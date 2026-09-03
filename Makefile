@@ -26,7 +26,7 @@ help:
 	@echo "  make test-tui      cargo test -p chatty-tui (TUI changes only)"
 	@echo "  make test-gpui     cargo test -p chatty-gpui (GPUI changes only)"
 	@echo "  make test-gateway  cargo test -p chatty-protocol-gateway (gateway changes only)"
-	@echo "  make lint          cargo clippy -- -D warnings"
+	@echo "  make lint          cargo clippy --all-features -- -D warnings"
 	@echo "  make fmt           cargo fmt"
 	@echo "  make fmt-check     cargo fmt --check"
 	@echo "  make typecheck     cargo check --all-features"
@@ -81,7 +81,7 @@ test-gateway:
 	cargo test -p chatty-protocol-gateway
 
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --all-features -- -D warnings
 
 fmt:
 	cargo fmt
