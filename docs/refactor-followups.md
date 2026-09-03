@@ -25,9 +25,9 @@ to catch behavioural regressions introduced by a mechanical split**.
 
 | File | Before | After (`mod.rs`) | Split into |
 |---|---:|---:|---|
-| `chat_view.rs` | 1966 | 852 | `chat_view/{handlers, sub_agent, history, start_screen}.rs` |
-| `chat_input.rs` | 1711 | 415 | `chat_input/{render, slash, at_mention}.rs` |
-| `trace_components.rs` | 1474 | 147 | `trace_components/{badges, blocks, inline}.rs` |
+| `chat_view.rs` | 1966 | 852 at the time; **~2059 today** (AGE-169, 2026-09) — grew back with feature work; a re-split candidate again, see AGE-173 | `chat_view/{handlers, sub_agent, history, start_screen}.rs` |
+| `chat_input.rs` | 1711 | 415 (443 today — within noise) | `chat_input/{render, slash, at_mention}.rs` |
+| `trace_components.rs` | 1474 | 147 (134 today — within noise) | `trace_components/{badges, blocks, inline}.rs` |
 | `app_controller.rs` (Tier 4 earlier) | — | — | `app_controller/{message_ops, conversation_ops, …}.rs` |
 
 The pattern used in all three: a `*/mod.rs` retains the struct
@@ -37,18 +37,29 @@ sub-views, sub-pickers). Cross-module method calls use `pub(super)`,
 which surfaces the seam-crossing dependency at the import site instead
 of hiding it inside a 1700-line scope.
 
-### Files still pending splits
+### Files still pending splits — mostly done (AGE-169, 2026-09)
 
-| File | LOC | Why a split is risky today |
-|---|---:|---|
-| `crates/chatty-gpui/src/settings/views/models_page.rs` | ~1400 | Mixed form state + provider-specific UI; safer to extract per-provider sections only after the provider abstraction in `ProviderType::default_capabilities` covers more of the form logic. |
-| `crates/chatty-core/src/tools/data_query_tool.rs` | 1332 | Single tool dispatcher with many ad-hoc parsing branches; tests cover happy paths but not the dispatch table. |
-| `crates/chatty-core/src/tools/daytona_tool.rs` | 1239 | Talks to an external Daytona sandbox; HTTP error-handling branches are not mocked. |
-| `crates/chatty-core/src/services/shell_service.rs` | 1225 | PTY allocation + signal handling + approval flow + output capping. Splitting without race tests is unsafe. |
-| `crates/chatty-core/src/exporters/atif_exporter.rs` | 1283 | Format spec is in code; the file *is* the spec. Tests cover the round-trip but not byte-level layout. |
-| `crates/chatty-gpui/src/auto_updater/mod.rs` | 1522 | Update lifecycle across three OSes; the platform `#[cfg]` branches make a flat file easier to reason about than a multi-file split until per-OS golden tests exist. |
-| `crates/chatty-gpui/src/main.rs` | 1471 | Mostly action / keybinding / startup wiring; clean seams exist but the file is essentially one long startup script. A split would primarily move boilerplate and provides little context-window relief during edits because callers usually open the whole file. |
-| `crates/chatty-tui/src/headless.rs` | 1424 | 50+ private helpers around stream-recovery heuristics. The helpers are individually trivial but their *ordering* matters for benchmark stability; splitting without characterization tests on full benchmark runs risks subtle scoring regressions. |
+Re-checked against the tree: six of the eight files below have already
+been split into `mod.rs` + siblings since this table was written, and
+`auto_updater/mod.rs` dropped under the 1000-LOC guideline through other
+refactoring without a formal split. Only `main.rs` is still a genuinely
+oversized flat file.
+
+| File | LOC then | LOC now | Status |
+|---|---:|---:|---|
+| `crates/chatty-gpui/src/settings/views/models_page.rs` | ~1400 | 134 (`models_page/mod.rs`) | Done |
+| `crates/chatty-core/src/tools/data_query_tool.rs` | 1332 | 589 (`data_query_tool/mod.rs`) | Done |
+| `crates/chatty-core/src/tools/daytona_tool.rs` | 1239 | 917 (`daytona_tool/mod.rs`) | Done |
+| `crates/chatty-core/src/services/shell_service.rs` | 1225 | 782 (`shell_service/mod.rs`) | Done |
+| `crates/chatty-core/src/exporters/atif_exporter.rs` | 1283 | 123 (`atif_exporter/mod.rs`) | Done |
+| `crates/chatty-tui/src/headless.rs` | 1424 | — (`headless/` directory) | Done |
+| `crates/chatty-gpui/src/auto_updater/mod.rs` | 1522 | 679 | Under threshold, not split |
+| `crates/chatty-gpui/src/main.rs` | 1471 | 1238 | **Still pending** — see rationale below |
+
+`main.rs` is mostly action / keybinding / startup wiring; clean seams
+exist but the file is essentially one long startup script. A split would
+primarily move boilerplate and provides little context-window relief
+during edits because callers usually open the whole file.
 
 ### Recommended next steps for each file
 
@@ -75,11 +86,10 @@ The audit-aligned sequence for any of the files above is:
    file** to point at the new sibling — these docstrings are how an
    agent finds the file in the first place.
 
-For `main.rs` and `auto_updater/mod.rs` specifically, an alternative
-to splitting is to add a top-of-file **table of contents** comment
-that lists the section headers (`// === keybindings ===`,
-`// === window setup ===`, etc.) with line ranges. That gives the
-same navigability benefit without the platform-`#[cfg]` headache.
+For `main.rs` specifically, an alternative to splitting is to add a
+top-of-file **table of contents** comment that lists the section headers
+(`// === keybindings ===`, `// === window setup ===`, etc.) with line
+ranges. That gives the same navigability benefit without a split.
 
 ---
 
@@ -186,21 +196,18 @@ mechanically would just shuffle the coupling without removing it. See
 `docs/entity-communication.md` for the event-based pattern the
 migration should follow.
 
-### 2d. Re-export removal follow-ups
+### 2d. Re-export removal follow-ups — done (AGE-177)
 
 Tier 4 removed the `pub use chatty_core::{auth, exporters, factories,
 repositories, tools}` re-exports from `crates/chatty-gpui/src/chatty/mod.rs`,
-so call sites now import from `chatty_core::…` directly. Two
-follow-ups remain:
+so call sites now import from `chatty_core::…` directly. Both follow-ups are
+resolved:
 
-1. **Lint rule.** Add a clippy or
-   `[lints.rust] unused_imports = "deny"`-style guard to prevent
-   re-introduction of the re-exports. The natural place is
-   `crates/chatty-gpui/src/chatty/mod.rs` itself, where a comment
-   already calls out the convention.
-2. **chatty-tui consistency check.** Audit `chatty-tui` for the same
-   re-export anti-pattern; the audit only confirmed `chatty-gpui` was
-   the source of the wildcard re-exports.
+1. **Lint rule.** `scripts/check-no-core-reexports.sh`, wired into CI's
+   `test` job, fails if either `chatty-gpui` or `chatty-tui` re-introduces
+   a `pub use chatty_core::{...}` re-export of those modules.
+2. **chatty-tui consistency check.** Confirmed clean — no re-exports of
+   `chatty_core`'s UI-agnostic modules in `chatty-tui/src`.
 
 ---
 

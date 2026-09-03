@@ -8,6 +8,8 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Root, Sizable, button::Bu
 
 impl Render for ChattyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::boot_timing::checkpoint("open_to_first_frame");
+
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let sidebar = self.sidebar_view.clone();
 

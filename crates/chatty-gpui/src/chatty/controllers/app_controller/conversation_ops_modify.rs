@@ -227,6 +227,7 @@ impl ChattyApp {
                                 cx.try_global::<crate::settings::models::ModuleSettingsModel>()
                                     .map(|m| m.gateway_port)
                             })
+                            .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                             .ok()
                             .flatten();
                         let (remote_agents, available_model_ids) = cx
@@ -301,8 +302,20 @@ impl ChattyApp {
                         let conv_data_res =
                             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 store.get_conversation(&conv_id).and_then(|conv| {
-                                    let history = conv.serialize_history().ok()?;
-                                    let traces = conv.serialize_traces().ok()?;
+                                    let history = match conv.serialize_history() {
+                                        Ok(h) => h,
+                                        Err(e) => {
+                                            warn!(error = ?e, "Failed to serialize conversation history for save after model change");
+                                            return None;
+                                        }
+                                    };
+                                    let traces = match conv.serialize_traces() {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            warn!(error = ?e, "Failed to serialize conversation traces for save after model change");
+                                            return None;
+                                        }
+                                    };
                                     let now = SystemTime::now()
                                         .duration_since(SystemTime::UNIX_EPOCH)
                                         .unwrap_or_default()
@@ -347,11 +360,19 @@ impl ChattyApp {
                                 })
                             });
 
-                        if let Ok(Some(conv_data)) = conv_data_res {
-                            repo.save(&conv_id, conv_data)
-                                .await
-                                .map_err(|e| anyhow::anyhow!(e))?;
-                            debug!("Conversation saved to disk");
+                        match conv_data_res {
+                            Ok(Some(conv_data)) => {
+                                repo.save(&conv_id, conv_data)
+                                    .await
+                                    .map_err(|e| anyhow::anyhow!(e))?;
+                                debug!("Conversation saved to disk");
+                            }
+                            Ok(None) => {
+                                warn!(conv_id = %conv_id, "Skipped saving conversation after model change: conversation missing or unserializable");
+                            }
+                            Err(e) => {
+                                warn!(conv_id = %conv_id, error = ?e, "Failed to read conversation for save after model change");
+                            }
                         }
 
                         Ok(())

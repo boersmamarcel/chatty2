@@ -321,8 +321,10 @@ mod tests {
     #[test]
     fn tool_count_includes_execution_tools_when_enabled() {
         use crate::settings::models::ExecutionSettingsModel;
-        let mut exec = ExecutionSettingsModel::default();
-        exec.enabled = true;
+        let exec = ExecutionSettingsModel {
+            enabled: true,
+            ..Default::default()
+        };
         let (count, _) = build_tool_hint(&exec, 0);
         // 7 base (includes fetch) + 11 execution = 18
         assert_eq!(

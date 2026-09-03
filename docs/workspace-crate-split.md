@@ -138,25 +138,25 @@ Ask: **"Does this code need GPUI's `Context`, `Window`, `Entity`, `Render`, or `
 - **No, but it's terminal UI or TUI-specific logic** → chatty-tui
 - **No** → chatty-core
 
-## Re-exports in chatty-gpui
+## No re-exports in chatty-gpui
 
-chatty-gpui re-exports core modules so existing controller code continues to work without path changes:
+`chatty-gpui/src/chatty/mod.rs` used to re-export `chatty_core`'s UI-agnostic
+modules (`auth`, `exporters`, `factories`, `repositories`, `tools`) so
+controller code could import them under `crate::chatty::…`. Those re-exports
+were removed — they hid which crate a definition lived in — so call sites
+import `chatty_core::…` directly instead:
 
 ```rust
 // chatty-gpui/src/chatty/mod.rs
-pub use chatty_core::auth;
-pub use chatty_core::exporters;
-pub use chatty_core::factories;
-pub use chatty_core::repositories;
-pub use chatty_core::tools;
-
-// GPUI-specific modules (not in core)
 pub mod controllers;
 pub mod models;
 pub mod services;
 pub mod token_budget;
 pub mod views;
 ```
+
+`scripts/check-no-core-reexports.sh` (wired into CI) fails the build if
+either `chatty-gpui` or `chatty-tui` re-introduces them.
 
 ## Integration Testing Strategy
 

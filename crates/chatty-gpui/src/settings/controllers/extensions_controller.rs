@@ -255,6 +255,7 @@ pub fn install_extension(
                 cx.global_mut::<MarketplaceState>().set_download_progress(&name, 0.0);
                 cx.refresh_windows();
             })
+            .map_err(|e| warn!(error = ?e, "Failed to signal download start in UI"))
             .ok();
 
             // Phase 1: send request, get headers.
@@ -270,6 +271,7 @@ pub fn install_extension(
                         );
                         cx.refresh_windows();
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to show auth-required error in UI"))
                     .ok();
                     return;
                 }
@@ -281,6 +283,7 @@ pub fn install_extension(
                         state.set_error(format!("Download failed: {e}"));
                         cx.refresh_windows();
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to show download-start error in UI"))
                     .ok();
                     return;
                 }
@@ -310,6 +313,7 @@ pub fn install_extension(
                             state.set_error(format!("Download interrupted: {e}"));
                             cx.refresh_windows();
                         })
+                        .map_err(|e| warn!(error = ?e, "Failed to show download-interrupted error in UI"))
                         .ok();
                         return;
                     }
@@ -322,6 +326,7 @@ pub fn install_extension(
                                     .set_download_progress(&name, progress);
                                 cx.refresh_windows();
                             })
+                            .map_err(|e| warn!(error = ?e, "Failed to update download progress in UI"))
                             .ok();
                         }
                     }
@@ -371,6 +376,7 @@ pub fn install_extension(
                         );
                         cx.refresh_windows();
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to show auth-required error in UI"))
                     .ok();
                 }
                 Err(e) => {
@@ -381,6 +387,7 @@ pub fn install_extension(
                         state.set_error(format!("Download failed: {e}"));
                         cx.refresh_windows();
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to show finalise-download error in UI"))
                     .ok();
                 }
             }
@@ -653,6 +660,7 @@ fn sync_hive_token_to_mcp(token: Option<String>, cx: &mut App) {
                 cx.update(|cx| {
                     emit_rebuild_required(cx);
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to emit rebuild-required after hive token update"))
                 .ok();
             })
             .detach();

@@ -148,7 +148,10 @@ impl ChattyApp {
                                     cx.global::<ConversationsStore>()
                                         .get_conversation(&id)
                                         .map(|c| c.pending_artifacts())
-                                }).ok().flatten();
+                                })
+                                .map_err(|e| debug!(error = ?e, "Failed to read pending artifacts handle"))
+                                .ok()
+                                .flatten();
 
                                 // Promote the pending stream and wire up artifacts
                                 if let Some(ref sm) = stream_manager {

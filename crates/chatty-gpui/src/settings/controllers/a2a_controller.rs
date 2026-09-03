@@ -2,7 +2,7 @@ use chatty_core::services::A2aClient;
 use chatty_core::settings::models::a2a_store::A2aAgentStatus;
 use chatty_core::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use gpui::{App, AsyncApp};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Fetch the agent card for a given agent and update the status in the global model.
 pub fn probe_agent_card(ext_id: String, agent_name: String, cx: &mut App) {
@@ -36,12 +36,14 @@ pub fn probe_agent_card(ext_id: String, agent_name: String, cx: &mut App) {
                     }
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(agent = %agent_name, error = ?e, "Failed to update UI after fetching A2A agent card"))
                 .ok();
                 // Persist updated skills
                 cx.update(|cx| {
                     let ext_model = cx.global::<ExtensionsModel>().clone();
                     save_extensions_async(ext_model, cx);
                 })
+                .map_err(|e| warn!(agent = %agent_name, error = ?e, "Failed to trigger extensions save after A2A card fetch"))
                 .ok();
             }
             Err(e) => {
@@ -52,6 +54,7 @@ pub fn probe_agent_card(ext_id: String, agent_name: String, cx: &mut App) {
                         .set_a2a_status(agent_name.clone(), A2aAgentStatus::Failed(err_msg));
                     cx.refresh_windows();
                 })
+                .map_err(|e| warn!(agent = %agent_name, error = ?e, "Failed to update UI after A2A agent card fetch failure"))
                 .ok();
             }
         }
@@ -85,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_toggle_logic() {
-        let mut agents = vec![make_cfg("agent-1", false)];
+        let mut agents = [make_cfg("agent-1", false)];
         if let Some(a) = agents.iter_mut().find(|a| a.name == "agent-1") {
             a.enabled = !a.enabled;
         }

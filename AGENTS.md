@@ -207,12 +207,13 @@ examples.
 
 ## Known gotchas
 
-1. **`chatty-gpui::chatty::*` re-exports.** `crates/chatty-gpui/src/chatty/mod.rs`
-   re-exports several modules (`auth`, `exporters`, `factories`,
-   `repositories`, `tools`) from `chatty_core`. So
-   `use crate::chatty::tools::Foo` in chatty-gpui actually resolves to
-   `chatty_core::tools::Foo`. If grep finds no definition under
+1. **No `chatty-gpui::chatty::*` re-exports.** `crates/chatty-gpui/src/chatty/mod.rs`
+   used to re-export `auth`, `exporters`, `factories`, `repositories`, `tools`
+   from `chatty_core`; those re-exports were removed so call sites import
+   `chatty_core::…` directly. If grep finds no definition under
    `chatty-gpui/`, look in `chatty-core/`.
+   `scripts/check-no-core-reexports.sh` (in CI) fails the build if they
+   come back.
 
 2. **Test parallelism.** See "Test-thread footgun" above.
 

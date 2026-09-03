@@ -42,7 +42,7 @@ pub mod memory_query;
 pub mod memory_service;
 #[cfg(feature = "mermaid")]
 pub mod mermaid_renderer_service;
-pub mod message_orchestrator;
+pub mod message_helpers;
 pub mod path_validator;
 #[cfg(feature = "pdf")]
 pub mod pdf_thumbnail;
@@ -74,7 +74,7 @@ pub use memory_query::simplify_memory_query;
 pub use memory_service::MemoryService;
 #[cfg(feature = "mermaid")]
 pub use mermaid_renderer_service::MermaidRendererService;
-pub use message_orchestrator::{extract_user_text, gather_mcp_tools};
+pub use message_helpers::{extract_user_text, extract_user_text_lines, gather_mcp_tools};
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;

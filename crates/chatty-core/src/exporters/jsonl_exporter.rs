@@ -2,11 +2,14 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::message::AssistantContent;
+#[cfg(test)]
+use rig_core::completion::message::UserContent;
 
 use crate::models::conversation::RegenerationRecord;
 use crate::models::message_types::{SystemTrace, TraceItem};
 use crate::repositories::ConversationData;
+use crate::services::extract_user_text_lines;
 use crate::settings::models::models_store::ModelConfig;
 
 /// Configuration options for SFT JSONL export
@@ -75,7 +78,7 @@ pub fn conversation_to_sft_jsonl(
     for (idx, message) in history.iter().enumerate() {
         match message {
             Message::User { content } => {
-                let text = extract_user_text(content);
+                let text = extract_user_text_lines(content);
                 if !text.is_empty() {
                     messages.push(serde_json::json!({
                         "role": "user",
@@ -217,7 +220,7 @@ pub fn conversation_to_dpo_jsonl(
             .get(record.message_index)
             .map(|msg| match msg {
                 Message::Assistant { content, .. } => extract_assistant_text(content),
-                Message::User { content } => extract_user_text(content),
+                Message::User { content } => extract_user_text_lines(content),
                 Message::System { content } => content.clone(),
             })
             .unwrap_or_default();
@@ -234,18 +237,6 @@ pub fn conversation_to_dpo_jsonl(
     }
 
     Ok(results)
-}
-
-/// Extract text-only content from user message, stripping images and documents.
-fn extract_user_text(content: &[UserContent]) -> String {
-    content
-        .iter()
-        .filter_map(|uc| match uc {
-            UserContent::Text(t) => Some(t.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Extract text-only content from assistant message, stripping tool calls.
@@ -281,7 +272,7 @@ fn messages_to_chatml_prefix(
     for msg in history.iter().take(up_to) {
         match msg {
             Message::User { content } => {
-                let text = extract_user_text(content);
+                let text = extract_user_text_lines(content);
                 if !text.is_empty() {
                     messages.push(serde_json::json!({
                         "role": "user",
