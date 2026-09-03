@@ -83,18 +83,38 @@ Always run `cargo test && cargo clippy -- -D warnings && cargo fmt --check` afte
 
 ## Project Structure
 
+Chatty is a Cargo workspace of `crates/chatty-*` crates, not a single
+`src/` tree. The three crates most of this document talks about:
+
 ```
-src/
-├── main.rs              # Application entry point, initialization, theme handling
-├── chatty/              # Main chat application module
-└── settings/            # Settings system
-    ├── controllers/     # Settings window controllers
-    ├── models/          # Data models (providers, models, general settings)
-    ├── providers/       # Provider implementations (e.g., Ollama)
-    ├── repositories/    # Persistence layer (JSON file storage)
-    ├── utils/           # Utilities (theme helpers)
-    └── views/           # Settings UI views
+crates/
+├── chatty-core/src/          # UI-agnostic domain logic (shared by gpui + tui)
+│   ├── auth/                 # Provider auth (API keys, Azure Entra ID)
+│   ├── exporters/            # JSONL / ATIF conversation export
+│   ├── factories/            # Agent construction (agent_factory)
+│   ├── models/                # Data models (conversations, approvals, tokens)
+│   ├── repositories/          # Persistence layer (JSON / SQLite)
+│   ├── services/               # Domain services (LLM streaming, MCP, memory, …)
+│   ├── settings/                # Settings models (providers, models, general)
+│   ├── token_budget/             # Token counting / summarization
+│   └── tools/                     # LLM-callable tools (shell, filesystem, MCP, …)
+├── chatty-gpui/src/          # Desktop app (GPUI)
+│   ├── main.rs                # Entry point, initialization, theme handling
+│   ├── chatty/                 # Main chat application module
+│   │   ├── controllers/         # App controllers (ChattyApp, StreamManager glue)
+│   │   ├── models/               # GPUI-specific models
+│   │   ├── services/              # GPUI-specific services
+│   │   └── views/                  # UI views (chat_view, chat_input, sidebar, …)
+│   └── settings/               # Settings window UI
+│       ├── controllers/          # Settings window controllers
+│       ├── models/                # Settings-page-specific models
+│       ├── providers/              # Provider implementations (e.g., Ollama)
+│       └── views/                   # Settings UI views
+└── chatty-tui/src/           # Terminal app (Ratatui)
 ```
+
+For the full crate-by-crate split (including the smaller research/support
+crates) see `docs/workspace-crate-split.md`.
 
 ## Build Commands
 

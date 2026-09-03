@@ -99,6 +99,7 @@ pub(super) async fn run_llm_stream(
                     .map(normalize_workspace_string)
             })
         })
+        .map_err(|e| warn!(error = ?e, "Failed to resolve workspace directory override"))
         .ok()
         .flatten();
 
@@ -124,6 +125,7 @@ pub(super) async fn run_llm_stream(
                     cx,
                 )
             })
+            .map_err(|e| warn!(error = ?e, "Failed to gather token budget snapshot inputs"))
             .ok()
             .flatten();
 
@@ -136,6 +138,7 @@ pub(super) async fn run_llm_stream(
                     cx.try_global::<GlobalTokenBudget>()
                         .map(|g| g.sender.clone())
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to read token budget sender global"))
                 .ok()
                 .flatten();
 
@@ -144,6 +147,7 @@ pub(super) async fn run_llm_stream(
                     cx.try_global::<crate::settings::models::TokenTrackingSettings>()
                         .cloned()
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to read token tracking settings global"))
                 .ok()
                 .flatten();
 
@@ -265,6 +269,7 @@ pub(super) async fn run_llm_stream(
                                     view.start_sub_agent_progress(&label, source, cx);
                                 }
                             })
+                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent start"))
                             .ok();
                     }
                     InvokeAgentProgress::Text(text) => {
@@ -281,6 +286,7 @@ pub(super) async fn run_llm_stream(
                                     view.append_sub_agent_progress(&text, cx);
                                 }
                             })
+                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent progress"))
                             .ok();
                     }
                     InvokeAgentProgress::Finished { success, result } => {
@@ -297,6 +303,7 @@ pub(super) async fn run_llm_stream(
                                     view.finalize_sub_agent_progress(success, result, cx);
                                 }
                             })
+                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent finish"))
                             .ok();
                     }
                 }
@@ -350,6 +357,7 @@ pub(super) async fn run_llm_stream(
                             sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
                                 sm.handle_chunk(&conv_id, StreamChunk::Done, cx)
                             })
+                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to forward Done chunk to StreamManager"))
                             .ok();
                         }
                         break;
@@ -365,6 +373,7 @@ pub(super) async fn run_llm_stream(
                                     cx.try_global::<chatty_core::auth::AzureTokenCache>()
                                         .cloned()
                                 })
+                                .map_err(|e| warn!(error = ?e, "Failed to read Azure token cache global"))
                                 .ok()
                                 .flatten()
                             {
@@ -545,6 +554,7 @@ pub(super) async fn run_llm_stream(
                             view.append_sub_agent_progress(&text, cx);
                         }
                     })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with drained sub-agent progress"))
                     .ok();
             }
             InvokeAgentProgress::Finished { success, result } => {
@@ -561,6 +571,7 @@ pub(super) async fn run_llm_stream(
                             view.finalize_sub_agent_progress(success, result, cx);
                         }
                     })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with drained sub-agent finish"))
                     .ok();
             }
             _ => {}
@@ -981,7 +992,7 @@ fn already_asked_to_retry(conv_id: &str, cx: &mut AsyncApp) -> bool {
             .rev()
             .find_map(|entry| match &entry.message {
                 rig_core::message::Message::User { content } => {
-                    Some(chatty_core::services::message_orchestrator::extract_user_text(content))
+                    Some(chatty_core::services::extract_user_text(content))
                 }
                 _ => None,
             })

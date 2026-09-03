@@ -340,6 +340,7 @@ impl ChattyApp {
                                             .update(cx, |view, cx| {
                                                 view.append_sub_agent_progress(msg, cx);
                                             })
+                                            .map_err(|e| warn!(error = ?e, "Failed to update chat view with A2A progress"))
                                             .ok();
                                     }
                             }
@@ -391,6 +392,7 @@ impl ChattyApp {
                     app.update(cx, |app, cx| {
                         app.persist_conversation(&conv_id_for_persist, cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to persist conversation after A2A result"))
                     .ok();
                 }
             }
@@ -400,6 +402,7 @@ impl ChattyApp {
                 .update(cx, |view, cx| {
                     view.finalize_sub_agent_progress(success, result_text, cx)
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to finalize A2A progress in chat view"))
                 .ok();
         })
         .detach();
@@ -555,6 +558,7 @@ impl ChattyApp {
                     Some(line) = progress_rx.recv() => {
                         chat_view
                             .update(cx, |view, cx| view.append_sub_agent_progress(&line, cx))
+                            .map_err(|e| warn!(error = ?e, "Failed to update chat view with sub-agent progress"))
                             .ok();
                     }
                     result = &mut blocking_fut => {
@@ -563,6 +567,7 @@ impl ChattyApp {
                         while let Ok(line) = progress_rx.try_recv() {
                             chat_view
                                 .update(cx, |view, cx| view.append_sub_agent_progress(&line, cx))
+                                .map_err(|e| warn!(error = ?e, "Failed to update chat view with drained sub-agent progress"))
                                 .ok();
                         }
                         break result;
@@ -614,6 +619,7 @@ impl ChattyApp {
                     app.update(cx, |app, cx| {
                         app.persist_conversation(&conv_id_for_persist, cx);
                     })
+                    .map_err(|e| warn!(error = ?e, "Failed to persist conversation after sub-agent result"))
                     .ok();
                 }
             }
@@ -626,6 +632,7 @@ impl ChattyApp {
                 .update(cx, |view, cx| {
                     view.finalize_sub_agent_progress(success, result_text, cx)
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to finalize sub-agent progress in chat view"))
                 .ok();
 
             // If the user navigated to a different conversation while the sub-agent was
@@ -672,6 +679,7 @@ impl ChattyApp {
                         app.update(cx, |app, cx| {
                             app.load_conversation(&nav_conv_id, cx);
                         })
+                        .map_err(|e| warn!(error = ?e, "Failed to navigate back to launch conversation"))
                         .ok();
                     }
                 }

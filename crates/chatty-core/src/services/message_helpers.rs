@@ -1,19 +1,27 @@
 use rig_core::message::UserContent;
 use tracing::info;
 
-/// Extract the text portion of user contents for memory query.
+/// Text portions of user contents, filtering out non-text content (images, PDFs).
+fn user_text_parts(contents: &[UserContent]) -> impl Iterator<Item = &str> {
+    contents.iter().filter_map(|c| match c {
+        UserContent::Text(t) => Some(t.text.as_str()),
+        _ => None,
+    })
+}
+
+/// Extract the text portion of user contents for memory query, joining fragments with a space.
 ///
-/// This filters out non-text content (images, PDFs) and joins text fragments.
 /// Shared between GPUI (which had this in token_budget/manager.rs) and TUI.
 pub fn extract_user_text(contents: &[UserContent]) -> String {
-    contents
-        .iter()
-        .filter_map(|c| match c {
-            UserContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    user_text_parts(contents).collect::<Vec<_>>().join(" ")
+}
+
+/// Extract the text portion of user contents, joining fragments with a newline.
+///
+/// Used where paragraph breaks in the original text should be preserved (e.g. exported
+/// training data), unlike `extract_user_text`'s single-line join.
+pub fn extract_user_text_lines(contents: &[UserContent]) -> String {
+    user_text_parts(contents).collect::<Vec<_>>().join("\n")
 }
 
 /// Gather MCP tools from the service, returning `None` when no tools are available.
@@ -52,5 +60,11 @@ mod tests {
     fn extract_user_text_empty_for_no_text() {
         let contents: Vec<UserContent> = vec![];
         assert_eq!(extract_user_text(&contents), "");
+    }
+
+    #[test]
+    fn extract_user_text_lines_joins_with_newline() {
+        let contents = vec![UserContent::text("hello"), UserContent::text("world")];
+        assert_eq!(extract_user_text_lines(&contents), "hello\nworld");
     }
 }

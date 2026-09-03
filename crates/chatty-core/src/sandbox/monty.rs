@@ -425,11 +425,11 @@ mod tests {
             .await;
 
         // If python3 is not installed, skip rather than fail.
-        if let Err(ref e) = result {
-            if e.to_string().contains("python3") {
-                eprintln!("Skipping: python3 not available ({e})");
-                return;
-            }
+        if let Err(ref e) = result
+            && e.to_string().contains("python3")
+        {
+            eprintln!("Skipping: python3 not available ({e})");
+            return;
         }
 
         let r = result.expect("execution succeeded");
@@ -445,10 +445,10 @@ mod tests {
             .execute("import sys\nsys.stderr.write('err\\n')", &Language::Python)
             .await;
 
-        if let Err(ref e) = result {
-            if e.to_string().contains("python3") {
-                return;
-            }
+        if let Err(ref e) = result
+            && e.to_string().contains("python3")
+        {
+            return;
         }
 
         let r = result.unwrap();

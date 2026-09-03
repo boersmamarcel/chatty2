@@ -22,6 +22,12 @@ pub struct MockMcpRepository {
     pub last_saved: Mutex<Option<Vec<McpServerConfig>>>,
 }
 
+impl Default for MockMcpRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockMcpRepository {
     pub fn new() -> Self {
         Self {
@@ -95,6 +101,12 @@ pub struct MockA2aRepository {
     pub agents: Mutex<Vec<A2aAgentConfig>>,
     /// If set, `load_all` returns this error.
     pub load_error: Mutex<Option<String>>,
+}
+
+impl Default for MockA2aRepository {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockA2aRepository {

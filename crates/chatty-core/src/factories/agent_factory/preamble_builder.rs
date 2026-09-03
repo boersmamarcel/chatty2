@@ -451,6 +451,7 @@ mod tests {
     use super::super::tool_registry::ToolAvailability;
     use super::*;
 
+    #[allow(clippy::type_complexity)]
     fn default_preamble_args() -> (
         ProviderType,
         ToolAvailability,
@@ -490,8 +491,10 @@ mod tests {
 
     #[test]
     fn shell_tools_included_when_enabled() {
-        let mut tools = ToolAvailability::default();
-        tools.shell = true;
+        let tools = ToolAvailability {
+            shell: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -509,10 +512,12 @@ mod tests {
 
     #[test]
     fn fs_tools_included_when_enabled() {
-        let mut tools = ToolAvailability::default();
-        tools.fs_read = true;
-        tools.doc_retriever = true;
-        tools.fs_write = true;
+        let tools = ToolAvailability {
+            fs_read: true,
+            doc_retriever: true,
+            fs_write: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -531,8 +536,10 @@ mod tests {
 
     #[test]
     fn git_tools_included_when_enabled() {
-        let mut tools = ToolAvailability::default();
-        tools.git = true;
+        let tools = ToolAvailability {
+            git: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -549,8 +556,10 @@ mod tests {
 
     #[test]
     fn memory_section_included_when_enabled() {
-        let mut tools = ToolAvailability::default();
-        tools.memory = true;
+        let tools = ToolAvailability {
+            memory: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -638,8 +647,10 @@ mod tests {
 
     #[test]
     fn excel_section_shows_read_only_when_write_disabled() {
-        let mut tools = ToolAvailability::default();
-        tools.excel_read = true;
+        let tools = ToolAvailability {
+            excel_read: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -655,9 +666,11 @@ mod tests {
 
     #[test]
     fn excel_section_shows_both_when_both_enabled() {
-        let mut tools = ToolAvailability::default();
-        tools.excel_read = true;
-        tools.excel_write = true;
+        let tools = ToolAvailability {
+            excel_read: true,
+            excel_write: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -674,9 +687,11 @@ mod tests {
 
     #[test]
     fn pdf_tools_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.pdf_info = true;
-        tools.pdf_extract_text = true;
+        let tools = ToolAvailability {
+            pdf_info: true,
+            pdf_extract_text: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -692,9 +707,11 @@ mod tests {
 
     #[test]
     fn docx_tools_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.docx_read = true;
-        tools.docx_write = true;
+        let tools = ToolAvailability {
+            docx_read: true,
+            docx_write: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -710,9 +727,11 @@ mod tests {
 
     #[test]
     fn pptx_tool_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.pptx_read = true;
-        tools.pptx_write = true;
+        let tools = ToolAvailability {
+            pptx_read: true,
+            pptx_write: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -728,8 +747,10 @@ mod tests {
 
     #[test]
     fn data_query_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.data_query = true;
+        let tools = ToolAvailability {
+            data_query: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -746,8 +767,10 @@ mod tests {
 
     #[test]
     fn sub_agent_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.sub_agent = true;
+        let tools = ToolAvailability {
+            sub_agent: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -779,9 +802,11 @@ mod tests {
 
     #[test]
     fn search_web_with_fetch_shows_web_section() {
-        let mut tools = ToolAvailability::default();
-        tools.fetch = true;
-        tools.search_web = true;
+        let tools = ToolAvailability {
+            fetch: true,
+            search_web: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -797,8 +822,10 @@ mod tests {
 
     #[test]
     fn compile_typst_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.compile_typst = true;
+        let tools = ToolAvailability {
+            compile_typst: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -814,8 +841,10 @@ mod tests {
 
     #[test]
     fn execute_code_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.execute_code = true;
+        let tools = ToolAvailability {
+            execute_code: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -831,8 +860,10 @@ mod tests {
 
     #[test]
     fn browser_use_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.browser_use = true;
+        let tools = ToolAvailability {
+            browser_use: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -847,8 +878,10 @@ mod tests {
 
     #[test]
     fn daytona_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.daytona = true;
+        let tools = ToolAvailability {
+            daytona: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,
@@ -863,8 +896,10 @@ mod tests {
 
     #[test]
     fn publish_module_section_included() {
-        let mut tools = ToolAvailability::default();
-        tools.publish_module = true;
+        let tools = ToolAvailability {
+            publish_module: true,
+            ..Default::default()
+        };
         let result = build_preamble(
             "",
             &ProviderType::OpenRouter,

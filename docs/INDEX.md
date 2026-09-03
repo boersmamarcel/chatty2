@@ -27,7 +27,6 @@ points here.
 | [`../docs-site/src/user/security.md`](../docs-site/src/user/security.md) | Workspace, shell, approval, secrets |
 | [`../docs-site/src/user/features.md`](../docs-site/src/user/features.md) | Rendering, traces, export, themes |
 | [`../docs-site/src/user/terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` modes and keybindings |
-| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | AGE-97 split decisions (GIF placement) |
 
 ## Architecture & design
 
@@ -87,7 +86,6 @@ points here.
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
 | [`research/README.md`](research/README.md) | Research folder entry | How the research docs are organized |
-| [`user/README-SPLIT-TODO.md`](user/README-SPLIT-TODO.md) | User-guide split leftover | Temporary note from the Epic 2 migration |
 
 ## Workspace crates
 

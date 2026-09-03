@@ -768,32 +768,6 @@ impl ChatEngine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ChatEngine, Command};
-
-    #[test]
-    fn parse_modules_command_variants() {
-        assert_eq!(
-            ChatEngine::parse_command("/modules"),
-            Some(Command::Modules(None))
-        );
-        assert_eq!(
-            ChatEngine::parse_command("/modules show"),
-            Some(Command::Modules(Some("show".to_string())))
-        );
-        assert_eq!(
-            ChatEngine::parse_command("/modules port 8421"),
-            Some(Command::Modules(Some("port 8421".to_string())))
-        );
-    }
-
-    #[test]
-    fn parse_update_command() {
-        assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
-    }
-}
-
 #[cfg(target_os = "linux")]
 async fn do_update_cli_if_installed() -> Result<Option<String>> {
     let bin_dir = dirs::home_dir()
@@ -848,4 +822,30 @@ async fn do_update_cli_if_installed() -> Result<Option<String>> {
 #[cfg(not(target_os = "linux"))]
 async fn do_update_cli_if_installed() -> Result<Option<String>> {
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatEngine, Command};
+
+    #[test]
+    fn parse_modules_command_variants() {
+        assert_eq!(
+            ChatEngine::parse_command("/modules"),
+            Some(Command::Modules(None))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/modules show"),
+            Some(Command::Modules(Some("show".to_string())))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/modules port 8421"),
+            Some(Command::Modules(Some("port 8421".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_update_command() {
+        assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
+    }
 }

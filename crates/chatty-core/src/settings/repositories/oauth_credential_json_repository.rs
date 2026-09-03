@@ -184,8 +184,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = test_repo(&dir);
 
-        let path =
-            JsonOAuthCredentialRepository::credential_path(&dir.path().to_path_buf(), "test");
+        let path = JsonOAuthCredentialRepository::credential_path(dir.path(), "test");
         tokio::fs::write(&path, "not valid json").await.unwrap();
         assert!(repo.has_credentials("test"));
 
@@ -198,7 +197,7 @@ mod tests {
     fn test_sanitizes_server_name() {
         let dir = TempDir::new().unwrap();
         let path = JsonOAuthCredentialRepository::credential_path(
-            &dir.path().to_path_buf(),
+            dir.path(),
             "my server/with:special.chars",
         );
         let filename = path.file_name().unwrap().to_str().unwrap();
