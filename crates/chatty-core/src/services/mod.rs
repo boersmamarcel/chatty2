@@ -51,6 +51,7 @@ pub mod pdfium_utils;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
+pub mod ssrf_guard;
 pub mod stream_processor;
 pub mod title_generator;
 #[cfg(feature = "math-render")]

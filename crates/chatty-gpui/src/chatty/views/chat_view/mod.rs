@@ -72,9 +72,9 @@ use super::transcript::{
     SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
     attach_plan_block, attachment_image_path, estimate_turn_height, extract_table_preview,
     file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
-    is_pdf_artifact_tool, is_pdf_path, merge_file_changes, new_artifact_view, plan_block_bottom,
-    plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
-    resolve_artifact_path, tool_file_path,
+    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
+    new_artifact_view, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    read_artifact_source, render_typed_block, resolve_artifact_path, tool_file_path,
 };
 use crate::chatty::models::MessageFeedback;
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -138,6 +138,10 @@ pub struct ChatView {
     last_auto_opened_table_id: Option<String>,
     /// Tool id of the last create_chart PNG auto-docked in the artifact panel.
     last_auto_opened_chart_id: Option<String>,
+    /// Tool id of the last Lane A browser call that opened the live
+    /// screencast artifact (AGE-155) — guards against re-opening on every
+    /// render pass while the same call is still in the transcript.
+    last_auto_opened_browser_tool_id: Option<String>,
     /// Persists the right-pane width across dock open/close.
     artifact_split: Entity<ResizableState>,
     /// User expand/collapse for settled activity groups (`BlockId.0` → open).
@@ -317,6 +321,7 @@ impl ChatView {
             artifact_close_wired: false,
             last_auto_opened_table_id: None,
             last_auto_opened_chart_id: None,
+            last_auto_opened_browser_tool_id: None,
             artifact_split: cx.new(|_| ResizableState::default()),
             activity_expanded: HashMap::new(),
             transcript_content_width: 480.0,
@@ -946,6 +951,58 @@ impl ChatView {
             return;
         };
         self.try_auto_open_image_artifact(&tool_id, path, cx);
+    }
+
+    /// Latest Lane A browser tool call, streaming or not — unlike the chart
+    /// and PDF triggers, this must fire while the call is still `Running`:
+    /// the whole point of the screencast (AGE-155) is watching the agent
+    /// drive the page live, not waiting for the turn to finish.
+    fn last_browser_tool_call(&self, cx: &App) -> Option<String> {
+        let traces = self.history_traces(cx);
+        for (msg, hist) in self.messages.iter().zip(traces.iter()).rev() {
+            let Some(trace) = msg.live_trace.as_ref().or(hist.as_ref()) else {
+                continue;
+            };
+            for item in trace.items.iter().rev() {
+                let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
+                    continue;
+                };
+                if is_lane_a_browser_tool(&tool.tool_name) {
+                    return Some(tool.id.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn maybe_open_browser_artifact(&mut self, cx: &mut Context<Self>) {
+        self.ensure_artifact_close_wired(cx);
+        // Deliberately not gated on `artifact_dismissed`, unlike the other
+        // artifact kinds: this is a live session the human-takeover feature
+        // (AGE-156) depends on being reachable, not a one-shot file preview.
+        // Closing the panel hides it for now; the next browser tool call
+        // (a fresh `tool_id`, deduped below) brings it back rather than
+        // leaving the take-control lock permanently unreachable.
+        let Some(tool_id) = self.last_browser_tool_call(cx) else {
+            return;
+        };
+        if self.last_auto_opened_browser_tool_id.as_deref() == Some(tool_id.as_str()) {
+            return;
+        }
+        let Some(conversation_id) = self.conversation_id.clone() else {
+            return;
+        };
+        let Some(manager) =
+            chatty_core::services::browser::registry::for_conversation(&conversation_id)
+        else {
+            return;
+        };
+        self.last_auto_opened_browser_tool_id = Some(tool_id);
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.open_browser(manager, cx);
+        });
+        cx.notify();
     }
 
     fn last_attachment_image(&self, cx: &App) -> Option<(String, PathBuf)> {
@@ -1917,6 +1974,7 @@ impl Render for ChatView {
         self.maybe_open_pdf_artifact(cx);
         self.maybe_open_query_table(cx);
         self.maybe_open_chart_artifact(cx);
+        self.maybe_open_browser_artifact(cx);
         let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         let full = self.artifact_view.read(cx).mode == ArtifactMode::Full;
         let artifact = self.artifact_view.clone();

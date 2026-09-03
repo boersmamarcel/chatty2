@@ -43,6 +43,15 @@ pub enum BrowserError {
     /// Writing a screenshot or a console/network dump failed.
     #[error("browser io error: {0}")]
     Io(String),
+
+    /// A mutating action was attempted while the user holds control
+    /// (AGE-156). Read-only tools are unaffected — this is only returned
+    /// from actions that change the page or the viewport.
+    #[error(
+        "the user is currently driving the browser; mutating actions are refused until they \
+         release control"
+    )]
+    ControlHeldByUser,
 }
 
 impl From<BrowserError> for crate::tools::ToolError {

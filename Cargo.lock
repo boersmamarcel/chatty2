@@ -1862,6 +1862,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "hex",
+ "image",
  "regex",
  "reqwest 0.13.2",
  "rig-agent",

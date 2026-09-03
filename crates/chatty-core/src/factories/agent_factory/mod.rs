@@ -76,6 +76,11 @@ pub struct AgentBuildContext {
     pub gateway_port: Option<u16>,
     pub remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
     pub available_model_ids: Vec<String>,
+    /// Conversation this turn belongs to. Only consulted when the `browser`
+    /// feature is on, to register the built `BrowserManager` where the
+    /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
+    /// else (e.g. chatty-tui, which doesn't enable that feature).
+    pub conversation_id: Option<String>,
 }
 
 /// Provider-agnostic agent wrapper.
@@ -132,7 +137,13 @@ impl AgentClient {
             gateway_port,
             remote_agents,
             available_model_ids,
+            conversation_id,
         } = ctx;
+
+        // Only consulted when browser tools are built below; avoids an
+        // unused-variable warning on builds without the `browser` feature.
+        #[cfg(not(feature = "browser"))]
+        let _ = &conversation_id;
 
         // Extract secret key names before user_secrets is moved into ShellSession.
         let secret_key_names: Vec<String> = user_secrets.iter().map(|(k, _)| k.clone()).collect();
@@ -488,16 +499,21 @@ impl AgentClient {
             None
         };
 
-        // Create the built-in browser tools (Lane A: localhost and workspace
-        // file:// only). Deliberately not gated on `fetch_enabled` — this lane
-        // never leaves the machine. A workspace is required because screenshots
-        // and console dumps have to be written somewhere.
+        // Create the built-in browser tools. Lane A (localhost and workspace
+        // file:// only) by default; when internet access is on, an open-web
+        // manager is built instead, allowing any public http(s) host too. A
+        // workspace is required because screenshots and console dumps have to
+        // be written somewhere.
         #[cfg(feature = "browser")]
         let browser_tools: Option<crate::tools::browser_tools::BrowserTools> = {
             let enabled = exec_settings
                 .as_ref()
                 .map(|s| s.browser_enabled)
                 .unwrap_or(false);
+            let internet_access = exec_settings
+                .as_ref()
+                .map(|s| s.fetch_enabled)
+                .unwrap_or(true);
             let workspace = exec_settings
                 .as_ref()
                 .and_then(|s| s.workspace_dir.clone())
@@ -506,10 +522,22 @@ impl AgentClient {
             // artifact sink the tool would capture images nobody ever sees.
             match (enabled, workspace, pending_artifacts.clone()) {
                 (true, Some(workspace), Some(pending_artifacts)) => {
-                    tracing::info!(workspace = %workspace.display(), "Browser tools enabled");
-                    let manager = std::sync::Arc::new(
-                        crate::services::browser::BrowserManager::lane_a(Some(workspace)),
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        internet_access,
+                        "Browser tools enabled"
                     );
+                    let manager = std::sync::Arc::new(if internet_access {
+                        crate::services::browser::BrowserManager::open_web(Some(workspace))
+                    } else {
+                        crate::services::browser::BrowserManager::lane_a(Some(workspace))
+                    });
+                    // So the artifact viewport (AGE-155) can find this turn's
+                    // session and screencast it — the tool structs below hold
+                    // their own clone but never expose it back to the caller.
+                    if let Some(id) = conversation_id.as_deref() {
+                        crate::services::browser::registry::register(id, manager.clone());
+                    }
                     Some(crate::tools::browser_tools::build_browser_tools(
                         manager,
                         pending_artifacts,
