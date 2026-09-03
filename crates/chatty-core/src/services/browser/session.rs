@@ -277,6 +277,27 @@ impl BrowserSession {
         Ok(final_url)
     }
 
+    /// Reload the current page (AGE-156's refresh button) — takes control
+    /// first, the same as any other user-initiated action, then reloads.
+    /// The URL does not change, so unlike `do_navigate` this skips the
+    /// policy check (already satisfied when the page first loaded) and
+    /// does not touch `current_url`.
+    pub async fn reload_as_user(&self) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        self.control.take();
+        self.events.clear();
+        with_deadline(NAVIGATE_TIMEOUT_SECS, "reloading", async {
+            self.page
+                .reload()
+                .await
+                .map_err(|e| BrowserError::Protocol(format!("reload failed: {e}")))?;
+            Ok(())
+        })
+        .await?;
+        self.invalidate_snapshot();
+        Ok(())
+    }
+
     /// Subscribe to page-URL changes (AGE-156's address bar) — fires once
     /// per successful navigation, whichever side initiated it. The initial
     /// value on a fresh receiver is the URL as of subscription time.

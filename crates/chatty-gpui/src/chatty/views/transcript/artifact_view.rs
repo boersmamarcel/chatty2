@@ -168,6 +168,13 @@ pub struct ArtifactView {
     /// not from the background task that learns about it.
     browser_current_url: String,
     browser_address_dirty: bool,
+    /// CDP viewport size (AGE-156) — kept matched to the panel's actual
+    /// rendered size by `sync_browser_viewport_size` rather than staying
+    /// fixed at `BROWSER_VIEWPORT_WIDTH`/`HEIGHT` for the session's whole
+    /// life, so expanding the artifact window shows more of the real page
+    /// instead of just scaling a static-size capture up. `(0, 0)` before
+    /// the first screencast frame's bounds are known.
+    browser_requested_size: (u32, u32),
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
@@ -240,6 +247,7 @@ impl ArtifactView {
             browser_address,
             browser_current_url: String::new(),
             browser_address_dirty: false,
+            browser_requested_size: (0, 0),
             workspace_root: None,
             load_gen: 0,
             editor,
@@ -418,6 +426,7 @@ impl ArtifactView {
                     this.browser_control = control_holder;
                     this.browser_mouse_tx = Some(mouse_tx);
                     this.browser_key_tx = Some(key_tx);
+                    this.browser_requested_size = (BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT);
                     cx.notify();
                 }
             })
@@ -535,6 +544,7 @@ impl ArtifactView {
         self.browser_control = ControlHolder::Agent;
         self.browser_current_url.clear();
         self.browser_address_dirty = true;
+        self.browser_requested_size = (0, 0);
         // Dropping the senders ends the drain loops (AGE-156) — their
         // `.recv()` returns `None` once every sender is gone.
         self.browser_mouse_tx = None;
@@ -598,6 +608,27 @@ impl ArtifactView {
                     }
                 }
                 this.browser_address_dirty = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The refresh button (AGE-156) reloads the current page — takes
+    /// control first, the same as any other user-initiated action. A no-op
+    /// if the browser artifact isn't open.
+    fn reload_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = session.reload_as_user().await;
+            this.update(cx, |this, cx| {
+                if let Err(e) = result {
+                    warn!(error = %e, "browser: user reload failed");
+                }
+                this.browser_control = ControlHolder::User;
                 cx.notify();
             })
             .ok();
@@ -1066,6 +1097,44 @@ impl ArtifactView {
         self.browser_address_dirty = false;
     }
 
+    /// Keep the CDP screencast's resolution matched to the artifact panel's
+    /// actual rendered size (AGE-156) — otherwise the browser always
+    /// captures at the fixed `BROWSER_VIEWPORT_WIDTH`/`HEIGHT` regardless of
+    /// how big the panel is, and expanding it (e.g. to `ArtifactMode::Full`)
+    /// just letterboxes a static-resolution image instead of showing more
+    /// of the real page.
+    ///
+    /// Debounced against `RESIZE_THRESHOLD_PX` so ordinary per-frame
+    /// repaints (this runs on every `render()`) don't spam CDP with resize
+    /// calls over sub-pixel layout jitter — only a real size change
+    /// retargets. `browser_frame_bounds` is one paint behind `render()`
+    /// (the `canvas()` prepaint that fills it runs after layout), which
+    /// just means the retarget lags a frame; harmless for a live view.
+    fn sync_browser_viewport_size(&mut self, cx: &mut Context<Self>) {
+        const RESIZE_THRESHOLD_PX: u32 = 24;
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        let bounds = *self.browser_frame_bounds.borrow();
+        let width = f32::from(bounds.size.width).round() as u32;
+        let height = f32::from(bounds.size.height).round() as u32;
+        if width == 0 || height == 0 {
+            return;
+        }
+        let (last_width, last_height) = self.browser_requested_size;
+        if last_width != 0
+            && width.abs_diff(last_width) < RESIZE_THRESHOLD_PX
+            && height.abs_diff(last_height) < RESIZE_THRESHOLD_PX
+        {
+            return;
+        }
+        self.browser_requested_size = (width, height);
+        cx.background_spawn(async move {
+            let _ = session.start_screencast(width, height).await;
+        })
+        .detach();
+    }
+
     fn sync_outline(&mut self, cx: &mut Context<Self>) {
         if self.outline_synced_gen == self.load_gen {
             return;
@@ -1128,22 +1197,28 @@ fn render_image_from_rgba(frame: &ScreencastFrame) -> Arc<RenderImage> {
 /// container's aspect ratio doesn't match the capture's. `None` for a
 /// position that lands in the letterbox padding rather than the image.
 ///
+/// `viewport` is whatever the CDP screencast is actually sized to right
+/// now — `browser_requested_size`, kept in sync with the panel's real
+/// dimensions by `sync_browser_viewport_size` — not a fixed constant, so
+/// this stays correct as the artifact panel resizes.
+///
 /// Both `gpui::Pixels` and CDP's `x`/`y` are already device-independent
 /// ("CSS") pixels — the screencast is started with `device_scale_factor:
 /// 1.0` — so nothing here needs to know the display's DPI scale factor.
 fn browser_viewport_position(
     bounds: Bounds<Pixels>,
     position: Point<Pixels>,
+    viewport: (u32, u32),
 ) -> Option<(f64, f64)> {
     let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if bw <= 0.0 || bh <= 0.0 {
         return None;
     }
-    let (vw, vh) = (
-        BROWSER_VIEWPORT_WIDTH as f32,
-        BROWSER_VIEWPORT_HEIGHT as f32,
-    );
+    let (vw, vh) = (viewport.0 as f32, viewport.1 as f32);
+    if vw <= 0.0 || vh <= 0.0 {
+        return None;
+    }
     let scale = (bw / vw).min(bh / vh);
     if scale <= 0.0 {
         return None;
@@ -1205,15 +1280,49 @@ fn browser_rendered_body(
     browser: &BrowserPreview,
     control: ControlHolder,
     frame_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    viewport: (u32, u32),
     focus: FocusHandle,
     address: &Entity<InputState>,
     entity: Entity<ArtifactView>,
     cx: &App,
 ) -> AnyElement {
-    // AGE-156: lets the user navigate directly — press Enter to go, same
-    // as any other browser's omnibox. Submission is wired in `ArtifactView::new`
-    // (a `PressEnter` subscription on this same `InputState`), not here.
-    let address_bar = Input::new(address).small().w_full().into_any_element();
+    // AGE-156: lets the user navigate directly — press Enter or click Go,
+    // same as any other browser's omnibox. Enter is wired in
+    // `ArtifactView::new` (a `PressEnter` subscription on this same
+    // `InputState`); Go reads the same field here and calls the same method.
+    let address_bar = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(Input::new(address).small().flex_1())
+        .child(
+            Button::new("artifact-browser-refresh")
+                .ghost()
+                .small()
+                .label("Refresh")
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.reload_browser(cx));
+                    }
+                }),
+        )
+        .child(
+            Button::new("artifact-browser-go")
+                .ghost()
+                .small()
+                .label("Go")
+                .on_click({
+                    let entity = entity.clone();
+                    let address = address.clone();
+                    move |_, _, cx| {
+                        let url = address.read(cx).value().to_string();
+                        entity.update(cx, |this, cx| this.navigate_browser_as_user(url, cx));
+                    }
+                }),
+        )
+        .into_any_element();
 
     let control_bar = div()
         .flex()
@@ -1315,7 +1424,7 @@ fn browser_rendered_body(
                         move |event, window, cx| {
                             window.focus(&focus);
                             let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position)
+                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
                             else {
                                 return;
                             };
@@ -1342,7 +1451,7 @@ fn browser_rendered_body(
                         let bounds = frame_bounds.clone();
                         move |event, _window, cx| {
                             let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position)
+                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
                             else {
                                 return;
                             };
@@ -1369,7 +1478,7 @@ fn browser_rendered_body(
                         let bounds = frame_bounds.clone();
                         move |event, _window, cx| {
                             let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position)
+                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
                             else {
                                 return;
                             };
@@ -1389,7 +1498,7 @@ fn browser_rendered_body(
                         let bounds = frame_bounds.clone();
                         move |event, _window, cx| {
                             let Some((x, y)) =
-                                browser_viewport_position(*bounds.borrow(), event.position)
+                                browser_viewport_position(*bounds.borrow(), event.position, viewport)
                             else {
                                 return;
                             };
@@ -1649,6 +1758,7 @@ impl Render for ArtifactView {
             self.sync_editor(window, cx);
             self.sync_outline(cx);
             self.sync_browser_address(window, cx);
+            self.sync_browser_viewport_size(cx);
         }
 
         let tab = self.tab;
@@ -1670,6 +1780,7 @@ impl Render for ArtifactView {
         let browser = self.browser.clone();
         let browser_control = self.browser_control;
         let browser_frame_bounds = self.browser_frame_bounds.clone();
+        let browser_viewport = self.browser_requested_size;
         let browser_focus = self.browser_focus.clone();
         let browser_address = self.browser_address.clone();
         let has_diff = !old.is_empty() && old != source;
@@ -1729,6 +1840,7 @@ impl Render for ArtifactView {
                     &browser,
                     browser_control,
                     browser_frame_bounds,
+                    browser_viewport,
                     browser_focus,
                     &browser_address,
                     entity.clone(),
