@@ -2,7 +2,9 @@
 //!
 //! # What lives here
 //!
-//! - `SlashCommand` / `SkillEntry` / `SlashMenuItem` types.
+//! - `SlashCommand` (an alias for `chatty_core::slash_commands::SlashCommandSpec`
+//!   — the catalog itself is shared with the TUI, see AGE-172) / `SkillEntry` /
+//!   `SlashMenuItem` types.
 //! - `slash_menu_items_for` / `slash_menu_items_with_skills` — pure
 //!   filtering helpers (also called from `chat_view` and from unit
 //!   tests).
@@ -21,24 +23,12 @@ use gpui_component::scroll::ScrollableElement;
 use super::{ChatInputEvent, ChatInputState};
 
 // ---------------------------------------------------------------------------
-// Slash command menu — types and filters
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Slash command menu
 // ---------------------------------------------------------------------------
 
-/// A single entry in the slash-command picker.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SlashCommand {
-    pub command: &'static str,
-    pub description: &'static str,
-    /// Text that is inserted into the input when the command is selected.
-    pub insert_text: &'static str,
-    /// When true the command is sent immediately on selection; when false
-    /// the insert_text is placed into the input so the user can add args.
-    pub execute_immediately: bool,
-}
+/// A single entry in the slash-command picker. The catalog lives in
+/// `chatty_core::slash_commands` so it stays in sync with the TUI.
+pub type SlashCommand = chatty_core::slash_commands::SlashCommandSpec;
 
 /// A skill loaded from the filesystem for display in the slash-command picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,63 +88,6 @@ impl SlashMenuItem {
     }
 }
 
-const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        command: "/add-dir",
-        description: "Add a directory to allowed workspace access",
-        insert_text: "/add-dir ",
-        execute_immediately: false,
-    },
-    SlashCommand {
-        command: "/agent",
-        description: "Launch a sub-agent with a prompt",
-        insert_text: "/agent ",
-        execute_immediately: false,
-    },
-    SlashCommand {
-        command: "/clear",
-        description: "Clear conversation history",
-        insert_text: "/clear",
-        execute_immediately: true,
-    },
-    SlashCommand {
-        command: "/new",
-        description: "Start a new conversation",
-        insert_text: "/new",
-        execute_immediately: true,
-    },
-    SlashCommand {
-        command: "/compact",
-        description: "Summarize conversation history to reduce context",
-        insert_text: "/compact",
-        execute_immediately: true,
-    },
-    SlashCommand {
-        command: "/context",
-        description: "Show context window usage",
-        insert_text: "/context",
-        execute_immediately: true,
-    },
-    SlashCommand {
-        command: "/copy",
-        description: "Copy latest response to clipboard",
-        insert_text: "/copy",
-        execute_immediately: true,
-    },
-    SlashCommand {
-        command: "/cwd",
-        description: "Show current working directory",
-        insert_text: "/cwd",
-        execute_immediately: true,
-    },
-    SlashCommand {
-        command: "/cd",
-        description: "Change working directory",
-        insert_text: "/cd ",
-        execute_immediately: false,
-    },
-];
-
 /// Returns the built-in slash commands that match the current `input_text`.
 /// The menu is active only when `input_text` starts with `/` and contains
 /// no whitespace (once there is a space the user is typing arguments).
@@ -171,8 +104,7 @@ pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
         return Vec::new();
     }
     let query = trimmed[1..].to_ascii_lowercase();
-    SLASH_COMMANDS
-        .iter()
+    chatty_core::slash_commands::gpui_commands()
         .filter(|cmd| {
             query.is_empty()
                 || cmd
@@ -196,8 +128,7 @@ pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> 
     }
     let query = trimmed[1..].to_ascii_lowercase();
 
-    let mut items: Vec<SlashMenuItem> = SLASH_COMMANDS
-        .iter()
+    let mut items: Vec<SlashMenuItem> = chatty_core::slash_commands::gpui_commands()
         .filter(|cmd| {
             query.is_empty()
                 || cmd
