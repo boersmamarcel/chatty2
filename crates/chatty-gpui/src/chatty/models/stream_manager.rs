@@ -749,7 +749,8 @@ mod tests {
     fn epoch_survives_the_stream_being_removed() {
         let mut mgr = StreamManager::new();
         let first = mgr.claim_epoch("conv-1");
-        mgr.streams.insert("conv-1".to_string(), active_state(first));
+        mgr.streams
+            .insert("conv-1".to_string(), active_state(first));
         mgr.streams.remove("conv-1");
         assert!(mgr.is_current_epoch("conv-1", first));
 
@@ -825,13 +826,29 @@ mod tests {
     #[test]
     fn test_promote_pending() {
         let mut mgr = StreamManager::new();
-        mgr.streams.insert(
+        let epoch = mgr.claim_epoch("__pending__");
+        mgr.streams
+            .insert("__pending__".to_string(), active_state(epoch));
+        mgr.pending_resolved_ids.insert(
             "__pending__".to_string(),
-            StreamState {
-                epoch: 1,
-                status: StreamStatus::Active,
-                token_usage: None,
-                trace_json: None,
-                task: None,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
-                
+            Arc::new(Mutex::new(Some("conv-456".to_string()))),
+        );
+
+        mgr.promote_pending("conv-456");
+
+        assert!(!mgr.streams.contains_key("__pending__"));
+        assert!(mgr.streams.contains_key("conv-456"));
+        assert!(mgr.pending_resolved_ids.is_empty());
+    }
+
+    #[test]
+    fn test_set_trace() {
+        let mut mgr = StreamManager::new();
+        mgr.streams.insert("conv-1".to_string(), active_state(1));
+
+        let trace = serde_json::json!({"tool_calls": []});
+        mgr.set_trace("conv-1", Some(trace.clone()));
+
+        assert_eq!(mgr.streams.get("conv-1").unwrap().trace_json, Some(trace));
+    }
+}

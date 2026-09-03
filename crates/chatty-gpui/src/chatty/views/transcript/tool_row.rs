@@ -123,11 +123,7 @@ impl RenderOnce for ToolRow {
                 this.child(Tag::danger().small().child(format!("−{n}")))
             })
             .when(attempt > 1, |this| {
-                this.child(
-                    Tag::danger()
-                        .small()
-                        .child(format!("attempt {attempt}")),
-                )
+                this.child(Tag::danger().small().child(format!("attempt {attempt}")))
             })
             .child(div().flex_1())
             .child(
@@ -176,10 +172,8 @@ impl RenderOnce for ToolRow {
                         // The full payload is one click away instead of being
                         // dropped on the floor.
                         this.child(
-                            Clipboard::new(ElementId::Name(
-                                format!("tool-error-copy-{id}").into(),
-                            ))
-                            .value(err.clone()),
+                            Clipboard::new(ElementId::Name(format!("tool-error-copy-{id}").into()))
+                                .value(err.clone()),
                         )
                     }),
             )
@@ -196,10 +190,7 @@ mod tests {
     #[test]
     fn headline_is_the_first_line() {
         let err = "browser_navigate: ERR_NETWORK_CHANGED\n  at Page::goto\n  at ...";
-        assert_eq!(
-            error_headline(err),
-            "browser_navigate: ERR_NETWORK_CHANGED"
-        );
+        assert_eq!(error_headline(err), "browser_navigate: ERR_NETWORK_CHANGED");
     }
 
     #[test]

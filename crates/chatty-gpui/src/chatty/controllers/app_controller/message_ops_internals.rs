@@ -1096,7 +1096,10 @@ fn is_malformed_tool_call_error(error: &str) -> bool {
 
 #[cfg(test)]
 mod stream_error_tests {
-    use super::{MALFORMED_TOOL_CALL_FOLLOW_UP, is_malformed_tool_call_error};
+    use super::{
+        FollowUpReason, MALFORMED_TOOL_CALL_FOLLOW_UP, follow_up_requires_cancel,
+        is_malformed_tool_call_error,
+    };
 
     /// The retry is bounded by spotting this text in history, and hidden from
     /// the transcript by the same prefix. Both depend on chatty-core's matcher

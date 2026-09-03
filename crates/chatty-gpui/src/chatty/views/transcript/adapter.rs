@@ -442,6 +442,7 @@ fn estimate_markdown_height(content: &str, layout: &TranscriptLayout<'_>) -> f32
     let mut fence: Option<FenceKind> = None;
     let mut fence_lines = 0.0_f32;
     let mut in_math = false;
+    let mut math_lines = 0.0_f32;
 
     for raw in content.lines() {
         let line = raw.trim_end();
@@ -464,15 +465,19 @@ fn estimate_markdown_height(content: &str, layout: &TranscriptLayout<'_>) -> f32
             continue;
         }
 
-        // `$$` toggles a display-math region that renders as one SVG.
+        // `$$` toggles a display-math region that renders as one SVG. A long
+        // equation renders taller than the one-line minimum, so the region
+        // costs at least its source's worth of rows.
         if trimmed == "$$" {
             if in_math {
-                height += MATH_BLOCK * scale;
+                height += math_region_height(math_lines, line_height, scale);
+                math_lines = 0.0;
             }
             in_math = !in_math;
             continue;
         }
         if in_math {
+            math_lines += 1.0;
             continue;
         }
 
@@ -499,7 +504,7 @@ fn estimate_markdown_height(content: &str, layout: &TranscriptLayout<'_>) -> f32
         height += close_fence(kind, fence_lines, scale);
     }
     if in_math {
-        height += MATH_BLOCK * scale;
+        height += math_region_height(math_lines, line_height, scale);
     }
 
     // An empty body still occupies one line.
@@ -561,8 +566,19 @@ fn heading_height(level: u8, scale: f32) -> f32 {
     (LINE_HEIGHT * factor + PARAGRAPH_MARGIN) * scale
 }
 
-/// Rows a line of `len` chars wraps into. Never below one: an empty line in a
+/// Height of one `$$ … $$` region.
+///
+/// At least the rendered SVG's minimum, and never less than the source it was
+/// written on — a multi-line equation renders tall.
+fn math_region_height(source_lines: f32, line_height: f32, scale: f32) -> f32 {
+    (MATH_BLOCK * scale).max(source_lines * line_height)
+}
+
+/// Rows a line of `len` bytes wraps into. Never below one: an empty line in a
 /// list or fence still occupies a row.
+///
+/// Bytes, not chars, on purpose: for non-ASCII text a byte count over-counts
+/// rows, and over-estimating leaves a gap where under-estimating overlaps text.
 fn wrapped_lines(len: usize, chars_per_line: f32) -> f32 {
     ((len as f32) / chars_per_line).ceil().max(1.0)
 }
@@ -704,7 +720,10 @@ mod attachment_height_tests {
         let two = block_estimated_height(
             &activity(
                 1,
-                vec![tool("a", ToolCallState::Success), tool("b", ToolCallState::Success)],
+                vec![
+                    tool("a", ToolCallState::Success),
+                    tool("b", ToolCallState::Success),
+                ],
             ),
             &layout(&expanded_map),
         );
@@ -717,7 +736,10 @@ mod attachment_height_tests {
             ),
             &layout(&expanded_map),
         );
-        assert!(five >= two + 3.0 * ACTIVITY_ROW, "each row needs its own space");
+        assert!(
+            five >= two + 3.0 * ACTIVITY_ROW,
+            "each row needs its own space"
+        );
     }
 
     /// AGE-179 defect 1: `max(wrapped, explicit)` is the max of two lower
@@ -804,11 +826,8 @@ mod attachment_height_tests {
         let expanded = HashMap::new();
         let l = layout(&expanded);
         let bare = estimate_message_bubble_height("intro\n", &[], &l);
-        let diagram = estimate_message_bubble_height(
-            "intro\n```mermaid\ngraph TD;\nA-->B;\n```\n",
-            &[],
-            &l,
-        );
+        let diagram =
+            estimate_message_bubble_height("intro\n```mermaid\ngraph TD;\nA-->B;\n```\n", &[], &l);
         assert!(
             diagram - bare >= MERMAID_DIAGRAM,
             "a mermaid fence must reserve its rendered diagram, got {}",
@@ -1065,7 +1084,12 @@ pub fn plan_block_bottom(
     if turn.collapsed {
         return Some(top + px(COLLAPSED_TURN_HEIGHT));
     }
-    Some(top + px(block_estimated_height(&Block::Plan { id: BlockId(0) }, layout)))
+    Some(
+        top + px(block_estimated_height(
+            &Block::Plan { id: BlockId(0) },
+            layout,
+        )),
+    )
 }
 
 /// True when the plan card has fully scrolled above the viewport.
@@ -1169,16 +1193,22 @@ pub fn estimate_turn_height(turn: &Turn, layout: &TranscriptLayout<'_>) -> Size<
                 attachments,
                 ..
             } => {
-                message_height = message_height
-                    .max(estimate_message_bubble_height(content, attachments, layout));
+                message_height = message_height.max(estimate_message_bubble_height(
+                    content,
+                    attachments,
+                    layout,
+                ));
             }
             Block::Text {
                 content,
                 attachments,
                 ..
             } => {
-                message_height = message_height
-                    .max(estimate_message_bubble_height(content, attachments, layout));
+                message_height = message_height.max(estimate_message_bubble_height(
+                    content,
+                    attachments,
+                    layout,
+                ));
             }
             _ if block_visible_in_turn(turn, block) => {
                 height += block_estimated_height(block, layout);

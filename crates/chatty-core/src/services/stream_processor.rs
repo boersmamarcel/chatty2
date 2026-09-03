@@ -52,8 +52,7 @@ pub const STALL_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// Reported as a stream error when the watchdog above fires.
-pub const STALLED_STREAM_MESSAGE: &str =
-    "The model stopped responding (no output for 3 minutes). The turn was ended \
+pub const STALLED_STREAM_MESSAGE: &str = "The model stopped responding (no output for 3 minutes). The turn was ended \
      — send a message to continue.";
 
 /// Install a fresh progress sender into the shared slot, returning the receiver.

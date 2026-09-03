@@ -1259,7 +1259,11 @@ impl Render for ArtifactView {
                     .when(
                         !session_review && matches!(copy_control, ArtifactCopy::Menu),
                         |this| {
-                            let rendered_label = if is_tabular { "Copy table" } else { "Copy text" };
+                            let rendered_label = if is_tabular {
+                                "Copy table"
+                            } else {
+                                "Copy text"
+                            };
                             this.child(
                                 DropdownButton::new("artifact-copy")
                                     .small()
@@ -1285,19 +1289,17 @@ impl Render for ArtifactView {
                                     .dropdown_menu({
                                         let entity = entity.clone();
                                         move |menu, _, _| {
-                                            menu.item(
-                                                PopupMenuItem::new("Copy source").on_click({
-                                                    let entity = entity.clone();
-                                                    move |_, _, cx| {
-                                                        entity.update(cx, |this, cx| {
-                                                            this.copy_kind(
-                                                                ArtifactCopyKind::Source,
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }
-                                                }),
-                                            )
+                                            menu.item(PopupMenuItem::new("Copy source").on_click({
+                                                let entity = entity.clone();
+                                                move |_, _, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.copy_kind(
+                                                            ArtifactCopyKind::Source,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            }))
                                             .item(
                                                 PopupMenuItem::new(rendered_label).on_click({
                                                     let entity = entity.clone();

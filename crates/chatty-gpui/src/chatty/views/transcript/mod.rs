@@ -53,10 +53,6 @@ mod verb;
 mod artifact_header;
 
 pub use action_bar::MessageActionBar;
-pub use artifact_header::{
-    ArtifactCopy, ArtifactCopyKind, ArtifactHeaderKind, ArtifactTabSpec, artifact_copy_control,
-    artifact_header_tabs,
-};
 pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
     BASE_FONT_SIZE, COLLAPSED_TURN_HEIGHT, TranscriptLayout, adapt_message,
@@ -67,6 +63,10 @@ pub use adapter::{
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;
 pub use artifact_card::ArtifactCard;
+pub use artifact_header::{
+    ArtifactCopy, ArtifactCopyKind, ArtifactHeaderKind, ArtifactTabSpec, artifact_copy_control,
+    artifact_header_tabs,
+};
 pub use artifact_kind::{
     ArtifactHeading, ArtifactVersion, ViewAnchor, artifact_display_title, artifact_file_name,
     artifact_format_token, artifact_language_for_path, artifact_meta_line, artifact_panel_title,

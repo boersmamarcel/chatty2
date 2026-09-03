@@ -72,7 +72,11 @@ pub(super) fn resolve_scroll_state(
 
     // Following resumes on its own once the user is back at the bottom, and
     // stops the moment they scroll meaningfully away.
-    let stick = if at_bottom { true } else { was_sticky && !show_pin };
+    let stick = if at_bottom {
+        true
+    } else {
+        was_sticky && !show_pin
+    };
 
     ScrollDecision { stick, show_pin }
 }

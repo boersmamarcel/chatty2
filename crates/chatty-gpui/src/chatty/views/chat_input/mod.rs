@@ -401,7 +401,10 @@ impl ChatInputState {
     /// name cannot push Send out of the row (AGE-184). The full name stays
     /// available in the button's tooltip.
     pub fn selected_model_button_label(&self) -> String {
-        truncate_model_label(&self.get_selected_model_display_name(), MODEL_LABEL_MAX_CHARS)
+        truncate_model_label(
+            &self.get_selected_model_display_name(),
+            MODEL_LABEL_MAX_CHARS,
+        )
     }
 
     pub fn selected_model(&self) -> Option<&ModelOption> {

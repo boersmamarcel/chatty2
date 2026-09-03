@@ -182,12 +182,18 @@ mod tests {
     /// Three menu items, one outcome. A code file gets one button instead.
     #[test]
     fn code_file_gets_a_single_copy_button() {
-        assert_eq!(artifact_copy_control(kind_for("form.html")), ArtifactCopy::Source);
+        assert_eq!(
+            artifact_copy_control(kind_for("form.html")),
+            ArtifactCopy::Source
+        );
     }
 
     #[test]
     fn only_kinds_with_two_payloads_keep_the_menu() {
-        assert_eq!(artifact_copy_control(kind_for("README.md")), ArtifactCopy::Menu);
+        assert_eq!(
+            artifact_copy_control(kind_for("README.md")),
+            ArtifactCopy::Menu
+        );
         let tabular = ArtifactHeaderKind::resolve(Some(&PathBuf::from("rows.csv")), true, false);
         assert_eq!(artifact_copy_control(tabular), ArtifactCopy::Menu);
     }
@@ -205,7 +211,11 @@ mod tests {
                 let before = indices.len();
                 indices.sort_unstable();
                 indices.dedup();
-                assert_eq!(before, indices.len(), "{path} (diff={has_diff}) repeats a view");
+                assert_eq!(
+                    before,
+                    indices.len(),
+                    "{path} (diff={has_diff}) repeats a view"
+                );
             }
         }
     }

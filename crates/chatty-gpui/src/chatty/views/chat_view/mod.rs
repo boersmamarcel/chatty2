@@ -68,20 +68,19 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, FileChange,
-    OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind,
-    SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
-    BASE_FONT_SIZE, TranscriptLayout, attach_plan_block, attachment_image_path,
-    estimate_turn_height, extract_table_preview,
-    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
-    is_pdf_artifact_tool, is_pdf_path, merge_file_changes, new_artifact_view, plan_block_bottom,
-    plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
-    resolve_artifact_path, tool_file_path,
+    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, BASE_FONT_SIZE,
+    Block, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin,
+    RunPinKind, SessionChangeBar, TableOpen, TranscriptLayout, Turn, TurnFileOverview, TurnRole,
+    adapt_messages_with_traces, attach_plan_block, attachment_image_path, estimate_turn_height,
+    extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
+    format_working_for, is_pdf_artifact_tool, is_pdf_path, merge_file_changes, new_artifact_view,
+    plan_block_bottom, plan_is_above_viewport, plan_turn_index, read_artifact_source,
+    render_typed_block, resolve_artifact_path, tool_file_path,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
-use crate::settings::models::general_model::GeneralSettingsModel;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
+use crate::settings::models::general_model::GeneralSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
 
 /// Main chat view component
