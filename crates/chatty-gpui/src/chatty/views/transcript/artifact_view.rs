@@ -995,7 +995,7 @@ fn headings_to_tree_items(headings: &[ArtifactHeading]) -> Vec<TreeItem> {
 fn render_image_from_rgba(frame: &ScreencastFrame) -> Arc<RenderImage> {
     let mut buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec())
         .expect("screencast frame dimensions match its own buffer length");
-    for pixel in buffer.chunks_exact_mut(4) {
+    for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
@@ -1159,6 +1159,7 @@ fn browser_rendered_body(
                 .child(
                     img(image.clone())
                         .w_full()
+                        .h_full()
                         .object_fit(ObjectFit::Contain)
                         .rounded_md(),
                 );
