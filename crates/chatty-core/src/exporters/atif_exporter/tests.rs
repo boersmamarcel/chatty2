@@ -13,6 +13,7 @@ use rig_core::completion::message::{AssistantContent, Text, UserContent};
 use std::collections::HashMap;
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)]
 fn make_conversation_data(
     id: &str,
     model_id: &str,
@@ -233,7 +234,7 @@ fn parse_trace_extracts_tool_output() {
         outputs.get("call_abc").map(|s| s.as_str()),
         Some("file contents here")
     );
-    assert!(outputs.get("read_file").is_none());
+    assert!(!outputs.contains_key("read_file"));
 }
 
 #[test]

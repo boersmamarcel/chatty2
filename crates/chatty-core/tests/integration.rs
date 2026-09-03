@@ -496,18 +496,20 @@ fn token_budget_estimation_delta_with_actuals() {
 fn execution_settings_json_roundtrip() {
     use chatty_core::settings::models::ExecutionSettingsModel;
 
-    let mut settings = ExecutionSettingsModel::default();
-    settings.filesystem_read_enabled = true;
-    settings.filesystem_write_enabled = false;
-    settings.git_enabled = true;
+    let settings = ExecutionSettingsModel {
+        filesystem_read_enabled: true,
+        filesystem_write_enabled: false,
+        git_enabled: true,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&settings).expect("serialization failed");
     let loaded: ExecutionSettingsModel =
         serde_json::from_str(&json).expect("deserialization failed");
 
-    assert_eq!(loaded.filesystem_read_enabled, true);
-    assert_eq!(loaded.filesystem_write_enabled, false);
-    assert_eq!(loaded.git_enabled, true);
+    assert!(loaded.filesystem_read_enabled);
+    assert!(!loaded.filesystem_write_enabled);
+    assert!(loaded.git_enabled);
 }
 
 /// SearchSettingsModel must survive a JSON roundtrip.
@@ -515,15 +517,17 @@ fn execution_settings_json_roundtrip() {
 fn search_settings_json_roundtrip() {
     use chatty_core::settings::models::SearchSettingsModel;
 
-    let mut settings = SearchSettingsModel::default();
-    settings.tavily_api_key = Some("tavily-key-123".to_string());
-    settings.enabled = true;
+    let settings = SearchSettingsModel {
+        tavily_api_key: Some("tavily-key-123".to_string()),
+        enabled: true,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&settings).expect("serialization failed");
     let loaded: SearchSettingsModel = serde_json::from_str(&json).expect("deserialization failed");
 
     assert_eq!(loaded.tavily_api_key, Some("tavily-key-123".to_string()));
-    assert_eq!(loaded.enabled, true);
+    assert!(loaded.enabled);
 }
 
 /// TrainingSettingsModel must survive a JSON roundtrip.
@@ -542,8 +546,10 @@ fn training_settings_json_roundtrip() {
 fn hive_settings_json_roundtrip() {
     use chatty_core::settings::models::HiveSettingsModel;
 
-    let mut settings = HiveSettingsModel::default();
-    settings.token = Some("hive-token-abc".to_string());
+    let settings = HiveSettingsModel {
+        token: Some("hive-token-abc".to_string()),
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&settings).expect("serialization failed");
     let loaded: HiveSettingsModel = serde_json::from_str(&json).expect("deserialization failed");

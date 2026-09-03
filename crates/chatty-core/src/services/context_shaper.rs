@@ -625,12 +625,11 @@ mod tests {
         let (out, freed) = stage1_budget_reduction(vec![msg], &settings);
         assert!(freed > 0);
         // Content should be a stub now.
-        if let Message::User { content } = &out[0] {
-            if let Some(UserContent::ToolResult(tr)) = content.first() {
-                if let Some(ToolResultContent::Text(t)) = tr.content.first() {
-                    assert!(t.text.contains("truncated"));
-                }
-            }
+        if let Message::User { content } = &out[0]
+            && let Some(UserContent::ToolResult(tr)) = content.first()
+            && let Some(ToolResultContent::Text(t)) = tr.content.first()
+        {
+            assert!(t.text.contains("truncated"));
         }
     }
 
@@ -655,10 +654,10 @@ mod tests {
         // head (1) + marker (1) + tail (2) = 4
         assert_eq!(out.len(), 4);
         // The marker should mention "snipped".
-        if let Message::User { content } = &out[1] {
-            if let Some(UserContent::Text(t)) = content.first() {
-                assert!(t.text.contains("snipped"));
-            }
+        if let Message::User { content } = &out[1]
+            && let Some(UserContent::Text(t)) = content.first()
+        {
+            assert!(t.text.contains("snipped"));
         }
     }
 

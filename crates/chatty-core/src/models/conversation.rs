@@ -734,6 +734,33 @@ impl Conversation {
     }
 }
 
+fn start_sub_agent_progress_state(
+    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+    prompt: &str,
+    source: ToolSource,
+) {
+    *streaming_sub_agent_trace = Some(SystemTrace::new_sub_agent(prompt, source));
+}
+
+fn append_sub_agent_progress_state(
+    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+    line: &str,
+) {
+    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
+        trace.append_sub_agent_progress(line);
+    }
+}
+
+fn finalize_sub_agent_progress_state(
+    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+    success: bool,
+    result: Option<String>,
+) {
+    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
+        trace.finalize_sub_agent_progress(success, result);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,32 +900,5 @@ mod tests {
         };
         assert_eq!(tc.output.as_deref(), Some("working...\n\n---\n\ndone"));
         assert!(!trace.is_running_sub_agent());
-    }
-}
-
-fn start_sub_agent_progress_state(
-    streaming_sub_agent_trace: &mut Option<SystemTrace>,
-    prompt: &str,
-    source: ToolSource,
-) {
-    *streaming_sub_agent_trace = Some(SystemTrace::new_sub_agent(prompt, source));
-}
-
-fn append_sub_agent_progress_state(
-    streaming_sub_agent_trace: &mut Option<SystemTrace>,
-    line: &str,
-) {
-    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
-        trace.append_sub_agent_progress(line);
-    }
-}
-
-fn finalize_sub_agent_progress_state(
-    streaming_sub_agent_trace: &mut Option<SystemTrace>,
-    success: bool,
-    result: Option<String>,
-) {
-    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
-        trace.finalize_sub_agent_progress(success, result);
     }
 }

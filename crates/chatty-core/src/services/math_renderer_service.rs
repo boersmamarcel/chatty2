@@ -585,13 +585,15 @@ mod tests {
 
     #[test]
     fn test_cache_max_entries_constant_is_reasonable() {
-        assert!(
-            MAX_MATH_CACHE_ENTRIES >= 100,
-            "Cache limit too low — would cause excessive re-renders"
-        );
-        assert!(
-            MAX_MATH_CACHE_ENTRIES <= 2000,
-            "Cache limit too high — defeats memory bounding"
-        );
+        const {
+            assert!(
+                MAX_MATH_CACHE_ENTRIES >= 100,
+                "Cache limit too low — would cause excessive re-renders"
+            );
+            assert!(
+                MAX_MATH_CACHE_ENTRIES <= 2000,
+                "Cache limit too high — defeats memory bounding"
+            );
+        }
     }
 }

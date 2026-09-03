@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_toggle_logic() {
-        let mut agents = vec![make_cfg("agent-1", false)];
+        let mut agents = [make_cfg("agent-1", false)];
         if let Some(a) = agents.iter_mut().find(|a| a.name == "agent-1") {
             a.enabled = !a.enabled;
         }

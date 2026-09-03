@@ -393,13 +393,15 @@ mod tests {
     #[test]
     fn max_cached_conversations_constant_is_reasonable() {
         // Guard: keep the constant between 5 and 50 to prevent accidental extremes
-        assert!(
-            MAX_CACHED_CONVERSATIONS >= 5,
-            "Cache limit too low — would cause excessive reloads"
-        );
-        assert!(
-            MAX_CACHED_CONVERSATIONS <= 50,
-            "Cache limit too high — defeats the purpose of eviction"
-        );
+        const {
+            assert!(
+                MAX_CACHED_CONVERSATIONS >= 5,
+                "Cache limit too low — would cause excessive reloads"
+            );
+            assert!(
+                MAX_CACHED_CONVERSATIONS <= 50,
+                "Cache limit too high — defeats the purpose of eviction"
+            );
+        }
     }
 }

@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn content_format() {
         let description = "Use when shipping a release";
-        let steps = vec![
+        let steps = [
             "cargo build --release".to_string(),
             "scp binary to server".to_string(),
         ];

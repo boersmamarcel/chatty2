@@ -2,8 +2,6 @@
 
 use super::*;
 
-use super::*;
-
 #[test]
 fn test_version_comparison() {
     let current = Version::parse("0.1.0").unwrap();

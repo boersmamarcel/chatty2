@@ -409,10 +409,10 @@ mod tests {
     #[test]
     fn user_data_lib_path_returns_none_when_cache_empty() {
         // If a test environment happens to have a real cached dylib, skip.
-        if let Some(p) = user_data_lib_dir() {
-            if p.join(lib_name()).exists() {
-                return;
-            }
+        if let Some(p) = user_data_lib_dir()
+            && p.join(lib_name()).exists()
+        {
+            return;
         }
         assert!(user_data_lib_path().is_none());
     }

@@ -482,14 +482,16 @@ mod tests {
 
     #[test]
     fn test_cache_max_entries_constant_is_reasonable() {
-        assert!(
-            MAX_MERMAID_CACHE_ENTRIES >= 50,
-            "Cache limit too low — would cause excessive re-renders"
-        );
-        assert!(
-            MAX_MERMAID_CACHE_ENTRIES <= 1000,
-            "Cache limit too high — defeats memory bounding"
-        );
+        const {
+            assert!(
+                MAX_MERMAID_CACHE_ENTRIES >= 50,
+                "Cache limit too low — would cause excessive re-renders"
+            );
+            assert!(
+                MAX_MERMAID_CACHE_ENTRIES <= 1000,
+                "Cache limit too high — defeats memory bounding"
+            );
+        }
     }
 
     #[test]
