@@ -949,6 +949,7 @@ fn main() {
                         cx.update(|cx| {
                             settings::controllers::a2a_controller::probe_agent_card(ext_id, name, cx);
                         })
+                        .map_err(|e| warn!(error = ?e, "Failed to probe A2A agent card"))
                         .ok();
                     }
                 }
@@ -1033,8 +1034,12 @@ fn main() {
                 chatty_core::extensions_repository().load(),
             );
 
-            let mut loaded_hive = hive_result.ok();
-            let mut loaded_ext = ext_result.ok();
+            let mut loaded_hive = hive_result
+                .map_err(|e| warn!(error = ?e, "Failed to load Hive settings, using defaults"))
+                .ok();
+            let mut loaded_ext = ext_result
+                .map_err(|e| warn!(error = ?e, "Failed to load extensions, using defaults"))
+                .ok();
             let mut save_backfilled_extensions = false;
 
             if let (Some(hive), Some(ext)) = (&loaded_hive, loaded_ext.as_mut()) {
@@ -1107,6 +1112,7 @@ fn main() {
                     );
                     cx.set_global(hive);
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to set Hive settings global"))
                 .ok();
             }
 
@@ -1129,6 +1135,7 @@ fn main() {
                         });
                     }
                 })
+                .map_err(|e| warn!(error = ?e, "Failed to set Extensions global"))
                 .ok();
             }
 
@@ -1153,14 +1160,18 @@ fn main() {
                             updated.registry_url = derived;
                             cx.set_global(updated.clone());
                             cx.spawn(|_cx: &mut AsyncApp| async move {
-                                let _ = chatty_core::hive_settings_repository()
+                                if let Err(e) = chatty_core::hive_settings_repository()
                                     .save(updated)
-                                    .await;
+                                    .await
+                                {
+                                    warn!(error = ?e, "Failed to persist synced Hive registry URL");
+                                }
                             })
                             .detach();
                         }
                 }
             })
+            .map_err(|e| warn!(error = ?e, "Failed to sync Hive registry URL from extension"))
             .ok();
 
             // Ensure the built-in Hive MCP server extension exists, and seed
@@ -1179,12 +1190,17 @@ fn main() {
                         .servers()
                         .to_vec();
                     cx.spawn(|_cx: &mut AsyncApp| async move {
-                        let _ = chatty_core::extensions_repository().save(ext_model).await;
-                        let _ = chatty_core::mcp_repository().save_all(mcp_servers).await;
+                        if let Err(e) = chatty_core::extensions_repository().save(ext_model).await {
+                            warn!(error = ?e, "Failed to persist default Hive/curated MCP extensions");
+                        }
+                        if let Err(e) = chatty_core::mcp_repository().save_all(mcp_servers).await {
+                            warn!(error = ?e, "Failed to persist default Hive/curated MCP servers");
+                        }
                     })
                     .detach();
                 }
             })
+            .map_err(|e| warn!(error = ?e, "Failed to ensure default Hive/curated MCP extensions"))
             .ok();
 
             // Seed the curated catalog of well-known external MCP servers
@@ -1205,12 +1221,17 @@ fn main() {
                     cx.global_mut::<settings::models::McpServersModel>()
                         .replace_all(mcp_servers.clone());
                     cx.spawn(|_cx: &mut AsyncApp| async move {
-                        let _ = chatty_core::extensions_repository().save(ext_model).await;
-                        let _ = chatty_core::mcp_repository().save_all(mcp_servers).await;
+                        if let Err(e) = chatty_core::extensions_repository().save(ext_model).await {
+                            warn!(error = ?e, "Failed to persist curated MCP extensions");
+                        }
+                        if let Err(e) = chatty_core::mcp_repository().save_all(mcp_servers).await {
+                            warn!(error = ?e, "Failed to persist curated MCP servers");
+                        }
                     })
                     .detach();
                 }
             })
+            .map_err(|e| warn!(error = ?e, "Failed to seed curated MCP catalog"))
             .ok();
         })
         .detach();

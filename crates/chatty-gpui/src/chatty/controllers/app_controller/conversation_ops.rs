@@ -352,6 +352,7 @@ impl ChattyApp {
                             cx.try_global::<crate::settings::models::ModuleSettingsModel>()
                                 .map(|m| m.gateway_port)
                         })
+                        .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                         .ok()
                         .flatten();
                     let (remote_agents, available_model_ids) = cx
@@ -459,7 +460,6 @@ impl ChattyApp {
         } else {
             let err_msg = "No models configured";
             error!("{}", err_msg);
-            // TODO: Show error in UI
             Task::ready(Err(anyhow::anyhow!(err_msg)))
         }
     }
@@ -514,14 +514,21 @@ impl ChattyApp {
                 let pending_approvals = cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|s, _| s.get_pending_approvals())?;
                 let pending_write_approvals = cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|s, _| s.get_pending_approvals())?;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
-                let theme_colors = cx.update(|cx| extract_theme_chart_colors(cx)).ok();
+                let theme_colors = cx
+                    .update(|cx| extract_theme_chart_colors(cx))
+                    .map_err(|e| warn!(error = ?e, "Failed to read theme chart colors"))
+                    .ok();
 
                 let skill_service = get_skill_service(cx);
 
                 let memory_service = await_memory_service(cx).await;
-                let search_settings = cx.update(|cx| {
-                    cx.try_global::<crate::settings::models::SearchSettingsModel>().cloned()
-                }).ok().flatten();
+                let search_settings = cx
+                    .update(|cx| {
+                        cx.try_global::<crate::settings::models::SearchSettingsModel>().cloned()
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to read search settings global"))
+                    .ok()
+                    .flatten();
 
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
