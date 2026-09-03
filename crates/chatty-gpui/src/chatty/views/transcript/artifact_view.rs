@@ -1193,8 +1193,13 @@ impl ArtifactView {
             return;
         }
         self.browser_requested_size = (width, height);
+        // GPUI's own timer, not `tokio::time::sleep`: `cx.background_spawn`
+        // runs on GPUI's background thread pool, which has no Tokio reactor
+        // entered on it, so a Tokio timer panics there ("no reactor
+        // running") the moment it fires.
+        let executor = cx.background_executor().clone();
         self.browser_resize_task = Some(cx.background_spawn(async move {
-            tokio::time::sleep(RESIZE_DEBOUNCE).await;
+            executor.timer(RESIZE_DEBOUNCE).await;
             tracing::debug!(
                 width,
                 height,
