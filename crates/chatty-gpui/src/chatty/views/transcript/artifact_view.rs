@@ -56,8 +56,14 @@ const OUTLINE_WIDTH: f32 = 220.0;
 /// PDF/image previews already work in this file: fetch one canonical
 /// resolution, let the flex layout scale it to fit rather than re-requesting
 /// a new capture on every layout pass.
-const BROWSER_VIEWPORT_WIDTH: u32 = 960;
-const BROWSER_VIEWPORT_HEIGHT: u32 = 600;
+///
+/// A normal laptop-desktop size, not a narrow one: most responsive sites
+/// switch to a cramped, oversized-nav "tablet" layout below ~1024px wide,
+/// which reads as "zoomed in" once it's scaled up to fill the panel. A
+/// wider source viewport downscales to fit a smaller panel instead (sharp);
+/// only a source narrower than the panel would need to scale up (blurry).
+const BROWSER_VIEWPORT_WIDTH: u32 = 1280;
+const BROWSER_VIEWPORT_HEIGHT: u32 = 800;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ArtifactMode {
