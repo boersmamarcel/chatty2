@@ -13,12 +13,31 @@ use super::verb::tool_row_label;
 #[derive(IntoElement)]
 pub struct ToolRow {
     tool: ToolCallBlock,
+    /// 1-based position among failures of the same tool in this group.
+    ///
+    /// Two stacked failure cards used to be indistinguishable — same tool,
+    /// same redacted text, no way to tell a retry from a second call
+    /// (AGE-187). Anything above 1 is labelled.
+    attempt: usize,
 }
 
 impl ToolRow {
     pub fn new(tool: ToolCallBlock) -> Self {
-        Self { tool }
+        Self { tool, attempt: 1 }
     }
+
+    pub fn attempt(mut self, attempt: usize) -> Self {
+        self.attempt = attempt;
+        self
+    }
+}
+
+/// First line of an error, for the inline summary.
+///
+/// The full text goes in the detail line below; this keeps the row itself one
+/// line tall when a tool returns a stack or a multi-line payload.
+fn error_headline(error: &str) -> String {
+    error.lines().next().unwrap_or(error).trim().to_string()
 }
 
 fn source_icon(source: &ToolSource) -> Option<IconName> {
@@ -32,6 +51,7 @@ fn source_icon(source: &ToolSource) -> Option<IconName> {
 
 impl RenderOnce for ToolRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let attempt = self.attempt;
         let tool = self.tool;
         let id = if tool.id.is_empty() {
             tool.tool_name.clone()
@@ -58,7 +78,7 @@ impl RenderOnce for ToolRow {
             cx.theme().foreground
         };
 
-        div()
+        let row = div()
             .id(ElementId::Name(format!("tool-row-{id}").into()))
             .flex()
             .flex_row()
@@ -102,8 +122,12 @@ impl RenderOnce for ToolRow {
             .when_some(label.removed.filter(|n| *n > 0), |this, n| {
                 this.child(Tag::danger().small().child(format!("−{n}")))
             })
-            .when_some(err, |this, err| {
-                this.child(Tag::danger().small().child(err))
+            .when(attempt > 1, |this| {
+                this.child(
+                    Tag::danger()
+                        .small()
+                        .child(format!("attempt {attempt}")),
+                )
             })
             .child(div().flex_1())
             .child(
@@ -115,6 +139,82 @@ impl RenderOnce for ToolRow {
                     .xsmall()
                     .icon(Icon::new(IconName::ExternalLink))
                     .tooltip("Open"),
+            );
+
+        let Some(err) = err else {
+            return row.into_any_element();
+        };
+
+        // A failure gets its own full-width line rather than a truncating chip
+        // in the row: the message is the whole point of the card, and it names
+        // the tool so two stacked failures are never ambiguous (AGE-187).
+        let headline = error_headline(&err);
+        let has_detail = err.trim() != headline;
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(row)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_2()
+                    .px_2()
+                    .pb_1()
+                    .pl_5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .min_w_0()
+                            .text_color(cx.theme().danger)
+                            .child(format!("{}: {headline}", tool.tool_name)),
+                    )
+                    .child(div().flex_1())
+                    .when(has_detail, |this| {
+                        // The full payload is one click away instead of being
+                        // dropped on the floor.
+                        this.child(
+                            Clipboard::new(ElementId::Name(
+                                format!("tool-error-copy-{id}").into(),
+                            ))
+                            .value(err.clone()),
+                        )
+                    }),
             )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_headline;
+
+    /// A tool that returns a stack or a multi-line payload must not stretch
+    /// the row; the rest is behind the copy control (AGE-187).
+    #[test]
+    fn headline_is_the_first_line() {
+        let err = "browser_navigate: ERR_NETWORK_CHANGED\n  at Page::goto\n  at ...";
+        assert_eq!(
+            error_headline(err),
+            "browser_navigate: ERR_NETWORK_CHANGED"
+        );
+    }
+
+    #[test]
+    fn single_line_errors_are_their_own_headline() {
+        let err = "path is outside the workspace";
+        assert_eq!(error_headline(err), err);
+    }
+
+    #[test]
+    fn headline_is_trimmed() {
+        assert_eq!(error_headline("  spaced out  \n rest"), "spaced out");
+    }
+
+    #[test]
+    fn empty_error_stays_empty() {
+        assert_eq!(error_headline(""), "");
     }
 }

@@ -1,4 +1,4 @@
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,6 +48,12 @@ impl Tool for GitStatusTool {
             "properties": {},
             "required": []
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -120,6 +126,12 @@ impl Tool for GitDiffTool {
         })
     }
 
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -186,6 +198,12 @@ impl Tool for GitLogTool {
             },
             "required": ["max_count"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -257,6 +275,12 @@ impl Tool for GitAddTool {
             },
             "required": ["paths"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -345,6 +369,12 @@ impl Tool for GitCreateBranchTool {
             },
             "required": ["name"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -437,6 +467,12 @@ impl Tool for GitSwitchBranchTool {
         })
     }
 
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -520,6 +556,12 @@ impl Tool for GitCommitTool {
             },
             "required": ["message"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(

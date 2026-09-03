@@ -1,4 +1,4 @@
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -188,6 +188,12 @@ impl Tool for FinalAnswerTool {
             },
             "required": ["answer"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -424,6 +430,12 @@ impl Tool for WriteFileTool {
         })
     }
 
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -509,6 +521,12 @@ impl Tool for CreateDirectoryTool {
         })
     }
 
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -578,6 +596,12 @@ impl Tool for DeleteFileTool {
             },
             "required": ["path"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -666,6 +690,12 @@ impl Tool for MoveFileTool {
             },
             "required": ["source", "destination"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -826,6 +856,12 @@ impl Tool for ApplyDiffTool {
             },
             "required": ["path", "old_content", "new_content"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(

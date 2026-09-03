@@ -78,6 +78,7 @@ pub use message_helpers::{extract_user_text, extract_user_text_lines, gather_mcp
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;
 pub use stream_processor::{
-    ChunkAction, StreamChunkHandler, install_progress_channel, run_stream_loop,
+    ChunkAction, STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE, StreamChunkHandler,
+    install_progress_channel, run_stream_loop,
 };
 pub use title_generator::generate_title;

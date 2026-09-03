@@ -9,6 +9,13 @@ citations are from that commit. Where an issue's own diagnosis was confirmed the
 plan says so and does not repeat it; where this pass found something the issue
 does not mention, it is marked **New finding**.
 
+> **Status: all six workstreams are implemented on this branch.** Each section's
+> "Changes" list is what was built, not what was proposed. Two things changed
+> during implementation and are called out in place: W2's fix turned out to be
+> smaller than planned (rig has a `map_error` hook designed for exactly this, so
+> no `FallibleTool` wrapper was needed), and W1's stall watchdog moved into the
+> shared `run_stream_loop` in chatty-core so `chatty-tui` gets it too.
+
 ---
 
 ## 1. Issue inventory
@@ -126,11 +133,18 @@ after that call finished or errored.
 5. **Never persist an empty assistant turn.** In `finalize_completed_stream`,
    if the accumulated response text is empty and the trace has no items, drop
    the turn instead of calling `conv.finalize_response("")`.
-6. **Stall detection.** Add a `tokio::time::timeout`-style branch to the
-   `select!` so the loop wakes periodically: re-check `cancel_flag`, and after a
-   no-chunk threshold (propose 90 s, configurable) emit a
-   `StreamChunk::Error("stream stalled…")` so the turn ends visibly instead of
-   counting forever. This is what actually closes AGE-188's reported case.
+6. **Stall detection, in the shared loop.** A `tokio::time::sleep(STALL_TICK)`
+   branch in the `select!` wakes the loop every 5 s to re-check `cancel_flag`,
+   and after `STALL_TIMEOUT` (180 s) with no chunk it reports
+   `StreamChunk::Error(STALLED_STREAM_MESSAGE)` and ends the turn. This is what
+   actually closes AGE-188's reported case.
+
+   It went into `chatty-core`'s `run_stream_loop` (`stream_processor.rs`), not
+   just the desktop loop: `chatty-tui` uses that shared loop and had the
+   identical gap — `cancel_flag` read only at the top, `stream.next()` with no
+   timeout. The desktop keeps its own copy of the loop (it interleaves GPUI
+   entity updates the shared one cannot) but imports the same three constants,
+   so there is one timeout for both UIs rather than two that can drift.
 7. **Attention only while running.** Filter the trace scan at
    `chat_view/mod.rs:1305` to tool calls in `ToolCallState::Running`; with none
    running, show the neutral ticker word and no tool name.
@@ -141,15 +155,26 @@ after that call finished or errored.
 
 ### 2.3 Verification
 
-* Unit: a `StreamEnded` carrying a stale epoch leaves the newly-registered
-  stream's UI state untouched (fails today).
-* Unit: `finalize_*` clears `is_streaming` on a message list containing a
-  sub-agent row plus a parent row.
-* Unit: `observe_tool_result` returning the `write_todos` nudge does not set the
-  cancel flag, and the prompt is still delivered after `Done`.
-* Unit: an empty response with an empty trace produces no persisted message.
-* Manual: drop the network mid `browser_navigate`; the footer must reach a
-  terminal state within the stall threshold.
+Shipped tests:
+
+* `stream_manager.rs` — a superseded epoch is not current; the epoch survives
+  the stream entry being removed (the whole point: the event arrives *after*
+  removal); epochs are per-conversation; an unknown conversation still accepts
+  its event; promotion carries the epoch to the real conversation id.
+* `chat_view/parent_stream.rs` — the sweep clears an orphaned progress row
+  alongside the parent, is a no-op when nothing streams, and is idempotent.
+* `message_ops_internals.rs` — the todo-protocol nudge does not cancel the turn;
+  the loop-guard pivot still does.
+* `stream_processor.rs` — the watchdog wakes well inside its own timeout, and
+  the stalled-stream message says both what happened and what to do.
+
+Not unit-tested, verified by reading: the empty-turn guard and the epoch guard
+both live inside GPUI entity update closures that need a window to drive. The
+epoch logic they depend on is tested directly, above.
+
+Manual check still owed on a desktop build: drop the network mid
+`browser_navigate` and confirm the footer reaches a terminal state within the
+stall threshold.
 
 ---
 
@@ -179,29 +204,42 @@ there is no expandable detail because there is no detail.
 
 ### 3.2 Changes
 
-1. **Do not let a tool error reach rig as an error.** Every typed tool is
-   registered at one site — `factories/agent_factory/tool_collector.rs:143-190`.
-   Add a generic wrapper there, `FallibleTool<T>`, that delegates `NAME`,
-   `definition()` and `Args` to `T`, sets `Error = Infallible` and
-   `Output = serde_json::Value`, and maps `Err(e)` to
-   `Ok(json!({ "error": { "tool": T::NAME, "message": e.to_string() } }))`.
-   Wrap each `.tool(x)` as `.tool(FallibleTool(x))`. One site, no per-tool edits.
-2. **Classify on the structured shape, not on prose.** Extend
-   `tool_result_looks_like_error` (`llm_service.rs:53`) to recognise the wrapper's
-   JSON envelope and pull the message out of it. Keep the `"the tool failed"`
-   literal as a fallback for MCP and any tool the wrapper does not cover, and
-   keep the existing test.
-3. **Give the card something to show.** In `tool_row.rs`, render the error as
-   tool name + short call summary + message, with the full payload behind the
-   existing expand affordance instead of a single truncating `Tag`. Preserve the
-   distinct-failure information the wrapper now carries so two cards are
-   distinguishable.
-4. **Verify the rig behaviour before building on it.** rig-core 0.42 sources are
-   not vendored in this checkout, so the exact redaction site is inferred from
-   our own code comment and the observed output. First step of this workstream is
-   a 20-line harness that makes a tool return `Err` and prints what
-   `StreamChunk::ToolCallError` carries — if rig 0.42 already forwards the real
-   message for some providers, change (1) shrinks accordingly.
+**The redaction site, confirmed.** rig-core 0.42's sources were read rather
+than inferred: `ToolExecutionError::from_error` calls `.redact_model_feedback()`
+on any arbitrary source error, which replaces the model-visible output with the
+kind's stable feedback — and `ToolErrorKind::Other`'s is the literal
+`"the tool failed"` (`rig-core-0.42.0/src/tool/result.rs`). `Tool::map_error`'s
+default is exactly that call.
+
+That made the fix smaller than planned. rig documents the hook for this case
+("Override this method when the domain error can provide a more precise kind,
+retryability policy, or safe model output"), and explicit constructors keep
+their message model-visible by design. No wrapper type was needed.
+
+1. **Override `map_error` on every tool.** A shared
+   `chatty-core/src/tools/mod.rs::map_tool_error(tool_name, error)` builds the
+   envelope explicitly — so the message survives — prefixes the tool name, and
+   classifies the failure into a `ToolErrorKind` (network, timeout,
+   permission-denied, not-found, other) for rig's retryability hint. All 66
+   `impl Tool` blocks call it; the one tool that already had a hand-written
+   override (`chart_tool`) now routes through the same helper so its card gains
+   the tool name too.
+2. **Classification stays best-effort.** `tool_result_looks_like_error`
+   (`llm_service.rs:53`) is unchanged: real messages now arrive prefixed with
+   the tool name and are matched by the existing `Error:`/`the tool failed`
+   rules or fall through as ordinary results. The `"the tool failed"` literal is
+   kept as the fallback for MCP tools, which do not go through `map_error`.
+3. **Give the card something to show.** `tool_row.rs` renders a failure on its
+   own full-width line — `tool_name: message` — instead of a truncating inline
+   `Tag`, with the full payload behind a copy control when the error has more
+   than one line. Repeated failures of the same tool within a group are numbered
+   ("attempt 2"), so a retry is visibly a retry rather than a second
+   indistinguishable card.
+
+**Note on the trade-off.** rig redacts because an arbitrary error's text may
+carry secrets. These are our own tools' own strings, and a failure the user
+cannot read is a dead end — the helper's doc comment says so and warns against
+routing third-party error text through it unexamined.
 
 ### 3.3 Verification
 
@@ -268,17 +306,32 @@ worse than overlapped text.
 
 ### 4.3 Verification
 
-Extend the existing `attachment_height_tests` (`adapter.rs:347`):
+Shipped, alongside the existing `attachment_height_tests` in `adapter.rs`:
 
-* an expanded 2-row `Block::Activity` estimates taller than a collapsed one, and
-  at least `header + 2 × row` (fails today — both are 40.0);
-* a markdown fixture with headings, a nested list and a fence estimates at least
-  the sum of its parts;
-* `estimate_message_bubble_height` is monotone in content length and never below
-  `Σ ceil(len(line) / chars_per_line) × LINE_HEIGHT`;
-* the estimate grows when `font_size` grows.
+* an expanded 2-row `Block::Activity` estimates taller than a collapsed one and
+  at least `header + 2 x row` (both were 40.0 before);
+* a failed group is estimated expanded, matching how `render_typed_block`
+  actually renders it;
+* an expanded card grows with its row count;
+* the estimate is never below the per-line sum for the mixed-markdown shape that
+  defeated `max()`;
+* the estimate is monotone in content length;
+* markdown structure (heading + list + fence) costs more than the same number of
+  plain lines, and a fence reserves its frame;
+* a mermaid fence reserves its rendered diagram and display math its SVG,
+  mirroring the existing image-attachment test;
+* the estimate grows when `font_size` grows;
+* `#hashtag` is not mistaken for a heading.
 
-Manual: set font size to 18, produce a long plan, send a follow-up — no overlap.
+The markdown walk is structural over the raw source (headings, fences, tables,
+blank lines, `$$` regions) rather than over `CachedParseResult` segments as the
+issue suggested: the cached segments need the parse cache threaded through the
+estimator, which is a larger change for the same result on these shapes. Walking
+the cached segments stays the better long-term answer and belongs with the
+measured-height follow-up.
+
+Manual check still owed: set font size to 18, produce a long plan, send a
+follow-up, confirm no overlap.
 
 ---
 
@@ -306,9 +359,17 @@ Also check `RunPinKind::JumpToLatest` in the artifact viewport
 (`artifact_view.rs:~1563`), which is gated on separate state — not affected, but
 it should not diverge in semantics.
 
-Regression tests: one turn taller than the viewport → pin hidden after a render
-pass; after `activate_sticky_scroll()`, `distance_from_bottom <= threshold`;
-scroll up past the threshold and back → pin appears and disappears.
+The policy is now a pure function in `chat_view/scroll.rs`, so it is tested
+without a window: an unscrollable conversation shows no pin (the reported
+single-turn case); a stale pin does not survive into a list with no scroll
+range; settling of 1-47px neither shows the pin nor stops sticky scroll; a
+screenful away shows the pin and stops following; scrolling back to the bottom
+hides it again and resumes following; the mid-band holds its previous state in
+both directions (no flicker); and the two thresholds are asserted ordered.
+
+`scroll_transcript_to_bottom` -- the `max_offset`-driven replacement for
+`VirtualListScrollHandle::scroll_to_bottom()` -- needs a laid-out window and is
+verified by reading, not by test.
 
 ---
 
@@ -322,13 +383,24 @@ Confirmed. The composer's bottom row (`chat_input/render.rs:472-476`) is a plain
 
 Changes:
 
-1. `w_full()` + `overflow_hidden()` on the row.
-2. `flex_shrink_0()` on the attach button and on Send/Stop so they always reserve
-   their space.
-3. `min_w_0()` + `truncate()` on the model button label, with the full name in a
-   tooltip; workdir chip truncates second.
-4. Check hit-testing, not just pixels, at the narrow end (artifact pane open,
-   small window, long model name).
+1. `w_full()` + `min_w_0()` on the row.
+2. `flex_shrink_0()` on the attach button and on Send/Stop, so they always
+   reserve their space and Send stays fully hit-testable.
+3. The model selector is the flexible element: `min_w_0()`, `flex_shrink()`,
+   `overflow_hidden()`, with the full name in a tooltip. The workdir chip
+   shrinks after it.
+4. The label itself is capped at `MODEL_LABEL_MAX_CHARS` (28) by
+   `truncate_model_label`, which counts chars rather than bytes so a multi-byte
+   model name cannot panic on a slice boundary.
+
+Tested: a short label is untouched; the reported
+"Google: Gemini 3.8 Flash · OpenRouter" elides to exactly the cap with an
+ellipsis and is a prefix of the original; a multi-byte name elides by chars; and
+the cap itself is asserted small enough to leave room for Send.
+
+Manual check still owed: confirm at the narrow end (artifact pane open, small
+window, long model name) that Send is hit-testable across its full width, not
+merely visually intact.
 
 ---
 
@@ -360,10 +432,24 @@ Sequence this **after** the browser screencast work
 [AGE-156](https://linear.app/agents-research/issue/AGE-156)) lands, to avoid
 conflicts in `artifact_view.rs` — the issue flags this and it still holds.
 
-Regression tests at the header-model level, not on pixels: a `.html` path yields
-one primary view with no separate `Source` tab absent a diff; `.md` still yields
-`Rendered | Source`; every offered `copy_kind` variant produces a distinct
-string; the copy control is absent for PDF/image/browser artifacts.
+Implemented as `transcript/artifact_header.rs` -- `ArtifactHeaderKind::resolve`
+plus `artifact_header_tabs` and `artifact_copy_control` -- so the header is
+tested by what it *offers*, not by what it paints, exactly as the issue asks.
+
+Shipped tests: a code file (and an unknown type) with no diff yields no tab bar
+at all; a code file with a diff yields `Source | Diff` with the diff keeping its
+internal view index; `.md` still yields `Rendered | Source` and `.csv` still
+yields `Table | Source`; copy is hidden for artifacts with no text; a code file
+gets a single icon button; only markdown and tabular keep the menu; and, across
+every path x diff combination, no two offered tabs ever select the same view.
+
+`copy_kind` now takes a two-variant `ArtifactCopyKind` instead of a `&str`, so
+"three menu items, one outcome" is not expressible: the type has exactly the two
+payloads that can differ. It also refuses to overwrite the clipboard with an
+empty string.
+
+The remembered tab index is validated against what this artifact offers, since
+selection carries across artifacts and a code file no longer has a tab 1.
 
 ---
 
@@ -381,6 +467,15 @@ string; the copy control is absent for PDF/image/browser artifacts.
 W3 and W5 touch files W1 does not, so they can run concurrently. W4 and W1 both
 edit `chat_view/mod.rs`; keep them sequential.
 
+**As built**, all six landed together on one branch rather than as six PRs. That
+was the wrong shape for review and is worth saying plainly: W1 and W4 both edit
+`chat_view/mod.rs`, and W2 touches 40 files in `chatty-core`, so a reviewer gets
+one large diff instead of six readable ones. If this is split before merge, the
+seams are clean -- W2 (`chatty-core/src/tools/*` plus `tool_row.rs`/`activity.rs`),
+W3 (`transcript/adapter.rs`), W5 (`chat_input/*`) and W6
+(`transcript/artifact_header.rs`, `artifact_view.rs`) touch disjoint files. W1
+and W4 share `chat_view/mod.rs` and would have to go in that order.
+
 ## 9. Ground rules for each PR
 
 Per CLAUDE.md:
@@ -392,9 +487,13 @@ Per CLAUDE.md:
 * `cargo test && cargo clippy --all-features -- -D warnings && cargo fmt --check`
   green before declaring done.
 * Blast radius: all of W3, W4, W5, W6 and most of W1 are `chatty-gpui`-only.
-  W2's wrapper and W1's stall detection touch `chatty-core` and therefore
-  `chatty-tui` — check the TUI's stream loop for the same stall gap and note it
-  in the PR (`ui-sync-check` will flag the crate asymmetry otherwise).
+  W2's `map_error` overrides and W1's stall detection touch `chatty-core` and
+  therefore `chatty-tui`. The TUI's stream loop *did* have the same stall gap --
+  it shares `run_stream_loop` -- so the watchdog went into the shared loop and
+  fixes both UIs. The TUI renders `StreamChunk::Error` already, so it needs no
+  further change; W2's richer tool errors reach it for free, though its own row
+  rendering was not touched and may want the same treatment
+  (`ui-sync-check` will flag the asymmetry).
 
 ## 10. Linear housekeeping
 
@@ -407,4 +506,14 @@ Per CLAUDE.md:
   model receives the same redacted string the UI does.
 * Add to **AGE-151** the deferred-`StreamEnded` race in §2.1(b) as the leading
   candidate for the "no agent turn at all" half the issue lists as unconfirmed.
-* File the measured-height follow-up (§4.2 item 6) as a new issue.
+* File the measured-height follow-up (§4.2 item 6) as a new issue, together
+  with the "walk the cached parse segments instead of the raw source" half of
+  the markdown estimator that this pass deliberately left out.
+
+Still open, and not this branch's to decide: **AGE-181** needed a product call
+and did not get one. The direction implemented is the one the issue itself
+recommends, and the header model is small enough to change if Marcel wants a
+different answer -- but it was built on the issue's suggestion, not on a
+decision. The issue also asks to sequence this after AGE-155/156 land, to avoid
+conflicts in `artifact_view.rs`; that advice was not followed either, so expect
+to resolve conflicts there.

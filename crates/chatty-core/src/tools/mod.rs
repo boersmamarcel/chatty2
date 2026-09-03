@@ -12,6 +12,126 @@ impl From<anyhow::Error> for ToolError {
     }
 }
 
+/// Normalize a tool's typed error into rig's envelope **without redacting the
+/// message**.
+///
+/// rig's default `Tool::map_error` is `ToolExecutionError::from_error`, which
+/// treats an arbitrary source error as operator-only: it keeps the real message
+/// for diagnostics and hands the model the stable kind feedback instead. For
+/// `ToolErrorKind::Other` that feedback is the literal string
+/// `"the tool failed"` (rig-core `src/tool/result.rs`), so a browser navigation
+/// that died on `ERR_NETWORK_CHANGED` reached both the model and the transcript
+/// as four content-free words (AGE-187).
+///
+/// Building the error explicitly keeps the message model-visible, which is what
+/// rig prescribes for deliberately authored failures. The trade-off is
+/// deliberate: our tool errors are strings we write ourselves, and a failure the
+/// user cannot read is a dead end when debugging. Do not route provider or
+/// third-party error text through here without checking it first — that is the
+/// case rig's redaction exists for.
+pub fn map_tool_error<E>(tool_name: &str, error: E) -> rig_agent::tool::ToolExecutionError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let message = error.to_string();
+    let kind = classify_tool_error(&message);
+    rig_agent::tool::ToolExecutionError::new(kind, format!("{tool_name}: {message}"))
+        .with_source(error)
+}
+
+/// Best-effort classification of a tool failure from its message.
+///
+/// Only affects rig's retryability hint and telemetry — the message reaches the
+/// model either way. Kept deliberately small: a wrong guess here is cosmetic,
+/// and an over-fitted matcher would be worse than `Other`.
+fn classify_tool_error(message: &str) -> rig_agent::tool::ToolErrorKind {
+    use rig_agent::tool::ToolErrorKind;
+
+    let m = message.to_ascii_lowercase();
+    if m.contains("timed out") || m.contains("timeout") {
+        ToolErrorKind::Timeout
+    } else if m.contains("permission denied")
+        || m.contains("not allowed")
+        || m.contains("outside the workspace")
+        || m.contains("denied by user")
+    {
+        ToolErrorKind::PermissionDenied
+    } else if m.contains("no such file") || m.contains("not found") {
+        ToolErrorKind::NotFound
+    } else if m.contains("err_")
+        || m.contains("connection")
+        || m.contains("network")
+        || m.contains("dns")
+        || m.contains("unreachable")
+    {
+        ToolErrorKind::Network
+    } else {
+        ToolErrorKind::Other
+    }
+}
+
+#[cfg(test)]
+mod map_tool_error_tests {
+    use super::*;
+
+    /// The regression this exists for: rig redacted every typed tool error to
+    /// "the tool failed" before it reached the model or the transcript.
+    #[test]
+    fn message_survives_into_model_feedback() {
+        let err = ToolError::OperationFailed(
+            "navigation failed: ERR_NETWORK_CHANGED (A network change was detected)".into(),
+        );
+        let mapped = map_tool_error("browser_navigate", err);
+
+        let feedback = mapped.model_feedback().unwrap_or_default();
+        assert!(
+            feedback.contains("ERR_NETWORK_CHANGED"),
+            "the model must see the real error, got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("browser_navigate"),
+            "the model must see which tool failed, got {feedback:?}"
+        );
+        assert_ne!(feedback, "the tool failed");
+    }
+
+    #[test]
+    fn transport_failures_classify_as_network() {
+        let mapped = map_tool_error(
+            "browser_navigate",
+            ToolError::OperationFailed("ERR_NETWORK_CHANGED".into()),
+        );
+        assert_eq!(mapped.kind(), rig_agent::tool::ToolErrorKind::Network);
+    }
+
+    #[test]
+    fn workspace_refusals_classify_as_permission_denied() {
+        let mapped = map_tool_error(
+            "write_file",
+            ToolError::OperationFailed("path is outside the workspace".into()),
+        );
+        assert_eq!(
+            mapped.kind(),
+            rig_agent::tool::ToolErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn unclassifiable_failures_still_carry_their_message() {
+        let mapped = map_tool_error(
+            "some_tool",
+            ToolError::OperationFailed("something specific went wrong".into()),
+        );
+        assert_eq!(mapped.kind(), rig_agent::tool::ToolErrorKind::Other);
+        assert!(
+            mapped
+                .model_feedback()
+                .unwrap_or_default()
+                .contains("something specific went wrong")
+        );
+    }
+}
+
 pub mod add_attachment_tool;
 pub mod agent_todo_tool;
 #[cfg(feature = "browser")]

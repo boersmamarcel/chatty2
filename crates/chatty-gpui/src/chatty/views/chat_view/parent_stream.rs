@@ -36,6 +36,24 @@ pub(super) fn index_of_parent_assistant(
     })
 }
 
+/// Clear `is_streaming` on every message, returning how many were still set.
+///
+/// The teardown paths (`finalize_assistant_message`, `mark_message_cancelled`)
+/// each clear exactly one message — the parent bubble. Any other row left
+/// streaming outlived its stream and kept the running footer alive with no
+/// turn header above it (AGE-189). Nothing is streaming once the stream has
+/// ended, so the sweep is unconditional.
+pub(super) fn clear_streaming_flags(messages: &mut [DisplayMessage]) -> usize {
+    let mut cleared = 0;
+    for msg in messages.iter_mut() {
+        if msg.is_streaming {
+            msg.is_streaming = false;
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +110,42 @@ mod tests {
             Some(0)
         );
         assert_eq!(index_of_parent_assistant(&messages, None), Some(0));
+    }
+
+    // -------------------------------------------------------------------
+    // Streaming-flag sweep (AGE-188 / AGE-189)
+    // -------------------------------------------------------------------
+
+    /// The shape that kept the footer running with no turn header above it: a
+    /// sub-agent progress row whose own finalize never arrived, so the
+    /// parent-only teardown left it streaming forever.
+    #[test]
+    fn sweep_clears_an_orphaned_progress_row() {
+        let mut messages = vec![
+            assistant("answer", false),
+            assistant("", true), // orphaned sub-agent progress row
+            assistant("continuation", true),
+        ];
+
+        let cleared = clear_streaming_flags(&mut messages);
+
+        assert_eq!(cleared, 2, "both streaming rows must be cleared");
+        assert!(
+            messages.iter().all(|m| !m.is_streaming),
+            "nothing may still be streaming after the stream ended"
+        );
+    }
+
+    #[test]
+    fn sweep_is_a_no_op_when_nothing_is_streaming() {
+        let mut messages = vec![assistant("a", false), assistant("b", false)];
+        assert_eq!(clear_streaming_flags(&mut messages), 0);
+    }
+
+    #[test]
+    fn sweep_is_idempotent() {
+        let mut messages = vec![assistant("a", true)];
+        assert_eq!(clear_streaming_flags(&mut messages), 1);
+        assert_eq!(clear_streaming_flags(&mut messages), 0);
     }
 }

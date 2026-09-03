@@ -1,5 +1,5 @@
 use calamine::{Reader, open_workbook_auto};
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -393,6 +393,12 @@ impl Tool for EditExcelTool {
 
     fn parameters(&self) -> serde_json::Value {
         edit_excel_parameters_schema()
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(

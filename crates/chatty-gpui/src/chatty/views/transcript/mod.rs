@@ -50,12 +50,19 @@ mod tool_row;
 mod types;
 mod verb;
 
+mod artifact_header;
+
 pub use action_bar::MessageActionBar;
+pub use artifact_header::{
+    ArtifactCopy, ArtifactCopyKind, ArtifactHeaderKind, ArtifactTabSpec, artifact_copy_control,
+    artifact_header_tabs,
+};
 pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
-    COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
-    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    format_working_for, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    BASE_FONT_SIZE, COLLAPSED_TURN_HEIGHT, TranscriptLayout, adapt_message,
+    adapt_message_with_trace, adapt_messages, adapt_messages_with_traces, attach_plan_block,
+    estimate_turn_height, format_worked_for, format_working_for, plan_block_bottom,
+    plan_is_above_viewport, plan_turn_index,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;

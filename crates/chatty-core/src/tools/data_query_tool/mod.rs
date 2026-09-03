@@ -33,7 +33,7 @@ pub use table_preview::{
 };
 
 use duckdb::Connection;
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -180,6 +180,12 @@ impl Tool for QueryDataTool {
             },
             "required": ["query"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(
@@ -371,6 +377,12 @@ impl Tool for DescribeDataTool {
         })
     }
 
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -519,6 +531,12 @@ impl Tool for ProfileDataTool {
             },
             "required": ["path"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(

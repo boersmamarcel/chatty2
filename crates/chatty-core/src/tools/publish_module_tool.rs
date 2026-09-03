@@ -1,5 +1,5 @@
 use base64::Engine;
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use rmcp::model::CallToolRequestParams;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -115,6 +115,12 @@ impl Tool for PublishModuleTool {
             },
             "required": ["wasm_path", "manifest_toml"]
         })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
     }
 
     async fn call(

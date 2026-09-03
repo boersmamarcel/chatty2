@@ -38,6 +38,24 @@ pub trait StreamChunkHandler {
     fn on_stream_ended(&mut self);
 }
 
+/// How often the stream loop wakes when the provider is yielding nothing.
+///
+/// Only bounds how quickly a cancellation or a stall is noticed. It is not a
+/// poll of anything.
+pub const STALL_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a stream may yield nothing before the turn is ended as stalled.
+///
+/// Generous on purpose: a long tool call (a build, a large fetch) is silence
+/// from the stream's point of view, and cutting a live turn short is worse
+/// than showing "working" for another minute.
+pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Reported as a stream error when the watchdog above fires.
+pub const STALLED_STREAM_MESSAGE: &str =
+    "The model stopped responding (no output for 3 minutes). The turn was ended \
+     — send a message to continue.";
+
 /// Install a fresh progress sender into the shared slot, returning the receiver.
 ///
 /// Both frontends need to install a progress channel before entering the stream
@@ -68,6 +86,8 @@ pub async fn run_stream_loop(
 ) -> Result<()> {
     handler.on_stream_started();
 
+    let mut last_activity = std::time::Instant::now();
+
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
             handler.on_cancelled();
@@ -78,10 +98,35 @@ pub async fn run_stream_loop(
             biased;
 
             Some(progress) = progress_rx.recv() => {
+                last_activity = std::time::Instant::now();
                 handler.on_progress(progress);
             }
 
+            // Wake periodically even when the provider yields nothing.
+            //
+            // `cancel_flag` is only read at the top of the loop and
+            // `stream.next()` has no timeout, so a provider or tool that stops
+            // yielding parked this loop indefinitely while the UI still showed
+            // the turn as running (AGE-188).
+            _ = tokio::time::sleep(STALL_TICK) => {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    handler.on_cancelled();
+                    break;
+                }
+                if last_activity.elapsed() >= STALL_TIMEOUT {
+                    tracing::warn!(
+                        idle_secs = last_activity.elapsed().as_secs(),
+                        "Stream produced nothing for too long; ending the turn as stalled"
+                    );
+                    handler.on_chunk(Ok(StreamChunk::Error(
+                        STALLED_STREAM_MESSAGE.to_string(),
+                    )))?;
+                    break;
+                }
+            }
+
             chunk_result = stream.next() => {
+                last_activity = std::time::Instant::now();
                 match chunk_result {
                     Some(result) => {
                         match handler.on_chunk(result)? {
@@ -104,6 +149,29 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::atomic::AtomicBool;
+
+    // -------------------------------------------------------------------
+    // Stall watchdog (AGE-188)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stall_watchdog_wakes_well_inside_its_timeout() {
+        assert!(
+            STALL_TICK < STALL_TIMEOUT,
+            "the watchdog has to wake before it can fire"
+        );
+        assert!(
+            STALL_TIMEOUT.as_secs() >= 60,
+            "a long tool call is silence from the stream's point of view; \
+             ending a live turn early is worse than showing 'working' longer"
+        );
+    }
+
+    #[test]
+    fn stalled_stream_message_says_what_happened_and_what_to_do() {
+        assert!(STALLED_STREAM_MESSAGE.contains("stopped responding"));
+        assert!(STALLED_STREAM_MESSAGE.contains("send a message"));
+    }
 
     struct TestHandler {
         started: bool,

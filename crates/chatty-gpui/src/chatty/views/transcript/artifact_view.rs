@@ -26,6 +26,9 @@ use gpui_component::{Icon, IconName, Sizable, VirtualListScrollHandle, v_flex};
 use tracing::warn;
 
 use super::artifact_card::reveal_path_in_os;
+use super::artifact_header::{
+    ArtifactCopy, ArtifactCopyKind, ArtifactHeaderKind, artifact_copy_control, artifact_header_tabs,
+};
 use super::artifact_kind::{
     ArtifactHeading, ArtifactVersion, ViewAnchor, artifact_format_token,
     artifact_language_for_path, artifact_panel_title, artifact_version, block_index_from_anchor,
@@ -544,17 +547,28 @@ impl ArtifactView {
         cx.notify();
     }
 
-    fn copy_kind(&self, kind: &str, cx: &mut App) {
+    /// Copy one of the artifact's two possible payloads.
+    ///
+    /// There are exactly two: the file's source text, and its rendered text
+    /// where those differ (markdown, tabular). The old three-item menu had
+    /// "Markdown" and "Rendered" sharing a match arm and "Plain" duplicating
+    /// the button it hung off, so for an HTML file all four controls copied
+    /// the same string (AGE-181). The caller decides which are offered; this
+    /// only has to make the two it can produce actually distinct.
+    fn copy_kind(&self, kind: ArtifactCopyKind, cx: &mut App) {
         let text = match kind {
-            "markdown" | "rendered" => {
-                if self.rendered.is_empty() {
-                    self.source.clone()
-                } else {
-                    self.rendered.clone()
-                }
-            }
-            _ => self.source.clone(),
+            ArtifactCopyKind::Rendered if !self.rendered.is_empty() => self.rendered.clone(),
+            // Nothing rendered to copy — fall back rather than clearing the
+            // user's clipboard.
+            ArtifactCopyKind::Rendered | ArtifactCopyKind::Source => self.source.clone(),
         };
+        if text.is_empty() {
+            tracing::warn!(
+                ?kind,
+                "Artifact copy produced no text; leaving the clipboard alone"
+            );
+            return;
+        }
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -931,28 +945,21 @@ impl Render for ArtifactView {
         let tabular = self.tabular.clone();
         let chart = self.chart.clone();
         let has_diff = !old.is_empty() && old != source;
-        let visible_tab = if !has_diff && tab > 1 {
-            0
-        } else if !has_diff && tab > 0 {
-            tab.min(1)
-        } else {
+        // The header only offers choices that exist for this artifact and that
+        // do different things (AGE-181).
+        let header_kind = ArtifactHeaderKind::resolve(
+            path_ref.as_deref(),
+            is_tabular,
+            is_pdf || is_image || is_chart,
+        );
+        let header_tabs = artifact_header_tabs(header_kind, has_diff);
+        let copy_control = artifact_copy_control(header_kind);
+        // Selection carries across artifacts, so fall back to the primary view
+        // whenever the remembered tab is not one this artifact offers.
+        let visible_tab = if header_tabs.iter().any(|spec| spec.index == tab) {
             tab
-        };
-        let primary_label = if is_tabular {
-            "Table"
         } else {
-            path_ref
-                .as_ref()
-                .map(|path| {
-                    if is_code_artifact_path(path) {
-                        "Code"
-                    } else if is_markdown_artifact_path(path) {
-                        "Rendered"
-                    } else {
-                        "Preview"
-                    }
-                })
-                .unwrap_or("Preview")
+            0
         };
         let show_outline = full && !self.headings.is_empty() && !is_pdf && !is_image && !is_chart;
         let editor = self.editor.clone();
@@ -1015,23 +1022,36 @@ impl Render for ArtifactView {
                 .min_h_0()
                 .h_full()
                 .w_full()
-                .child(
-                    TabBar::new("artifact-modes")
-                        .segmented()
-                        .child(Tab::new().label(primary_label))
-                        .child(Tab::new().label("Source"))
-                        .when(has_diff, |this| this.child(Tab::new().label("Diff")))
-                        .selected_index(visible_tab)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |ix, window, cx| {
-                                entity.update(cx, |this, cx| {
-                                    let next = if has_diff { *ix } else { (*ix).min(1) };
-                                    this.select_tab(next, window, cx);
-                                });
-                            }
-                        }),
-                )
+                .when(!header_tabs.is_empty(), |this| {
+                    let selected = header_tabs
+                        .iter()
+                        .position(|spec| spec.index == visible_tab)
+                        .unwrap_or(0);
+                    let indices: Vec<usize> = header_tabs.iter().map(|spec| spec.index).collect();
+                    this.child(
+                        TabBar::new("artifact-modes")
+                            .segmented()
+                            .children(
+                                header_tabs
+                                    .iter()
+                                    .map(|spec| Tab::new().label(spec.label))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .selected_index(selected)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |ix, window, cx| {
+                                    // Map the visible position back to the
+                                    // viewer's own view index, which does not
+                                    // change with which tabs are shown.
+                                    let next = indices.get(*ix).copied().unwrap_or(0);
+                                    entity.update(cx, |this, cx| {
+                                        this.select_tab(next, window, cx);
+                                    });
+                                }
+                            }),
+                    )
+                })
                 .child(
                     div()
                         .flex()
@@ -1213,58 +1233,89 @@ impl Render for ArtifactView {
                             )
                         },
                     )
-                    .when(!session_review, |this| {
-                        this.child(
-                            DropdownButton::new("artifact-copy")
-                                .small()
-                                .ghost()
-                                .button(
-                                    Button::new("artifact-copy-main")
-                                        .ghost()
-                                        .small()
-                                        .label("Copy")
-                                        .on_click({
-                                            let entity = entity.clone();
-                                            move |_, _, cx| {
-                                                entity.update(cx, |this, cx| {
-                                                    this.copy_kind("plain", cx);
-                                                });
-                                            }
-                                        }),
-                                )
-                                .dropdown_menu({
-                                    let entity = entity.clone();
-                                    move |menu, _, _| {
-                                        menu.item(PopupMenuItem::new("Markdown").on_click({
-                                            let entity = entity.clone();
-                                            move |_, _, cx| {
-                                                entity.update(cx, |this, cx| {
-                                                    this.copy_kind("markdown", cx);
-                                                });
-                                            }
-                                        }))
-                                        .item(PopupMenuItem::new("Rendered").on_click({
-                                            let entity = entity.clone();
-                                            move |_, _, cx| {
-                                                entity.update(cx, |this, cx| {
-                                                    this.copy_kind("rendered", cx);
-                                                });
-                                            }
-                                        }))
-                                        .item(
-                                            PopupMenuItem::new("Plain").on_click({
+                    // One button where there is one payload, a menu only where
+                    // source and rendered genuinely differ, nothing at all for
+                    // an artifact with no text (AGE-181).
+                    .when(
+                        !session_review && matches!(copy_control, ArtifactCopy::Source),
+                        |this| {
+                            this.child(
+                                Button::new("artifact-copy-main")
+                                    .ghost()
+                                    .small()
+                                    .icon(Icon::new(IconName::Copy).size_3())
+                                    .tooltip("Copy file contents")
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, _, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.copy_kind(ArtifactCopyKind::Source, cx);
+                                            });
+                                        }
+                                    }),
+                            )
+                        },
+                    )
+                    .when(
+                        !session_review && matches!(copy_control, ArtifactCopy::Menu),
+                        |this| {
+                            let rendered_label = if is_tabular { "Copy table" } else { "Copy text" };
+                            this.child(
+                                DropdownButton::new("artifact-copy")
+                                    .small()
+                                    .ghost()
+                                    .button(
+                                        Button::new("artifact-copy-main")
+                                            .ghost()
+                                            .small()
+                                            .label("Copy")
+                                            .tooltip("Copy the file's source")
+                                            .on_click({
                                                 let entity = entity.clone();
                                                 move |_, _, cx| {
                                                     entity.update(cx, |this, cx| {
-                                                        this.copy_kind("plain", cx);
+                                                        this.copy_kind(
+                                                            ArtifactCopyKind::Source,
+                                                            cx,
+                                                        );
                                                     });
                                                 }
                                             }),
-                                        )
-                                    }
-                                }),
-                        )
-                    })
+                                    )
+                                    .dropdown_menu({
+                                        let entity = entity.clone();
+                                        move |menu, _, _| {
+                                            menu.item(
+                                                PopupMenuItem::new("Copy source").on_click({
+                                                    let entity = entity.clone();
+                                                    move |_, _, cx| {
+                                                        entity.update(cx, |this, cx| {
+                                                            this.copy_kind(
+                                                                ArtifactCopyKind::Source,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new(rendered_label).on_click({
+                                                    let entity = entity.clone();
+                                                    move |_, _, cx| {
+                                                        entity.update(cx, |this, cx| {
+                                                            this.copy_kind(
+                                                                ArtifactCopyKind::Rendered,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                }),
+                                            )
+                                        }
+                                    }),
+                            )
+                        },
+                    )
                     .when(!session_review, |this| {
                         this.when_some(self.path.clone(), |this, path| {
                             this.child(

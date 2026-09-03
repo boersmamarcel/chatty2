@@ -43,6 +43,7 @@
 mod handlers;
 mod history;
 mod parent_stream;
+mod scroll;
 mod start_screen;
 mod sub_agent;
 
@@ -70,14 +71,16 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, FileChange,
     OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind,
     SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
-    attach_plan_block, attachment_image_path, estimate_turn_height, extract_table_preview,
+    BASE_FONT_SIZE, TranscriptLayout, attach_plan_block, attachment_image_path,
+    estimate_turn_height, extract_table_preview,
     file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
     is_pdf_artifact_tool, is_pdf_path, merge_file_changes, new_artifact_view, plan_block_bottom,
     plan_is_above_viewport, plan_turn_index, read_artifact_source, render_typed_block,
     resolve_artifact_path, tool_file_path,
 };
-use crate::chatty::models::MessageFeedback;
+use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
+use crate::settings::models::general_model::GeneralSettingsModel;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelsModel;
 
@@ -525,7 +528,16 @@ impl ChatView {
 
     /// Finalize the current streaming assistant message
     pub fn finalize_assistant_message(&mut self, cx: &mut Context<Self>) {
-        let Some(idx) = self.parent_streaming_assistant_index() else {
+        // Resolve the parent bubble *before* the sweep — the lookup keys off
+        // `is_streaming`, which the sweep clears.
+        let parent = self.parent_streaming_assistant_index();
+
+        let Some(idx) = parent else {
+            // No parent bubble, but rows may still be marked streaming. The
+            // stream has ended either way, so clear them rather than leaving
+            // the footer running (AGE-189).
+            self.clear_all_streaming_flags();
+            cx.notify();
             return;
         };
 
@@ -537,12 +549,14 @@ impl ChatView {
             && self.messages[idx].system_trace_view.is_none();
         if empty {
             self.messages.remove(idx);
+            self.clear_all_streaming_flags();
             self.streaming_parse_cache = None;
             cx.notify();
             return;
         }
 
         self.stamp_trace_duration();
+        self.clear_all_streaming_flags();
         let last = &mut self.messages[idx];
         let had_live_trace = last.live_trace.is_some();
         let had_streaming_cache = self.streaming_parse_cache.is_some();
@@ -640,10 +654,15 @@ impl ChatView {
 
     /// Mark the current streaming message as cancelled by the user
     pub fn mark_message_cancelled(&mut self, cx: &mut Context<Self>) {
+        // As in `finalize_assistant_message`: resolve the parent first, then
+        // sweep, and sweep even when there is no parent to finalize.
         let Some(idx) = self.parent_streaming_assistant_index() else {
+            self.clear_all_streaming_flags();
+            cx.notify();
             return;
         };
         self.stamp_trace_duration();
+        self.clear_all_streaming_flags();
         let last = &mut self.messages[idx];
         // Append cancellation notice to the message
         if !last.content.is_empty() {
@@ -753,17 +772,31 @@ impl ChatView {
     fn activate_sticky_scroll(&mut self) {
         self.stick_to_bottom = true;
         self.user_scrolled_away = false;
-        self.list_scroll.scroll_to_bottom();
+        self.scroll_transcript_to_bottom();
+    }
+
+    /// Scroll the transcript to the true bottom of its content.
+    ///
+    /// `VirtualListScrollHandle::scroll_to_bottom()` aligns the *top* of the
+    /// last item with the viewport top (gpui-component 0.5.1,
+    /// `virtual_list.rs`), so a last turn taller than the viewport can never
+    /// reach the bottom — and the pin's own click handler scrolled backwards
+    /// into the middle of that turn (AGE-180). Driving the offset from
+    /// `max_offset` lands on the content bottom whatever the last item's
+    /// height.
+    fn scroll_transcript_to_bottom(&mut self) {
+        let max_offset = self.list_scroll.max_offset();
+        let x = self.list_scroll.offset().x;
+        self.list_scroll.set_offset(point(x, -max_offset.height));
         self.scroll_handle.scroll_to_bottom();
     }
 
-    /// If sticky-scroll is active, re-assert scroll_to_bottom for this frame.
+    /// If sticky-scroll is active, re-assert the bottom for this frame.
     /// Used for incremental streaming updates — respects the user's decision
     /// to scroll up by not re-enabling sticky mode.
     fn scroll_if_sticky(&mut self) {
-        if self.stick_to_bottom && !self.user_scrolled_away {
-            self.list_scroll.scroll_to_bottom();
-            self.scroll_handle.scroll_to_bottom();
+        if self.stick_to_bottom {
+            self.scroll_transcript_to_bottom();
         }
     }
 
@@ -803,15 +836,49 @@ impl ChatView {
             })
     }
 
-    /// Whether to show the animated "thinking" indicator at the bottom
-    /// of the message list. We show it whenever any assistant message is
-    /// still streaming (parent bubble or in-flight progress card). This
-    /// matches Claude Code / Cursor behaviour: a continuous "agent is
-    /// working" signal until the stream actually ends.
-    fn is_thinking_indicator_visible(&self) -> bool {
+    /// Whether to show the animated "thinking" indicator at the bottom of the
+    /// message list.
+    ///
+    /// The authority is `StreamManager`, not the per-message `is_streaming`
+    /// flags: those are cleared one message at a time, so a row the teardown
+    /// path missed (a sub-agent progress row whose finalize never arrived) kept
+    /// the footer counting up forever with no turn header above it — AGE-188
+    /// and AGE-189. Message flags still drive per-bubble rendering; they just
+    /// no longer decide whether the agent is working.
+    ///
+    /// Falls back to the message scan when there is no StreamManager (tests,
+    /// early startup).
+    fn is_thinking_indicator_visible(&self, cx: &App) -> bool {
+        let manager = cx
+            .try_global::<GlobalStreamManager>()
+            .and_then(|global| global.get());
+        match (manager, self.conversation_id.as_ref()) {
+            (Some(manager), Some(conv_id)) => manager.read(cx).is_streaming(conv_id),
+            _ => self.any_assistant_message_streaming(),
+        }
+    }
+
+    fn any_assistant_message_streaming(&self) -> bool {
         self.messages
             .iter()
             .any(|msg| matches!(msg.role, MessageRole::Assistant) && msg.is_streaming)
+    }
+
+    /// Clear `is_streaming` on every assistant message.
+    ///
+    /// `finalize_assistant_message` and `mark_message_cancelled` each clear a
+    /// single message — the parent bubble — so any other row left streaming
+    /// outlived its stream. Nothing is streaming once the stream has ended, so
+    /// the sweep is unconditional (AGE-189).
+    fn clear_all_streaming_flags(&mut self) {
+        let cleared = parent_stream::clear_streaming_flags(&mut self.messages);
+        if cleared > 1 {
+            trace!(
+                target: "chatty_gpui::render::stream",
+                cleared,
+                "Cleared streaming flags left behind by an earlier row"
+            );
+        }
     }
 
     fn running_step_progress(&self) -> (usize, usize) {
@@ -1183,7 +1250,7 @@ impl ChatView {
     }
 
     fn ensure_elapsed_tick(&mut self, cx: &mut Context<Self>) {
-        if self.elapsed_tick_started || !self.is_thinking_indicator_visible() {
+        if self.elapsed_tick_started || !self.is_thinking_indicator_visible(cx) {
             return;
         }
         self.elapsed_tick_started = true;
@@ -1192,7 +1259,7 @@ impl ChatView {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let keep = entity
                     .update(cx, |this, cx| {
-                        if this.is_thinking_indicator_visible() {
+                        if this.is_thinking_indicator_visible(cx) {
                             cx.notify();
                             true
                         } else {
@@ -1215,31 +1282,38 @@ impl ChatView {
         self.transcript_content_width =
             Self::compute_transcript_content_width(window, artifact_docked);
 
-        let running = self.is_thinking_indicator_visible();
+        let running = self.is_thinking_indicator_visible(cx);
         let pending_approval = self.pending_approval.is_some();
         self.artifact_view.update(cx, |view, cx| {
             view.set_chrome(running, pending_approval, cx);
         });
 
-        // Sticky-scroll: re-assert scroll_to_bottom on every render so that
-        // async layout changes (image loading, SVG math, code blocks) always
-        // converge to the true bottom. Detect user scroll-away to disable.
-        if self.stick_to_bottom && !self.user_scrolled_away {
-            let offset = self.list_scroll.offset();
-            let max_offset = self.list_scroll.max_offset();
-            let distance_from_bottom = max_offset.height + offset.y;
+        // Sticky-scroll and pin visibility are both derived from how far the
+        // transcript currently is from its bottom, rather than latched on the
+        // first frame that drifts (AGE-180).
+        let offset = self.list_scroll.offset();
+        let max_offset = self.list_scroll.max_offset();
+        let distance_from_bottom = max_offset.height + offset.y;
+        let measured = max_offset.height > px(0.0);
 
-            if distance_from_bottom > px(10.0) && max_offset.height > px(0.0) {
-                self.stick_to_bottom = false;
-                self.user_scrolled_away = true;
-                trace!(
-                    distance = %distance_from_bottom,
-                    "Sticky scroll disabled: user scrolled up"
-                );
-            } else {
-                self.list_scroll.scroll_to_bottom();
-                self.scroll_handle.scroll_to_bottom();
-            }
+        let decision = scroll::resolve_scroll_state(
+            distance_from_bottom,
+            measured,
+            self.stick_to_bottom,
+            self.user_scrolled_away,
+        );
+        if decision.stick != self.stick_to_bottom || decision.show_pin != self.user_scrolled_away {
+            trace!(
+                distance = %distance_from_bottom,
+                stick = decision.stick,
+                show_pin = decision.show_pin,
+                "Transcript scroll state changed"
+            );
+        }
+        self.stick_to_bottom = decision.stick;
+        self.user_scrolled_away = decision.show_pin;
+        if decision.stick {
+            self.scroll_transcript_to_bottom();
         }
 
         // Clear the input if a message was sent
@@ -1301,13 +1375,22 @@ impl ChatView {
         let is_awaiting = self.is_awaiting_response();
         let turns = self.typed_turns(cx);
         let show_start_screen = turns.is_empty() && !is_awaiting;
-        let thinking_visible = self.is_thinking_indicator_visible();
+        let thinking_visible = self.is_thinking_indicator_visible(cx);
         if thinking_visible {
             self.ensure_elapsed_tick(cx);
+            // Only name a tool that is still running. Taking the last tool
+            // call regardless of state left the footer reading "Conjuring
+            // browser_navigate" long after that call had finished or errored
+            // out (AGE-188).
             let attention = self.messages.iter().rev().find_map(|msg| {
                 msg.live_trace.as_ref().and_then(|trace| {
                     trace.items.iter().rev().find_map(|item| match item {
-                        crate::chatty::views::message_types::TraceItem::ToolCall(tool) => {
+                        crate::chatty::views::message_types::TraceItem::ToolCall(tool)
+                            if matches!(
+                                tool.state,
+                                chatty_core::models::message_types::ToolCallState::Running
+                            ) =>
+                        {
                             Some(if tool.display_name.is_empty() {
                                 tool.tool_name.clone()
                             } else {
@@ -1320,9 +1403,9 @@ impl ChatView {
             });
             let (steps_done, steps_total) = self.running_step_progress();
             self.thinking_indicator.update(cx, |indicator, cx| {
-                if let Some(attention) = attention {
-                    indicator.set_attention(attention, cx);
-                }
+                // Clear the name when no tool is running, rather than leaving
+                // the last one in place (AGE-188).
+                indicator.set_attention(attention.unwrap_or_default(), cx);
                 indicator.set_progress(steps_done, steps_total, cx);
             });
         }
@@ -1333,10 +1416,26 @@ impl ChatView {
             .map(|snapshot| snapshot.todos.len())
             .unwrap_or(0);
         let content_width = self.transcript_content_width;
+        // Font size is user-configurable; the estimator's pixel constants were
+        // measured at the 14px default, so it has to be told (AGE-179).
+        let font_size = cx
+            .try_global::<GeneralSettingsModel>()
+            .map(|s| s.font_size)
+            .unwrap_or(BASE_FONT_SIZE);
+        let has_plan = self.plan_snapshot_active();
+        if has_plan {
+            self.ensure_plan_scroll_watch(cx);
+        }
+        let layout = TranscriptLayout {
+            content_width_px: content_width,
+            font_size,
+            plan_steps,
+            activity_expanded: &self.activity_expanded,
+        };
         let sizes = Rc::new(
             turns
                 .iter()
-                .map(|turn| estimate_turn_height(turn, plan_steps, content_width))
+                .map(|turn| estimate_turn_height(turn, &layout))
                 .collect::<Vec<_>>(),
         );
         let entity = cx.entity();
@@ -1349,12 +1448,8 @@ impl ChatView {
         };
         let user_away = self.user_scrolled_away;
         let has_approval = self.active_approval_for_display().is_some();
-        let has_plan = self.plan_snapshot_active();
-        if has_plan {
-            self.ensure_plan_scroll_watch(cx);
-        }
         let show_strip = has_plan
-            && plan_block_bottom(&turns, plan_steps, px(16.0), content_width)
+            && plan_block_bottom(&turns, px(16.0), &layout)
                 .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
         if !show_strip {
             self.plan_overlay_open = false;
@@ -1562,7 +1657,7 @@ impl ChatView {
         let plan = self.agent_task_snapshot.clone();
         let open_artifact = self.artifact_view.read(cx).path().cloned();
         let live_elapsed = self.stream_started_at.map(|t| t.elapsed()).or_else(|| {
-            self.is_thinking_indicator_visible()
+            self.is_thinking_indicator_visible(cx)
                 .then(|| self.thinking_indicator.read(cx).elapsed())
         });
         range

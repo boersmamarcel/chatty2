@@ -6,6 +6,10 @@
 //! orchestrate these helpers.
 
 use super::*;
+// The desktop keeps its own copy of the stream loop (it interleaves GPUI entity
+// updates that the shared `run_stream_loop` cannot), so it imports the stall
+// watchdog's constants rather than redefining them: one timeout for both UIs.
+use chatty_core::services::{STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE};
 
 /// Parameters for the shared LLM stream processing.
 pub(super) struct LlmStreamParams {
@@ -230,6 +234,8 @@ pub(super) async fn run_llm_stream(
     // Set when the stream terminated via StreamChunk::Error, which already
     // emitted StreamEnded and removed the stream from the manager.
     let mut stream_errored = false;
+    // Last time the provider yielded anything, for the stall watchdog below.
+    let mut last_activity = std::time::Instant::now();
 
     // 6. Stream processing loop
     debug!(conv_id = %conv_id, "Entering stream processing loop");
@@ -307,8 +313,46 @@ pub(super) async fn run_llm_stream(
                 }
                 continue;
             }
+            // Wake periodically even when the provider yields nothing, so a
+            // stalled stream is noticed instead of counting up forever.
+            //
+            // `cancel_flag` is only read at the top of the loop, and the
+            // `stream.next()` branch below has no timeout: a provider or tool
+            // that stops yielding — the `ERR_NETWORK_CHANGED` case — parked
+            // this loop indefinitely with the UI still showing "working"
+            // (AGE-188). This tick gives both a chance to run.
+            _ = tokio::time::sleep(STALL_TICK) => {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    debug!(conv_id = %conv_id, "Stream cancelled while idle");
+                    break;
+                }
+                if last_activity.elapsed() >= STALL_TIMEOUT {
+                    warn!(
+                        conv_id = %conv_id,
+                        idle_secs = last_activity.elapsed().as_secs(),
+                        "Stream produced nothing for too long; ending the turn as stalled"
+                    );
+                    let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
+                    stream_errored = true;
+                    if let Some(ref sm) = stream_manager {
+                        sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
+                            sm.set_trace(&conv_id, trace_json);
+                            sm.handle_chunk(
+                                &conv_id,
+                                StreamChunk::Error(STALLED_STREAM_MESSAGE.to_string()),
+                                cx,
+                            );
+                        })
+                        .map_err(|e| warn!(error = ?e, "Failed to report a stalled stream"))
+                        .ok();
+                    }
+                    break;
+                }
+                continue;
+            }
             // Process LLM stream chunks
             chunk_result = stream.next() => {
+                last_activity = std::time::Instant::now();
                 let chunk_result = match chunk_result {
                     Some(r) => r,
                     None => break,
@@ -449,13 +493,17 @@ pub(super) async fn run_llm_stream(
                                 conv_id = %conv_id,
                                 "Agent todo protocol: multiple tool results observed before write_todos"
                             );
-                            cancel_flag.store(true, Ordering::Relaxed);
+                            if follow_up_requires_cancel(FollowUpReason::TodoProtocol) {
+                                cancel_flag.store(true, Ordering::Relaxed);
+                            }
                             pending_follow_up = Some(prompt);
                         }
                         if let Some(pivot) = loop_guard.on_tool_completed(&tool_name, &tool_args) {
                             debug!(conv_id = %conv_id, pivot = %pivot,
                                 "AgentLoopGuard loop detected; cancelling stream");
-                            cancel_flag.store(true, Ordering::Relaxed);
+                            if follow_up_requires_cancel(FollowUpReason::LoopGuard) {
+                                cancel_flag.store(true, Ordering::Relaxed);
+                            }
                             pending_follow_up = Some(pivot);
                         }
                     }
@@ -637,11 +685,20 @@ pub(super) async fn run_llm_stream(
     // shows the previous response first. Hidden from the transcript bubble list.
     if let Some(follow_up) = pending_follow_up {
         debug!(conv_id = %conv_id, "Injecting protocol follow-up after stream");
+        // A follow-up that never reaches the model looks exactly like a hung
+        // model from the user's seat, so a failure here names the conversation
+        // (AGE-151).
         weak_ctrl
             .update(&mut *cx, |app, cx| {
                 app.send_protocol_follow_up(follow_up, cx);
             })
-            .map_err(|e| warn!(error = ?e, "Failed to inject protocol follow-up"))
+            .map_err(|e| {
+                warn!(
+                    error = ?e,
+                    conv_id = %conv_id,
+                    "Protocol follow-up dropped: the conversation will look stalled"
+                )
+            })
             .ok();
     }
 
@@ -964,6 +1021,32 @@ fn extract_trace_json(
     })
 }
 
+/// Why a follow-up prompt is being queued for after the current turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FollowUpReason {
+    /// The todo protocol wants a plan (or a verification) before more work.
+    TodoProtocol,
+    /// `AgentLoopGuard` saw the agent repeating itself.
+    LoopGuard,
+}
+
+/// Whether queuing this follow-up should also cancel the in-flight stream.
+///
+/// Only the loop guard's pivot should: it fires precisely because the agent is
+/// going in circles, so letting the turn run on is the thing being prevented.
+///
+/// The todo-protocol nudge must not. Cancelling for it broke the stream loop
+/// before `StreamChunk::Done`, so the turn's streamed text was discarded — the
+/// billed-but-empty assistant message in AGE-151 — and the nudge was delivered
+/// into a turn that had just been torn down. The nudge asks the agent to plan
+/// before doing *more* work; it never needed the work already done thrown away.
+pub(super) fn follow_up_requires_cancel(reason: FollowUpReason) -> bool {
+    match reason {
+        FollowUpReason::TodoProtocol => false,
+        FollowUpReason::LoopGuard => true,
+    }
+}
+
 /// Injected once when a provider rejects a tool call for malformed JSON.
 ///
 /// The `Agent protocol follow-up:` prefix is what
@@ -1056,5 +1139,22 @@ mod stream_error_tests {
                 "{other} should not be treated as a malformed tool call"
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Follow-up cancellation policy (AGE-151)
+    // -------------------------------------------------------------------
+
+    /// The regression: the todo-protocol nudge cancelled the stream, which
+    /// broke the loop before `Done` and discarded the turn's streamed text.
+    #[test]
+    fn todo_protocol_nudge_does_not_cancel_the_turn() {
+        assert!(!follow_up_requires_cancel(FollowUpReason::TodoProtocol));
+    }
+
+    /// The loop guard still cancels: stopping the runaway turn is the point.
+    #[test]
+    fn loop_guard_pivot_still_cancels_the_turn() {
+        assert!(follow_up_requires_cancel(FollowUpReason::LoopGuard));
     }
 }
