@@ -19,8 +19,6 @@
 //! See `docs/rendering-system.md` for how these components fit into the
 //! overall message rendering pipeline.
 
-#![allow(clippy::collapsible_if)]
-
 mod badges;
 mod blocks;
 mod inline;

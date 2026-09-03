@@ -853,7 +853,6 @@ async fn discover_openai_compat(
 
 /// Inject discovered models and a synthetic provider config into the existing
 /// provider/model lists. This is ephemeral — nothing is persisted to disk.
-#[allow(clippy::too_many_arguments)]
 fn inject_discovered(
     providers: &mut Vec<ProviderConfig>,
     models_list: &mut Vec<ModelConfig>,
