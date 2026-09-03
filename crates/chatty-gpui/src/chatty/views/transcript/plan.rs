@@ -35,6 +35,7 @@ impl PlanBlock {
 impl RenderOnce for PlanBlock {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (done, total, _, _) = plan_counts(&self.snapshot);
+        let skipped = self.snapshot.verification_skipped;
         let last = self.snapshot.todos.len().saturating_sub(1);
 
         div()
@@ -64,7 +65,11 @@ impl RenderOnce for PlanBlock {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{done}/{total}")),
+                            .child(if skipped {
+                                format!("{done}/{total} · verification skipped")
+                            } else {
+                                format!("{done}/{total}")
+                            }),
                     ),
             )
             .children(
@@ -130,6 +135,8 @@ impl RenderOnce for PlanStrip {
         let (done, total, failed, current) = plan_counts(&self.snapshot);
         let count_label = if failed > 0 {
             format!("Plan {done} of {total} · {failed} failed")
+        } else if self.snapshot.verification_skipped {
+            format!("Plan {done} of {total} · verification skipped")
         } else {
             format!("Plan {done} of {total}")
         };
@@ -247,7 +254,11 @@ impl PlanOverlay {
 impl RenderOnce for PlanOverlay {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (done, total, _, _) = plan_counts(&self.snapshot);
-        let meta = format!("{done} of {total} done");
+        let meta = if self.snapshot.verification_skipped {
+            format!("{done} of {total} done · verification skipped")
+        } else {
+            format!("{done} of {total} done")
+        };
         let on_jump = self.on_jump.clone();
         let on_close = self.on_close.clone();
         let on_decide = self.on_decide.clone();

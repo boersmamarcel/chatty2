@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 
 const MAX_TODOS: usize = 12;
 
+/// Maximum number of protocol follow-ups the harness injects for a single user
+/// turn. Mirrors `AgentLoopGuard::MAX_LOOP_PIVOTS`: without a cap, a model that
+/// answers every nudge with prose keeps the harness re-injecting forever
+/// (AGE-150). `reset()` restores the budget when a new user turn starts.
+const MAX_PROTOCOL_FOLLOW_UPS: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTodoStatus {
@@ -36,6 +42,11 @@ pub struct AgentTaskSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_reason: Option<String>,
     pub evidence: Vec<String>,
+    /// True once the follow-up budget ran out with verification still pending,
+    /// so the UI can show that verification was skipped rather than silently
+    /// leaving the plan unfinished.
+    #[serde(default)]
+    pub verification_skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +94,8 @@ struct AgentTaskState {
     evidence: Vec<String>,
     blocked_counts: HashMap<String, usize>,
     non_todo_tool_results_without_plan: usize,
+    follow_up_count: usize,
+    verification_skipped: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -93,6 +106,16 @@ pub struct AgentTaskController {
 impl AgentTaskController {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Clear all task state so a new user turn starts from scratch.
+    ///
+    /// The controller lives inside the conversation's `AgentClient` and
+    /// therefore outlives a single send. Without this, an unverified plan makes
+    /// every later message in the conversation end with the same nudge and
+    /// blocks `write_todos` for good (AGE-150).
+    pub fn reset(&self) {
+        *self.state.lock() = AgentTaskState::default();
     }
 
     pub fn write_todos(
@@ -143,6 +166,7 @@ impl AgentTaskController {
         state.evidence.clear();
         state.blocked_counts.clear();
         state.non_todo_tool_results_without_plan = 0;
+        state.verification_skipped = false;
 
         Ok(response(
             "Todo plan recorded. Start the first pending todo with update_todo(status=\"in_progress\").",
@@ -193,6 +217,7 @@ impl AgentTaskController {
         todo.blocked_reason = blocked_reason.filter(|value| !value.trim().is_empty());
         todo.reflection = reflection.filter(|value| !value.trim().is_empty());
         state.verified = false;
+        state.verification_skipped = false;
         state.verification_reason = None;
         state.evidence.clear();
 
@@ -251,6 +276,7 @@ impl AgentTaskController {
         }
 
         state.verified = goal_achieved;
+        state.verification_skipped = false;
         state.verification_reason = Some(reason.trim().to_string());
         state.evidence = evidence;
 
@@ -292,7 +318,10 @@ impl AgentTaskController {
         }
 
         state.non_todo_tool_results_without_plan += 1;
-        if state.non_todo_tool_results_without_plan >= 2 {
+        if state.non_todo_tool_results_without_plan >= 2
+            && state.follow_up_count < MAX_PROTOCOL_FOLLOW_UPS
+        {
+            state.follow_up_count += 1;
             tracing::warn!(
                 tool_name = %tool_name,
                 tool_results = state.non_todo_tool_results_without_plan,
@@ -307,15 +336,29 @@ impl AgentTaskController {
         }
     }
 
+    /// The nudge to inject after a stream ends, or `None` when the agent is
+    /// done or the follow-up budget is spent.
+    ///
+    /// The in-progress check comes first on purpose: an in-progress todo makes
+    /// `verify_completion` fail with `TodosNotDone`, so asking for verification
+    /// there is an instruction the state machine forbids (AGE-150).
     pub fn stream_end_follow_up(&self) -> Option<String> {
-        let state = self.state.lock();
-        if state.write_todos_called && !state.verified {
-            tracing::warn!("Agent todo protocol violation: stream ended before verify_completion");
-            Some(
-                "Before writing the final reply, call verify_completion with concrete evidence for each todo. If verification fails, continue from the reopened todo instead of responding to the user."
-                    .to_string(),
-            )
-        } else if state
+        let mut state = self.state.lock();
+        if !state.write_todos_called || state.verified {
+            return None;
+        }
+
+        if state.follow_up_count >= MAX_PROTOCOL_FOLLOW_UPS {
+            tracing::warn!(
+                follow_ups = state.follow_up_count,
+                "Agent todo protocol: follow-up budget exhausted; leaving the reply unverified"
+            );
+            state.verification_skipped = true;
+            return None;
+        }
+        state.follow_up_count += 1;
+
+        if state
             .todos
             .iter()
             .any(|todo| todo.status == AgentTodoStatus::InProgress)
@@ -326,7 +369,11 @@ impl AgentTaskController {
                     .to_string(),
             )
         } else {
-            None
+            tracing::warn!("Agent todo protocol violation: stream ended before verify_completion");
+            Some(
+                "Before writing the final reply, call verify_completion with concrete evidence for each todo. If verification fails, continue from the reopened todo instead of responding to the user."
+                    .to_string(),
+            )
         }
     }
 }
@@ -359,6 +406,7 @@ fn snapshot(state: &AgentTaskState) -> AgentTaskSnapshot {
         verified: state.verified,
         verification_reason: state.verification_reason.clone(),
         evidence: state.evidence.clone(),
+        verification_skipped: state.verification_skipped,
     }
 }
 
@@ -514,6 +562,65 @@ mod tests {
 
         assert!(prompt.is_some());
         assert!(prompt.unwrap().contains("verify_completion"));
+    }
+
+    #[test]
+    fn in_progress_todo_asks_for_update_todo_not_verification() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        controller
+            .update_todo("t1".into(), AgentTodoStatus::InProgress, None, None)
+            .unwrap();
+
+        let prompt = controller.stream_end_follow_up().unwrap();
+
+        assert!(prompt.contains("update_todo"));
+        assert!(!prompt.contains("verify_completion"));
+    }
+
+    #[test]
+    fn stream_end_follow_up_stops_after_the_cap() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+
+        for _ in 0..MAX_PROTOCOL_FOLLOW_UPS {
+            assert!(controller.stream_end_follow_up().is_some());
+        }
+
+        assert!(controller.stream_end_follow_up().is_none());
+        assert!(controller.snapshot().verification_skipped);
+    }
+
+    #[test]
+    fn observe_tool_result_shares_the_follow_up_budget() {
+        let controller = controller();
+
+        // The first tool result only primes the counter; every later one nudges
+        // until the shared follow-up budget runs out.
+        assert!(controller.observe_tool_result("read_file").is_none());
+        for _ in 0..MAX_PROTOCOL_FOLLOW_UPS {
+            assert!(controller.observe_tool_result("read_file").is_some());
+        }
+
+        assert!(controller.observe_tool_result("read_file").is_none());
+    }
+
+    #[test]
+    fn reset_clears_state_and_allows_a_new_plan() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        for _ in 0..MAX_PROTOCOL_FOLLOW_UPS {
+            controller.stream_end_follow_up();
+        }
+        assert!(controller.stream_end_follow_up().is_none());
+
+        controller.reset();
+
+        let snapshot = controller.snapshot();
+        assert!(!snapshot.write_todos_called);
+        assert!(!snapshot.verification_skipped);
+        assert!(controller.write_todos("Ship again".into(), todos()).is_ok());
+        assert!(controller.stream_end_follow_up().is_some());
     }
 
     #[test]
