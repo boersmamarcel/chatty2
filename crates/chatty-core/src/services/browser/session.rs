@@ -69,6 +69,10 @@ pub struct BrowserSession {
     /// Who is driving (AGE-156). Agent by default; every fresh session
     /// starts here regardless of what a previous, now-dead session had.
     control: ControlLock,
+    /// Current page URL, broadcast so the artifact viewport's address bar
+    /// (AGE-156) can mirror navigation from either side — the agent's
+    /// `browser_navigate` tool or the user typing a new URL.
+    current_url: watch::Sender<String>,
     /// Temp user-data dir for an ephemeral profile; removed on drop.
     _user_data: Option<tempfile::TempDir>,
 }
@@ -158,6 +162,7 @@ impl BrowserSession {
             listeners: Mutex::new(listeners),
             screencast: tokio::sync::Mutex::new(None),
             control: ControlLock::new(),
+            current_url: watch::channel(String::from("about:blank")).0,
             _user_data: user_data,
         }))
     }
@@ -212,6 +217,23 @@ impl BrowserSession {
     pub async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
         self.ensure_alive()?;
         self.control.ensure_agent()?;
+        self.do_navigate(url).await
+    }
+
+    /// The user navigates directly (AGE-156's address bar) — takes control
+    /// first, exactly like reaching for the mouse does, then navigates the
+    /// same as the agent would. Never refused for being user-held control;
+    /// the whole point is the user driving.
+    pub async fn navigate_as_user(&self, url: &str) -> Result<String, BrowserError> {
+        self.ensure_alive()?;
+        self.control.take();
+        self.do_navigate(url).await
+    }
+
+    /// Shared navigation body once the caller has settled who's allowed to
+    /// drive: policy check, the CDP round trip, the redirect-landing check,
+    /// snapshot invalidation, and broadcasting the new URL to the address bar.
+    async fn do_navigate(&self, url: &str) -> Result<String, BrowserError> {
         self.policy.check(url)?;
 
         // Drop the previous page's entries *before* navigating, not after:
@@ -251,7 +273,15 @@ impl BrowserSession {
         }
 
         self.invalidate_snapshot();
+        let _ = self.current_url.send(final_url.clone());
         Ok(final_url)
+    }
+
+    /// Subscribe to page-URL changes (AGE-156's address bar) — fires once
+    /// per successful navigation, whichever side initiated it. The initial
+    /// value on a fresh receiver is the URL as of subscription time.
+    pub fn watch_url(&self) -> watch::Receiver<String> {
+        self.current_url.subscribe()
     }
 
     /// Start (or resize) the live screencast the artifact viewport watches

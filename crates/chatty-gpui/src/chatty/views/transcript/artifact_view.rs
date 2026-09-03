@@ -24,7 +24,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::Disableable;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants, DropdownButton};
-use gpui_component::input::{Input, InputState, Position};
+use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::list::ListItem;
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::tab::{Tab, TabBar};
@@ -154,6 +154,14 @@ pub struct ArtifactView {
     /// Routes forwarded key events: the frame must hold focus for
     /// `on_key_down` to fire at all.
     browser_focus: FocusHandle,
+    /// Address bar (AGE-156) — lets the user navigate directly instead of
+    /// only forwarding clicks/keys to whatever page is already loaded.
+    browser_address: Entity<InputState>,
+    /// Last URL this view knows about, from either side's navigation.
+    /// Mirrored into `browser_address` during render (needs `Window`),
+    /// not from the background task that learns about it.
+    browser_current_url: String,
+    browser_address_dirty: bool,
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
@@ -193,6 +201,17 @@ impl ArtifactView {
             }
         })
         .detach();
+        let browser_address = cx.new(|cx| InputState::new(window, cx).placeholder("Enter a URL…"));
+        cx.subscribe(
+            &browser_address,
+            |this: &mut Self, input, event: &InputEvent, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let url = input.read(cx).value().to_string();
+                    this.navigate_browser_as_user(url, cx);
+                }
+            },
+        )
+        .detach();
         Self {
             mode: ArtifactMode::Closed,
             path: None,
@@ -212,6 +231,9 @@ impl ArtifactView {
             browser_key_tx: None,
             browser_frame_bounds: Rc::new(RefCell::new(Bounds::default())),
             browser_focus: cx.focus_handle(),
+            browser_address,
+            browser_current_url: String::new(),
+            browser_address_dirty: false,
             workspace_root: None,
             load_gen: 0,
             editor,
@@ -395,6 +417,44 @@ impl ArtifactView {
             })
             .ok();
 
+            // AGE-156: seed the address bar with the current URL, then keep
+            // it live as either side navigates — the agent's browser_navigate
+            // tool or the user typing a new one.
+            {
+                let mut url_rx = session.watch_url();
+                let initial_url = url_rx.borrow_and_update().clone();
+                this.update(cx, |this, cx| {
+                    if this.load_gen == load_id {
+                        this.browser_current_url = initial_url;
+                        this.browser_address_dirty = true;
+                        cx.notify();
+                    }
+                })
+                .ok();
+                let this = this.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        if url_rx.changed().await.is_err() {
+                            return;
+                        }
+                        let url = url_rx.borrow_and_update().clone();
+                        let alive = this
+                            .update(cx, |this, cx| {
+                                if this.load_gen == load_id {
+                                    this.browser_current_url = url;
+                                    this.browser_address_dirty = true;
+                                    cx.notify();
+                                }
+                            })
+                            .is_ok();
+                        if !alive {
+                            return;
+                        }
+                    }
+                })
+                .detach();
+            }
+
             let mut frames = match session
                 .start_screencast(BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT)
                 .await
@@ -467,6 +527,8 @@ impl ArtifactView {
         self.load_gen = self.load_gen.wrapping_add(1);
         self.browser_session = None;
         self.browser_control = ControlHolder::Agent;
+        self.browser_current_url.clear();
+        self.browser_address_dirty = true;
         // Dropping the senders ends the drain loops (AGE-156) — their
         // `.recv()` returns `None` once every sender is gone.
         self.browser_mouse_tx = None;
@@ -498,6 +560,43 @@ impl ArtifactView {
         session.release_control();
         self.browser_control = ControlHolder::Agent;
         cx.notify();
+    }
+
+    /// The user submits a URL from the address bar (AGE-156) — takes
+    /// control first, the same as reaching for the mouse does, then
+    /// navigates. A no-op if the browser artifact isn't open or the field
+    /// is empty; on failure (e.g. a policy-refused host) the address bar
+    /// reverts to the last known-good URL rather than showing an error in
+    /// place of the live view.
+    fn navigate_browser_as_user(&mut self, raw_url: String, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        let url = normalize_address_bar_url(&raw_url);
+        if url.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = session.navigate_as_user(&url).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(final_url) => {
+                        this.browser_control = ControlHolder::User;
+                        this.browser_current_url = final_url;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, url = %url, "browser: user navigation failed");
+                        this.browser_control = ControlHolder::User;
+                        // Fall back to whatever the page actually shows —
+                        // do not leave the bad input sitting in the field.
+                    }
+                }
+                this.browser_address_dirty = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Queue a mouse event for the input-forwarding drain (AGE-156). A
@@ -946,6 +1045,21 @@ impl ArtifactView {
         self.apply_pending_jump(window, cx);
     }
 
+    /// Mirror `browser_current_url` into the address bar's `InputState`
+    /// (AGE-156). Split from wherever the URL is learned because
+    /// `InputState::set_value` needs `&mut Window`, which the background
+    /// task watching `BrowserSession::watch_url` does not have.
+    fn sync_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.browser_address_dirty {
+            return;
+        }
+        let url = self.browser_current_url.clone();
+        self.browser_address.update(cx, |input, cx| {
+            input.set_value(url, window, cx);
+        });
+        self.browser_address_dirty = false;
+    }
+
     fn sync_outline(&mut self, cx: &mut Context<Self>) {
         if self.outline_synced_gen == self.load_gen {
             return;
@@ -1069,14 +1183,32 @@ fn browser_wheel_delta(delta: ScrollDelta) -> (f64, f64) {
     }
 }
 
+/// Best-effort scheme completion for what the user typed into the address
+/// bar (AGE-156) — a bare `example.com` becomes `https://example.com`,
+/// matching ordinary browser omnibox behavior. Already-schemed URLs
+/// (`http://`, `https://`, `file://`, …) pass through unchanged.
+fn normalize_address_bar_url(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    format!("https://{trimmed}")
+}
+
 fn browser_rendered_body(
     browser: &BrowserPreview,
     control: ControlHolder,
     frame_bounds: Rc<RefCell<Bounds<Pixels>>>,
     focus: FocusHandle,
+    address: &Entity<InputState>,
     entity: Entity<ArtifactView>,
     cx: &App,
 ) -> AnyElement {
+    // AGE-156: lets the user navigate directly — press Enter to go, same
+    // as any other browser's omnibox. Submission is wired in `ArtifactView::new`
+    // (a `PressEnter` subscription on this same `InputState`), not here.
+    let address_bar = Input::new(address).small().w_full().into_any_element();
+
     let control_bar = div()
         .flex()
         .flex_row()
@@ -1300,6 +1432,7 @@ fn browser_rendered_body(
         .flex_1()
         .min_h_0()
         .gap_1()
+        .child(address_bar)
         .child(control_bar)
         .child(frame)
         .into_any_element()
@@ -1509,6 +1642,7 @@ impl Render for ArtifactView {
             self.refresh_staleness();
             self.sync_editor(window, cx);
             self.sync_outline(cx);
+            self.sync_browser_address(window, cx);
         }
 
         let tab = self.tab;
@@ -1531,6 +1665,7 @@ impl Render for ArtifactView {
         let browser_control = self.browser_control;
         let browser_frame_bounds = self.browser_frame_bounds.clone();
         let browser_focus = self.browser_focus.clone();
+        let browser_address = self.browser_address.clone();
         let has_diff = !old.is_empty() && old != source;
         let visible_tab = if !has_diff && tab > 1 {
             0
@@ -1589,6 +1724,7 @@ impl Render for ArtifactView {
                     browser_control,
                     browser_frame_bounds,
                     browser_focus,
+                    &browser_address,
                     entity.clone(),
                     cx,
                 ))
@@ -1992,4 +2128,47 @@ impl EventEmitter<ArtifactViewEvent> for ArtifactView {}
 
 pub fn new_artifact_view(window: &mut Window, cx: &mut App) -> Entity<ArtifactView> {
     cx.new(|cx| ArtifactView::new(window, cx))
+}
+
+#[cfg(test)]
+mod address_bar_tests {
+    use super::normalize_address_bar_url;
+
+    #[test]
+    fn adds_https_to_bare_host() {
+        assert_eq!(
+            normalize_address_bar_url("example.com"),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalize_address_bar_url("localhost:3000"),
+            "https://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn leaves_schemed_urls_alone() {
+        assert_eq!(
+            normalize_address_bar_url("http://localhost:3000/"),
+            "http://localhost:3000/"
+        );
+        assert_eq!(
+            normalize_address_bar_url("https://example.com/page"),
+            "https://example.com/page"
+        );
+        assert_eq!(
+            normalize_address_bar_url("file:///tmp/index.html"),
+            "file:///tmp/index.html"
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_and_handles_empty() {
+        assert_eq!(
+            normalize_address_bar_url("  example.com  "),
+            "https://example.com"
+        );
+        assert_eq!(normalize_address_bar_url("   "), "");
+        assert_eq!(normalize_address_bar_url(""), "");
+    }
 }
