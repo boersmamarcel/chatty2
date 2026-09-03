@@ -142,7 +142,10 @@ jobs:
 
       - name: Run clippy
         if: needs.changes.outputs.rust == 'true'
-        run: cargo clippy -- -D warnings
+        # --all-features matches the coverage of the test step above; clippy
+        # was previously default-features-only, leaving feature-gated code
+        # unchecked (AGE-174).
+        run: cargo clippy --all-features -- -D warnings
 
       - name: Check reserved symbols (AGE research)
         if: needs.changes.outputs.rust == 'true'

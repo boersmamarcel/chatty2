@@ -75,7 +75,7 @@ For multi-step tasks, state a brief plan:
 3. [Step] → verify: [check]
 ```
 
-Always run `cargo test && cargo clippy -- -D warnings && cargo fmt --check` after changes to verify nothing is broken before declaring the task done.
+Always run `cargo test && cargo clippy --all-features -- -D warnings && cargo fmt --check` after changes to verify nothing is broken before declaring the task done.
 
 ---
 
@@ -132,7 +132,7 @@ cargo test
 cargo fmt --check
 
 # Run clippy lints
-cargo clippy -- -D warnings
+cargo clippy --all-features -- -D warnings
 ```
 
 ## Packaging

@@ -118,7 +118,7 @@ make test-fast        # cargo test -p chatty-core --lib  (quick inner loop)
 make test-tui         # cargo test -p chatty-tui          (TUI changes only)
 make test-gpui        # cargo test -p chatty-gpui         (GPUI changes only)
 make test-gateway     # cargo test -p chatty-protocol-gateway  (gateway changes only)
-make lint             # cargo clippy -- -D warnings
+make lint             # cargo clippy --all-features -- -D warnings
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
 make wasm-modules     # build the echo-agent WASM module (needed by tests)
@@ -137,7 +137,7 @@ Or use cargo directly:
 cargo build
 cargo test --all-features -- --test-threads=1
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-features -- -D warnings
 ```
 
 ### Test-thread footgun
@@ -301,7 +301,6 @@ into the VM; the startup/update script only re-runs
   `./target/debug/chatty-tui --ollama http://localhost:11434 --model qwen2.5:0.5b --headless -m "..."`.
   The desktop app auto-detects a running local Ollama and lists its models.
 
-- **Clippy has pre-existing findings under current stable.** `cargo clippy -- -D warnings`
-  currently fails on 3 lints that predate this environment work
-  (`models/conversations_store.rs`, `services/skill_service.rs`,
-  `tools/search_memory_tool.rs`) — newer-toolchain lints, not env breakage.
+- **Clippy is clean workspace-wide.** `cargo clippy --workspace --all-features -- -D warnings`
+  passes (AGE-174); CI runs the same `--all-features` invocation, matching the
+  `cargo test --all-features` coverage.

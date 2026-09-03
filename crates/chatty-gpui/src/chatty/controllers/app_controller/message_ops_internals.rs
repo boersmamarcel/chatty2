@@ -5,8 +5,6 @@
 //! See `message_ops.rs` for the high-level `ChattyApp` methods that
 //! orchestrate these helpers.
 
-#![allow(clippy::too_many_arguments)]
-
 use super::*;
 
 /// Parameters for the shared LLM stream processing.

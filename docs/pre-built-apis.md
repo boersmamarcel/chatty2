@@ -67,20 +67,20 @@ Several methods in the token budget subsystem are pre-built for planned features
 
 | Item | File | Purpose |
 |------|------|---------|
-| `GlobalTokenBudget::publish()` | `manager.rs:62` | Publish a new snapshot to subscribers |
-| `GlobalTokenBudget::snapshot()` | `manager.rs:103` | Get current snapshot reference |
-| `TokenBudgetSnapshot.computed_at` | `snapshot.rs:9` | Staleness detection in UI |
-| `TokenBudgetSnapshot::is_empty()` | `snapshot.rs:137` | Check if snapshot has been computed |
-| `ContextStatus::label()` | `snapshot.rs:161` | Human-readable label for popover |
-| `ContextPressureEvent` enum | `snapshot.rs:201` | Event for pressure transitions |
-| `TokenBudgetCache::invalidate()` | `cache.rs:104` | Clear cache on model switch |
-| `TokenBudgetCache::cached_preamble_tokens()` | `cache.rs:124` | Read-through cache accessor |
-| `TokenBudgetCache::cached_tool_tokens()` | `cache.rs:130` | Read-through cache accessor |
-| `TokenCounter::encoding()` | `counter.rs:79` | Get current encoding for diagnostics |
-| `TokenBudgetSummarizer::summarize_with_model()` | `summarizer.rs:142` | Secondary-model summarization (returns error) |
-| `PreComputeInput.exec_settings` | `manager.rs:130` | Stored for future tool estimation |
-| `PreComputeInput.mcp_server_count` | `manager.rs:132` | Stored for future tool estimation |
-| `PreComputeInput.tool_hint` | `manager.rs:141` | Stored for diagnostics |
+| `GlobalTokenBudget::publish()` | `chatty-gpui/.../token_budget/manager.rs:63` | Publish a new snapshot to subscribers |
+| `GlobalTokenBudget::snapshot()` | `chatty-gpui/.../token_budget/manager.rs:104` | Get current snapshot reference |
+| `TokenBudgetSnapshot.computed_at` | `snapshot.rs:10` | Staleness detection in UI |
+| `TokenBudgetSnapshot::is_empty()` | `snapshot.rs:138` | Check if snapshot has been computed |
+| `ContextStatus::label()` | `snapshot.rs:162` | Human-readable label for popover |
+| `ContextPressureEvent` enum | `snapshot.rs:203` | Event for pressure transitions |
+| `TokenBudgetCache::invalidate()` | `cache.rs:105` | Clear cache on model switch |
+| `TokenBudgetCache::cached_preamble_tokens()` | `cache.rs:125` | Read-through cache accessor |
+| `TokenBudgetCache::cached_tool_tokens()` | `cache.rs:131` | Read-through cache accessor |
+| `TokenCounter::encoding()` | `counter.rs:87` | Get current encoding for diagnostics |
+| `TokenBudgetSummarizer::summarize_with_model()` | `summarizer.rs:140` | Secondary-model summarization (returns error) |
+| `PreComputeInput.exec_settings` | `chatty-gpui/.../token_budget/manager.rs:131` | Stored for future tool estimation |
+| `PreComputeInput.mcp_server_count` | `chatty-gpui/.../token_budget/manager.rs:133` | Stored for future tool estimation |
+| `PreComputeInput.tool_hint` | `chatty-gpui/.../token_budget/manager.rs:142` | Stored for diagnostics |
 
 ## Token Tracking Settings
 
@@ -88,21 +88,20 @@ Several methods in the token budget subsystem are pre-built for planned features
 
 | Method | Line | Purpose |
 |--------|------|---------|
-| `validated()` | 113 | Self-repair after deserialization |
-| `should_show_bar()` | 134 | Gate bar rendering on model capability |
-| `is_high()` | 140 | Check if utilization crosses high threshold |
-| `is_critical()` | 146 | Check if utilization crosses critical threshold |
+| `validated()` | 111 | Self-repair after deserialization |
+| `should_show_bar()` | 132 | Gate bar rendering on model capability |
+| `is_high()` | 138 | Check if utilization crosses high threshold |
+| `is_critical()` | 144 | Check if utilization crosses critical threshold |
 
 ## Conversation & Store Helpers
 
 | Item | File | Purpose |
 |------|------|---------|
-| `Conversation::message_timestamps()` | `conversation.rs:405` | Access per-message timestamps |
-| `Conversation::regeneration_records()` | `conversation.rs:446` | Access DPO preference records |
-| `ConversationsStore::set_active()` | `conversations_store.rs:135` | Validated active-conversation setter |
-| `ConversationsStore::clear_active()` | `conversations_store.rs:151` | Clear active conversation |
-| `ConversationsStore::list_recent()` | `conversations_store.rs:164` | Efficient K-recent query |
-| `ConversationRepository::load_all()` | `conversation_repository.rs:86` | Load all conversations |
+| `Conversation::regeneration_records()` | `conversation.rs:468` | Access DPO preference records |
+| `ConversationsStore::set_active()` | `conversations_store.rs:203` | Validated active-conversation setter |
+| `ConversationsStore::clear_active()` | `conversations_store.rs:219` | Clear active conversation |
+| `ConversationsStore::list_recent()` | `conversations_store.rs:232` | Efficient K-recent query |
+| `ConversationRepository::load_all()` | `conversation_repository.rs:101` | Load all conversations (trait method; unused — callers use narrower list/metadata queries) |
 
 ## Token Usage
 
@@ -118,32 +117,31 @@ Several methods in the token budget subsystem are pre-built for planned features
 
 | Item | File | Purpose |
 |------|------|---------|
-| `ShellSession::shutdown()` | `shell_service.rs:674` | Clean shutdown of bash process |
-| `ShellSession::is_running()` | `shell_service.rs:685` | Check process liveness |
-| `MathRenderService::clear_cache()` | `math_renderer_service.rs:373` | Clear SVG cache |
-| `MathRenderService::cache_size()` | `math_renderer_service.rs:483` | Cache diagnostics |
-| `MermaidRenderService::clear_cache()` | `mermaid_renderer_service.rs:252` | Clear rendering cache |
-| `MermaidRenderService::cache_size()` | `mermaid_renderer_service.rs:260` | Cache diagnostics |
-| `PathValidator::validate_parent()` | `path_validator.rs:157` | Validate paths for glob patterns |
-| `is_pdf_extension()` | `attachment_validation.rs:68` | PDF file extension check |
+| `ShellSession::shutdown()` | `shell_service/mod.rs:746` | Clean shutdown of bash process |
+| `ShellSession::is_running()` | `shell_service/mod.rs:757` | Check process liveness |
+| `MathRenderService::clear_cache()` | `math_renderer_service.rs:410` | Clear SVG cache |
+| `MathRenderService::cache_size()` | `math_renderer_service.rs:523` | Cache diagnostics |
+| `MermaidRenderService::clear_cache()` | `mermaid_renderer_service.rs:357` | Clear rendering cache |
+| `MermaidRenderService::cache_size()` | `mermaid_renderer_service.rs:368` | Cache diagnostics |
+| `PathValidator::validate_parent()` | `path_validator.rs:158` | Validate paths for glob patterns |
+| `is_pdf_extension()` | `attachment_validation.rs:72` | PDF file extension check |
 
 ## View Helpers
 
 | Item | File | Purpose |
 |------|------|---------|
-| `SidebarView::set_collapsed()` | `sidebar_view.rs:75` | Programmatic collapse |
-| `CodeBlockComponent::new()` | `code_block_component.rs:20` | Constructor |
-| `DisplayMessage::from_assistant_message()` | `message_component.rs:200` | Build display from model |
-| `ChattyApp::chat_input_state()` | `app_controller.rs:2335` | Access input state entity |
-| `AgentClient::provider_name()` | `agent_factory.rs:1108` | Provider name for logging |
-| `StreamManager::has_active_streams()` | `stream_manager.rs:516` | Check for active streams |
+| `SidebarView::set_collapsed()` | `sidebar_view.rs:79` | Programmatic collapse |
+| `CodeBlockComponent::new()` | `code_block_component.rs:34` | Constructor |
+| `DisplayMessage::from_assistant_message()` | `message_component.rs:55` | Build display from model |
+| `ChattyApp::chat_input_state()` | `app_controller/mod.rs:722` | Access input state entity |
+| `AgentClient::provider_name()` | `agent_factory/mod.rs:1031` | Provider name for logging |
+| `StreamManager::has_active_streams()` | `stream_manager.rs:588` | Check for active streams |
 
 ## Other
 
 | Item | File | Purpose |
 |------|------|---------|
-| `InstallerError::ExtractionFailed` | `auto_updater/installer.rs:39` | Error variant for extraction failures |
-| `ListToolsError` enum | `tools/list_tools_tool.rs:26` | Error type for list tools |
-| `StreamStatus` enum | `stream_manager.rs:19` | Stream lifecycle states |
-| `StreamManagerEvent` enum | `stream_manager.rs:54` | Stream event variants |
-| `ExecutionApprovalRequest` fields (`id`, `command`, `is_sandboxed`, `created_at`) | `execution_approval_store.rs:72-81` | Read by approval UI (fields stored but not all consumed yet) |
+| `InstallerError::ExtractionFailed` | `auto_updater/installer.rs:40` | Error variant for extraction failures |
+| `StreamStatus` enum | `stream_manager.rs:24` | Stream lifecycle states |
+| `StreamManagerEvent` enum | `stream_manager.rs:62` | Stream event variants |
+| `ExecutionApprovalRequest` fields (`id`, `command`, `is_sandboxed`, `created_at`) | `execution_approval_store.rs:73-82` | Read by approval UI (fields stored but not all consumed yet) |
