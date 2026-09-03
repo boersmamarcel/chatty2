@@ -106,10 +106,12 @@ same way a chart or rendered PDF page is. In practice the agent captures the
 screenshot, finishes its turn, and reviews the image on the turn after. Say
 "keep going" if it stops after capturing.
 
-They are deliberately limited to **`localhost` and `file://` URLs inside your
-workspace** — this is for reviewing your own work, not for browsing the web. Use
-`search_web` or `fetch` for anything on the internet. Because no site you are
-signed in to is reachable, none of these tools asks for approval.
+By default they are limited to **`localhost` and `file://` URLs inside your
+workspace** — this is for reviewing your own work, not for browsing the web.
+Turn on **Internet Access** in Settings → Search and the browser can also open
+public websites, using the same address filtering as `fetch` and `search_web`
+to keep private/internal network targets out of reach. The browser profile is
+never signed in to anything, so none of these tools asks for approval either way.
 
 Turn them on with **Enable Browser Tools** in Settings → Code Execution. They
 need a workspace directory, which is where screenshots and console logs are
