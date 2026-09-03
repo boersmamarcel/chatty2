@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::assets::CustomIcon;
 use chatty_core::services::browser::{
     BrowserManager, BrowserSession, ControlHolder, InputModifiers, KeyInput, MouseAction,
     MouseButtonKind, MouseInput, ScreencastFrame, ScreencastUpdate,
@@ -404,7 +405,52 @@ impl ArtifactView {
             {
                 let session = session.clone();
                 cx.background_spawn(async move {
-                    while let Some(input) = mouse_rx.recv().await {
+                    // Coalesce a backlog of trailing same-kind Move/Wheel
+                    // events before dispatching: each dispatch is a real
+                    // CDP round trip, slower than a trackpad or fast mouse
+                    // move can fire, so draining one event per await here
+                    // (as this loop used to) builds a growing lag between
+                    // the input and what the page does. Wheel deltas are
+                    // summed so the total scroll distance stays correct;
+                    // Move keeps only the latest position. Down/Up are
+                    // never merged or dropped — hitting one stops the
+                    // coalescing run, and it carries over to the next
+                    // outer iteration via `pending` rather than being lost.
+                    let mut pending: Option<MouseInput> = None;
+                    loop {
+                        let mut input = match pending.take() {
+                            Some(input) => input,
+                            None => match mouse_rx.recv().await {
+                                Some(input) => input,
+                                None => break,
+                            },
+                        };
+                        while let Ok(next) = mouse_rx.try_recv() {
+                            match (&mut input.action, next.action) {
+                                (MouseAction::Move, MouseAction::Move) => {
+                                    input.x = next.x;
+                                    input.y = next.y;
+                                    input.modifiers = next.modifiers;
+                                }
+                                (
+                                    MouseAction::Wheel { delta_x, delta_y },
+                                    MouseAction::Wheel {
+                                        delta_x: next_dx,
+                                        delta_y: next_dy,
+                                    },
+                                ) => {
+                                    *delta_x += next_dx;
+                                    *delta_y += next_dy;
+                                    input.x = next.x;
+                                    input.y = next.y;
+                                    input.modifiers = next.modifiers;
+                                }
+                                _ => {
+                                    pending = Some(next);
+                                    break;
+                                }
+                            }
+                        }
                         let _ = session.dispatch_mouse(input).await;
                     }
                 })
@@ -1128,9 +1174,18 @@ impl ArtifactView {
         {
             return;
         }
+        tracing::debug!(
+            from_width = last_width,
+            from_height = last_height,
+            to_width = width,
+            to_height = height,
+            "browser: retargeting screencast to panel size"
+        );
         self.browser_requested_size = (width, height);
         cx.background_spawn(async move {
-            let _ = session.start_screencast(width, height).await;
+            if let Err(e) = session.start_screencast(width, height).await {
+                tracing::warn!(error = %e, width, height, "browser: viewport retarget failed");
+            }
         })
         .detach();
     }
@@ -1301,7 +1356,8 @@ fn browser_rendered_body(
             Button::new("artifact-browser-refresh")
                 .ghost()
                 .small()
-                .label("Refresh")
+                .icon(Icon::new(CustomIcon::Refresh).size_3())
+                .tooltip("Refresh")
                 .on_click({
                     let entity = entity.clone();
                     move |_, _, cx| {
@@ -1313,7 +1369,8 @@ fn browser_rendered_body(
             Button::new("artifact-browser-go")
                 .ghost()
                 .small()
-                .label("Go")
+                .icon(Icon::new(IconName::ArrowRight).size_3())
+                .tooltip("Go")
                 .on_click({
                     let entity = entity.clone();
                     let address = address.clone();
