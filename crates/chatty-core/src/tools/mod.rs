@@ -156,6 +156,7 @@ mod map_tool_error_tests {
 
 pub mod add_attachment_tool;
 pub mod agent_todo_tool;
+pub mod ask_user_tool;
 #[cfg(feature = "browser")]
 pub mod browser_tools;
 pub mod browser_use_tool;
@@ -204,6 +205,7 @@ pub mod typst_tool;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
+pub use ask_user_tool::AskUserTool;
 pub use browser_use_tool::BrowserUseTool;
 pub use chart_tool::CreateChartTool;
 #[cfg(feature = "duckdb")]
