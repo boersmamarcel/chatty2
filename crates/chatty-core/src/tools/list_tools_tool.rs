@@ -584,6 +584,7 @@ mod tests {
             browser_use: false,
             daytona: false,
             publish_module: false,
+            ask_user: false,
         }
     }
 
@@ -617,6 +618,7 @@ mod tests {
             browser_use: true,
             daytona: true,
             publish_module: true,
+            ask_user: true,
         }
     }
 

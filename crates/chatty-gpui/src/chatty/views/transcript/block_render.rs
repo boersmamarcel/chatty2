@@ -10,6 +10,7 @@ use super::activity::{ActivityGroup, RunTally};
 use super::approval::{ApprovalCard, ErrorBlock};
 use super::artifact_batch_card::ArtifactBatchCard;
 use super::artifact_card::ArtifactCard;
+use super::clarification::ClarificationSummary;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
 use super::table::render_table_preview_card;
@@ -69,6 +70,9 @@ pub fn render_typed_block(
             hunk.into_any_element()
         }
         Block::Approval { approval, .. } => ApprovalCard::new(approval.clone()).into_any_element(),
+        Block::Clarification { clarification, .. } => {
+            ClarificationSummary::new(clarification.clone()).into_any_element()
+        }
         Block::Artifact {
             path, old_content, ..
         } => {

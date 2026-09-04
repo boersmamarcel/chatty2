@@ -25,14 +25,18 @@ use std::time::SystemTime;
 use tracing::{debug, trace, warn};
 
 use super::super::message_types::{
-    ApprovalBlock, ApprovalState, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState,
-    ToolSource, TraceItem, classify_initial_execution_engine, detect_execution_engine,
-    friendly_tool_name, is_denial_result, predict_execution_engine,
+    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, ThinkingBlock,
+    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+    classify_initial_execution_engine, detect_execution_engine, friendly_tool_name,
+    is_denial_result, predict_execution_engine,
 };
 use super::super::trace_components::SystemTraceView;
-use super::{ChatView, PendingApprovalInfo};
+use super::{ChatView, PendingApprovalInfo, PendingClarificationInfo};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
+use crate::chatty::views::transcript::ChosenOption;
 use crate::chatty::views::transcript::{attachment_image_path, extract_table_preview};
+use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
+use std::collections::HashMap;
 
 impl ChatView {
     /// Handle tool call started event
@@ -633,6 +637,186 @@ impl ChatView {
 
             // Also update the trace
             self.handle_approval_resolved(&id, approved, cx);
+        }
+    }
+
+    /// Handle a clarifying-question request from the agent.
+    ///
+    /// Shows the popover above the chat input and records the questions in the
+    /// live trace so they persist with the conversation.
+    pub fn handle_clarification_requested(
+        &mut self,
+        id: String,
+        questions: Vec<ClarifyingQuestion>,
+        cx: &mut Context<Self>,
+    ) {
+        debug!(clarification_id = %id, questions = questions.len(), "UI: handle_clarification_requested called");
+
+        // Answers from a previous request must not leak into this one; the
+        // boxes are cleared on the next render, which has the `Window` that
+        // `InputState::set_value` needs.
+        self.clarification_inputs_dirty = true;
+
+        if let Some(conversation_id) = self.conversation_id.clone() {
+            self.pending_clarification = Some(PendingClarificationInfo {
+                id: id.clone(),
+                conversation_id,
+                questions: questions.clone(),
+                choices: HashMap::new(),
+            });
+        }
+
+        let clarification = ClarificationBlock {
+            id,
+            questions,
+            answers: Vec::new(),
+            state: ClarificationState::Pending,
+            created_at: std::time::SystemTime::now(),
+        };
+
+        if let Some(last) = self.parent_streaming_message_mut()
+            && let Some(ref mut trace) = last.live_trace
+        {
+            let index = trace.items.len();
+            trace.add_clarification(clarification);
+            trace.set_active_tool(index);
+
+            let trace_clone = trace.clone();
+            if let Some(ref view_entity) = last.system_trace_view {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                    cx.notify();
+                });
+            }
+        }
+
+        cx.notify();
+        self.activate_sticky_scroll();
+    }
+
+    /// Drop the clarification popover, e.g. when the stream is cancelled.
+    pub fn clear_pending_clarification(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_clarification.take() {
+            self.record_clarification_answers(
+                &pending.id,
+                Vec::new(),
+                ClarificationState::Cancelled,
+                cx,
+            );
+            cx.notify();
+        }
+    }
+
+    /// Record a clicked option for one question.
+    pub(super) fn choose_clarification_option(
+        &mut self,
+        question_id: String,
+        option_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ref mut pending) = self.pending_clarification {
+            pending.choices.insert(question_id, ChosenOption(option_ix));
+            cx.notify();
+        }
+    }
+
+    /// Collect the answers the user has given so far.
+    ///
+    /// Free text always wins over a clicked option: if the user typed something
+    /// after clicking, the typing is the later intent. Questions left entirely
+    /// blank are omitted, so the model can see which ones went unanswered.
+    pub(super) fn clarification_answers(&self, cx: &App) -> Vec<ClarificationAnswer> {
+        let Some(ref pending) = self.pending_clarification else {
+            return Vec::new();
+        };
+
+        pending
+            .questions
+            .iter()
+            .enumerate()
+            .filter_map(|(q_ix, question)| {
+                let typed = self
+                    .clarification_inputs
+                    .get(q_ix)
+                    .map(|slot| slot.read(cx).value().to_string())
+                    .unwrap_or_default();
+                let typed = typed.trim();
+
+                if !typed.is_empty() {
+                    return Some(ClarificationAnswer {
+                        id: question.id.clone(),
+                        answer: typed.to_string(),
+                        custom: true,
+                    });
+                }
+
+                let ChosenOption(ix) = pending.choices.get(&question.id).copied()?;
+                let option = question.options.get(ix)?;
+                Some(ClarificationAnswer {
+                    id: question.id.clone(),
+                    answer: option.clone(),
+                    custom: false,
+                })
+            })
+            .collect()
+    }
+
+    /// True once at least one question has an answer to send.
+    pub(super) fn clarification_ready(&self, cx: &App) -> bool {
+        !self.clarification_answers(cx).is_empty()
+    }
+
+    /// Send the collected answers back to the waiting `ask_user` tool.
+    pub(super) fn submit_clarification(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.pending_clarification.as_ref().map(|p| p.id.clone()) else {
+            return;
+        };
+
+        let answers = self.clarification_answers(cx);
+        if answers.is_empty() {
+            return;
+        }
+
+        // Hide the popover before resolving: the tool unblocks immediately and
+        // the stream can push its next chunk straight away.
+        self.pending_clarification = None;
+
+        match cx.try_global::<chatty_core::models::ClarificationStore>() {
+            Some(store) => {
+                if !store.resolve(&id, answers.clone()) {
+                    warn!(clarification_id = %id, "No pending clarification to resolve");
+                }
+            }
+            None => {
+                warn!(clarification_id = %id, "ClarificationStore global missing; answers dropped")
+            }
+        }
+
+        self.record_clarification_answers(&id, answers, ClarificationState::Answered, cx);
+        cx.notify();
+    }
+
+    /// Write the answers into the live trace so the transcript shows them.
+    fn record_clarification_answers(
+        &mut self,
+        id: &str,
+        answers: Vec<ClarificationAnswer>,
+        state: ClarificationState,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(last) = self.parent_streaming_message_mut()
+            && let Some(ref mut trace) = last.live_trace
+        {
+            trace.resolve_clarification(id, answers, state);
+            trace.clear_active_tool();
+
+            let trace_clone = trace.clone();
+            if let Some(ref view_entity) = last.system_trace_view {
+                view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                    cx.notify();
+                });
+            }
         }
     }
 

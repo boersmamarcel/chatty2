@@ -20,15 +20,15 @@ use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
 use crate::tools::{
-    AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
-    FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
-    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
-    ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool, LocalModuleAgentSummary,
-    MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool,
-    RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool,
-    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool, UpdateTodoTool,
-    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    AddAttachmentTool, ApplyDiffTool, AskUserTool, BrowserUseTool, CreateChartTool,
+    CreateDirectoryTool, DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool,
+    FinalAnswerTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool,
+    GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
+    GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
+    LocalModuleAgentSummary, MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool,
+    ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool,
+    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool,
+    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -62,6 +62,7 @@ pub struct AgentBuildContext {
     pub mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
     pub exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
     pub pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
+    pub pending_clarifications: Option<crate::models::clarification_store::PendingClarifications>,
     pub pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
     pub pending_artifacts: Option<PendingArtifacts>,
     pub shell_session: Option<std::sync::Arc<ShellSession>>,
@@ -123,6 +124,7 @@ impl AgentClient {
             mcp_tools,
             exec_settings,
             pending_approvals,
+            pending_clarifications,
             pending_write_approvals,
             pending_artifacts,
             shell_session,
@@ -931,6 +933,7 @@ impl AgentClient {
             browser_use: browser_use_tool.is_some(),
             daytona: daytona_tool.is_some(),
             publish_module: false, // set below after publish_module_tool is created
+            ask_user: false,       // set below alongside publish_module
         };
 
         let native_tool_names = active_native_tool_names(&tool_availability);
@@ -944,6 +947,11 @@ impl AgentClient {
         let write_todos_tool = WriteTodosTool::new(agent_task_controller.clone());
         let update_todo_tool = UpdateTodoTool::new(agent_task_controller.clone());
         let verify_completion_tool = VerifyCompletionTool::new(agent_task_controller.clone());
+
+        // Ask-the-user tool: only offered when a frontend is listening for the
+        // question. Without a pending store the call would block until it
+        // times out, so the model must not see the tool at all.
+        let ask_user_tool = pending_clarifications.map(AskUserTool::new);
 
         // Create list_agents tool (always available)
         let list_agents_tool =
@@ -984,6 +992,7 @@ impl AgentClient {
         // Update publish_module availability now that we know
         let tool_availability = ToolAvailability {
             publish_module: publish_module_tool.is_some(),
+            ask_user: ask_user_tool.is_some(),
             ..tool_availability
         };
 
@@ -1038,6 +1047,7 @@ impl AgentClient {
             list_agents_tool: list_agents_tool,
             invoke_agent_tool: invoke_agent_tool,
             publish_module_tool: publish_module_tool,
+            ask_user_tool: ask_user_tool,
         );
 
         let agent = provider_builder::build_provider_agent(
@@ -1088,6 +1098,20 @@ mod tests {
         assert!(names.contains("search_code"));
         assert!(names.contains("find_files"));
         assert!(names.contains("find_definition"));
+    }
+
+    /// `ask_user` only exists when a frontend is listening, so it must be
+    /// reserved conditionally rather than unconditionally like `read_skill`.
+    #[test]
+    fn active_native_tool_names_reserves_ask_user_only_when_available() {
+        assert!(!active_native_tool_names(&ToolAvailability::default()).contains("ask_user"));
+        assert!(
+            active_native_tool_names(&ToolAvailability {
+                ask_user: true,
+                ..Default::default()
+            })
+            .contains("ask_user")
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ mod artifact_card;
 mod artifact_kind;
 mod artifact_view;
 mod block_render;
+mod clarification;
 mod diff;
 mod diff_parse;
 mod plan;
@@ -81,6 +82,7 @@ pub use artifact_view::{
     ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view, presentation_on_open,
 };
 pub use block_render::render_typed_block;
+pub use clarification::{ChosenOption, ClarificationCard, ClarificationSummary};
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
 pub use diff_parse::parse_unified_diff;
 pub use plan::{PLAN_LIST_TOP_PADDING, PLAN_STRIP_HEIGHT, PlanBlock, PlanOverlay, PlanStrip};
