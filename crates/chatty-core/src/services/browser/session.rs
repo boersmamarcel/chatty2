@@ -18,12 +18,16 @@ use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 use chromiumoxide::page::Page;
 use futures::StreamExt;
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use super::control::{ControlHolder, ControlLock};
 use super::error::BrowserError;
 use super::events::EventBuffers;
+use super::input::{self, KeyInput, MouseInput};
 use super::profile::{BrowserProfile, NavigationPolicy};
+use super::screencast::{self, ScreencastState, ScreencastUpdate};
 
 /// Default deadline for a CDP round trip.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -58,6 +62,17 @@ pub struct BrowserSession {
     handler: Mutex<Option<JoinHandle<()>>>,
     /// Pumps CDP events into `events`.
     listeners: Mutex<Vec<JoinHandle<()>>>,
+    /// Live `Page.startScreencast` state, when the artifact viewport
+    /// (AGE-155) is watching this session. `tokio::sync::Mutex` because
+    /// starting/retargeting holds the guard across CDP round trips.
+    screencast: tokio::sync::Mutex<Option<ScreencastState>>,
+    /// Who is driving (AGE-156). Agent by default; every fresh session
+    /// starts here regardless of what a previous, now-dead session had.
+    control: ControlLock,
+    /// Current page URL, broadcast so the artifact viewport's address bar
+    /// (AGE-156) can mirror navigation from either side — the agent's
+    /// `browser_navigate` tool or the user typing a new URL.
+    current_url: watch::Sender<String>,
     /// Temp user-data dir for an ephemeral profile; removed on drop.
     _user_data: Option<tempfile::TempDir>,
 }
@@ -145,6 +160,9 @@ impl BrowserSession {
             dead,
             handler: Mutex::new(Some(handler)),
             listeners: Mutex::new(listeners),
+            screencast: tokio::sync::Mutex::new(None),
+            control: ControlLock::new(),
+            current_url: watch::channel(String::from("about:blank")).0,
             _user_data: user_data,
         }))
     }
@@ -198,6 +216,24 @@ impl BrowserSession {
     /// redirect hop the browser followed to get there.
     pub async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
         self.ensure_alive()?;
+        self.control.ensure_agent()?;
+        self.do_navigate(url).await
+    }
+
+    /// The user navigates directly (AGE-156's address bar) — takes control
+    /// first, exactly like reaching for the mouse does, then navigates the
+    /// same as the agent would. Never refused for being user-held control;
+    /// the whole point is the user driving.
+    pub async fn navigate_as_user(&self, url: &str) -> Result<String, BrowserError> {
+        self.ensure_alive()?;
+        self.control.take();
+        self.do_navigate(url).await
+    }
+
+    /// Shared navigation body once the caller has settled who's allowed to
+    /// drive: policy check, the CDP round trip, the redirect-landing check,
+    /// snapshot invalidation, and broadcasting the new URL to the address bar.
+    async fn do_navigate(&self, url: &str) -> Result<String, BrowserError> {
         self.policy.check(url)?;
 
         // Drop the previous page's entries *before* navigating, not after:
@@ -237,11 +273,120 @@ impl BrowserSession {
         }
 
         self.invalidate_snapshot();
+        let _ = self.current_url.send(final_url.clone());
         Ok(final_url)
+    }
+
+    /// Reload the current page (AGE-156's refresh button) — takes control
+    /// first, the same as any other user-initiated action, then reloads.
+    /// The URL does not change, so unlike `do_navigate` this skips the
+    /// policy check (already satisfied when the page first loaded) and
+    /// does not touch `current_url`.
+    pub async fn reload_as_user(&self) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        self.control.take();
+        self.events.clear();
+        with_deadline(NAVIGATE_TIMEOUT_SECS, "reloading", async {
+            self.page
+                .reload()
+                .await
+                .map_err(|e| BrowserError::Protocol(format!("reload failed: {e}")))?;
+            Ok(())
+        })
+        .await?;
+        self.invalidate_snapshot();
+        Ok(())
+    }
+
+    /// Subscribe to page-URL changes (AGE-156's address bar) — fires once
+    /// per successful navigation, whichever side initiated it. The initial
+    /// value on a fresh receiver is the URL as of subscription time.
+    pub fn watch_url(&self) -> watch::Receiver<String> {
+        self.current_url.subscribe()
+    }
+
+    /// Start (or resize) the live screencast the artifact viewport watches
+    /// (AGE-155), returning a channel of frame updates.
+    ///
+    /// Backpressure is handled inside `screencast`: a slow receiver only
+    /// ever sees the latest frame, never a backlog. Calling this again while
+    /// a screencast is already running retargets it to the new size rather
+    /// than starting a second one.
+    pub async fn start_screencast(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
+        self.ensure_alive()?;
+        let mut guard = self.screencast.lock().await;
+        let existing = guard.take();
+        let (state, rx) = screencast::start(&self.page, existing, width, height).await?;
+        *guard = Some(state);
+        Ok(rx)
+    }
+
+    /// Stop the screencast. Idle handling (AGE-155) calls this when the
+    /// artifact window closes or the browser artifact stops being the
+    /// active one — a screencast nobody is watching is pure CPU.
+    pub async fn stop_screencast(&self) {
+        let state = self.screencast.lock().await.take();
+        if let Some(state) = state {
+            screencast::stop(&self.page, state).await;
+        }
+    }
+
+    /// Who is driving right now (AGE-156).
+    pub fn control_holder(&self) -> ControlHolder {
+        self.control.holder()
+    }
+
+    /// Err if the user currently holds control. `navigate` already checks
+    /// this; other mutating tools (`browser_resize`) call it directly.
+    pub fn ensure_agent_control(&self) -> Result<(), BrowserError> {
+        self.control.ensure_agent()
+    }
+
+    /// The user takes control — never requested, always granted
+    /// immediately. Returns the holder *before* the transition.
+    pub fn take_control(&self) -> ControlHolder {
+        self.control.take()
+    }
+
+    /// Hand control back to the agent. The page moved underneath whatever
+    /// it last looked at, so every outstanding element ref is invalidated
+    /// the same way a navigation invalidates them.
+    pub fn release_control(&self) -> ControlHolder {
+        let previous = self.control.release();
+        if previous == ControlHolder::User {
+            self.invalidate_snapshot();
+        }
+        previous
+    }
+
+    /// Forward a mouse event. A no-op — not an error — when the agent
+    /// holds control: a stray event racing a handback must not steer a
+    /// session nobody handed to the user.
+    pub async fn dispatch_mouse(&self, event: MouseInput) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        if self.control_holder() != ControlHolder::User {
+            return Ok(());
+        }
+        input::dispatch_mouse(&self.page, event).await
+    }
+
+    /// Forward a keyboard event. Same no-op-when-agent-owns-it rule as
+    /// [`Self::dispatch_mouse`].
+    pub async fn dispatch_key(&self, event: KeyInput) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        if self.control_holder() != ControlHolder::User {
+            return Ok(());
+        }
+        input::dispatch_key(&self.page, event).await
     }
 
     /// Close the browser and stop every task this session owns.
     pub async fn shutdown(&self) {
+        self.stop_screencast().await;
         for handle in self.listeners.lock().drain(..) {
             handle.abort();
         }
@@ -272,6 +417,13 @@ impl Drop for BrowserSession {
         }
         if let Some(handle) = self.handler.lock().take() {
             handle.abort();
+        }
+        // No CDP round trip here — `try_lock` is sync, and stopping the
+        // task is enough; the browser process going away ends the cast.
+        if let Ok(mut guard) = self.screencast.try_lock()
+            && let Some(state) = guard.take()
+        {
+            state.abort();
         }
     }
 }

@@ -18,6 +18,20 @@ pub fn is_image_path(path: &Path) -> bool {
         })
 }
 
+/// Lane A browser tools (AGE-142/AGE-155). Matched by exact name rather than
+/// a `browser_` prefix — `browser_use` is a distinct, unrelated tool.
+pub fn is_lane_a_browser_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "browser_navigate"
+            | "browser_snapshot"
+            | "browser_screenshot"
+            | "browser_console"
+            | "browser_network"
+            | "browser_resize"
+    )
+}
+
 /// True when `path` looks like a PDF (extension only — we do not sniff bytes).
 pub fn is_pdf_path(path: &Path) -> bool {
     path.extension()
