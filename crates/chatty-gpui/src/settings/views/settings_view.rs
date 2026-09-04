@@ -5,7 +5,6 @@ use crate::settings::views::execution_settings_page::execution_settings_page;
 use crate::settings::views::extensions_page::extensions_page;
 use crate::settings::views::memory_settings_page::memory_settings_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
-use crate::settings::views::providers_view::providers_page;
 use crate::settings::views::search_settings_page::search_settings_page;
 use crate::settings::views::training_settings_page::training_settings_page;
 use crate::settings::views::user_secrets_page::user_secrets_page;
@@ -200,13 +199,12 @@ impl Render for SettingsView {
                         #[cfg(not(target_os = "macos"))]
                         cli_group(),
                     ]),
-                SettingPage::new("Models")
-                    .description("Configure AI models and their parameters")
+                // Models and providers are one page: the roster shows both, and
+                // credentials live in its Manage keys sheet.
+                SettingPage::new("Models & Providers")
                     .resettable(false)
                     .groups(vec![
                         SettingGroup::new()
-                            .title("Models List")
-                            .description("All configured AI models")
                             .items(vec![SettingItem::render(|_options, window, cx| {
                                 // Get or create the global singleton view
                                 let view =
@@ -232,10 +230,9 @@ impl Render for SettingsView {
                                         new_view
                                     };
 
-                                div().w_full().min_h(px(400.)).child(view)
+                                div().w_full().min_h(px(520.)).child(view)
                             })]),
                     ]),
-                providers_page(),
                 extensions_page(),
                 search_settings_page(),
                 execution_settings_page(),

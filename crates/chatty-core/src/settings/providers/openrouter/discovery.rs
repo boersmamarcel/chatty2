@@ -71,6 +71,34 @@ pub async fn discover_openrouter_models() -> Result<Vec<OpenRouterModel>> {
     Ok(body.data)
 }
 
+/// Check that an OpenRouter API key is accepted.
+///
+/// `/api/v1/models` is public, so a successful fetch says nothing about the
+/// key — this asks the authenticated `/api/v1/key` endpoint instead, which is
+/// what makes the settings sheet's Test button mean anything.
+pub async fn verify_openrouter_key(api_key: &str) -> Result<()> {
+    if api_key.trim().is_empty() {
+        return Err(anyhow::anyhow!("No API key set"));
+    }
+
+    let resp = reqwest::Client::new()
+        .get("https://openrouter.ai/api/v1/key")
+        .bearer_auth(api_key.trim())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        Err(anyhow::anyhow!("Key rejected"))
+    } else {
+        Err(anyhow::anyhow!("OpenRouter returned HTTP {status}"))
+    }
+}
+
 /// Return `true` if the model supports image input.
 ///
 /// OpenRouter **does not** transparently parse images for non-vision models —

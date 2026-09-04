@@ -8,6 +8,7 @@ use crate::models::message_types::{
     SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
 };
 use crate::models::token_usage::TokenUsage;
+use crate::settings::models::models_store::ModelSource;
 use crate::settings::models::providers_store::ProviderType;
 use rig_core::completion::message::{AssistantContent, Text, UserContent};
 use std::collections::HashMap;
@@ -60,6 +61,9 @@ fn make_model_config(provider_type: ProviderType) -> ModelConfig {
         supports_pdf: true,
         supports_temperature: true,
         max_context_window: None,
+        source: ModelSource::User,
+        is_favorite: false,
+        is_default: false,
     }
 }
 

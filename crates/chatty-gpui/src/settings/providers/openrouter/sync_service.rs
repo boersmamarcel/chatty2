@@ -30,20 +30,22 @@ impl Global for OpenRouterCatalog {}
 /// 1. Fetches the full model catalog from `https://openrouter.ai/api/v1/models`.
 /// 2. Matches fetched models against the curated list (hardcoded defaults or
 ///    user-overridden `openrouter_curated.json`).
-/// 3. Removes **old OpenRouter models that are not in the curated list** — this
-///    prevents permanently stale entries when OpenRouter retires a version.
+/// 3. Removes **sync-created OpenRouter models that are not in the curated
+///    list** — this prevents permanently stale entries when OpenRouter retires
+///    a version.
 /// 4. Adds or updates the curated models with live metadata (image/PDF support,
-///    context length, pricing if present, temperature support, etc.).
+///    context length, pricing if present, temperature support, etc.), carrying
+///    the user's favourite/default flags over from the entry being replaced.
 /// 5. Persists the updated `ModelsModel` to disk.
 ///
-/// Non-curated models that were added manually by the user or discovered by a
-/// previous search are **left untouched**.
+/// Models the user added by hand carry `ModelSource::User` and are **left
+/// untouched**. Step 3 is scoped to `ModelSource::Sync` for exactly that
+/// reason: a user-added model is never in the curated list, so pruning purely
+/// by absence deleted it on every startup and then saved the result.
 pub async fn sync_openrouter_models(cx: &mut AsyncApp) -> Result<usize> {
     info!("Starting OpenRouter curated-model sync");
 
     let curated = load_curated_models();
-    let _curated_ids: std::collections::HashSet<&str> =
-        curated.iter().map(|c| c.id.as_str()).collect();
 
     // -----------------------------------------------------------------
     // 1. Discover what OpenRouter currently advertises.
@@ -92,26 +94,32 @@ pub async fn sync_openrouter_models(cx: &mut AsyncApp) -> Result<usize> {
     // -----------------------------------------------------------------
     cx.update(|cx| {
         cx.update_global::<ModelsModel, _>(|model, _cx| {
-            // --- 3a. Remove stale OpenRouter models not in curated list ---
-            let existing_openrouter_ids: Vec<String> = model
-                .models_by_provider(&ProviderType::OpenRouter)
-                .iter()
-                .map(|m| m.id.clone())
-                .filter(|id| !synced_ids.contains(id.as_str()))
-                .collect();
+            // --- 3a. Remove stale OpenRouter models this sync itself created ---
+            // Scoped to ModelSource::Sync: anything the user added is not in
+            // the curated list either, and pruning by absence alone deleted it.
+            let stale = model.stale_sync_ids(&ProviderType::OpenRouter, &synced_ids);
 
-            for id in existing_openrouter_ids {
+            for id in stale {
                 model.delete_model(&id);
             }
 
             // --- 3b. Upsert each curated model ---
+            // The refreshed config carries live provider metadata but no user
+            // state, so favourite/default are carried over from the entry it
+            // replaces — otherwise every startup would clear them.
             for config in &new_configs {
-                if model.get_model(&config.id).is_some() {
-                    model.update_model(config.clone());
-                    debug!(id = %config.id, "Updated existing OpenRouter model");
-                } else {
-                    model.add_model(config.clone());
-                    debug!(id = %config.id, "Added new OpenRouter model");
+                match model.get_model(&config.id) {
+                    Some(existing) => {
+                        let mut config = config.clone();
+                        config.is_favorite = existing.is_favorite;
+                        config.is_default = existing.is_default;
+                        model.update_model(config);
+                        debug!(id = %config.id, "Updated existing OpenRouter model");
+                    }
+                    None => {
+                        model.add_model(config.clone());
+                        debug!(id = %config.id, "Added new OpenRouter model");
+                    }
                 }
             }
         });
@@ -181,5 +189,5 @@ fn build_model_config(cm: &CuratedModel, data: &OpenRouterModel) -> ModelConfig 
     config.cost_per_million_input_tokens = model_prompt_cost(data);
     config.cost_per_million_output_tokens = model_completion_cost(data);
 
-    config
+    config.synced()
 }

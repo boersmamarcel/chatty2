@@ -1,16 +1,16 @@
-//! Settings → Models page.
+//! Settings → Models & Providers.
 //!
-//! Lets users browse, add, edit, and delete LLM model configurations,
-//! grouped by provider. Includes the Azure OpenAI deployment-id flow and
-//! the OpenRouter curated catalog picker.
+//! One roster for both: a provider status strip on top, then every model as a
+//! dense row with its favourite, default, context, price and temperature
+//! visible without opening anything. Replaces the old split between a Models
+//! page and a Providers page.
 //!
 //! # What lives here
 //!
-//! - `ModelsPage` view + render path.
-//! - Add / edit modal flows for each provider type (Anthropic, OpenAI,
-//!   Azure, Ollama, Mistral, Gemini, OpenRouter, …).
-//! - Capability toggles (image / PDF / temperature) per model.
-//! - OpenRouter catalog search & one-click import.
+//! - `ModelsListView` — the roster: filtering, sorting, and the row rendering.
+//! - `add_model_sheet` — browse a provider's catalogue and add in one shot.
+//! - `provider_keys_sheet` — one sheet for every provider's credentials.
+//! - `dialogs` — the per-model edit form, reached from a row's ⋯ menu.
 //!
 //! # What does NOT live here
 //!
@@ -22,19 +22,18 @@
 use crate::settings::controllers::models_controller;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::{ProviderModel, ProviderType};
-use crate::settings::providers::openrouter::OpenRouterCatalog;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, Styled, Window,
-    div, prelude::*, px,
+    App, Context, Corner, Entity, FocusHandle, Focusable, Hsla, IntoElement, MouseButton, Render,
+    SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme, IndexPath, Sizable, WindowExt as _,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, WindowExt as _,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
-    list::{List, ListDelegate, ListItem, ListState},
+    menu::PopupMenuItem,
     scroll::ScrollableElement,
-    select::{Select, SelectEvent, SelectState},
+    select::{Select, SelectState},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -43,38 +42,202 @@ use tracing::trace;
 // Global state to store the models list view
 pub type GlobalModelsListView = crate::global_entity::GlobalStrongEntity<ModelsListView>;
 
-// Helper function to convert provider display name to ProviderType
-fn string_to_provider_type(s: &str) -> ProviderType {
-    match s {
-        "OpenRouter" => ProviderType::OpenRouter,
-        "Ollama" => ProviderType::Ollama,
-        "Azure OpenAI" => ProviderType::AzureOpenAI,
-        _ => ProviderType::OpenRouter, // Default fallback
+/// The providers the roster knows about, in the order their chips appear.
+const PROVIDERS: [ProviderType; 3] = [
+    ProviderType::OpenRouter,
+    ProviderType::Ollama,
+    ProviderType::AzureOpenAI,
+];
+
+/// Column widths, shared by the header row and every model row so the two
+/// stay in step.
+mod col {
+    use gpui::{Pixels, px};
+
+    pub const STAR: Pixels = px(26.);
+    pub const PROVIDER: Pixels = px(92.);
+    pub const CONTEXT: Pixels = px(68.);
+    pub const PRICE: Pixels = px(70.);
+    pub const TEMP: Pixels = px(54.);
+    pub const MENU: Pixels = px(26.);
+}
+
+/// The quick filter chips above the roster.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RosterFilter {
+    All,
+    Favourites,
+    Local,
+}
+
+impl RosterFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Favourites => "Favourites",
+            Self::Local => "Local",
+        }
+    }
+
+    fn matches(self, model: &ModelConfig) -> bool {
+        match self {
+            Self::All => true,
+            Self::Favourites => model.is_favorite,
+            Self::Local => model.provider_type == ProviderType::Ollama,
+        }
+    }
+}
+
+/// Roster sort order. Clicking the sort control cycles through these.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Name,
+    Provider,
+    Context,
+    Price,
+}
+
+impl SortKey {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Provider => "provider",
+            Self::Context => "context",
+            Self::Price => "price",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Provider,
+            Self::Provider => Self::Context,
+            Self::Context => Self::Price,
+            Self::Price => Self::Name,
+        }
+    }
+}
+
+/// How a provider is doing, for its chip in the status strip.
+struct ProviderStatus {
+    provider_type: ProviderType,
+    configured: bool,
+    model_count: usize,
+}
+
+impl ProviderStatus {
+    fn detail(&self) -> String {
+        if self.configured {
+            format!("{}", self.model_count)
+        } else {
+            "needs key".to_string()
+        }
     }
 }
 
 pub struct ModelsListView {
     focus_handle: FocusHandle,
-    list_state: Entity<ListState<ModelsListDelegate>>,
+    search: Entity<InputState>,
+    filter: RosterFilter,
+    /// `None` shows every provider; otherwise only the chosen one.
+    provider_filter: Option<ProviderType>,
+    sort: SortKey,
 }
 
 impl ModelsListView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        let delegate = ModelsListDelegate::new(cx);
-        let list_state = cx.new(|cx| ListState::new(delegate, window, cx).searchable(true));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter models"));
+
+        // Re-render as the query changes; the roster is derived in render()
+        // straight from the global store, so there is no cache to invalidate.
+        cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
 
         Self {
-            focus_handle,
-            list_state,
+            focus_handle: cx.focus_handle(),
+            search,
+            filter: RosterFilter::All,
+            provider_filter: None,
+            sort: SortKey::Name,
         }
     }
 
+    /// Kept for callers that mutate models and then ask for a redraw. The
+    /// roster reads the store on every render, so a notify is all it takes.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.list_state.update(cx, |state, cx| {
-            state.delegate_mut().reload(cx);
-            cx.notify();
+        cx.notify();
+    }
+
+    /// Provider chips: configured state and how many models each contributes.
+    fn provider_statuses(cx: &App) -> Vec<ProviderStatus> {
+        let configured: Vec<ProviderType> = cx
+            .global::<ProviderModel>()
+            .configured_providers()
+            .map(|p| p.provider_type.clone())
+            .collect();
+        let models = cx.global::<ModelsModel>().models();
+
+        PROVIDERS
+            .iter()
+            .map(|provider_type| ProviderStatus {
+                provider_type: provider_type.clone(),
+                configured: configured.contains(provider_type),
+                model_count: models
+                    .iter()
+                    .filter(|m| &m.provider_type == provider_type)
+                    .count(),
+            })
+            .collect()
+    }
+
+    /// The rows to draw: search, chip filter and provider filter applied,
+    /// favourites pinned above the rest, then the chosen sort within each half.
+    fn visible_models(&self, cx: &App) -> Vec<ModelConfig> {
+        let query = self.search.read(cx).value().to_lowercase();
+
+        let mut models: Vec<ModelConfig> = cx
+            .global::<ModelsModel>()
+            .models()
+            .iter()
+            .filter(|m| self.filter.matches(m))
+            .filter(|m| {
+                self.provider_filter
+                    .as_ref()
+                    .is_none_or(|p| &m.provider_type == p)
+            })
+            .filter(|m| {
+                query.is_empty()
+                    || m.name.to_lowercase().contains(&query)
+                    || m.model_identifier.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+
+        let sort = self.sort;
+        models.sort_by(|a, b| {
+            // Favourites pin to the top whatever the sort key is.
+            b.is_favorite
+                .cmp(&a.is_favorite)
+                .then_with(|| match sort {
+                    SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                    SortKey::Provider => a
+                        .provider_type
+                        .display_name()
+                        .cmp(b.provider_type.display_name()),
+                    // Biggest context and priciest first — the interesting end.
+                    SortKey::Context => b.max_context_window.cmp(&a.max_context_window),
+                    SortKey::Price => b
+                        .cost_per_million_input_tokens
+                        .partial_cmp(&a.cost_per_million_input_tokens)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                })
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
+
+        models
     }
 }
 
@@ -84,51 +247,444 @@ impl Focusable for ModelsListView {
     }
 }
 
+/// `200000` → `200K`, `1000000` → `1M`. Context windows are read at a glance,
+/// so the exact digits are noise.
+fn format_context(tokens: Option<i32>) -> String {
+    match tokens {
+        Some(t) if t >= 1_000_000 => {
+            let m = t as f32 / 1_000_000.0;
+            if (m.fract() * 10.0).round() == 0.0 {
+                format!("{m:.0}M")
+            } else {
+                format!("{m:.1}M")
+            }
+        }
+        Some(t) if t >= 1_000 => format!("{}K", t / 1_000),
+        Some(t) => t.to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// Input-token price per million, or `free` for anything running locally.
+fn format_price(model: &ModelConfig) -> String {
+    match model.cost_per_million_input_tokens {
+        Some(cost) => format!("${cost:.2}"),
+        None if model.provider_type == ProviderType::Ollama => "free".to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// A pill — the `Default` and `Local` markers on a row.
+fn pill(label: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> impl IntoElement {
+    div()
+        .px_2()
+        .rounded_full()
+        .bg(bg)
+        .text_xs()
+        .text_color(fg)
+        .child(label.into())
+}
+
+/// A filter chip. `on_click` fires on press; `active` paints the selected state.
+fn chip(
+    id: impl Into<gpui::ElementId>,
+    active: bool,
+    theme_fg: Hsla,
+    theme_muted_fg: Hsla,
+    accent: Hsla,
+    accent_bg: Hsla,
+    on_click: impl Fn(&mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    h_flex()
+        .id(id)
+        .h(px(26.))
+        .px_3()
+        .gap_2()
+        .items_center()
+        .rounded_full()
+        .cursor_pointer()
+        .text_xs()
+        .when(active, |this| this.bg(accent_bg).text_color(accent))
+        .when(!active, |this| this.text_color(theme_muted_fg))
+        .hover(move |this| this.text_color(theme_fg))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx))
+}
+
 impl Render for ModelsListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let fg = cx.theme().foreground;
+        let muted_fg = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let muted = cx.theme().muted;
+        let accent = cx.theme().primary;
+        let accent_bg = cx.theme().accent;
+        let success = cx.theme().success;
+        let warning = cx.theme().warning;
+
+        let statuses = Self::provider_statuses(cx);
+        let models = self.visible_models(cx);
+        let total = cx.global::<ModelsModel>().models().len();
+        let favourites = cx
+            .global::<ModelsModel>()
+            .models()
+            .iter()
+            .filter(|m| m.is_favorite)
+            .count();
+        let configured_count = statuses.iter().filter(|s| s.configured).count();
+
+        let entity = cx.entity();
 
         v_flex()
             .size_full()
-            .gap_4()
             .track_focus(&self.focus_handle)
+            // ── Header ────────────────────────────────────────────────────
             .child(
-                // Header with title and add button
                 h_flex()
                     .justify_between()
-                    .items_center()
-                    .pb_4()
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .items_end()
+                    .gap_4()
+                    .pb_3()
                     .child(
-                        v_flex().gap_1().child(
-                            div()
-                                .text_2xl()
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .child("AI Models"),
-                        ),
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_lg().child("Models & Providers"))
+                            .child(
+                                div().text_xs().text_color(muted_fg).child(format!(
+                                    "{total} models across {configured_count} providers · {favourites} favourites"
+                                )),
+                            ),
                     )
                     .child(
-                        Button::new("add-model-btn")
-                            .label("+ Add Model")
-                            .primary()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                trace!("Add Model button clicked");
-                                this.show_add_model_dialog(window, cx);
-                            })),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("manage-keys-btn")
+                                    .label("Manage keys")
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.show_provider_keys_sheet(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("add-model-btn")
+                                    .label("Add model")
+                                    .icon(Icon::new(IconName::Plus))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        trace!("Add model button clicked");
+                                        this.show_add_model_sheet(window, cx);
+                                    })),
+                            ),
                     ),
             )
+            // ── Provider status strip ─────────────────────────────────────
             .child(
-                // List container
+                h_flex().gap_2().pb_3().children(
+                    statuses
+                        .iter()
+                        .map(|status| {
+                            let provider_type = status.provider_type.clone();
+                            let selected = self.provider_filter.as_ref() == Some(&provider_type);
+                            let entity = entity.clone();
+                            let dot = if status.configured { success } else { warning };
+
+                            chip(
+                                SharedString::from(format!(
+                                    "provider-chip-{}",
+                                    provider_type.display_name()
+                                )),
+                                selected,
+                                fg,
+                                muted_fg,
+                                accent,
+                                accent_bg,
+                                move |cx| {
+                                    let provider_type = provider_type.clone();
+                                    entity.update(cx, |this, cx| {
+                                        // Clicking the active chip clears the filter.
+                                        this.provider_filter = if this.provider_filter.as_ref()
+                                            == Some(&provider_type)
+                                        {
+                                            None
+                                        } else {
+                                            Some(provider_type)
+                                        };
+                                        cx.notify();
+                                    });
+                                },
+                            )
+                            .child(
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(dot),
+                            )
+                            .child(format!(
+                                "{} · {}",
+                                status.provider_type.display_name(),
+                                status.detail()
+                            ))
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            // ── Filter bar ────────────────────────────────────────────────
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(div().w(px(240.)).child(Input::new(&self.search).small()))
+                    .children(
+                        [RosterFilter::All, RosterFilter::Favourites, RosterFilter::Local]
+                            .into_iter()
+                            .map(|filter| {
+                                let entity = entity.clone();
+                                chip(
+                                    SharedString::from(format!("filter-{}", filter.label())),
+                                    self.filter == filter,
+                                    fg,
+                                    muted_fg,
+                                    accent,
+                                    accent_bg,
+                                    move |cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.filter = filter;
+                                            cx.notify();
+                                        });
+                                    },
+                                )
+                                .child(filter.label())
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .child(
+                        h_flex().ml_auto().child({
+                            let entity = entity.clone();
+                            let label = format!("Sort: {}", self.sort.label());
+                            Button::new("sort-btn")
+                                .label(label)
+                                .icon(Icon::new(IconName::ChevronDown))
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.sort = this.sort.next();
+                                        cx.notify();
+                                    });
+                                })
+                        }),
+                    ),
+            )
+            // ── Column header ─────────────────────────────────────────────
+            .child(
+                h_flex()
+                    .h(px(30.))
+                    .items_center()
+                    .px_3()
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(div().w(col::STAR))
+                    .child(div().flex_1().min_w_0().child("Model"))
+                    .child(div().w(col::PROVIDER).child("Provider"))
+                    .child(div().w(col::CONTEXT).child("Context"))
+                    .child(div().w(col::PRICE).child("$ / 1M in"))
+                    .child(div().w(col::TEMP).child("Temp"))
+                    .child(div().w(col::MENU)),
+            )
+            // ── Rows ──────────────────────────────────────────────────────
+            .child(
                 div()
+                    .id("models-roster")
                     .flex_1()
-                    .w_full()
-                    .child(List::new(&self.list_state).max_h(px(600.)).min_w(px(500.))),
+                    .min_h(px(240.))
+                    .overflow_y_scrollbar()
+                    .when(models.is_empty(), |this| {
+                        this.child(
+                            v_flex()
+                                .py_8()
+                                .gap_1()
+                                .items_center()
+                                .child(div().text_color(muted_fg).child(if total == 0 {
+                                    "No models yet — add one to get started"
+                                } else {
+                                    "No models match these filters"
+                                })),
+                        )
+                    })
+                    .children(
+                        models
+                            .iter()
+                            .map(|model| {
+                                self.render_row(model, fg, muted_fg, border, muted, accent, accent_bg, cx)
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+            )
+            // ── Footer ────────────────────────────────────────────────────
+            .child(
+                h_flex()
+                    .justify_between()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(border)
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(format!("Showing {} of {}", models.len(), total))
+                    .child("Changes save automatically"),
             )
     }
 }
 
-mod delegate;
-mod dialogs;
+impl ModelsListView {
+    /// One roster row: favourite star, name + markers + identifier, then the
+    /// numbers, then the ⋯ menu.
+    #[allow(clippy::too_many_arguments)]
+    fn render_row(
+        &self,
+        model: &ModelConfig,
+        fg: Hsla,
+        muted_fg: Hsla,
+        border: Hsla,
+        muted: Hsla,
+        accent: Hsla,
+        accent_bg: Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let model_id = model.id.clone();
+        let is_favorite = model.is_favorite;
+        let entity = cx.entity();
 
-use delegate::ModelsListDelegate;
+        h_flex()
+            .id(SharedString::from(format!("row-{}", model.id)))
+            .h(px(46.))
+            .items_center()
+            .px_3()
+            .text_sm()
+            .border_b_1()
+            .border_color(border)
+            .when(model.is_default, |this| this.bg(accent_bg))
+            // Star
+            .child(
+                div()
+                    .id(SharedString::from(format!("star-{}", model.id)))
+                    .w(col::STAR)
+                    .cursor_pointer()
+                    .text_color(if is_favorite { accent } else { muted_fg })
+                    .child(if is_favorite { "★" } else { "☆" })
+                    .on_mouse_down(MouseButton::Left, {
+                        let model_id = model_id.clone();
+                        move |_, _, cx| {
+                            models_controller::toggle_favorite(&model_id, cx);
+                        }
+                    }),
+            )
+            // Name, markers, identifier
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_color(fg).child(model.name.clone()))
+                    .when(model.is_default, |this| {
+                        this.child(pill("Default", accent, muted))
+                    })
+                    .when(model.provider_type == ProviderType::Ollama, |this| {
+                        this.child(pill("Local", muted_fg, muted))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(muted_fg)
+                            .child(model.model_identifier.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .w(col::PROVIDER)
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(model.provider_type.display_name().to_string()),
+            )
+            .child(
+                div()
+                    .w(col::CONTEXT)
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(format_context(model.max_context_window)),
+            )
+            .child(
+                div()
+                    .w(col::PRICE)
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(format_price(model)),
+            )
+            .child(
+                div()
+                    .w(col::TEMP)
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(format!("{:.1}", model.temperature)),
+            )
+            // Row menu
+            .child(
+                div().w(col::MENU).child(
+                    Button::new(SharedString::from(format!("row-menu-{}", model.id)))
+                        .icon(Icon::new(IconName::Ellipsis))
+                        .xsmall()
+                        .ghost()
+                        .dropdown_menu_with_anchor(Corner::TopRight, {
+                            let model_id = model_id.clone();
+                            let entity = entity.clone();
+                            let is_default = model.is_default;
+                            move |menu, _, _| {
+                                let set_default_id = model_id.clone();
+                                let edit_id = model_id.clone();
+                                let delete_id = model_id.clone();
+                                let entity_for_edit = entity.clone();
+                                let entity_for_delete = entity.clone();
+
+                                menu.item(
+                                    PopupMenuItem::new("Set as default")
+                                        .checked(is_default)
+                                        .on_click(move |_, _, cx| {
+                                            models_controller::set_default_model(
+                                                &set_default_id,
+                                                cx,
+                                            );
+                                        }),
+                                )
+                                .item(PopupMenuItem::new("Edit…").on_click(
+                                    move |_, window, cx| {
+                                        let edit_id = edit_id.clone();
+                                        entity_for_edit.update(cx, |view, cx| {
+                                            view.show_edit_model_dialog(edit_id, window, cx);
+                                        });
+                                    },
+                                ))
+                                .item(PopupMenuItem::new("Remove").on_click(
+                                    move |_, _, cx| {
+                                        models_controller::delete_model(delete_id.clone(), cx);
+                                        entity_for_delete.update(cx, |view, cx| {
+                                            view.refresh(cx);
+                                        });
+                                    },
+                                ))
+                            }
+                        }),
+                ),
+            )
+    }
+}
+
+mod add_model_sheet;
+mod dialogs;
+mod provider_keys_sheet;
