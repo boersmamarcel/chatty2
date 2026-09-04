@@ -19,6 +19,7 @@ use super::session_changes::{
 use super::table::{extract_table_preview, inline_table_card_height};
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
+use crate::chatty::views::message_parsing::{ContentSegment, parse_content_segments};
 
 /// Fixed height reported by a collapsed finished turn.
 pub const COLLAPSED_TURN_HEIGHT: f32 = 36.0;
@@ -384,6 +385,15 @@ const MERMAID_DIAGRAM: f32 = 320.0;
 const MATH_BLOCK: f32 = 48.0;
 /// Padding around the bubble body.
 const BUBBLE_PADDING: f32 = 28.0;
+/// Chrome of a `<think>` card in `render_thinking_block`: bottom margin,
+/// vertical padding, and the “Thinking” header row with its own margin.
+const THINKING_CARD_CHROME: f32 = 60.0;
+/// Horizontal frame a `<think>` card takes out of the bubble width
+/// (`p_3` both sides plus the 4px left rule).
+const THINKING_CARD_INSET: f32 = 28.0;
+/// Floor for an inset card's usable width, so a narrow window cannot drive the
+/// wrap estimate to zero or negative.
+const MIN_CARD_WIDTH: f32 = 120.0;
 /// A non-image attachment renders as a filename chip.
 const FILE_ATTACHMENT_ROW: f32 = 56.0;
 /// An image renders as a thumbnail whose wrapper `render_attachments` clamps
@@ -423,9 +433,47 @@ pub fn estimate_message_bubble_height(
         })
         .sum();
 
-    let body = estimate_markdown_height(content, layout);
+    let body = estimate_body_height(content, layout);
 
     (BUBBLE_PADDING + body) * SAFETY_FACTOR + attachment_height
+}
+
+/// Rendered height of a message body, thinking cards included.
+///
+/// `render_message` splits the content on `<think>` tags and renders each
+/// thinking segment as a bordered card, not as prose. Charging those segments
+/// as plain lines left every card's chrome unreserved, so the next turn's
+/// “Working for …” header painted across the card.
+///
+/// The split goes through the renderer's own [`parse_content_segments`] so the
+/// two cannot disagree about where a card starts.
+fn estimate_body_height(content: &str, layout: &TranscriptLayout<'_>) -> f32 {
+    let segments = parse_content_segments(content);
+    if segments.is_empty() {
+        return estimate_markdown_height(content, layout);
+    }
+
+    segments
+        .iter()
+        .map(|segment| match segment {
+            ContentSegment::Text(text) => estimate_markdown_height(text, layout),
+            ContentSegment::Thinking(text) => estimate_thinking_card_height(text, layout),
+        })
+        .sum()
+}
+
+/// Height of one `<think>` card as `render_thinking_block` draws it.
+///
+/// The body is charged at prose line height even though the card renders it at
+/// `text_sm`: the smaller face is the direction that leaves a gap, and a gap
+/// is the failure this estimator is allowed to have.
+fn estimate_thinking_card_height(text: &str, layout: &TranscriptLayout<'_>) -> f32 {
+    let inner = TranscriptLayout {
+        content_width_px: (layout.content_width_px - THINKING_CARD_INSET).max(MIN_CARD_WIDTH),
+        ..*layout
+    };
+
+    THINKING_CARD_CHROME * layout.scale() + estimate_markdown_height(text, &inner)
 }
 
 /// Rendered height of a markdown body, walked line by line.
@@ -821,6 +869,44 @@ mod attachment_height_tests {
             structured_h > prose_h,
             "markdown structure must cost more than the same number of plain \
              lines (prose={prose_h}, structured={structured_h})"
+        );
+    }
+
+    /// A `<think>` segment renders as a bordered card, not as prose. The card
+    /// has to be reserved with its chrome, or the following turn's “Working
+    /// for …” header lands on top of the thinking text.
+    #[test]
+    fn thinking_card_reserves_more_than_the_same_text_as_prose() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let text = "That's not the right URL. Let me click the third article.";
+        let prose = estimate_message_bubble_height(text, &[], &l);
+        let card = estimate_message_bubble_height(&format!("<think>{text}</think>"), &[], &l);
+
+        assert!(
+            card >= prose + THINKING_CARD_CHROME,
+            "a thinking card must reserve its chrome on top of its text \
+             (prose={prose}, card={card})"
+        );
+    }
+
+    /// Text around a thinking card still costs its own lines — the card must
+    /// add to the body, not replace it.
+    #[test]
+    fn thinking_card_adds_to_surrounding_text() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let card_only = estimate_message_bubble_height("<think>reasoning</think>", &[], &l);
+        let with_answer = estimate_message_bubble_height(
+            "<think>reasoning</think>\nHere is the answer.\nSecond line.",
+            &[],
+            &l,
+        );
+
+        assert!(
+            with_answer > card_only,
+            "the answer after a thinking card needs its own lines \
+             (card_only={card_only}, with_answer={with_answer})"
         );
     }
 
