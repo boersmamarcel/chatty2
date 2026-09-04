@@ -39,6 +39,15 @@ pub fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
 }
 
+/// Longest edge, in pixels, of an inline attachment thumbnail rendered under a
+/// chat bubble.
+///
+/// The renderer clamps the thumbnail's wrapper to this box and the transcript
+/// height estimator reserves a slot derived from it, so the two cannot drift.
+/// A thumbnail taller than its reserved slot paints over the following block —
+/// that is what put a full-page screenshot under the to-do panel (AGE-183).
+pub const INLINE_IMAGE_MAX_PX: f32 = 300.0;
+
 /// Attachment paths shown inline under a message bubble (images, charts).
 /// PDFs use artifact cards in the typed transcript instead.
 ///

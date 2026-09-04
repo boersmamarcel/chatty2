@@ -386,10 +386,12 @@ const MATH_BLOCK: f32 = 48.0;
 const BUBBLE_PADDING: f32 = 28.0;
 /// A non-image attachment renders as a filename chip.
 const FILE_ATTACHMENT_ROW: f32 = 56.0;
-/// An image renders as a thumbnail capped at 300x300 by `render_message`,
-/// plus its border and the row's bottom margin. Estimating a chip here is
-/// what made screenshots paint over the following turn.
-const IMAGE_ATTACHMENT_ROW: f32 = 312.0;
+/// An image renders as a thumbnail whose wrapper `render_attachments` clamps
+/// to [`INLINE_IMAGE_MAX_PX`] square, plus its border and the row's bottom
+/// margin. Estimating a chip here is what made screenshots paint over the
+/// following turn, so this is derived from the renderer's own bound rather
+/// than written out again.
+const IMAGE_ATTACHMENT_ROW: f32 = super::artifact_kind::INLINE_IMAGE_MAX_PX + 12.0;
 /// Deliberate over-estimate applied to every bubble.
 ///
 /// The asymmetry is the point: an over-estimate leaves a small gap, an
@@ -620,6 +622,22 @@ mod attachment_height_tests {
         assert!(
             with_image - bare >= 300.0,
             "an image attachment must reserve at least its 300px thumbnail              (bare={bare}, with_image={with_image})"
+        );
+    }
+
+    /// The renderer clamps a thumbnail's wrapper to `INLINE_IMAGE_MAX_PX`
+    /// square; the estimator must reserve at least that, or a full-page
+    /// screenshot paints over the block after it (AGE-183).
+    #[test]
+    fn image_reserve_covers_the_renderer_clamp() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let bare = block_estimated_height(&text_block(vec![]), &l);
+        let with_image = block_estimated_height(&text_block(vec![PathBuf::from("shot.png")]), &l);
+
+        assert!(
+            with_image - bare >= super::super::artifact_kind::INLINE_IMAGE_MAX_PX,
+            "the reserved slot must cover the thumbnail the renderer can draw"
         );
     }
 
