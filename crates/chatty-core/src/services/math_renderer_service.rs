@@ -10,6 +10,9 @@ static RE_OPERATORNAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\\?operatorname\{([^}]+)\}").unwrap());
 static RE_FILL_BLACK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r##"fill="#000000?""##).unwrap());
+/// MiTeX's name for ∂, which Typst now calls `partial`. Word-bounded so it
+/// cannot chew through an identifier that merely contains "diff".
+static RE_DIFF_SYMBOL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bdiff\b").unwrap());
 static RE_STROKE_BLACK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r##"stroke="#000000?""##).unwrap());
 
@@ -185,6 +188,18 @@ impl MathRendererService {
         typst_code = typst_code.replace("dfrac", "frac");
         typst_code = typst_code.replace("pmatrix", "mat");
         typst_code = typst_code.replace("aligned", "cases"); // Approximation for aligned environments
+
+        // MiTeX 0.2.4 emits symbol names from an older Typst. Two of them no
+        // longer resolve against the Typst we compile with, and each one kills
+        // the whole equation:
+        //   `\hbar`    -> `planck.reduce`, but `planck` is ħ itself now and
+        //                 has no `reduce` modifier ("unknown symbol modifier")
+        //   `\partial` -> `diff`, which no longer exists ("unknown variable")
+        // Both are plain renames; check `codex`'s `sym.txt` when adding more.
+        typst_code = typst_code.replace("planck.reduce", "planck");
+        typst_code = RE_DIFF_SYMBOL
+            .replace_all(&typst_code, "partial")
+            .into_owned();
 
         // Fix \operatorname{...} - convert to op("...") for Typst
         // MiTeX may pass through \operatorname as-is or convert it incorrectly
@@ -544,6 +559,24 @@ $ {typst_code} $")
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MiTeX targets an older Typst than we compile with, and a stale symbol
+    /// name fails the whole equation rather than one glyph. These two were
+    /// reported from a real conversation (Schrödinger, Maxwell).
+    #[test]
+    fn renders_math_using_symbols_mitex_names_for_an_older_typst() {
+        let service = MathRendererService::new();
+        for latex in [
+            r"i\hbar \frac{\partial}{\partial t}\Psi(\mathbf{r},t) = \left[ -\frac{\hbar^2}{2m}\nabla^2 + V(\mathbf{r},t) \right] \Psi(\mathbf{r},t)",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}",
+            r"\hbar",
+            r"\partial",
+        ] {
+            service
+                .render_to_svg(latex, false)
+                .unwrap_or_else(|e| panic!("{latex} failed to render: {e:#}"));
+        }
+    }
 
     #[test]
     fn test_cache_starts_empty() {
