@@ -62,6 +62,12 @@ fn verb_for(tool_name: &str, display_name: &str, state: &ToolCallState) -> Strin
         "fetch" => ("Fetching", "Fetched"),
         "git_diff" => ("Diffing", "Diffed"),
         "git_status" => ("Checking", "Checked"),
+        // Synthetic rows for the human-takeover handoffs (AGE-156).
+        "browser_take_control" => (
+            "Taking control of the browser",
+            "Took control of the browser",
+        ),
+        "browser_release_control" => ("Handing the browser back", "Handed the browser back"),
         other => {
             return tense_unknown(display_name, other, state);
         }
@@ -410,6 +416,33 @@ mod tests {
         );
         assert_eq!(label.headline(), "Read docs/poem.md");
         assert!(label.added.is_none());
+    }
+
+    #[test]
+    fn browser_handoffs_read_as_past_tense_sentences_with_the_url() {
+        let take = tool_row_label(
+            "Taking control of the browser",
+            "browser_take_control",
+            &ToolCallState::Success,
+            r#"{"url":"https://example.com"}"#,
+            None,
+        );
+        assert_eq!(
+            take.headline(),
+            "Took control of the browser https://example.com"
+        );
+
+        let release = tool_row_label(
+            "Handing the browser back",
+            "browser_release_control",
+            &ToolCallState::Success,
+            r#"{"url":"https://example.com/docs"}"#,
+            None,
+        );
+        assert_eq!(
+            release.headline(),
+            "Handed the browser back https://example.com/docs"
+        );
     }
 
     #[test]

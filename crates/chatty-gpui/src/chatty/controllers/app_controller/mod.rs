@@ -618,6 +618,9 @@ impl ChattyApp {
                 ChatViewEvent::RegenerateMessage { history_index } => {
                     app.handle_regeneration(*history_index, cx);
                 }
+                ChatViewEvent::BrowserControlChanged { item, streaming } => {
+                    app.handle_browser_control_changed((**item).clone(), *streaming, cx);
+                }
             },
         )
         .detach();

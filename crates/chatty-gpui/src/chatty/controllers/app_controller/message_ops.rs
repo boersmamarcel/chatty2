@@ -1187,6 +1187,35 @@ impl ChattyApp {
         }
     }
 
+    /// Record a browser control handoff (AGE-156) in the active
+    /// conversation's trace. Mid-stream it joins the streaming trace, which
+    /// the stream's own finalization persists; once the turn has settled it
+    /// is appended to the last assistant message and saved right away.
+    pub(super) fn handle_browser_control_changed(
+        &self,
+        item: ToolCallBlock,
+        streaming: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conv_id) = cx.global::<ConversationsStore>().active_id().cloned() else {
+            return;
+        };
+        let recorded = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            let Some(conv) = store.get_conversation_mut(&conv_id) else {
+                return false;
+            };
+            if streaming {
+                conv.ensure_streaming_trace().add_tool_call(item);
+                false
+            } else {
+                conv.append_trace_item_to_last_assistant(TraceItem::ToolCall(item))
+            }
+        });
+        if recorded {
+            self.persist_conversation(&conv_id, cx);
+        }
+    }
+
     /// Handle regeneration of the last assistant message.
     ///
     /// Records the original response as a DPO preference pair, removes the old
