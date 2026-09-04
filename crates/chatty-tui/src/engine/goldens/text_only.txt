@@ -1,0 +1,5 @@
+StreamStarted
+TextChunk("Hello")
+TextChunk(", world")
+StreamCompleted
+=> loop returned Ok

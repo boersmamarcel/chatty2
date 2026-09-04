@@ -224,6 +224,10 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
 }
 
 #[cfg(test)]
+#[path = "streaming_characterization.rs"]
+mod characterization;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chatty_core::services::{AgentTaskController, AgentTodoStatus, StreamChunkHandler};

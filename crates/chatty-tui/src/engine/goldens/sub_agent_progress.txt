@@ -1,0 +1,8 @@
+StreamStarted
+SubAgentProgress("[local agent: researcher] Summarize the changelog")
+SubAgentProgress("Reading CHANGELOG.md")
+SubAgentFinished("Three releases since 0.3.45.")
+ToolCallStarted(id="call-1", "invoke_agent")
+ToolCallResult(id="call-1", "Three releases since 0.3.45.")
+StreamCompleted
+=> loop returned Ok

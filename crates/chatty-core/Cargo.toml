@@ -118,6 +118,9 @@ default = ["mcp", "all-tools"]
 # Workspace still lists rig-mcp (=0.2.5) for the compose bridge; it is not wired here
 # because it pins rmcp ^1.6 and does not provide AgentBuilder MCP helpers.
 mcp = ["rig-agent/rmcp"]
+# Scripted stream fixtures for the frontends' characterization tests (AGE-191).
+# Enabled from chatty-tui / chatty-gpui dev-dependencies, never in a release build.
+test-support = []
 # Enable this feature to get `impl gpui::Global` on core types.
 # A future TUI crate would NOT enable this feature.
 gpui-globals = ["dep:gpui"]

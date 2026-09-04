@@ -52,6 +52,10 @@ pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
 pub mod ssrf_guard;
+/// Scripted stream fixtures for the frontends' characterization tests (AGE-191).
+/// Test-only: enable `chatty-core/test-support` from a dev-dependency.
+#[cfg(feature = "test-support")]
+pub mod stream_fixtures;
 pub mod stream_processor;
 pub mod title_generator;
 #[cfg(feature = "math-render")]
@@ -78,6 +82,10 @@ pub use message_helpers::{extract_user_text, extract_user_text_lines, gather_mcp
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;
+#[cfg(feature = "test-support")]
+pub use stream_fixtures::{
+    Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
+};
 pub use stream_processor::{
     ChunkAction, STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE, StreamChunkHandler,
     install_progress_channel, run_stream_loop,

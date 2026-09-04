@@ -1,0 +1,5 @@
+StreamStarted
+TextChunk("Answer.")
+TokenUsage(in=1234, out=56)
+StreamCompleted
+=> loop returned Ok
