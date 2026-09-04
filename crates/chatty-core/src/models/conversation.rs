@@ -757,11 +757,19 @@ fn append_trace_item_state(entries: &mut [MessageEntry], item: TraceItem) -> boo
     else {
         return false;
     };
-    let mut trace = entry
-        .system_trace
-        .take()
-        .and_then(|v| serde_json::from_value::<SystemTrace>(v).ok())
-        .unwrap_or_default();
+    // Never `take()` the stored trace first: a trace that fails to parse
+    // or re-serialize must stay exactly as it was rather than be replaced
+    // by one holding only the new item.
+    let mut trace = match entry.system_trace.as_ref() {
+        Some(value) => match serde_json::from_value::<SystemTrace>(value.clone()) {
+            Ok(trace) => trace,
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to parse stored trace; not appending item");
+                return false;
+            }
+        },
+        None => SystemTrace::new(),
+    };
     trace.items.push(item);
     match serde_json::to_value(&trace) {
         Ok(value) => {
@@ -1001,6 +1009,15 @@ mod tests {
         let trace: SystemTrace =
             serde_json::from_value(entries[0].system_trace.clone().unwrap()).unwrap();
         assert_eq!(trace.items.len(), 2);
+    }
+
+    #[test]
+    fn append_trace_item_leaves_an_unparseable_trace_untouched() {
+        let garbage = serde_json::json!("not a trace");
+        let mut entries = vec![entry(Message::assistant("a"), Some(garbage.clone()))];
+
+        assert!(!append_trace_item_state(&mut entries, handoff_item()));
+        assert_eq!(entries[0].system_trace, Some(garbage));
     }
 
     #[test]

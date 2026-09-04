@@ -140,6 +140,16 @@ fn subject_for(tool_name: &str, input: &str, display_name: &str) -> String {
             }
         }
     }
+    // The handoff rows' only subject is the URL, returned above when present.
+    // With none (the session was still opening), the display-name fallback
+    // below would split "Taking control of the browser" and read
+    // "Took control of the browser control of the browser".
+    if matches!(
+        tool_name,
+        "browser_take_control" | "browser_release_control"
+    ) {
+        return String::new();
+    }
     // If display already embeds a specific subject ("Read README.md"), keep it
     // only when it isn't the generic friendly name.
     let display = display_name.trim();
@@ -443,6 +453,18 @@ mod tests {
             release.headline(),
             "Handed the browser back https://example.com/docs"
         );
+    }
+
+    #[test]
+    fn browser_handoff_without_a_url_is_just_the_verb() {
+        let label = tool_row_label(
+            "Taking control of the browser",
+            "browser_take_control",
+            &ToolCallState::Success,
+            r#"{"url":""}"#,
+            None,
+        );
+        assert_eq!(label.headline(), "Took control of the browser");
     }
 
     #[test]
