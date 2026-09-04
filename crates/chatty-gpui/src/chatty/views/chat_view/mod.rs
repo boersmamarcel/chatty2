@@ -340,6 +340,58 @@ impl ChatView {
         &self.chat_input_state
     }
 
+    /// Get the artifact panel entity (for the top-right unfold button in
+    /// `app_view.rs`/`titlebar.rs`, which needs to read its mode and toggle it).
+    pub fn artifact_view(&self) -> &Entity<ArtifactView> {
+        &self.artifact_view
+    }
+
+    /// Unfold/fold the artifact panel — mirrors the sidebar's own
+    /// fold/unfold toggle. Reveals whatever was last open; folding it away
+    /// again stays available from the panel's own close button and Escape.
+    pub fn toggle_artifact_panel(&mut self, cx: &mut Context<Self>) {
+        self.artifact_view.update(cx, |view, cx| {
+            let next = if view.mode == ArtifactMode::Closed {
+                ArtifactMode::Docked
+            } else {
+                ArtifactMode::Closed
+            };
+            view.set_mode(next, cx);
+        });
+    }
+
+    /// Manually start a browser session in the artifact panel — independent
+    /// of any agent tool call, from the unfold button's "Browser" menu item.
+    /// Reuses the conversation's existing session if the agent already
+    /// built one this turn, rather than starting a second, disconnected one.
+    pub fn open_manual_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(conv_id) = self.conversation_id.clone() else {
+            return;
+        };
+        let manager = chatty_core::services::browser::registry::for_conversation(&conv_id)
+            .unwrap_or_else(|| {
+                let settings = cx.try_global::<ExecutionSettingsModel>();
+                let workspace = settings
+                    .and_then(|s| s.workspace_dir.clone())
+                    .map(std::path::PathBuf::from);
+                let internet_access = settings.map(|s| s.fetch_enabled).unwrap_or(true);
+                let manager = std::sync::Arc::new(if internet_access {
+                    chatty_core::services::browser::BrowserManager::open_web(workspace)
+                } else {
+                    chatty_core::services::browser::BrowserManager::lane_a(workspace)
+                });
+                chatty_core::services::browser::registry::register(
+                    conv_id.clone(),
+                    manager.clone(),
+                );
+                manager
+            });
+        self.artifact_dismissed = false;
+        self.artifact_view.update(cx, |view, cx| {
+            view.open_browser(manager, cx);
+        });
+    }
+
     /// Get a reference to all displayed messages (for slash-command handlers, etc.).
     pub fn messages(&self) -> &[DisplayMessage] {
         &self.messages
