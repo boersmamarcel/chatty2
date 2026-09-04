@@ -945,6 +945,11 @@ impl ChatEngine {
         if let Some(flag) = &self.cancel_flag {
             flag.store(true, Ordering::Relaxed);
         }
+        // A blocked `ask_user` call never reaches the stream loop's cancel-flag
+        // check, so drop the pending request too. Without this, stopping does
+        // nothing visible until the tool's five-minute timeout expires.
+        self.pending_clarification = None;
+        self.clarification_store.cancel_all();
     }
 
     /// Approve a pending tool execution (checks both execution and write stores)
