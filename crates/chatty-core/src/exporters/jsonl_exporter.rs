@@ -382,6 +382,7 @@ mod tests {
     use super::*;
     use crate::models::conversation::{MessageFeedback, RegenerationRecord};
     use crate::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+    use crate::settings::models::models_store::ModelSource;
     use crate::settings::models::providers_store::ProviderType;
     use rig_core::completion::message::Text;
     use std::collections::HashMap;
