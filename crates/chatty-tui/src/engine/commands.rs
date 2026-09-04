@@ -79,6 +79,8 @@ impl ChatEngine {
         self.total_output_tokens = 0;
         self.pin_to_bottom();
         self.pending_approval = None;
+        self.pending_clarification = None;
+        self.clarification_store.cancel_all();
         self.model_picker = None;
         self.tool_picker = None;
         self.conversation = None;
