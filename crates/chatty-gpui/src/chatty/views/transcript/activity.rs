@@ -303,7 +303,25 @@ impl RenderOnce for ActivityGroup {
                     .border_l_1()
                     .border_color(cx.theme().border)
                     .ml_3()
-                    .children(self.tools.into_iter().map(ToolRow::new)),
+                    .children({
+                        // Number repeated failures of the same tool so a retry
+                        // is visibly a retry (AGE-187).
+                        let mut failures: std::collections::HashMap<String, usize> =
+                            std::collections::HashMap::new();
+                        self.tools
+                            .into_iter()
+                            .map(|tool| {
+                                let attempt = if matches!(tool.state, ToolCallState::Error(_)) {
+                                    let n = failures.entry(tool.tool_name.clone()).or_insert(0);
+                                    *n += 1;
+                                    *n
+                                } else {
+                                    1
+                                };
+                                ToolRow::new(tool).attempt(attempt)
+                            })
+                            .collect::<Vec<_>>()
+                    }),
             )
     }
 }

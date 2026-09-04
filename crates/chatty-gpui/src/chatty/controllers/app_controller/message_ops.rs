@@ -80,7 +80,13 @@ impl ChattyApp {
 
         // Block message sending until app is ready (initial conversation created/loaded)
         if !self.is_ready {
-            debug!("Not ready yet, ignoring message");
+            // A dropped send is indistinguishable from a hung model, so this
+            // has to be loud (AGE-151, and CLAUDE.md's no-silent-failures
+            // rule).
+            warn!(
+                show_in_transcript,
+                "Message dropped: app is not ready yet (no conversation loaded)"
+            );
             return;
         }
 
@@ -640,13 +646,35 @@ impl ChattyApp {
             }
             StreamManagerEvent::StreamEnded {
                 conversation_id,
+                epoch,
                 status,
                 token_usage,
                 trace_json,
                 pending_artifacts,
                 api_turn_count,
             } => {
-                debug!(conv_id = %conversation_id, status = ?status, "StreamManager: stream ended");
+                debug!(conv_id = %conversation_id, epoch = *epoch, status = ?status, "StreamManager: stream ended");
+
+                // `StreamEnded` is delivered on the next effect flush, but a
+                // protocol follow-up registers the next stream synchronously
+                // right after `finalize_stream` returns. Without this guard,
+                // turn N's end event arrives after turn N+1 has started and
+                // tears it down: the UI stops streaming, and the still-empty
+                // response is committed as an empty assistant message
+                // (AGE-151).
+                let is_current = cx
+                    .try_global::<GlobalStreamManager>()
+                    .and_then(|g| g.get())
+                    .map(|mgr| mgr.read(cx).is_current_epoch(conversation_id, *epoch))
+                    .unwrap_or(true);
+                if !is_current {
+                    warn!(
+                        conv_id = %conversation_id,
+                        epoch = *epoch,
+                        "Ignoring StreamEnded from a superseded stream"
+                    );
+                    return;
+                }
 
                 // Allow this conversation to be evicted again
                 if conversation_id != "__pending__" {
@@ -823,6 +851,21 @@ impl ChattyApp {
                         .unwrap_or_default();
                     let has_trace = trace_json.is_some();
                     let model_id = conv.model_id().to_string();
+
+                    // A turn that produced neither text nor a trace has nothing
+                    // to persist. Committing it wrote an empty assistant
+                    // message into history — the billed-but-empty turn in
+                    // AGE-151 — which is worse than no turn at all: it is
+                    // indistinguishable from a real empty answer and it goes
+                    // back to the provider on the next request.
+                    if response_text.trim().is_empty() && !has_trace {
+                        warn!(
+                            conv_id = %conv_id,
+                            "Stream completed with no text and no trace; dropping the turn rather than persisting an empty message"
+                        );
+                        return (false, None, Some(model_id));
+                    }
+
                     conv.finalize_response(response_text, artifact_paths, trace_json);
                     let msg_count = conv.message_count();
                     let traces_len = conv.entries().len();

@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chatty_core::models::message_types::{ApprovalState, SystemTrace, ToolCallState, TraceItem};
+use chatty_core::models::message_types::{
+    ApprovalState, SystemTrace, ToolCallBlock, ToolCallState, TraceItem,
+};
 use gpui::{Pixels, Size, px, size};
 
 use super::activity::{RunTally, classify_tool};
@@ -16,6 +19,7 @@ use super::session_changes::{
 use super::table::{extract_table_preview, inline_table_card_height};
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
+use crate::chatty::views::message_parsing::{ContentSegment, parse_content_segments};
 
 /// Fixed height reported by a collapsed finished turn.
 pub const COLLAPSED_TURN_HEIGHT: f32 = 36.0;
@@ -298,37 +302,126 @@ pub fn plan_turn_index(turns: &[Turn]) -> Option<usize> {
     })
 }
 
-/// Approximate usable text width inside a message bubble for line wrapping.
-pub fn transcript_chars_per_line(content_width_px: f32) -> f32 {
-    const AVG_CHAR_WIDTH: f32 = 7.2;
-    const MIN_CHARS: f32 = 16.0;
-    const MAX_CHARS: f32 = 80.0;
-    (content_width_px / AVG_CHAR_WIDTH).clamp(MIN_CHARS, MAX_CHARS)
+/// Layout inputs the height estimator needs.
+///
+/// Bundled into one struct because the estimator kept growing dimensions
+/// (font size, per-block expansion state) that would otherwise be threaded
+/// through every block arm one parameter at a time.
+#[derive(Clone, Copy, Debug)]
+pub struct TranscriptLayout<'a> {
+    /// Usable width inside a bubble, in px.
+    pub content_width_px: f32,
+    /// The app's configured font size. `GeneralSettingsModel` defaults to 14.
+    pub font_size: f32,
+    /// Number of steps in the active plan, for `Block::Plan`.
+    pub plan_steps: usize,
+    /// Expansion state of activity cards, keyed by `BlockId.0`. An expanded
+    /// card is several times taller than a collapsed one; estimating every
+    /// card as collapsed is what made later blocks paint over it (AGE-183).
+    pub activity_expanded: &'a HashMap<u64, bool>,
 }
+
+/// Font size the estimator's pixel constants were measured at.
+pub const BASE_FONT_SIZE: f32 = 14.0;
+
+impl TranscriptLayout<'_> {
+    /// How much taller/wider everything is than at [`BASE_FONT_SIZE`].
+    ///
+    /// Clamped below at 1.0: a smaller font may render shorter than modeled,
+    /// and shrinking the estimate is the direction that overlaps text.
+    fn scale(&self) -> f32 {
+        (self.font_size / BASE_FONT_SIZE).max(1.0)
+    }
+
+    fn line_height(&self) -> f32 {
+        LINE_HEIGHT * self.scale()
+    }
+
+    /// Approximate usable text width inside a message bubble for wrapping.
+    fn chars_per_line(&self) -> f32 {
+        const MIN_CHARS: f32 = 16.0;
+        const MAX_CHARS: f32 = 80.0;
+        (self.content_width_px / (AVG_CHAR_WIDTH * self.scale())).clamp(MIN_CHARS, MAX_CHARS)
+    }
+
+    /// Same, for the narrower monospace column inside a code fence.
+    fn mono_chars_per_line(&self) -> f32 {
+        const MIN_CHARS: f32 = 12.0;
+        const MAX_CHARS: f32 = 100.0;
+        // Fences are inset by their frame, so subtract the horizontal padding.
+        ((self.content_width_px - CODE_FENCE_INSET) / (MONO_CHAR_WIDTH * self.scale()))
+            .clamp(MIN_CHARS, MAX_CHARS)
+    }
+
+    fn is_activity_expanded(&self, id: u64, tools: &[ToolCallBlock]) -> bool {
+        // Mirrors `render_typed_block`: a failed group is always expanded.
+        let default_open = RunTally::has_failure(tools);
+        self.activity_expanded
+            .get(&id)
+            .copied()
+            .unwrap_or(default_open)
+    }
+}
+
+/// Base line box for prose at [`BASE_FONT_SIZE`].
+const LINE_HEIGHT: f32 = 22.0;
+/// Average prose glyph advance at [`BASE_FONT_SIZE`].
+const AVG_CHAR_WIDTH: f32 = 7.2;
+/// Average monospace glyph advance at [`BASE_FONT_SIZE`].
+const MONO_CHAR_WIDTH: f32 = 8.4;
+/// Line box inside a fenced code block.
+const CODE_LINE_HEIGHT: f32 = 20.0;
+/// A fence renders through `CodeBlockComponent`: header row + vertical padding.
+const CODE_FENCE_CHROME: f32 = 44.0;
+/// Horizontal frame a fence takes out of the bubble width.
+const CODE_FENCE_INSET: f32 = 32.0;
+/// Vertical rhythm between paragraphs (what a blank source line becomes).
+const PARAGRAPH_MARGIN: f32 = 8.0;
+/// A rendered table row.
+const TABLE_ROW_HEIGHT: f32 = 28.0;
+/// A ```mermaid fence renders as a diagram, not as its source lines.
+const MERMAID_DIAGRAM: f32 = 320.0;
+/// A `$$ … $$` display-math region renders as an SVG.
+const MATH_BLOCK: f32 = 48.0;
+/// Padding around the bubble body.
+const BUBBLE_PADDING: f32 = 28.0;
+/// Chrome of a `<think>` card in `render_thinking_block`: bottom margin,
+/// vertical padding, and the “Thinking” header row with its own margin.
+const THINKING_CARD_CHROME: f32 = 60.0;
+/// Horizontal frame a `<think>` card takes out of the bubble width
+/// (`p_3` both sides plus the 4px left rule).
+const THINKING_CARD_INSET: f32 = 28.0;
+/// Floor for an inset card's usable width, so a narrow window cannot drive the
+/// wrap estimate to zero or negative.
+const MIN_CARD_WIDTH: f32 = 120.0;
+/// A non-image attachment renders as a filename chip.
+const FILE_ATTACHMENT_ROW: f32 = 56.0;
+/// An image renders as a thumbnail whose wrapper `render_attachments` clamps
+/// to [`INLINE_IMAGE_MAX_PX`] square, plus its border and the row's bottom
+/// margin. Estimating a chip here is what made screenshots paint over the
+/// following turn, so this is derived from the renderer's own bound rather
+/// than written out again.
+const IMAGE_ATTACHMENT_ROW: f32 = super::artifact_kind::INLINE_IMAGE_MAX_PX + 12.0;
+/// Deliberate over-estimate applied to every bubble.
+///
+/// The asymmetry is the point: an over-estimate leaves a small gap, an
+/// under-estimate paints the next turn on top of this one. They are not
+/// equally bad, so the estimator does not treat them as if they were.
+const SAFETY_FACTOR: f32 = 1.05;
 
 /// Height of a user/assistant bubble rendered via [`render_message`].
 ///
 /// Virtual-list slots use a fixed height; under-estimating here makes the next
 /// turn paint on top of this one (e.g. user prompt + “Worked for…” + artifact).
+///
+/// The walk is structural rather than flat: `render_message` renders markdown,
+/// so headings, fences, tables, math and mermaid each get their rendered
+/// footprint instead of being charged one prose line apiece.
 pub fn estimate_message_bubble_height(
     content: &str,
     attachments: &[PathBuf],
-    content_width_px: f32,
+    layout: &TranscriptLayout<'_>,
 ) -> f32 {
-    const LINE_HEIGHT: f32 = 22.0;
-    const BUBBLE_PADDING: f32 = 28.0;
-    /// A non-image attachment renders as a filename chip.
-    const FILE_ATTACHMENT_ROW: f32 = 56.0;
-    /// An image renders as a thumbnail capped at 300x300 by `render_message`,
-    /// plus its border and the row's bottom margin. Estimating a chip here is
-    /// what made screenshots paint over the following turn.
-    const IMAGE_ATTACHMENT_ROW: f32 = 312.0;
-
-    let chars_per_line = transcript_chars_per_line(content_width_px);
-    let wrapped_lines = (content.len().max(1) as f32 / chars_per_line).ceil();
-    let explicit_lines = content.lines().count().max(1) as f32;
-    let lines = wrapped_lines.max(explicit_lines);
-
     let attachment_height: f32 = attachments
         .iter()
         .map(|path| {
@@ -340,12 +433,220 @@ pub fn estimate_message_bubble_height(
         })
         .sum();
 
-    BUBBLE_PADDING + lines * LINE_HEIGHT + attachment_height
+    let body = estimate_body_height(content, layout);
+
+    (BUBBLE_PADDING + body) * SAFETY_FACTOR + attachment_height
+}
+
+/// Rendered height of a message body, thinking cards included.
+///
+/// `render_message` splits the content on `<think>` tags and renders each
+/// thinking segment as a bordered card, not as prose. Charging those segments
+/// as plain lines left every card's chrome unreserved, so the next turn's
+/// “Working for …” header painted across the card.
+///
+/// The split goes through the renderer's own [`parse_content_segments`] so the
+/// two cannot disagree about where a card starts.
+fn estimate_body_height(content: &str, layout: &TranscriptLayout<'_>) -> f32 {
+    let segments = parse_content_segments(content);
+    if segments.is_empty() {
+        return estimate_markdown_height(content, layout);
+    }
+
+    segments
+        .iter()
+        .map(|segment| match segment {
+            ContentSegment::Text(text) => estimate_markdown_height(text, layout),
+            ContentSegment::Thinking(text) => estimate_thinking_card_height(text, layout),
+        })
+        .sum()
+}
+
+/// Height of one `<think>` card as `render_thinking_block` draws it.
+///
+/// The body is charged at prose line height even though the card renders it at
+/// `text_sm`: the smaller face is the direction that leaves a gap, and a gap
+/// is the failure this estimator is allowed to have.
+fn estimate_thinking_card_height(text: &str, layout: &TranscriptLayout<'_>) -> f32 {
+    let inner = TranscriptLayout {
+        content_width_px: (layout.content_width_px - THINKING_CARD_INSET).max(MIN_CARD_WIDTH),
+        ..*layout
+    };
+
+    THINKING_CARD_CHROME * layout.scale() + estimate_markdown_height(text, &inner)
+}
+
+/// Rendered height of a markdown body, walked line by line.
+///
+/// Every branch sums per line rather than taking `max(wrapped, explicit)`.
+/// Both of those were lower bounds, and the max of two lower bounds is still a
+/// lower bound — mixed markdown (many short list lines plus a few long
+/// paragraphs) defeated both at once (AGE-179).
+fn estimate_markdown_height(content: &str, layout: &TranscriptLayout<'_>) -> f32 {
+    let line_height = layout.line_height();
+    let scale = layout.scale();
+    let chars_per_line = layout.chars_per_line();
+    let mono_chars_per_line = layout.mono_chars_per_line();
+
+    let mut height = 0.0_f32;
+    let mut fence: Option<FenceKind> = None;
+    let mut fence_lines = 0.0_f32;
+    let mut in_math = false;
+    let mut math_lines = 0.0_f32;
+
+    for raw in content.lines() {
+        let line = raw.trim_end();
+        let trimmed = line.trim_start();
+
+        if let Some(kind) = fence {
+            if is_fence_delimiter(trimmed) {
+                height += close_fence(kind, fence_lines, scale);
+                fence = None;
+                fence_lines = 0.0;
+            } else {
+                fence_lines += wrapped_lines(line.len(), mono_chars_per_line);
+            }
+            continue;
+        }
+
+        if is_fence_delimiter(trimmed) {
+            fence = Some(FenceKind::from_info(&trimmed[3..]));
+            fence_lines = 0.0;
+            continue;
+        }
+
+        // `$$` toggles a display-math region that renders as one SVG. A long
+        // equation renders taller than the one-line minimum, so the region
+        // costs at least its source's worth of rows.
+        if trimmed == "$$" {
+            if in_math {
+                height += math_region_height(math_lines, line_height, scale);
+                math_lines = 0.0;
+            }
+            in_math = !in_math;
+            continue;
+        }
+        if in_math {
+            math_lines += 1.0;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            height += PARAGRAPH_MARGIN * scale;
+            continue;
+        }
+
+        if let Some(level) = heading_level(trimmed) {
+            height += heading_height(level, scale);
+            continue;
+        }
+
+        if trimmed.starts_with('|') {
+            height += TABLE_ROW_HEIGHT * scale;
+            continue;
+        }
+
+        height += wrapped_lines(line.len(), chars_per_line) * line_height;
+    }
+
+    // An unterminated fence still renders as a frame.
+    if let Some(kind) = fence {
+        height += close_fence(kind, fence_lines, scale);
+    }
+    if in_math {
+        height += math_region_height(math_lines, line_height, scale);
+    }
+
+    // An empty body still occupies one line.
+    height.max(line_height)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FenceKind {
+    Code,
+    Mermaid,
+}
+
+impl FenceKind {
+    fn from_info(info: &str) -> Self {
+        if info.trim().eq_ignore_ascii_case("mermaid") {
+            Self::Mermaid
+        } else {
+            Self::Code
+        }
+    }
+}
+
+/// Height a fence contributes once closed.
+///
+/// A mermaid fence is charged its rendered diagram, not its source: ten lines
+/// of source that render as a 300px diagram were being charged 220px.
+fn close_fence(kind: FenceKind, source_lines: f32, scale: f32) -> f32 {
+    match kind {
+        FenceKind::Mermaid => MERMAID_DIAGRAM * scale,
+        FenceKind::Code => CODE_FENCE_CHROME * scale + source_lines * CODE_LINE_HEIGHT * scale,
+    }
+}
+
+fn is_fence_delimiter(trimmed: &str) -> bool {
+    trimmed.starts_with("```")
+}
+
+/// ATX heading level, if this line is one.
+fn heading_level(trimmed: &str) -> Option<u8> {
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    // `#hashtag` is not a heading; a heading needs a space after the hashes.
+    match trimmed.chars().nth(hashes) {
+        Some(' ') => Some(hashes as u8),
+        _ => None,
+    }
+}
+
+/// Headings render larger than body text and carry their own margin.
+fn heading_height(level: u8, scale: f32) -> f32 {
+    let factor = match level {
+        1 => 1.8,
+        2 => 1.5,
+        3 => 1.3,
+        _ => 1.15,
+    };
+    (LINE_HEIGHT * factor + PARAGRAPH_MARGIN) * scale
+}
+
+/// Height of one `$$ … $$` region.
+///
+/// At least the rendered SVG's minimum, and never less than the source it was
+/// written on — a multi-line equation renders tall.
+fn math_region_height(source_lines: f32, line_height: f32, scale: f32) -> f32 {
+    (MATH_BLOCK * scale).max(source_lines * line_height)
+}
+
+/// Rows a line of `len` bytes wraps into. Never below one: an empty line in a
+/// list or fence still occupies a row.
+///
+/// Bytes, not chars, on purpose: for non-ASCII text a byte count over-counts
+/// rows, and over-estimating leaves a gap where under-estimating overlaps text.
+fn wrapped_lines(len: usize, chars_per_line: f32) -> f32 {
+    ((len as f32) / chars_per_line).ceil().max(1.0)
 }
 
 #[cfg(test)]
 mod attachment_height_tests {
     use super::*;
+
+    /// Default layout for tests: 600px wide, default font, no plan, nothing
+    /// expanded.
+    fn layout(expanded: &HashMap<u64, bool>) -> TranscriptLayout<'_> {
+        TranscriptLayout {
+            content_width_px: 600.0,
+            font_size: BASE_FONT_SIZE,
+            plan_steps: 0,
+            activity_expanded: expanded,
+        }
+    }
 
     fn text_block(attachments: Vec<PathBuf>) -> Block {
         Block::Text {
@@ -361,9 +662,10 @@ mod attachment_height_tests {
     /// image straight over the following turn.
     #[test]
     fn assistant_image_attachment_reserves_thumbnail_height() {
-        let bare = block_estimated_height(&text_block(vec![]), 0, 600.0);
-        let with_image =
-            block_estimated_height(&text_block(vec![PathBuf::from("shot.png")]), 0, 600.0);
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let bare = block_estimated_height(&text_block(vec![]), &l);
+        let with_image = block_estimated_height(&text_block(vec![PathBuf::from("shot.png")]), &l);
 
         assert!(
             with_image - bare >= 300.0,
@@ -371,11 +673,28 @@ mod attachment_height_tests {
         );
     }
 
+    /// The renderer clamps a thumbnail's wrapper to `INLINE_IMAGE_MAX_PX`
+    /// square; the estimator must reserve at least that, or a full-page
+    /// screenshot paints over the block after it (AGE-183).
+    #[test]
+    fn image_reserve_covers_the_renderer_clamp() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let bare = block_estimated_height(&text_block(vec![]), &l);
+        let with_image = block_estimated_height(&text_block(vec![PathBuf::from("shot.png")]), &l);
+
+        assert!(
+            with_image - bare >= super::super::artifact_kind::INLINE_IMAGE_MAX_PX,
+            "the reserved slot must cover the thumbnail the renderer can draw"
+        );
+    }
+
     #[test]
     fn non_image_attachment_reserves_only_a_chip() {
-        let bare = block_estimated_height(&text_block(vec![]), 0, 600.0);
-        let with_file =
-            block_estimated_height(&text_block(vec![PathBuf::from("report.pdf")]), 0, 600.0);
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let bare = block_estimated_height(&text_block(vec![]), &l);
+        let with_file = block_estimated_height(&text_block(vec![PathBuf::from("report.pdf")]), &l);
         let delta = with_file - bare;
         assert!(
             (40.0..100.0).contains(&delta),
@@ -383,13 +702,300 @@ mod attachment_height_tests {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Height estimator regressions (AGE-179, AGE-183)
+    //
+    // The virtual list gives each turn a fixed slot and does not clip its
+    // contents, so an under-estimate paints the next turn on top of this one.
+    // Over-estimating leaves a small gap. The two are not equally bad, and
+    // these tests are written in that direction.
+    // -------------------------------------------------------------------
+
+    fn tool(name: &str, state: ToolCallState) -> ToolCallBlock {
+        ToolCallBlock {
+            id: name.to_string(),
+            tool_name: name.to_string(),
+            display_name: name.to_string(),
+            input: String::new(),
+            output: None,
+            output_preview: None,
+            state,
+            duration: None,
+            text_before: String::new(),
+            source: chatty_core::models::message_types::ToolSource::Local,
+            execution_engine: None,
+        }
+    }
+
+    fn activity(id: u64, tools: Vec<ToolCallBlock>) -> Block {
+        Block::Activity {
+            id: BlockId(id),
+            tools,
+        }
+    }
+
+    /// AGE-183: an expanded "Explored 2 files" card was charged the same flat
+    /// 40px as a collapsed one, so the blocks after it — the streaming status
+    /// header and the to-do panel — were placed inside its bounds.
+    #[test]
+    fn expanded_activity_card_is_taller_than_collapsed() {
+        let tools = vec![
+            tool("browser_navigate", ToolCallState::Success),
+            tool("browser_screenshot", ToolCallState::Success),
+        ];
+        let block = activity(7, tools);
+
+        let collapsed_map = HashMap::from([(7u64, false)]);
+        let expanded_map = HashMap::from([(7u64, true)]);
+        let collapsed = block_estimated_height(&block, &layout(&collapsed_map));
+        let expanded = block_estimated_height(&block, &layout(&expanded_map));
+
+        assert!(
+            expanded > collapsed,
+            "an expanded card must reserve more than a collapsed one \
+             (collapsed={collapsed}, expanded={expanded})"
+        );
+        assert!(
+            expanded >= ACTIVITY_HEADER + 2.0 * ACTIVITY_ROW,
+            "an expanded 2-row card must reserve header + both rows, got {expanded}"
+        );
+    }
+
+    /// A failed group renders expanded whether or not the user opened it, so
+    /// the estimate has to follow that default.
+    #[test]
+    fn failed_activity_card_is_estimated_expanded_by_default() {
+        let block = activity(
+            9,
+            vec![
+                tool("browser_navigate", ToolCallState::Error("boom".into())),
+                tool("browser_navigate", ToolCallState::Error("boom".into())),
+            ],
+        );
+        let empty = HashMap::new();
+        let height = block_estimated_height(&block, &layout(&empty));
+        assert!(
+            height >= ACTIVITY_HEADER + 2.0 * ACTIVITY_ROW,
+            "a failed group renders expanded, got {height}"
+        );
+    }
+
+    #[test]
+    fn expanded_activity_grows_with_row_count() {
+        let expanded_map = HashMap::from([(1u64, true)]);
+        let two = block_estimated_height(
+            &activity(
+                1,
+                vec![
+                    tool("a", ToolCallState::Success),
+                    tool("b", ToolCallState::Success),
+                ],
+            ),
+            &layout(&expanded_map),
+        );
+        let five = block_estimated_height(
+            &activity(
+                1,
+                (0..5)
+                    .map(|i| tool(&format!("t{i}"), ToolCallState::Success))
+                    .collect(),
+            ),
+            &layout(&expanded_map),
+        );
+        assert!(
+            five >= two + 3.0 * ACTIVITY_ROW,
+            "each row needs its own space"
+        );
+    }
+
+    /// AGE-179 defect 1: `max(wrapped, explicit)` is the max of two lower
+    /// bounds, which is still a lower bound. Mixed markdown defeats both.
+    #[test]
+    fn estimate_never_below_the_per_line_sum() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        // Many short list lines plus a few long wrapping paragraphs — the
+        // shape `max()` under-counts.
+        let mut content = String::new();
+        for i in 0..120 {
+            content.push_str(&format!("- short item {i}\n"));
+        }
+        for _ in 0..5 {
+            content.push_str(&"word ".repeat(80));
+            content.push('\n');
+        }
+
+        let per_line_sum: f32 = content
+            .lines()
+            .map(|line| wrapped_lines(line.len(), l.chars_per_line()))
+            .sum::<f32>()
+            * l.line_height();
+
+        let estimate = estimate_message_bubble_height(&content, &[], &l);
+        assert!(
+            estimate >= per_line_sum,
+            "estimate {estimate} is below the per-line sum {per_line_sum}"
+        );
+    }
+
+    #[test]
+    fn estimate_is_monotone_in_content_length() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let mut previous = 0.0_f32;
+        for n in [1usize, 10, 50, 200, 800] {
+            let content = "some prose line here\n".repeat(n);
+            let height = estimate_message_bubble_height(&content, &[], &l);
+            assert!(
+                height >= previous,
+                "estimate shrank as content grew ({previous} -> {height})"
+            );
+            previous = height;
+        }
+    }
+
+    /// AGE-179 defect 2: the rendered content is markdown, so a heading and a
+    /// fence cost more than the flat 22px per source line they were charged.
+    #[test]
+    fn markdown_structure_costs_more_than_flat_prose() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let prose = "aaaa\nbbbb\ncccc\ndddd\neeee\n";
+        let structured = "# Heading\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n";
+
+        let prose_h = estimate_message_bubble_height(prose, &[], &l);
+        let structured_h = estimate_message_bubble_height(structured, &[], &l);
+        assert!(
+            structured_h > prose_h,
+            "markdown structure must cost more than the same number of plain \
+             lines (prose={prose_h}, structured={structured_h})"
+        );
+    }
+
+    /// A `<think>` segment renders as a bordered card, not as prose. The card
+    /// has to be reserved with its chrome, or the following turn's “Working
+    /// for …” header lands on top of the thinking text.
+    #[test]
+    fn thinking_card_reserves_more_than_the_same_text_as_prose() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let text = "That's not the right URL. Let me click the third article.";
+        let prose = estimate_message_bubble_height(text, &[], &l);
+        let card = estimate_message_bubble_height(&format!("<think>{text}</think>"), &[], &l);
+
+        assert!(
+            card >= prose + THINKING_CARD_CHROME,
+            "a thinking card must reserve its chrome on top of its text \
+             (prose={prose}, card={card})"
+        );
+    }
+
+    /// Text around a thinking card still costs its own lines — the card must
+    /// add to the body, not replace it.
+    #[test]
+    fn thinking_card_adds_to_surrounding_text() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let card_only = estimate_message_bubble_height("<think>reasoning</think>", &[], &l);
+        let with_answer = estimate_message_bubble_height(
+            "<think>reasoning</think>\nHere is the answer.\nSecond line.",
+            &[],
+            &l,
+        );
+
+        assert!(
+            with_answer > card_only,
+            "the answer after a thinking card needs its own lines \
+             (card_only={card_only}, with_answer={with_answer})"
+        );
+    }
+
+    #[test]
+    fn fenced_block_reserves_its_frame() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let without = estimate_message_bubble_height("intro\n", &[], &l);
+        let with = estimate_message_bubble_height("intro\n```\nlet x = 1;\n```\n", &[], &l);
+        assert!(
+            with - without >= CODE_FENCE_CHROME,
+            "a fence must reserve its header and padding, got {}",
+            with - without
+        );
+    }
+
+    /// Mirrors the existing image-attachment test: a mermaid source block
+    /// renders as a diagram, not as its handful of source lines.
+    #[test]
+    fn mermaid_segment_reserves_its_rendered_footprint() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let bare = estimate_message_bubble_height("intro\n", &[], &l);
+        let diagram =
+            estimate_message_bubble_height("intro\n```mermaid\ngraph TD;\nA-->B;\n```\n", &[], &l);
+        assert!(
+            diagram - bare >= MERMAID_DIAGRAM,
+            "a mermaid fence must reserve its rendered diagram, got {}",
+            diagram - bare
+        );
+    }
+
+    #[test]
+    fn display_math_reserves_its_svg() {
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let bare = estimate_message_bubble_height("intro\n", &[], &l);
+        let math = estimate_message_bubble_height("intro\n$$\nx = 1\n$$\n", &[], &l);
+        assert!(math > bare, "display math must reserve its rendered height");
+    }
+
+    /// AGE-179 defect 3: the constants encode the 14px default, but font size
+    /// is user-configurable, so the shortfall scaled with answer length.
+    #[test]
+    fn estimate_grows_with_font_size() {
+        let expanded = HashMap::new();
+        let content = "# Plan\n\n1. first step\n2. second step\n".repeat(20);
+
+        let small = estimate_message_bubble_height(
+            &content,
+            &[],
+            &TranscriptLayout {
+                content_width_px: 600.0,
+                font_size: BASE_FONT_SIZE,
+                plan_steps: 0,
+                activity_expanded: &expanded,
+            },
+        );
+        let large = estimate_message_bubble_height(
+            &content,
+            &[],
+            &TranscriptLayout {
+                content_width_px: 600.0,
+                font_size: 18.0,
+                plan_steps: 0,
+                activity_expanded: &expanded,
+            },
+        );
+        assert!(
+            large > small,
+            "a larger font must estimate taller (14px={small}, 18px={large})"
+        );
+    }
+
+    #[test]
+    fn hashtag_is_not_a_heading() {
+        assert_eq!(heading_level("#tag"), None);
+        assert_eq!(heading_level("####### too many"), None);
+        assert_eq!(heading_level("## Real heading"), Some(2));
+    }
+
     #[test]
     fn multiple_images_accumulate() {
-        let one = block_estimated_height(&text_block(vec![PathBuf::from("a.png")]), 0, 600.0);
+        let expanded = HashMap::new();
+        let l = layout(&expanded);
+        let one = block_estimated_height(&text_block(vec![PathBuf::from("a.png")]), &l);
         let two = block_estimated_height(
             &text_block(vec![PathBuf::from("a.png"), PathBuf::from("b.png")]),
-            0,
-            600.0,
+            &l,
         );
         assert!(two - one >= 300.0, "each image needs its own slot");
     }
@@ -444,32 +1050,44 @@ mod duplicate_render_tests {
     }
 }
 
-pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px: f32) -> f32 {
+/// Header row of an activity card ("Explored 2 files ›").
+const ACTIVITY_HEADER: f32 = 40.0;
+/// One tool row inside an expanded activity card.
+const ACTIVITY_ROW: f32 = 28.0;
+/// Vertical padding the expanded content area adds around its rows.
+const ACTIVITY_CONTENT_PADDING: f32 = 12.0;
+
+pub fn block_estimated_height(block: &Block, layout: &TranscriptLayout<'_>) -> f32 {
+    let scale = layout.scale();
     match block {
         Block::User {
             content,
             attachments,
             ..
-        } => estimate_message_bubble_height(content, attachments, content_width_px),
+        } => estimate_message_bubble_height(content, attachments, layout),
         Block::Text {
             content,
             attachments,
             ..
-        } => estimate_message_bubble_height(content, attachments, content_width_px),
-        Block::Thinking { .. } => 56.0,
-        Block::Activity { tools, .. } => {
-            if RunTally::has_failure(tools) {
-                40.0 + tools.len() as f32 * 28.0
+        } => estimate_message_bubble_height(content, attachments, layout),
+        Block::Thinking { .. } => 56.0 * scale,
+        Block::Activity { id, tools } => {
+            // An expanded card is header + one row per tool. Charging every
+            // card its collapsed height is what placed the following blocks
+            // inside it (AGE-183).
+            if layout.is_activity_expanded(id.0, tools) {
+                (ACTIVITY_HEADER + ACTIVITY_CONTENT_PADDING) * scale
+                    + tools.len() as f32 * ACTIVITY_ROW * scale
             } else {
-                40.0
+                ACTIVITY_HEADER * scale
             }
         }
-        Block::Diff { .. } => 120.0,
+        Block::Diff { .. } => 120.0 * scale,
         Block::Approval { approval, .. } => match approval.state {
-            ApprovalState::Pending => 72.0,
-            ApprovalState::Approved | ApprovalState::Denied => 28.0,
+            ApprovalState::Pending => 72.0 * scale,
+            ApprovalState::Approved | ApprovalState::Denied => 28.0 * scale,
         },
-        Block::Plan { .. } => 40.0 + 32.0 * plan_steps.max(1) as f32,
+        Block::Plan { .. } => (40.0 + 32.0 * layout.plan_steps.max(1) as f32) * scale,
         Block::Artifact { path, .. } => {
             if super::artifact_kind::is_image_path(path) {
                 160.0
@@ -484,8 +1102,8 @@ pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px
                 52.0 + files.len().min(4) as f32 * 28.0
             }
         }
-        Block::TablePreview { preview, .. } => inline_table_card_height(preview),
-        Block::Error { .. } => 64.0,
+        Block::TablePreview { preview, .. } => inline_table_card_height(preview) * scale,
+        Block::Error { .. } => 64.0 * scale,
     }
 }
 
@@ -536,14 +1154,13 @@ fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
 /// Content Y of the top of the inline plan block, including list top padding.
 pub fn plan_block_top(
     turns: &[Turn],
-    plan_steps: usize,
     padding_top: Pixels,
-    content_width_px: f32,
+    layout: &TranscriptLayout<'_>,
 ) -> Option<Pixels> {
     let ix = plan_turn_index(turns)?;
     let mut y = padding_top;
     for turn in &turns[..ix] {
-        y += estimate_turn_height(turn, plan_steps, content_width_px).height;
+        y += estimate_turn_height(turn, layout).height;
     }
     let turn = &turns[ix];
     if turn.collapsed {
@@ -554,7 +1171,7 @@ pub fn plan_block_top(
         if matches!(block, Block::Plan { .. }) {
             return Some(y);
         }
-        y += px(block_estimated_height(block, plan_steps, content_width_px));
+        y += px(block_estimated_height(block, layout));
     }
     Some(y)
 }
@@ -562,11 +1179,10 @@ pub fn plan_block_top(
 /// Content Y of the bottom of the inline plan block, including list top padding.
 pub fn plan_block_bottom(
     turns: &[Turn],
-    plan_steps: usize,
     padding_top: Pixels,
-    content_width_px: f32,
+    layout: &TranscriptLayout<'_>,
 ) -> Option<Pixels> {
-    let top = plan_block_top(turns, plan_steps, padding_top, content_width_px)?;
+    let top = plan_block_top(turns, padding_top, layout)?;
     let ix = plan_turn_index(turns)?;
     let turn = &turns[ix];
     if turn.collapsed {
@@ -575,8 +1191,7 @@ pub fn plan_block_bottom(
     Some(
         top + px(block_estimated_height(
             &Block::Plan { id: BlockId(0) },
-            plan_steps,
-            content_width_px,
+            layout,
         )),
     )
 }
@@ -634,7 +1249,7 @@ pub fn adapt_messages_with_traces(
         .collect()
 }
 
-pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f32) -> Size<Pixels> {
+pub fn estimate_turn_height(turn: &Turn, layout: &TranscriptLayout<'_>) -> Size<Pixels> {
     // Mirror `render_visible_turns`: optional work header, typed blocks (not
     // User/Text), then `render_message` for the bubble body.
     let has_work_fold = turn_has_work_fold(turn);
@@ -647,7 +1262,7 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
         let mut receipts = 0u32;
         for block in &turn.blocks {
             if block_visible_in_turn(turn, block) {
-                receipt_height += block_estimated_height(block, plan_steps, content_width_px);
+                receipt_height += block_estimated_height(block, layout);
                 receipts += 1;
             }
         }
@@ -685,7 +1300,7 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
                 message_height = message_height.max(estimate_message_bubble_height(
                     content,
                     attachments,
-                    content_width_px,
+                    layout,
                 ));
             }
             Block::Text {
@@ -696,11 +1311,11 @@ pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f3
                 message_height = message_height.max(estimate_message_bubble_height(
                     content,
                     attachments,
-                    content_width_px,
+                    layout,
                 ));
             }
             _ if block_visible_in_turn(turn, block) => {
-                height += block_estimated_height(block, plan_steps, content_width_px);
+                height += block_estimated_height(block, layout);
                 flex_children += 1;
             }
             _ => {}
@@ -754,6 +1369,16 @@ pub fn format_working_for(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// Layout at a given content width, default font, nothing expanded.
+    fn at_width(width: f32, expanded: &HashMap<u64, bool>) -> TranscriptLayout<'_> {
+        TranscriptLayout {
+            content_width_px: width,
+            font_size: BASE_FONT_SIZE,
+            plan_steps: 0,
+            activity_expanded: expanded,
+        }
+    }
+
     #[test]
     fn worked_for_formats_seconds_and_minutes() {
         assert_eq!(format_worked_for(None), "Worked for a moment");
@@ -798,8 +1423,9 @@ mod tests {
             history_index: None,
         };
         let turn = adapt_message(&msg, 0, false);
-        let wide = estimate_turn_height(&turn, 0, 520.0).height;
-        let narrow = estimate_turn_height(&turn, 0, 220.0).height;
+        let expanded = HashMap::new();
+        let wide = estimate_turn_height(&turn, &at_width(520.0, &expanded)).height;
+        let narrow = estimate_turn_height(&turn, &at_width(220.0, &expanded)).height;
         assert!(
             narrow > wide,
             "narrow width should reserve more height (wide={wide:?}, narrow={narrow:?})"
@@ -814,8 +1440,9 @@ mod tests {
     #[test]
     fn narrow_width_increases_wrapped_line_estimate() {
         let prompt = "Create a short 2-page PDF report at workspace_notes.pdf using Typst.";
-        let wide = estimate_message_bubble_height(prompt, &[], 520.0);
-        let narrow = estimate_message_bubble_height(prompt, &[], 220.0);
+        let expanded = HashMap::new();
+        let wide = estimate_message_bubble_height(prompt, &[], &at_width(520.0, &expanded));
+        let narrow = estimate_message_bubble_height(prompt, &[], &at_width(220.0, &expanded));
         assert!(narrow > wide);
     }
 
@@ -854,7 +1481,8 @@ mod tests {
             history_index: None,
         };
         let turn = adapt_message(&msg, 0, true);
-        let height = estimate_turn_height(&turn, 0, 400.0).height;
+        let expanded = HashMap::new();
+        let height = estimate_turn_height(&turn, &at_width(400.0, &expanded)).height;
         assert!(
             height >= px(100.0),
             "assistant receipt turn under-estimated at {height:?}"
@@ -870,7 +1498,8 @@ mod tests {
         let mut msg = assistant_with_tools(vec![sample_tool("a", "read_file")]);
         msg.content.clear();
         let turn = adapt_message(&msg, 0, true);
-        let height = estimate_turn_height(&turn, 0, 400.0).height;
+        let expanded = HashMap::new();
+        let height = estimate_turn_height(&turn, &at_width(400.0, &expanded)).height;
         assert!(
             height <= px(48.0),
             "collapsed work header should sit tight, got {height:?}"
@@ -893,7 +1522,8 @@ mod tests {
         let turns = adapt_messages(&[msg], &[true]);
         assert_eq!(turns.len(), 1, "live turn must stay in the transcript");
         assert!(turns[0].streaming);
-        let height = estimate_turn_height(&turns[0], 0, 400.0).height;
+        let expanded = HashMap::new();
+        let height = estimate_turn_height(&turns[0], &at_width(400.0, &expanded)).height;
         assert!(
             height <= px(48.0),
             "collapsed Working header should sit tight, got {height:?}"

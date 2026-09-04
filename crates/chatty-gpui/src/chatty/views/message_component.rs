@@ -1,6 +1,6 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
-use crate::chatty::views::transcript::inline_chat_attachments;
+use crate::chatty::views::transcript::{INLINE_IMAGE_MAX_PX, inline_chat_attachments};
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Icon;
@@ -227,17 +227,23 @@ fn render_attachments(attachments: &[PathBuf], id_prefix: &str, cx: &App) -> Div
             let element_id = ElementId::Name(format!("{}-att-{}", id_prefix, i).into());
 
             if is_image_file(path) {
-                // Render image thumbnail
+                // Render image thumbnail. The clamp lives on the wrapper, not
+                // only on the `img`: gpui resolves an auto-sized image to its
+                // natural size and sets an aspect ratio, so a tall full-page
+                // screenshot keeps growing past the image's own `max_h`. The
+                // wrapper's bound is what the transcript estimator reserves.
                 div()
                     .id(element_id)
                     .rounded_md()
                     .border_1()
                     .border_color(border_color)
+                    .max_w(px(INLINE_IMAGE_MAX_PX))
+                    .max_h(px(INLINE_IMAGE_MAX_PX))
                     .overflow_hidden()
                     .child(
                         img(path.clone())
-                            .max_w(px(300.))
-                            .max_h(px(300.))
+                            .max_w(px(INLINE_IMAGE_MAX_PX))
+                            .max_h(px(INLINE_IMAGE_MAX_PX))
                             .rounded_md(),
                     )
             } else {

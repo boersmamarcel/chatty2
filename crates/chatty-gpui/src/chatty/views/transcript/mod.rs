@@ -50,25 +50,33 @@ mod tool_row;
 mod types;
 mod verb;
 
+mod artifact_header;
+
 pub use action_bar::MessageActionBar;
 pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
-    COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
-    adapt_messages_with_traces, attach_plan_block, estimate_turn_height, format_worked_for,
-    format_working_for, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    BASE_FONT_SIZE, COLLAPSED_TURN_HEIGHT, TranscriptLayout, adapt_message,
+    adapt_message_with_trace, adapt_messages, adapt_messages_with_traces, attach_plan_block,
+    estimate_turn_height, format_worked_for, format_working_for, plan_block_bottom,
+    plan_is_above_viewport, plan_turn_index,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;
 pub use artifact_card::ArtifactCard;
+pub use artifact_header::{
+    ArtifactCopy, ArtifactCopyKind, ArtifactHeaderKind, ArtifactTabSpec, artifact_copy_control,
+    artifact_header_tabs,
+};
 pub use artifact_kind::{
-    ArtifactHeading, ArtifactVersion, ViewAnchor, artifact_display_title, artifact_file_name,
-    artifact_format_token, artifact_language_for_path, artifact_meta_line, artifact_panel_title,
-    artifact_version, attachment_image_path, chart_artifact_path, csv_shape, csv_stat_line,
-    heading_index_for_line, inline_chat_attachments, is_chart_artifact_tool, is_code_artifact_path,
-    is_image_artifact_tool, is_image_path, is_lane_a_browser_tool, is_markdown_artifact_path,
-    is_pdf_artifact_tool, is_pdf_path, is_produced_file_tool, is_standalone_artifact_path,
-    is_tabular_path, is_transcript_artifact_receipt, markdown_headings, read_artifact_source,
-    resolve_artifact_path, source_line_from_anchor, tool_file_path,
+    ArtifactHeading, ArtifactVersion, INLINE_IMAGE_MAX_PX, ViewAnchor, artifact_display_title,
+    artifact_file_name, artifact_format_token, artifact_language_for_path, artifact_meta_line,
+    artifact_panel_title, artifact_version, attachment_image_path, chart_artifact_path, csv_shape,
+    csv_stat_line, heading_index_for_line, inline_chat_attachments, is_chart_artifact_tool,
+    is_code_artifact_path, is_image_artifact_tool, is_image_path, is_lane_a_browser_tool,
+    is_markdown_artifact_path, is_pdf_artifact_tool, is_pdf_path, is_produced_file_tool,
+    is_standalone_artifact_path, is_tabular_path, is_transcript_artifact_receipt,
+    markdown_headings, read_artifact_source, resolve_artifact_path, source_line_from_anchor,
+    tool_file_path,
 };
 pub use artifact_view::{
     ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view, presentation_on_open,

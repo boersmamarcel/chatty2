@@ -34,6 +34,13 @@ pub enum StreamStatus {
 /// responsibility of `ConversationsStore.streaming_message`. StreamManager
 /// only tracks lifecycle (status, cancellation, token usage, trace).
 pub struct StreamState {
+    /// Identifies this registration among all streams for the conversation.
+    ///
+    /// `StreamEnded` is delivered through `cx.emit`, i.e. on the next effect
+    /// flush — but a protocol follow-up registers the next stream synchronously
+    /// right after `finalize_stream` returns. Without an epoch, turn N's end
+    /// event lands on turn N+1 and tears it down (AGE-151).
+    epoch: u64,
     pub status: StreamStatus,
     pub token_usage: Option<(u32, u32)>,
     pub trace_json: Option<serde_json::Value>,
@@ -105,6 +112,9 @@ pub enum StreamManagerEvent {
     },
     StreamEnded {
         conversation_id: String,
+        /// Epoch of the stream that ended. Subscribers must ignore an event
+        /// whose epoch is not the conversation's current one (AGE-151).
+        epoch: u64,
         status: StreamStatus,
         token_usage: Option<(u32, u32)>,
         trace_json: Option<serde_json::Value>,
@@ -129,6 +139,12 @@ pub enum StreamManagerEvent {
 pub struct StreamManager {
     streams: HashMap<String, StreamState>,
     pending_resolved_ids: HashMap<String, Arc<Mutex<Option<String>>>>,
+    /// Monotonic counter handing every registered stream a distinct epoch.
+    next_epoch: u64,
+    /// Epoch of the most recent registration per conversation, kept after the
+    /// stream is removed so a late `StreamEnded` can still be recognised as
+    /// stale.
+    current_epoch: HashMap<String, u64>,
 }
 
 impl EventEmitter<StreamManagerEvent> for StreamManager {}
@@ -138,6 +154,28 @@ impl StreamManager {
         Self {
             streams: HashMap::new(),
             pending_resolved_ids: HashMap::new(),
+            next_epoch: 1,
+            current_epoch: HashMap::new(),
+        }
+    }
+
+    /// Claim the next epoch for `conv_id` and record it as current.
+    fn claim_epoch(&mut self, conv_id: &str) -> u64 {
+        let epoch = self.next_epoch;
+        self.next_epoch = self.next_epoch.wrapping_add(1);
+        self.current_epoch.insert(conv_id.to_string(), epoch);
+        epoch
+    }
+
+    /// Whether `epoch` is the conversation's latest registration.
+    ///
+    /// An unknown conversation answers `true` so events for streams that
+    /// predate epoch tracking (or for `__pending__` before promotion) are not
+    /// silently dropped.
+    pub fn is_current_epoch(&self, conv_id: &str, epoch: u64) -> bool {
+        match self.current_epoch.get(conv_id) {
+            Some(current) => *current == epoch,
+            None => true,
         }
     }
 
@@ -163,6 +201,7 @@ impl StreamManager {
             let token_usage = existing.token_usage;
             let trace_json = existing.trace_json.clone();
             let turn_count = existing.api_turn_count;
+            let ended_epoch = existing.epoch;
 
             debug!(conv_id = %conv_id, "Cancelled existing stream before registering new one");
 
@@ -171,6 +210,7 @@ impl StreamManager {
 
             cx.emit(StreamManagerEvent::StreamEnded {
                 conversation_id: conv_id.clone(),
+                epoch: ended_epoch,
                 status: StreamStatus::Cancelled,
                 token_usage,
                 trace_json,
@@ -179,9 +219,11 @@ impl StreamManager {
             });
         }
 
+        let epoch = self.claim_epoch(&conv_id);
         self.streams.insert(
             conv_id.clone(),
             StreamState {
+                epoch,
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -223,10 +265,12 @@ impl StreamManager {
 
             debug!("Cancelled existing pending stream");
 
+            let ended_epoch = existing.epoch;
             drop(existing.task.take());
 
             cx.emit(StreamManagerEvent::StreamEnded {
                 conversation_id: "__pending__".to_string(),
+                epoch: ended_epoch,
                 status: StreamStatus::Cancelled,
                 token_usage,
                 trace_json,
@@ -235,9 +279,11 @@ impl StreamManager {
             });
         }
 
+        let epoch = self.claim_epoch("__pending__");
         self.streams.insert(
             "__pending__".to_string(),
             StreamState {
+                epoch,
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -264,9 +310,13 @@ impl StreamManager {
     pub fn promote_pending(&mut self, conv_id: &str) {
         if let Some(state) = self.streams.remove("__pending__") {
             debug!(conv_id = %conv_id, "Promoting pending stream to conversation");
+            // The epoch moves with the stream, so a StreamEnded emitted under
+            // either key still matches the conversation's current epoch.
+            self.current_epoch.insert(conv_id.to_string(), state.epoch);
             self.streams.insert(conv_id.to_string(), state);
         }
         self.pending_resolved_ids.remove("__pending__");
+        self.current_epoch.remove("__pending__");
     }
 
     /// Set the pending artifacts handle on a promoted stream.
@@ -416,19 +466,21 @@ impl StreamManager {
             StreamChunk::Error(error) => {
                 // Flush any buffered text before emitting StreamEnded
                 self.flush_pending_text(conv_id, cx);
-                let (token_usage, trace_json, turn_count) =
+                let (token_usage, trace_json, turn_count, epoch) =
                     if let Some(state) = self.streams.get_mut(conv_id) {
                         state.status = StreamStatus::Error(error.clone());
                         (
                             state.token_usage,
                             state.trace_json.clone(),
                             state.api_turn_count,
+                            state.epoch,
                         )
                     } else {
-                        (None, None, 1)
+                        (None, None, 1, 0)
                     };
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: conv_id.to_string(),
+                    epoch,
                     status: StreamStatus::Error(error),
                     token_usage,
                     trace_json,
@@ -447,7 +499,7 @@ impl StreamManager {
         // Flush any remaining buffered text before emitting StreamEnded
         self.flush_pending_text(conv_id, cx);
 
-        let (token_usage, trace_json, artifacts, turn_count) =
+        let (token_usage, trace_json, artifacts, turn_count, epoch) =
             if let Some(state) = self.streams.get(conv_id) {
                 let drained = state
                     .pending_artifacts
@@ -460,6 +512,7 @@ impl StreamManager {
                     state.trace_json.clone(),
                     drained,
                     state.api_turn_count,
+                    state.epoch,
                 )
             } else {
                 warn!(conv_id = %conv_id, "finalize_stream called but no stream found");
@@ -468,6 +521,7 @@ impl StreamManager {
 
         cx.emit(StreamManagerEvent::StreamEnded {
             conversation_id: conv_id.to_string(),
+            epoch,
             status: StreamStatus::Completed,
             token_usage,
             trace_json,
@@ -520,6 +574,7 @@ impl StreamManager {
             let token_usage = state.token_usage;
             let trace_json = state.trace_json.clone();
             let turn_count = state.api_turn_count;
+            let epoch = state.epoch;
 
             debug!(conv_id = %conv_id, "Stream stopped gracefully");
 
@@ -528,6 +583,7 @@ impl StreamManager {
 
             cx.emit(StreamManagerEvent::StreamEnded {
                 conversation_id: conv_id.to_string(),
+                epoch,
                 status: StreamStatus::Cancelled,
                 token_usage,
                 trace_json,
@@ -558,6 +614,7 @@ impl StreamManager {
             debug!("Cancelled pending stream");
             cx.emit(StreamManagerEvent::StreamEnded {
                 conversation_id: "__pending__".to_string(),
+                epoch: state.epoch,
                 status: StreamStatus::Cancelled,
                 token_usage: state.token_usage,
                 trace_json: state.trace_json,
@@ -566,6 +623,7 @@ impl StreamManager {
             });
         }
         self.pending_resolved_ids.remove("__pending__");
+        self.current_epoch.remove("__pending__");
     }
 
     /// Check if a conversation has an active stream.
@@ -613,6 +671,7 @@ impl StreamManager {
                 state.cancel_flag.store(true, Ordering::Relaxed);
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: key,
+                    epoch: state.epoch,
                     status: StreamStatus::Cancelled,
                     token_usage: state.token_usage,
                     trace_json: state.trace_json,
@@ -622,6 +681,7 @@ impl StreamManager {
             }
         }
         self.pending_resolved_ids.clear();
+        self.current_epoch.clear();
     }
 }
 
@@ -633,6 +693,101 @@ pub type GlobalStreamManager = crate::global_entity::GlobalStrongEntity<StreamMa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------
+    // Stream epoch (AGE-151)
+    //
+    // `StreamEnded` is delivered on the next effect flush, but a protocol
+    // follow-up registers the next stream synchronously right after
+    // `finalize_stream` returns. The epoch is what lets the subscriber tell
+    // turn N's late end event from turn N+1's.
+    // -------------------------------------------------------------------
+
+    fn active_state(epoch: u64) -> StreamState {
+        StreamState {
+            epoch,
+            status: StreamStatus::Active,
+            token_usage: None,
+            trace_json: None,
+            task: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            pending_artifacts: None,
+            has_emitted_first_chunk: false,
+            pending_text: String::new(),
+            last_flush: Instant::now(),
+            api_turn_count: 1,
+        }
+    }
+
+    #[test]
+    fn each_registration_claims_a_distinct_epoch() {
+        let mut mgr = StreamManager::new();
+        let first = mgr.claim_epoch("conv-1");
+        let second = mgr.claim_epoch("conv-1");
+        assert_ne!(first, second);
+    }
+
+    /// The guard the follow-up race needs: once the next turn is registered,
+    /// the previous turn's still-undelivered end event is stale.
+    #[test]
+    fn a_superseded_epoch_is_not_current() {
+        let mut mgr = StreamManager::new();
+        let first = mgr.claim_epoch("conv-1");
+        assert!(mgr.is_current_epoch("conv-1", first));
+
+        let second = mgr.claim_epoch("conv-1");
+        assert!(
+            !mgr.is_current_epoch("conv-1", first),
+            "turn N's end event must not be applied to turn N+1"
+        );
+        assert!(mgr.is_current_epoch("conv-1", second));
+    }
+
+    /// The epoch outlives the stream entry, because the whole point is to
+    /// recognise an event that arrives after the stream was removed.
+    #[test]
+    fn epoch_survives_the_stream_being_removed() {
+        let mut mgr = StreamManager::new();
+        let first = mgr.claim_epoch("conv-1");
+        mgr.streams
+            .insert("conv-1".to_string(), active_state(first));
+        mgr.streams.remove("conv-1");
+        assert!(mgr.is_current_epoch("conv-1", first));
+
+        let second = mgr.claim_epoch("conv-1");
+        assert!(!mgr.is_current_epoch("conv-1", first));
+        assert!(mgr.is_current_epoch("conv-1", second));
+    }
+
+    /// Conversations do not interfere with each other.
+    #[test]
+    fn epochs_are_tracked_per_conversation() {
+        let mut mgr = StreamManager::new();
+        let a = mgr.claim_epoch("conv-a");
+        let _b = mgr.claim_epoch("conv-b");
+        assert!(mgr.is_current_epoch("conv-a", a));
+    }
+
+    /// A stream registered before epoch tracking (or an event for a
+    /// conversation we know nothing about) must not be silently dropped.
+    #[test]
+    fn unknown_conversation_accepts_its_event() {
+        let mgr = StreamManager::new();
+        assert!(mgr.is_current_epoch("never-seen", 0));
+    }
+
+    /// Promotion moves the epoch with the stream, so an end event emitted
+    /// under either key still matches.
+    #[test]
+    fn promotion_carries_the_epoch_to_the_real_conversation() {
+        let mut mgr = StreamManager::new();
+        let epoch = mgr.claim_epoch("__pending__");
+        mgr.streams
+            .insert("__pending__".to_string(), active_state(epoch));
+
+        mgr.promote_pending("conv-9");
+        assert!(mgr.is_current_epoch("conv-9", epoch));
+    }
 
     #[test]
     fn test_new_stream_manager_is_empty() {
@@ -651,6 +806,7 @@ mod tests {
         mgr.streams.insert(
             "__pending__".to_string(),
             StreamState {
+                epoch: 1,
                 status: StreamStatus::Active,
                 token_usage: None,
                 trace_json: None,
@@ -670,21 +826,9 @@ mod tests {
     #[test]
     fn test_promote_pending() {
         let mut mgr = StreamManager::new();
-        mgr.streams.insert(
-            "__pending__".to_string(),
-            StreamState {
-                status: StreamStatus::Active,
-                token_usage: None,
-                trace_json: None,
-                task: None,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
-                pending_artifacts: None,
-                has_emitted_first_chunk: false,
-                pending_text: String::new(),
-                last_flush: Instant::now(),
-                api_turn_count: 1,
-            },
-        );
+        let epoch = mgr.claim_epoch("__pending__");
+        mgr.streams
+            .insert("__pending__".to_string(), active_state(epoch));
         mgr.pending_resolved_ids.insert(
             "__pending__".to_string(),
             Arc::new(Mutex::new(Some("conv-456".to_string()))),
@@ -700,21 +844,7 @@ mod tests {
     #[test]
     fn test_set_trace() {
         let mut mgr = StreamManager::new();
-        mgr.streams.insert(
-            "conv-1".to_string(),
-            StreamState {
-                status: StreamStatus::Active,
-                token_usage: None,
-                trace_json: None,
-                task: None,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
-                pending_artifacts: None,
-                has_emitted_first_chunk: false,
-                pending_text: String::new(),
-                last_flush: Instant::now(),
-                api_turn_count: 1,
-            },
-        );
+        mgr.streams.insert("conv-1".to_string(), active_state(1));
 
         let trace = serde_json::json!({"tool_calls": []});
         mgr.set_trace("conv-1", Some(trace.clone()));
