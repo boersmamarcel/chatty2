@@ -97,6 +97,7 @@
 - [chatty-playbook promises](./dev/adrs/crate-promises-chatty-playbook.md)
 - [chatty-flow promises](./dev/adrs/crate-promises-chatty-flow.md)
 - [Cost model](./dev/adrs/cost-model.md)
+- [Semver policy (research crates)](./dev/adrs/semver-policy.md)
 - [AppWorld decision](./dev/adrs/appworld-decision.md)
 
 ---

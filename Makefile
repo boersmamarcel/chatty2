@@ -108,6 +108,10 @@ ci: wasm-modules test
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	bash scripts/check-reserved.sh
+	bash scripts/check-no-chatty-eval.sh
+	bash scripts/check-msrv.sh
+	bash scripts/check-forbid-unsafe.sh
+	bash scripts/check-shipping-isolation.sh
 	bash scripts/check-rig-pins.sh
 
 clean:

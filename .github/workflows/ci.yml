@@ -151,6 +151,18 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-reserved.sh
 
+      - name: Check no resurrected chatty-eval (AGE-24 / AGE-26)
+        run: bash scripts/check-no-chatty-eval.sh
+
+      - name: Check MSRV declaration (AGE-26)
+        run: bash scripts/check-msrv.sh
+
+      - name: Check #![forbid(unsafe_code)] on research crates (AGE-26)
+        run: bash scripts/check-forbid-unsafe.sh
+
+      - name: Check shipping crate isolation from chatty-optimize (AGE-26)
+        run: bash scripts/check-shipping-isolation.sh
+
       - name: Check rig exact-minor pins (AGE-26)
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-rig-pins.sh

@@ -85,6 +85,7 @@ points here.
 | [`research/crate-promises-chatty-playbook.md`](research/crate-promises-chatty-playbook.md) | chatty-playbook work | Playbook crate scope |
 | [`research/crate-promises-chatty-flow.md`](research/crate-promises-chatty-flow.md) | chatty-flow work | Flow crate scope |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
+| [`research/semver-policy.md`](research/semver-policy.md) | Research crate semver | Semver policy for shipping research crates (AGE-26) |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
 | [`research/README.md`](research/README.md) | Research folder entry | How the research docs are organized |
 
