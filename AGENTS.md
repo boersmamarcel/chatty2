@@ -186,9 +186,17 @@ examples.
   `ModelsNotifier`).
 - **Stream lifecycle** — All LLM streams go through `StreamManager` with
   cancellation tokens; the stream loop never updates UI directly, it
-  emits events. See [`docs/stream-manager.md`](docs/stream-manager.md).
+  emits events. Streams carry a monotonic epoch so a stale `StreamEnded`
+  can't tear down a newer turn, and a shared stall watchdog
+  (`chatty-core/src/services/stream_processor.rs`) ends a turn after 180s
+  of silence. See [`docs/stream-manager.md`](docs/stream-manager.md).
 - **Error handling** — Don't `.ok()` away errors silently. Log as
   `warn!()` for non-critical paths; propagate with `?` for critical I/O.
+- **Tool errors** — Every `impl Tool`'s error path must go through
+  `map_tool_error(tool_name, error)` (`chatty-core/src/tools/mod.rs`), not
+  rig's default `Tool::map_error`, or the model/transcript only ever see
+  the redacted string `"the tool failed"`. See "Tool Error Reporting
+  Pattern" in CLAUDE.md.
 - **Sensitive env vars** — When sending MCP config to the LLM, use
   `masked_env()` not `.env`. See "Security Practices" in CLAUDE.md.
 - **Rust edition** — 2024. Use `LazyLock`/`OnceLock` (std) rather than
