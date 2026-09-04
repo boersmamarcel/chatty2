@@ -185,7 +185,9 @@ sudo apt-get install -y \
   - **Windows**: `%APPDATA%\chatty\math_cache\`
   - Base SVGs (`{hash}.svg`) are cached indefinitely for reuse
   - Styled SVGs (`{hash}.styled.{color_hash}.svg`) are theme-specific variants that are cleaned up on app restart
-  - The `inject_svg_color()` method strips inline color attributes and injects CSS to apply theme colors
+  - The generated Typst sets `fill: none` on the page. Typst's default page fill is white for SVG export, which would put an opaque white card behind every equation in a dark theme
+  - The `inject_svg_color()` method rewrites six-digit black `fill`/`stroke` attributes to the theme colour (it injects no CSS and does not touch backgrounds)
+  - `MathRendererService::CACHE_VERSION` is hashed into the cache key: base SVGs are written once and never cleaned, so a rendering change needs a bump to reach existing installs
 - **Pdfium Library Cache**: The pdfium native library is cached in a persistent user-data directory so it survives bundle corruption, app translocation, and partial auto-update rsyncs. Lookup order in `pdfium_utils::create_pdfium()`: user-data cache → exe-relative → `CHATTY_PDFIUM_LIB_DIR` env → compile-time `PDFIUM_LIB_DIR` → system. On every successful bind, the library is opportunistically copied to the cache (`self_heal_copy()`). Platform paths:
   - **macOS**: `~/Library/Application Support/chatty/lib/`
   - **Linux**: `~/.local/share/chatty/lib/` or `$XDG_DATA_HOME/chatty/lib/`

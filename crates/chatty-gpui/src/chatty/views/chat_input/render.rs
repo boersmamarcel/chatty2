@@ -173,8 +173,10 @@ impl RenderOnce for ChatInput {
         let effective_working_dir = per_chat_working_dir.clone().or(global_workspace_dir);
         let has_working_dir_override = per_chat_working_dir.is_some();
 
-        // Model display name
-        let model_display = self.state.read(cx).get_selected_model_display_name();
+        // Model display name: full text for the tooltip, elided text for the
+        // button label (AGE-184).
+        let model_display_full = self.state.read(cx).get_selected_model_display_name();
+        let model_display = self.state.read(cx).selected_model_button_label();
         let selected_model = self.state.read(cx).selected_model().cloned();
         let _no_models = self.state.read(cx).available_models.is_empty();
 
@@ -194,7 +196,9 @@ impl RenderOnce for ChatInput {
         };
         let at_menu_selected = self.state.read(cx).at_menu_selected();
 
-        // Model dropdown button
+        // Model dropdown button. The label is the widest and most variable
+        // element in the composer's bottom row, so it is the one that gives up
+        // space when the row runs out (AGE-184) — never Send.
         let model_button = if let Some(model) = selected_model {
             Button::new("model-select")
                 .label(model_display.clone())
@@ -202,6 +206,7 @@ impl RenderOnce for ChatInput {
         } else {
             Button::new("model-select").label(model_display.clone())
         };
+        let model_tooltip = model_display_full;
 
         // Model popover
         let model_popover = Popover::new("model-menu")
@@ -473,9 +478,14 @@ impl RenderOnce for ChatInput {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .w_full()
+                                    .min_w_0()
                                     .items_center()
                                     .gap_2()
-                                    .when_some(attachment_popover, |d, popover| d.child(popover))
+                                    .when_some(attachment_popover, |d, popover| {
+                                        // Attach reserves its space like Send.
+                                        d.child(div().flex_shrink_0().child(popover))
+                                    })
                                     .when_some(effective_working_dir, |d, dir| {
                                         // Compute display name: last path component or full path
                                         let dir_name = dir
@@ -488,6 +498,9 @@ impl RenderOnce for ChatInput {
                                             div()
                                                 .flex()
                                                 .flex_row()
+                                                .min_w_0()
+                                                .flex_shrink()
+                                                .overflow_hidden()
                                                 .items_center()
                                                 .gap_1()
                                                 .child(
@@ -599,10 +612,27 @@ impl RenderOnce for ChatInput {
                                         )
                                     })
                                     .child(div().flex_grow())
-                                    .child(model_popover)
                                     .child(
-                                        // Send/Stop button (conditional based on streaming state)
+                                        // The model selector is the flexible
+                                        // element: it shrinks and clips before
+                                        // Send ever loses space (AGE-184).
                                         div()
+                                            .id("model-selector-slot")
+                                            .flex()
+                                            .min_w_0()
+                                            .flex_shrink()
+                                            .overflow_hidden()
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(model_tooltip.clone()).build(window, cx)
+                                            })
+                                            .child(model_popover),
+                                    )
+                                    .child(
+                                        // Send/Stop button (conditional based on streaming state).
+                                        // Fixed size, never shrinks: it must stay
+                                        // fully rendered and hit-testable.
+                                        div()
+                                            .flex_shrink_0()
                                             .px_3()
                                             .py_1()
                                             .rounded_sm()

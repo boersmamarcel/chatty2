@@ -308,3 +308,44 @@ fn resolve_selected_picks_default_when_none_selected() {
         Some("b".into())
     );
 }
+
+// -----------------------------------------------------------------------
+// Composer model label elision (AGE-184)
+//
+// The composer's bottom row runs out of width before Send does, so the model
+// label — the widest and most variable element — is what gives up space.
+// -----------------------------------------------------------------------
+
+#[test]
+fn model_label_kept_intact_when_it_fits() {
+    let label = "Haiku 4.5 · Anthropic";
+    assert!(label.chars().count() <= super::MODEL_LABEL_MAX_CHARS);
+    assert_eq!(super::truncate_model_label(label, 28), label);
+}
+
+#[test]
+fn long_model_label_is_elided_to_the_cap() {
+    // The reported case: long enough to clip Send at half window width.
+    let label = "Google: Gemini 3.8 Flash · OpenRouter";
+    let out = super::truncate_model_label(label, 28);
+    assert_eq!(out.chars().count(), 28);
+    assert!(out.ends_with('\u{2026}'));
+    assert!(label.starts_with(out.trim_end_matches('\u{2026}')));
+}
+
+#[test]
+fn model_label_elision_counts_chars_not_bytes() {
+    // A multi-byte name must not panic on a slice boundary.
+    let label = "モデル名がとても長いモデル · プロバイダー";
+    let out = super::truncate_model_label(label, 8);
+    assert_eq!(out.chars().count(), 8);
+    assert!(out.ends_with('\u{2026}'));
+}
+
+#[test]
+fn model_label_cap_leaves_room_for_send() {
+    // Guards the constant itself: a label at the cap plus the fixed-width
+    // controls has to stay well under a half-width chat column. A const block
+    // makes this a compile-time check rather than a runtime one.
+    const { assert!(super::MODEL_LABEL_MAX_CHARS <= 32) };
+}

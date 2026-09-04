@@ -1,21 +1,23 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chatty_core::models::message_types::{ApprovalState, SystemTrace, ToolCallState, TraceItem};
+use chatty_core::models::message_types::{
+    ApprovalState, SystemTrace, ToolCallBlock, ToolCallState, TraceItem,
+};
 use gpui::{Pixels, Size, px, size};
 
 use super::activity::{RunTally, classify_tool};
 use super::artifact_kind::{
     artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
     is_produced_file_tool, is_standalone_artifact_path, is_transcript_artifact_receipt,
-    tool_file_path,
+    produced_path_is_openable, tool_file_path,
 };
-use super::session_changes::{
-    file_change_from_tool, file_changes_from_turn, file_changes_height, merge_file_changes,
-};
-use super::table::{extract_table_preview, inline_table_card_height};
+use super::session_changes::{file_change_from_tool, file_changes_from_turn, merge_file_changes};
+use super::table::extract_table_preview;
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
+use crate::chatty::views::message_parsing::{ContentSegment, parse_content_segments};
 
 /// Fixed height reported by a collapsed finished turn.
 pub const COLLAPSED_TURN_HEIGHT: f32 = 36.0;
@@ -115,6 +117,13 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                     approval: approval.clone(),
                 });
             }
+            TraceItem::ClarificationPrompt(clarification) => {
+                flush_activity(blocks, &mut activity_tools);
+                blocks.push(Block::Clarification {
+                    id: BlockId::from_parts(namespace, &clarification.id),
+                    clarification: clarification.clone(),
+                });
+            }
             TraceItem::ToolCall(tool) => {
                 if is_agent_todo_tool(&tool.tool_name) {
                     if tool.tool_name == "write_todos" && !plan_emitted {
@@ -174,9 +183,16 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                             old_content: None,
                         });
                     }
-                } else if is_produced_file_tool(&tool.tool_name, &tool.input) {
+                } else if matches!(tool.state, ToolCallState::Success)
+                    && is_produced_file_tool(&tool.tool_name, &tool.input)
+                {
                     // Count/show the write in the activity group, then attach
                     // an artifact receipt so provenance stays next to the turn.
+                    //
+                    // Success-gated like every other receipt above: without it
+                    // this arm also swallowed *failed* writes, which both hid
+                    // the error (the `tool_error` arm below never ran) and
+                    // minted a card for a file that was never written.
                     activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
                     if let Some(path) = artifact_path(tool)
@@ -297,104 +313,6 @@ pub fn plan_turn_index(turns: &[Turn]) -> Option<usize> {
             .any(|block| matches!(block, Block::Plan { .. }))
     })
 }
-
-/// Approximate usable text width inside a message bubble for line wrapping.
-pub fn transcript_chars_per_line(content_width_px: f32) -> f32 {
-    const AVG_CHAR_WIDTH: f32 = 7.2;
-    const MIN_CHARS: f32 = 16.0;
-    const MAX_CHARS: f32 = 80.0;
-    (content_width_px / AVG_CHAR_WIDTH).clamp(MIN_CHARS, MAX_CHARS)
-}
-
-/// Height of a user/assistant bubble rendered via [`render_message`].
-///
-/// Virtual-list slots use a fixed height; under-estimating here makes the next
-/// turn paint on top of this one (e.g. user prompt + “Worked for…” + artifact).
-pub fn estimate_message_bubble_height(
-    content: &str,
-    attachments: &[PathBuf],
-    content_width_px: f32,
-) -> f32 {
-    const LINE_HEIGHT: f32 = 22.0;
-    const BUBBLE_PADDING: f32 = 28.0;
-    /// A non-image attachment renders as a filename chip.
-    const FILE_ATTACHMENT_ROW: f32 = 56.0;
-    /// An image renders as a thumbnail capped at 300x300 by `render_message`,
-    /// plus its border and the row's bottom margin. Estimating a chip here is
-    /// what made screenshots paint over the following turn.
-    const IMAGE_ATTACHMENT_ROW: f32 = 312.0;
-
-    let chars_per_line = transcript_chars_per_line(content_width_px);
-    let wrapped_lines = (content.len().max(1) as f32 / chars_per_line).ceil();
-    let explicit_lines = content.lines().count().max(1) as f32;
-    let lines = wrapped_lines.max(explicit_lines);
-
-    let attachment_height: f32 = attachments
-        .iter()
-        .map(|path| {
-            if super::artifact_kind::is_image_path(path) {
-                IMAGE_ATTACHMENT_ROW
-            } else {
-                FILE_ATTACHMENT_ROW
-            }
-        })
-        .sum();
-
-    BUBBLE_PADDING + lines * LINE_HEIGHT + attachment_height
-}
-
-#[cfg(test)]
-mod attachment_height_tests {
-    use super::*;
-
-    fn text_block(attachments: Vec<PathBuf>) -> Block {
-        Block::Text {
-            id: BlockId::from_parts(1, "text"),
-            content: "Here is the screenshot.".to_string(),
-            streaming: false,
-            attachments,
-        }
-    }
-
-    /// An image renders up to 300px tall inside the bubble. The virtual list
-    /// assigns each turn a fixed slot, so an under-estimate here paints the
-    /// image straight over the following turn.
-    #[test]
-    fn assistant_image_attachment_reserves_thumbnail_height() {
-        let bare = block_estimated_height(&text_block(vec![]), 0, 600.0);
-        let with_image =
-            block_estimated_height(&text_block(vec![PathBuf::from("shot.png")]), 0, 600.0);
-
-        assert!(
-            with_image - bare >= 300.0,
-            "an image attachment must reserve at least its 300px thumbnail              (bare={bare}, with_image={with_image})"
-        );
-    }
-
-    #[test]
-    fn non_image_attachment_reserves_only_a_chip() {
-        let bare = block_estimated_height(&text_block(vec![]), 0, 600.0);
-        let with_file =
-            block_estimated_height(&text_block(vec![PathBuf::from("report.pdf")]), 0, 600.0);
-        let delta = with_file - bare;
-        assert!(
-            (40.0..100.0).contains(&delta),
-            "a filename chip should not reserve thumbnail height, got {delta}"
-        );
-    }
-
-    #[test]
-    fn multiple_images_accumulate() {
-        let one = block_estimated_height(&text_block(vec![PathBuf::from("a.png")]), 0, 600.0);
-        let two = block_estimated_height(
-            &text_block(vec![PathBuf::from("a.png"), PathBuf::from("b.png")]),
-            0,
-            600.0,
-        );
-        assert!(two - one >= 300.0, "each image needs its own slot");
-    }
-}
-
 /// Remove artifact cards whose image is already shown inline on this message.
 fn drop_artifact_cards_shown_inline(blocks: &mut Vec<Block>, attachments: &[PathBuf]) {
     if attachments.is_empty() {
@@ -444,51 +362,6 @@ mod duplicate_render_tests {
     }
 }
 
-pub fn block_estimated_height(block: &Block, plan_steps: usize, content_width_px: f32) -> f32 {
-    match block {
-        Block::User {
-            content,
-            attachments,
-            ..
-        } => estimate_message_bubble_height(content, attachments, content_width_px),
-        Block::Text {
-            content,
-            attachments,
-            ..
-        } => estimate_message_bubble_height(content, attachments, content_width_px),
-        Block::Thinking { .. } => 56.0,
-        Block::Activity { tools, .. } => {
-            if RunTally::has_failure(tools) {
-                40.0 + tools.len() as f32 * 28.0
-            } else {
-                40.0
-            }
-        }
-        Block::Diff { .. } => 120.0,
-        Block::Approval { approval, .. } => match approval.state {
-            ApprovalState::Pending => 72.0,
-            ApprovalState::Approved | ApprovalState::Denied => 28.0,
-        },
-        Block::Plan { .. } => 40.0 + 32.0 * plan_steps.max(1) as f32,
-        Block::Artifact { path, .. } => {
-            if super::artifact_kind::is_image_path(path) {
-                160.0
-            } else {
-                76.0
-            }
-        }
-        Block::ArtifactBatch { files, .. } => {
-            if files.len() <= 1 {
-                76.0
-            } else {
-                52.0 + files.len().min(4) as f32 * 28.0
-            }
-        }
-        Block::TablePreview { preview, .. } => inline_table_card_height(preview),
-        Block::Error { .. } => 64.0,
-    }
-}
-
 fn is_work_trace_block(block: &Block) -> bool {
     matches!(
         block,
@@ -499,29 +372,27 @@ fn is_work_trace_block(block: &Block) -> bool {
             | Block::ArtifactBatch { .. }
             | Block::TablePreview { .. }
             | Block::Approval { .. }
+            | Block::Clarification { .. }
             | Block::Plan { .. }
             | Block::Error { .. }
     )
 }
 
-fn turn_has_work_fold(turn: &Turn) -> bool {
+/// True when a turn renders the "Worked for …" fold header.
+///
+/// Shared with `ChatView::render_turn` so the header and the blocks under it
+/// can never disagree about whether a turn has a work trace.
+pub fn turn_has_work_fold(turn: &Turn) -> bool {
     matches!(turn.role, TurnRole::Assistant)
         && (turn.streaming || turn.blocks.iter().any(is_work_trace_block))
 }
 
-fn turn_message_is_empty(turn: &Turn) -> bool {
-    !turn.blocks.iter().any(|block| match block {
-        Block::User {
-            content,
-            attachments,
-            ..
-        } => !content.is_empty() || !attachments.is_empty(),
-        Block::Text { content, .. } => !content.is_empty(),
-        _ => false,
-    })
-}
-
-fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
+/// True when a block renders inside its turn.
+///
+/// A collapsed turn keeps its receipts (artifacts, tables, approvals, plan,
+/// errors) and hides the work trace. `User`/`Text` never render here — the
+/// message bubble draws them.
+pub fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
     if turn.collapsed
         && matches!(
             block,
@@ -533,59 +404,6 @@ fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
     !matches!(block, Block::User { .. } | Block::Text { .. })
 }
 
-/// Content Y of the top of the inline plan block, including list top padding.
-pub fn plan_block_top(
-    turns: &[Turn],
-    plan_steps: usize,
-    padding_top: Pixels,
-    content_width_px: f32,
-) -> Option<Pixels> {
-    let ix = plan_turn_index(turns)?;
-    let mut y = padding_top;
-    for turn in &turns[..ix] {
-        y += estimate_turn_height(turn, plan_steps, content_width_px).height;
-    }
-    let turn = &turns[ix];
-    if turn.collapsed {
-        return Some(y);
-    }
-    y += px(48.0);
-    for block in &turn.blocks {
-        if matches!(block, Block::Plan { .. }) {
-            return Some(y);
-        }
-        y += px(block_estimated_height(block, plan_steps, content_width_px));
-    }
-    Some(y)
-}
-
-/// Content Y of the bottom of the inline plan block, including list top padding.
-pub fn plan_block_bottom(
-    turns: &[Turn],
-    plan_steps: usize,
-    padding_top: Pixels,
-    content_width_px: f32,
-) -> Option<Pixels> {
-    let top = plan_block_top(turns, plan_steps, padding_top, content_width_px)?;
-    let ix = plan_turn_index(turns)?;
-    let turn = &turns[ix];
-    if turn.collapsed {
-        return Some(top + px(COLLAPSED_TURN_HEIGHT));
-    }
-    Some(
-        top + px(block_estimated_height(
-            &Block::Plan { id: BlockId(0) },
-            plan_steps,
-            content_width_px,
-        )),
-    )
-}
-
-/// True when the plan card has fully scrolled above the viewport.
-pub fn plan_is_above_viewport(plan_bottom: Pixels, viewport_top: Pixels) -> bool {
-    plan_bottom + px(8.0) <= viewport_top
-}
-
 fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> bool {
     matches!(
         classify_tool(&tool.tool_name),
@@ -593,14 +411,20 @@ fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> boo
     ) && !is_produced_file_tool(&tool.tool_name, &tool.input)
 }
 
+/// Where a produced-file tool wrote, as far as its result can be trusted.
+///
+/// Output first (e.g. Typst's absolute `saved_path`), falling back to the
+/// input, because tools like `write_file` report no structured output and the
+/// requested path is all there is. Either way the path has to be openable: an
+/// absolute path that is not on disk is a path the tool never wrote.
 fn artifact_path(
     tool: &chatty_core::models::message_types::ToolCallBlock,
 ) -> Option<std::path::PathBuf> {
-    // Prefer the resolved on-disk path from tool output (e.g. Typst saved_path).
     tool.output
         .as_deref()
         .and_then(tool_file_path)
         .or_else(|| tool_file_path(&tool.input))
+        .filter(|path| produced_path_is_openable(path))
 }
 
 fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Option<String> {
@@ -634,99 +458,6 @@ pub fn adapt_messages_with_traces(
         .collect()
 }
 
-pub fn estimate_turn_height(turn: &Turn, plan_steps: usize, content_width_px: f32) -> Size<Pixels> {
-    // Mirror `render_visible_turns`: optional work header, typed blocks (not
-    // User/Text), then `render_message` for the bubble body.
-    let has_work_fold = turn_has_work_fold(turn);
-    let empty_message = turn_message_is_empty(turn);
-
-    // Consecutive collapsed work headers should sit tight — no empty bubble
-    // shell and no extra turn padding.
-    if has_work_fold && turn.collapsed && empty_message {
-        let mut receipt_height = 0.0_f32;
-        let mut receipts = 0u32;
-        for block in &turn.blocks {
-            if block_visible_in_turn(turn, block) {
-                receipt_height += block_estimated_height(block, plan_steps, content_width_px);
-                receipts += 1;
-            }
-        }
-        let mut height = COLLAPSED_TURN_HEIGHT + receipt_height;
-        if receipts > 0 {
-            height += 8.0 * receipts as f32;
-        }
-        return size(px(800.), px(height.max(28.0)));
-    }
-
-    let mut height = 0.0_f32;
-    let mut flex_children = 0u32;
-
-    if has_work_fold {
-        height += COLLAPSED_TURN_HEIGHT;
-        flex_children += 1;
-    }
-
-    if has_work_fold && !turn.collapsed {
-        let overview = file_changes_height(&file_changes_from_turn(turn));
-        if overview > 0.0 {
-            height += overview;
-            flex_children += 1;
-        }
-    }
-
-    let mut message_height = 0.0_f32;
-    for block in &turn.blocks {
-        match block {
-            Block::User {
-                content,
-                attachments,
-                ..
-            } => {
-                message_height = message_height.max(estimate_message_bubble_height(
-                    content,
-                    attachments,
-                    content_width_px,
-                ));
-            }
-            Block::Text {
-                content,
-                attachments,
-                ..
-            } => {
-                message_height = message_height.max(estimate_message_bubble_height(
-                    content,
-                    attachments,
-                    content_width_px,
-                ));
-            }
-            _ if block_visible_in_turn(turn, block) => {
-                height += block_estimated_height(block, plan_steps, content_width_px);
-                flex_children += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let show_message = !empty_message || (!has_work_fold && message_height > 0.0);
-    if show_message {
-        let stacks_message_shell = has_work_fold || flex_children > 0;
-        if stacks_message_shell {
-            height += message_height.max(32.0);
-        } else {
-            height += message_height;
-        }
-        flex_children += 1;
-    }
-
-    // `gap_2` between work header, typed blocks, and message bubble.
-    if flex_children > 1 {
-        height += 8.0 * (flex_children - 1) as f32;
-    }
-
-    height += 8.0;
-    size(px(800.), px(height.max(36.0)))
-}
-
 pub fn format_worked_for(elapsed: Option<Duration>) -> String {
     let Some(duration) = elapsed else {
         return "Worked for a moment".to_string();
@@ -754,6 +485,17 @@ pub fn format_working_for(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// A PDF that really is on disk. The adapter refuses to build a card for an
+    /// absolute path that is not there, which is the point — a fixture that
+    /// skips this is testing a case the renderer no longer accepts.
+    fn written_pdf(dir_name: &str, file_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(file_name);
+        std::fs::write(&path, b"%PDF-1.4").expect("write pdf");
+        path
+    }
+
     #[test]
     fn worked_for_formats_seconds_and_minutes() {
         assert_eq!(format_worked_for(None), "Worked for a moment");
@@ -780,47 +522,10 @@ mod tests {
         );
     }
 
+    /// A collapsed receipt turn renders a work-fold header plus the artifact
+    /// card, and nothing else — no empty message shell under it.
     #[test]
-    fn long_user_prompt_gets_enough_virtual_list_height() {
-        let prompt = "Create a short 2-page PDF report at workspace_notes.pdf using Typst. \
-            Page 1: title 'Chatty PDF QA', a one-paragraph poem, and the formula E = mc^2. \
-            Page 2: a small 2-column table (Item / Notes) with three rows. \
-            Then open it so I can flip pages in the document panel.";
-        let msg = DisplayMessage {
-            role: MessageRole::User,
-            content: prompt.into(),
-            is_streaming: false,
-            system_trace_view: None,
-            live_trace: None,
-            is_markdown: false,
-            attachments: Vec::new(),
-            feedback: None,
-            history_index: None,
-        };
-        let turn = adapt_message(&msg, 0, false);
-        let wide = estimate_turn_height(&turn, 0, 520.0).height;
-        let narrow = estimate_turn_height(&turn, 0, 220.0).height;
-        assert!(
-            narrow > wide,
-            "narrow width should reserve more height (wide={wide:?}, narrow={narrow:?})"
-        );
-        assert!(
-            narrow >= px(170.0),
-            "narrow user bubble under-estimated at {narrow:?} for {} chars",
-            prompt.len()
-        );
-    }
-
-    #[test]
-    fn narrow_width_increases_wrapped_line_estimate() {
-        let prompt = "Create a short 2-page PDF report at workspace_notes.pdf using Typst.";
-        let wide = estimate_message_bubble_height(prompt, &[], 520.0);
-        let narrow = estimate_message_bubble_height(prompt, &[], 220.0);
-        assert!(narrow > wide);
-    }
-
-    #[test]
-    fn collapsed_assistant_with_artifact_reserves_work_header_and_receipt() {
+    fn collapsed_assistant_with_artifact_shows_a_work_fold_and_one_receipt() {
         use chatty_core::models::message_types::{
             SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
         };
@@ -830,7 +535,10 @@ mod tests {
             tool_name: "compile_typst".into(),
             display_name: "Generating PDF".into(),
             input: r#"{"content":"= Hi","output_path":"workspace_notes.pdf"}"#.into(),
-            output: Some(r#"{"saved_path":"/tmp/workspace_notes.pdf","page_count":2}"#.into()),
+            output: Some(format!(
+                r#"{{"saved_path":"{}","page_count":2}}"#,
+                written_pdf("adapter_collapsed_receipt", "workspace_notes.pdf").display()
+            )),
             output_preview: None,
             state: ToolCallState::Success,
             duration: None,
@@ -854,26 +562,34 @@ mod tests {
             history_index: None,
         };
         let turn = adapt_message(&msg, 0, true);
-        let height = estimate_turn_height(&turn, 0, 400.0).height;
+        assert!(turn.collapsed);
+        assert!(turn_has_work_fold(&turn), "a receipt turn folds its work");
+
+        let visible: Vec<&Block> = turn
+            .blocks
+            .iter()
+            .filter(|block| block_visible_in_turn(&turn, block))
+            .collect();
         assert!(
-            height >= px(100.0),
-            "assistant receipt turn under-estimated at {height:?}"
-        );
-        assert!(
-            height < px(140.0),
-            "collapsed receipt should not reserve an empty message shell, got {height:?}"
+            matches!(visible.as_slice(), [Block::Artifact { .. }]),
+            "collapsed receipt renders the card and nothing else, got {visible:?}"
         );
     }
 
+    /// A collapsed turn whose only content is a tool run renders as the fold
+    /// header alone: the activity card is hidden and there is no message.
     #[test]
-    fn collapsed_work_only_turn_is_compact() {
+    fn collapsed_work_only_turn_renders_just_its_header() {
         let mut msg = assistant_with_tools(vec![sample_tool("a", "read_file")]);
         msg.content.clear();
         let turn = adapt_message(&msg, 0, true);
-        let height = estimate_turn_height(&turn, 0, 400.0).height;
+        assert!(turn_has_work_fold(&turn));
         assert!(
-            height <= px(48.0),
-            "collapsed work header should sit tight, got {height:?}"
+            !turn
+                .blocks
+                .iter()
+                .any(|block| block_visible_in_turn(&turn, block)),
+            "a collapsed work-only turn draws nothing but its header"
         );
     }
 
@@ -893,10 +609,9 @@ mod tests {
         let turns = adapt_messages(&[msg], &[true]);
         assert_eq!(turns.len(), 1, "live turn must stay in the transcript");
         assert!(turns[0].streaming);
-        let height = estimate_turn_height(&turns[0], 0, 400.0).height;
         assert!(
-            height <= px(48.0),
-            "collapsed Working header should sit tight, got {height:?}"
+            turn_has_work_fold(&turns[0]),
+            "a streaming turn shows the Working header before its first token"
         );
     }
 
@@ -965,7 +680,10 @@ mod tests {
             tool_name: "compile_typst".into(),
             display_name: "Generating PDF".into(),
             input: r#"{"content":"= Hi","output_path":"reports/sales.pdf"}"#.into(),
-            output: Some(r#"{"saved_path":"/tmp/reports/sales.pdf","page_count":1}"#.into()),
+            output: Some(format!(
+                r#"{{"saved_path":"{}","page_count":1}}"#,
+                written_pdf("adapter_typst_saved_path", "sales.pdf").display()
+            )),
             output_preview: None,
             state: ToolCallState::Success,
             duration: None,
@@ -1192,20 +910,9 @@ mod tests {
         );
     }
 
+    /// Never had a `#[test]` attribute: the one above it belonged to the plan
+    /// strip test that has since moved to `chat_view::scroll`.
     #[test]
-    fn plan_strip_hides_while_block_straddles_and_shows_when_fully_past() {
-        let bottom = px(120.0);
-        assert!(
-            !plan_is_above_viewport(bottom, px(100.0)),
-            "straddling the top edge must not show the strip"
-        );
-        assert!(
-            !plan_is_above_viewport(bottom, px(126.0)),
-            "8px hysteresis keeps the boundary quiet"
-        );
-        assert!(plan_is_above_viewport(bottom, px(130.0)));
-    }
-
     fn tally_sentence_matches_linear_1a_order() {
         let sentence = RunTally {
             edits: 4,

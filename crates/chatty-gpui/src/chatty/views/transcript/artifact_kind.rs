@@ -39,6 +39,15 @@ pub fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
 }
 
+/// Longest edge, in pixels, of an inline attachment thumbnail rendered under a
+/// chat bubble.
+///
+/// The renderer clamps the thumbnail's wrapper to this box and the transcript
+/// height estimator reserves a slot derived from it, so the two cannot drift.
+/// A thumbnail taller than its reserved slot paints over the following block —
+/// that is what put a full-page screenshot under the to-do panel (AGE-183).
+pub const INLINE_IMAGE_MAX_PX: f32 = 300.0;
+
 /// Attachment paths shown inline under a message bubble (images, charts).
 /// PDFs use artifact cards in the typed transcript instead.
 ///
@@ -380,7 +389,9 @@ pub fn artifact_format_token(path: &Path) -> String {
 pub fn artifact_type_token(path: &Path) -> &'static str {
     if is_tabular_path(path) {
         "Data"
-    } else if is_image_path(path) || is_pdf_path(path) {
+    } else if is_pdf_path(path) {
+        "Document"
+    } else if is_image_path(path) {
         "Image"
     } else if is_code_artifact_path(path) {
         "Code"
@@ -560,7 +571,24 @@ pub fn block_index_from_anchor(headings: &[ArtifactHeading], anchor: ViewAnchor)
     }
 }
 
+/// Whether a path a tool reported is worth offering to open.
+///
+/// An absolute path must exist: tools report where they *would* write before
+/// they write it, and a card for a file that was never created ends at a
+/// "No such file or directory" in the viewer. A relative path cannot be judged
+/// here — it is resolved against the workspace later, by
+/// [`resolve_artifact_path`] — so it is taken on trust.
+pub fn produced_path_is_openable(path: &Path) -> bool {
+    !path.is_absolute() || path.exists()
+}
+
 /// True when a produced-file tool result is a PDF the artifact panel should open.
+///
+/// The input path is a fallback, not a source of truth: it is the path the
+/// model *asked* for, still present verbatim when the tool failed. Reading it
+/// unconditionally is how a failed `compile_typst` opened the viewer on a PDF
+/// that was never written, so the result must also be openable — and callers
+/// check the call actually succeeded.
 pub fn is_pdf_artifact_tool(tool_name: &str, input: &str, output: Option<&str>) -> bool {
     if !is_produced_file_tool(tool_name, input) {
         // compile_typst may only expose the absolute path on output.
@@ -569,9 +597,10 @@ pub fn is_pdf_artifact_tool(tool_name: &str, input: &str, output: Option<&str>) 
             return false;
         }
     }
-    tool_file_path(input)
-        .or_else(|| output.and_then(tool_file_path))
-        .is_some_and(|p| is_pdf_path(&p))
+    output
+        .and_then(tool_file_path)
+        .or_else(|| tool_file_path(input))
+        .is_some_and(|p| is_pdf_path(&p) && produced_path_is_openable(&p))
 }
 
 #[cfg(test)]
@@ -704,10 +733,45 @@ mod tests {
             "compile_typst",
             r#"{"content":"= Hi","output_path":"out.pdf"}"#
         ));
+        let dir = std::env::temp_dir().join("chatty-pdf-artifact-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let written = dir.join("out.pdf");
+        std::fs::write(&written, b"%PDF-1.4").expect("write pdf");
+        assert!(
+            is_pdf_artifact_tool(
+                "compile_typst",
+                r#"{"content":"= Hi","output_path":"out.pdf"}"#,
+                Some(&format!(
+                    r#"{{"saved_path":"{}","page_count":1}}"#,
+                    written.display()
+                )),
+            ),
+            "a compile that wrote its PDF opens in the panel"
+        );
+        assert!(
+            !is_pdf_artifact_tool(
+                "compile_typst",
+                r#"{"content":"= Hi","output_path":"/abs/never_written.pdf"}"#,
+                Some("Error: compile_typst: Typst compilation failed:\nunknown variable"),
+            ),
+            "a failed compile must not offer a card for a file that does not exist"
+        );
+        assert!(
+            !is_pdf_artifact_tool(
+                "compile_typst",
+                r#"{"content":"= Hi","output_path":"/abs/never_written.pdf"}"#,
+                Some(r#"{"saved_path":"/abs/never_written.pdf","page_count":1}"#),
+            ),
+            "an absolute path that is not on disk is not openable"
+        );
+        // A *relative* requested path cannot be judged here — it is resolved
+        // against the workspace later — so this predicate still accepts it.
+        // Callers are what keep a failed run from reaching the viewer: they
+        // require the call to have succeeded.
         assert!(is_pdf_artifact_tool(
             "compile_typst",
-            r#"{"content":"= Hi","output_path":"out.pdf"}"#,
-            Some(r#"{"saved_path":"/abs/out.pdf","page_count":1}"#)
+            r#"{"content":"= Hi","output_path":"never_written.pdf"}"#,
+            Some("Error: compile_typst: Typst compilation failed"),
         ));
         assert!(is_produced_file_tool("write_file", r#"{"path":"a.md"}"#));
         assert!(!is_produced_file_tool(

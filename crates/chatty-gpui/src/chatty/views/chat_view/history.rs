@@ -32,6 +32,7 @@ impl ChatView {
 
         // Clear any pending approval from previous conversation
         self.pending_approval = None;
+        self.pending_clarification = None;
         self.artifact_dismissed = false;
         self.artifact_view.update(cx, |view, cx| {
             view.set_mode(crate::chatty::views::transcript::ArtifactMode::Closed, cx);
@@ -55,8 +56,14 @@ impl ChatView {
         self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
+        self.reset_transcript_list();
         self.last_auto_opened_table_id = None;
         self.last_auto_opened_chart_id = None;
+        // Tool-call IDs are per-turn sequential (e.g. "browser_navigate:0"),
+        // not globally unique, so a stale value here can collide with the
+        // new conversation's own first browser call and wrongly look
+        // already-opened — the panel then never reconnects for this chat.
+        self.last_auto_opened_browser_tool_id = None;
 
         for (idx, entry) in entries.iter().enumerate() {
             let feedback = entry.feedback.clone();

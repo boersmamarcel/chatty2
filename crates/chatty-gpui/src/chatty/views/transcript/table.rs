@@ -34,15 +34,6 @@ pub fn extract_table_preview(tool_call: &ToolCallBlock) -> Option<TablePreview> 
         .and_then(|p| serde_json::from_value(p.clone()).ok())
 }
 
-/// Fixed height estimate for one inline table card (chrome + capped preview grid).
-pub fn inline_table_card_height(preview: &TablePreview) -> f32 {
-    const CHROME: f32 = 76.0;
-    const HEADER: f32 = 28.0;
-    const ROW: f32 = 24.0;
-    let visible_rows = preview.rows.len().clamp(1, INLINE_TABLE_PREVIEW_ROWS);
-    (CHROME + HEADER + visible_rows as f32 * ROW).min(CHROME + INLINE_TABLE_MAX_HEIGHT_PX)
-}
-
 fn source_hint(preview: &TablePreview) -> String {
     match &preview.source {
         TableSource::Query { .. } => "SQL query".into(),

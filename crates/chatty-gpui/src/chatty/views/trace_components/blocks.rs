@@ -126,6 +126,17 @@ impl SystemTraceView {
                             ("✗", "denied", cx.theme().ring)
                         }
                     },
+                    TraceItem::ClarificationPrompt(clarification) => match clarification.state {
+                        crate::chatty::views::message_types::ClarificationState::Pending => {
+                            ("?", "question", cx.theme().primary)
+                        }
+                        crate::chatty::views::message_types::ClarificationState::Answered => {
+                            ("✓", "answered", cx.theme().accent)
+                        }
+                        crate::chatty::views::message_types::ClarificationState::Cancelled => {
+                            ("✗", "unanswered", cx.theme().ring)
+                        }
+                    },
                 };
 
                 let mut step_container = div().flex().items_center().gap_1();
@@ -213,6 +224,12 @@ impl SystemTraceView {
                         TraceItem::ApprovalPrompt(approval) => self
                             .render_approval_block(index, approval, entity.clone(), cx)
                             .into_any_element(),
+                        TraceItem::ClarificationPrompt(clarification) => {
+                            crate::chatty::views::transcript::ClarificationSummary::new(
+                                clarification.clone(),
+                            )
+                            .into_any_element()
+                        }
                     }),
             )
     }

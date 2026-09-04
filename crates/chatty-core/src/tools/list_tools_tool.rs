@@ -1,6 +1,6 @@
 use crate::factories::agent_factory::ToolAvailability;
 use crate::tools::ToolError;
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 /// Arguments for the list_tools tool (no arguments needed)
@@ -495,6 +495,12 @@ impl Tool for ListToolsTool {
         })
     }
 
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -578,6 +584,7 @@ mod tests {
             browser_use: false,
             daytona: false,
             publish_module: false,
+            ask_user: false,
         }
     }
 
@@ -611,6 +618,7 @@ mod tests {
             browser_use: true,
             daytona: true,
             publish_module: true,
+            ask_user: true,
         }
     }
 

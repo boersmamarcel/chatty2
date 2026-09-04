@@ -1,10 +1,15 @@
 use crate::chatty::controllers::ChattyApp;
 use crate::chatty::views::AppTitleBar;
 use crate::chatty::views::footer::StatusFooterView;
+use crate::chatty::views::transcript::ArtifactMode;
 use crate::settings::models::general_model::GeneralSettingsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Root, Sizable, button::Button};
+use gpui_component::menu::PopupMenuItem;
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Root, Sizable,
+    button::{Button, ButtonVariants, DropdownButton},
+};
 
 impl Render for ChattyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -12,6 +17,7 @@ impl Render for ChattyApp {
 
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let sidebar = self.sidebar_view.clone();
+        let chat_view = self.chat_view.clone();
 
         div()
             .size_full()
@@ -22,7 +28,7 @@ impl Render for ChattyApp {
             .relative() // Enable absolute positioning for floating button
             .child(
                 // Custom titlebar with toggle button
-                AppTitleBar::new(self.sidebar_view.clone()),
+                AppTitleBar::new(self.sidebar_view.clone(), self.chat_view.clone()),
             )
             .child(
                 // Content area - existing panels
@@ -78,6 +84,53 @@ impl Render for ChattyApp {
                                 crate::chatty::views::SearchConversationsDialog::open(window, cx);
                             }),
                     ),
+                )
+                .when(
+                    chat_view.read(cx).artifact_view().read(cx).mode == ArtifactMode::Closed,
+                    |this| {
+                        // Unfold the artifact panel, mirroring the sidebar's own
+                        // floating toggle. Only while the panel is closed: once
+                        // open, its header occupies this same corner (maximize,
+                        // close) and the button would sit on top of those. The
+                        // caret opens a small picker for manually starting an
+                        // artifact — "Browser" for now — so the panel is reachable
+                        // even when the agent never opened one.
+                        this.child(
+                            div().absolute().top(px(8.)).right(px(8.)).child(
+                                DropdownButton::new("toggle-artifact-floating")
+                                    .small()
+                                    .button(
+                                        Button::new("toggle-artifact-floating-main")
+                                            .ghost()
+                                            .icon(Icon::new(IconName::PanelRightOpen))
+                                            .label("")
+                                            .small()
+                                            .tooltip("Open artifact panel")
+                                            .on_click({
+                                                let chat_view = chat_view.clone();
+                                                move |_event, _window, cx| {
+                                                    chat_view.update(cx, |view, cx| {
+                                                        view.toggle_artifact_panel(cx);
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                    .dropdown_menu({
+                                        let chat_view = chat_view.clone();
+                                        move |menu, _window, _cx| {
+                                            menu.item(PopupMenuItem::new("Browser").on_click({
+                                                let chat_view = chat_view.clone();
+                                                move |_event, _window, cx| {
+                                                    chat_view.update(cx, |view, cx| {
+                                                        view.open_manual_browser(cx);
+                                                    });
+                                                }
+                                            }))
+                                        }
+                                    }),
+                            ),
+                        )
+                    },
                 )
             })
             .children(dialog_layer)

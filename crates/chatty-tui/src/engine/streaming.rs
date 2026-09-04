@@ -12,6 +12,8 @@ use rig_core::message::UserContent;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+use chatty_core::models::clarification_store::ClarificationNotification;
+
 use crate::events::AppEvent;
 
 pub(super) struct StreamParams {
@@ -21,6 +23,7 @@ pub(super) struct StreamParams {
     pub cancel_flag: Arc<AtomicBool>,
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
     pub approval_rx: mpsc::UnboundedReceiver<ApprovalNotification>,
+    pub clarification_rx: mpsc::UnboundedReceiver<ClarificationNotification>,
     pub resolution_rx: mpsc::UnboundedReceiver<ApprovalResolution>,
     pub max_agent_turns: usize,
     pub invoke_agent_progress_slot: InvokeAgentProgressSlot,
@@ -98,6 +101,12 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                     .send(AppEvent::ApprovalResolved { id, approved });
                 Ok(ChunkAction::Continue)
             }
+            StreamChunk::ClarificationRequested { id, questions } => {
+                let _ = self
+                    .event_tx
+                    .send(AppEvent::ClarificationRequested { id, questions });
+                Ok(ChunkAction::Continue)
+            }
             StreamChunk::TokenUsage {
                 input_tokens,
                 output_tokens,
@@ -170,6 +179,7 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         cancel_flag,
         event_tx,
         approval_rx,
+        clarification_rx,
         resolution_rx,
         max_agent_turns,
         invoke_agent_progress_slot,
@@ -188,6 +198,7 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         contents,
         Some(approval_rx),
         Some(resolution_rx),
+        Some(clarification_rx),
         max_agent_turns,
     )
     .await
