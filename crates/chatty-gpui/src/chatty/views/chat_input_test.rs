@@ -345,6 +345,7 @@ fn model_label_elision_counts_chars_not_bytes() {
 #[test]
 fn model_label_cap_leaves_room_for_send() {
     // Guards the constant itself: a label at the cap plus the fixed-width
-    // controls has to stay well under a half-width chat column.
-    assert!(super::MODEL_LABEL_MAX_CHARS <= 32);
+    // controls has to stay well under a half-width chat column. A const block
+    // makes this a compile-time check rather than a runtime one.
+    const { assert!(super::MODEL_LABEL_MAX_CHARS <= 32) };
 }
