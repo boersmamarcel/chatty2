@@ -613,6 +613,42 @@ pub fn friendly_tool_name(name: &str) -> String {
     }
 }
 
+impl ToolCallBlock {
+    /// A synthetic, already-finished tool row recording a browser control
+    /// handoff (AGE-156): the user taking the browser from the agent
+    /// (`taken`) or handing it back. Not a real tool call — the user did
+    /// this from the artifact panel — but it lives in the activity trail
+    /// as one so the transcript shows *when* the agent lost and regained
+    /// the browser between its own actions, the same way sub-agent
+    /// progress rides on a synthetic `sub_agent` call.
+    pub fn browser_control_handoff(taken: bool, url: &str) -> Self {
+        let (tool_name, display_name) = if taken {
+            ("browser_take_control", "Taking control of the browser")
+        } else {
+            ("browser_release_control", "Handing the browser back")
+        };
+        ToolCallBlock {
+            id: format!(
+                "browser-control-{}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
+            tool_name: tool_name.to_string(),
+            display_name: display_name.to_string(),
+            input: json!({ "url": url }).to_string(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        }
+    }
+}
+
 impl Default for SystemTrace {
     fn default() -> Self {
         Self::new()
@@ -891,6 +927,21 @@ mod tests {
         assert!(output.contains("Preparing remote module..."));
         assert!(output.contains("Running analysis..."));
         assert!(output.contains("Analysis complete"));
+    }
+
+    #[test]
+    fn browser_control_handoff_rows_are_finished_local_tool_calls() {
+        let take = ToolCallBlock::browser_control_handoff(true, "https://example.com");
+        assert_eq!(take.tool_name, "browser_take_control");
+        assert_eq!(take.display_name, "Taking control of the browser");
+        assert_eq!(take.input, r#"{"url":"https://example.com"}"#);
+        assert!(matches!(take.state, ToolCallState::Success));
+        assert_eq!(take.source, ToolSource::Local);
+        assert!(take.output.is_none());
+
+        let release = ToolCallBlock::browser_control_handoff(false, "about:blank");
+        assert_eq!(release.tool_name, "browser_release_control");
+        assert_eq!(release.display_name, "Handing the browser back");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use rig_core::completion::message::{AssistantContent, Text};
 
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;
-use crate::models::message_types::{SystemTrace, ToolSource};
+use crate::models::message_types::{SystemTrace, ToolSource, TraceItem};
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::services::AgentTaskSnapshot;
@@ -437,6 +437,19 @@ impl Conversation {
         }
     }
 
+    /// Append a trace item to the activity trail of the most recent
+    /// assistant message, once that message has settled (AGE-156: browser
+    /// control handoffs happen between turns, after the streaming trace is
+    /// gone). Returns `false` when there is no assistant message to attach
+    /// it to.
+    pub fn append_trace_item_to_last_assistant(&mut self, item: TraceItem) -> bool {
+        let appended = append_trace_item_state(&mut self.entries, item);
+        if appended {
+            self.updated_at = SystemTime::now();
+        }
+        appended
+    }
+
     /// Serialize message feedback to JSON string
     pub fn serialize_message_feedback(&self) -> Result<String> {
         let feedback: Vec<Option<&MessageFeedback>> =
@@ -734,6 +747,42 @@ impl Conversation {
     }
 }
 
+/// Push `item` onto the persisted trace of the last assistant entry,
+/// creating the trace when the message had none.
+fn append_trace_item_state(entries: &mut [MessageEntry], item: TraceItem) -> bool {
+    let Some(entry) = entries
+        .iter_mut()
+        .rev()
+        .find(|e| matches!(e.message, Message::Assistant { .. }))
+    else {
+        return false;
+    };
+    // Never `take()` the stored trace first: a trace that fails to parse
+    // or re-serialize must stay exactly as it was rather than be replaced
+    // by one holding only the new item.
+    let mut trace = match entry.system_trace.as_ref() {
+        Some(value) => match serde_json::from_value::<SystemTrace>(value.clone()) {
+            Ok(trace) => trace,
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to parse stored trace; not appending item");
+                return false;
+            }
+        },
+        None => SystemTrace::new(),
+    };
+    trace.items.push(item);
+    match serde_json::to_value(&trace) {
+        Ok(value) => {
+            entry.system_trace = Some(value);
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "Failed to serialize trace after appending item");
+            false
+        }
+    }
+}
+
 fn start_sub_agent_progress_state(
     streaming_sub_agent_trace: &mut Option<SystemTrace>,
     prompt: &str,
@@ -900,5 +949,81 @@ mod tests {
         };
         assert_eq!(tc.output.as_deref(), Some("working...\n\n---\n\ndone"));
         assert!(!trace.is_running_sub_agent());
+    }
+
+    fn entry(message: Message, system_trace: Option<serde_json::Value>) -> MessageEntry {
+        MessageEntry {
+            message,
+            system_trace,
+            attachment_paths: Vec::new(),
+            timestamp: None,
+            feedback: None,
+        }
+    }
+
+    fn handoff_item() -> TraceItem {
+        TraceItem::ToolCall(
+            crate::models::message_types::ToolCallBlock::browser_control_handoff(
+                true,
+                "https://example.com",
+            ),
+        )
+    }
+
+    #[test]
+    fn append_trace_item_targets_the_last_assistant_entry() {
+        let existing =
+            serde_json::to_value(SystemTrace::new_sub_agent("x", ToolSource::Local)).unwrap();
+        let mut entries = vec![
+            entry(Message::user("hi"), None),
+            entry(Message::assistant("first"), Some(existing)),
+            entry(Message::user("again"), None),
+            entry(Message::assistant("second"), None),
+        ];
+
+        assert!(append_trace_item_state(&mut entries, handoff_item()));
+
+        // The earlier assistant message is untouched.
+        let first: SystemTrace =
+            serde_json::from_value(entries[1].system_trace.clone().unwrap()).unwrap();
+        assert_eq!(first.items.len(), 1);
+        // The last one gained a fresh trace holding only the handoff.
+        let last: SystemTrace =
+            serde_json::from_value(entries[3].system_trace.clone().unwrap()).unwrap();
+        assert_eq!(last.items.len(), 1);
+        match &last.items[0] {
+            TraceItem::ToolCall(tc) => assert_eq!(tc.tool_name, "browser_take_control"),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert!(entries[2].system_trace.is_none());
+    }
+
+    #[test]
+    fn append_trace_item_extends_an_existing_trace() {
+        let existing =
+            serde_json::to_value(SystemTrace::new_sub_agent("x", ToolSource::Local)).unwrap();
+        let mut entries = vec![entry(Message::assistant("a"), Some(existing))];
+
+        assert!(append_trace_item_state(&mut entries, handoff_item()));
+
+        let trace: SystemTrace =
+            serde_json::from_value(entries[0].system_trace.clone().unwrap()).unwrap();
+        assert_eq!(trace.items.len(), 2);
+    }
+
+    #[test]
+    fn append_trace_item_leaves_an_unparseable_trace_untouched() {
+        let garbage = serde_json::json!("not a trace");
+        let mut entries = vec![entry(Message::assistant("a"), Some(garbage.clone()))];
+
+        assert!(!append_trace_item_state(&mut entries, handoff_item()));
+        assert_eq!(entries[0].system_trace, Some(garbage));
+    }
+
+    #[test]
+    fn append_trace_item_without_an_assistant_message_is_a_no_op() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+        assert!(!append_trace_item_state(&mut entries, handoff_item()));
+        assert!(entries[0].system_trace.is_none());
     }
 }
