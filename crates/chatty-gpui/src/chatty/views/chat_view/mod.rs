@@ -73,9 +73,10 @@ use super::transcript::{
     RunPinKind, SessionChangeBar, TableOpen, TranscriptLayout, Turn, TurnFileOverview, TurnRole,
     adapt_messages_with_traces, attach_plan_block, attachment_image_path, estimate_turn_height,
     extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
-    format_working_for, is_pdf_artifact_tool, is_pdf_path, merge_file_changes, new_artifact_view,
-    plan_block_bottom, plan_is_above_viewport, plan_turn_index, read_artifact_source,
-    render_typed_block, resolve_artifact_path, tool_file_path,
+    format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
+    merge_file_changes, new_artifact_view, plan_block_bottom, plan_is_above_viewport,
+    plan_turn_index, read_artifact_source, render_typed_block, resolve_artifact_path,
+    tool_file_path,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;

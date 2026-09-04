@@ -57,6 +57,11 @@ impl ChatView {
         self.messages.clear();
         self.last_auto_opened_table_id = None;
         self.last_auto_opened_chart_id = None;
+        // Tool-call IDs are per-turn sequential (e.g. "browser_navigate:0"),
+        // not globally unique, so a stale value here can collide with the
+        // new conversation's own first browser call and wrongly look
+        // already-opened — the panel then never reconnects for this chat.
+        self.last_auto_opened_browser_tool_id = None;
 
         for (idx, entry) in entries.iter().enumerate() {
             let feedback = entry.feedback.clone();
