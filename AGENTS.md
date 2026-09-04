@@ -199,7 +199,13 @@ examples.
 - **Transcript blocks** — Typed block/turn types in
   `chatty-gpui/src/chatty/views/transcript/` render the transcript;
   persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
-  chatty-core. Don't leak transcript block types into chatty-core.
+  chatty-core. Don't leak transcript block types into chatty-core. The
+  transcript list uses gpui's `list`/`ListState` (measured heights), not
+  `v_virtual_list` (predicted heights) — see CLAUDE.md.
+- **Tool failure signal is text, not a flag** — `map_tool_error()`'s
+  `Error: {tool_name}: {message}` prefix is the only thing that tells
+  `llm_service::tool_result_looks_like_error` a tool call failed. Don't
+  drop or reword that prefix. See CLAUDE.md.
 - **Stale docs** — If a change alters a fact a page claims, update that
   page in the same PR. `update-agent-docs.yml` only safety-nets
   `AGENTS.md` / `CLAUDE.md`. See
