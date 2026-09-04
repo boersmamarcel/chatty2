@@ -215,12 +215,17 @@ impl MathRendererService {
         debug!(typst_code = %typst_code, "MiTeX converted LaTeX to Typst (after fixes)");
 
         // Wrap in Typst document template with minimal page size
+        // `fill: none` is required, not cosmetic. Typst's page fill defaults to
+        // `Auto`, which SVG export resolves to *white* (`fill_or_white`), so the
+        // exported file opens with a full-canvas white rect. Colour injection
+        // only rewrites the black glyph fills, so that rect survived into the
+        // transcript and math rendered on a white card in dark themes.
         let doc_content = if is_inline {
-            format!("#set page(width: auto, height: auto, margin: (x: {INLINE_MARGIN_X}pt, y: {INLINE_MARGIN_Y}pt))
+            format!("#set page(width: auto, height: auto, fill: none, margin: (x: {INLINE_MARGIN_X}pt, y: {INLINE_MARGIN_Y}pt))
 ${typst_code}$")
         } else {
             // Spaces around content make it display math
-            format!("#set page(width: auto, height: auto, margin: (x: {BLOCK_MARGIN_X}pt, y: {BLOCK_MARGIN_Y}pt))
+            format!("#set page(width: auto, height: auto, fill: none, margin: (x: {BLOCK_MARGIN_X}pt, y: {BLOCK_MARGIN_Y}pt))
 $ {typst_code} $")
         };
 
@@ -350,8 +355,10 @@ $ {typst_code} $")
 
     /// Inject theme color into SVG by replacing black color attributes
     ///
-    /// Replaces inline fill and stroke attributes that use black (#000000 or #000)
-    /// with the provided theme color. This approach:
+    /// Replaces inline `fill`/`stroke` attributes that use six-digit black
+    /// (`#000000`) with the provided theme color. It does not inject CSS and
+    /// does not touch backgrounds — the page is kept transparent at the Typst
+    /// end instead (`fill: none`). This approach:
     /// - Preserves all non-black colors and attributes like fill="none"
     /// - Avoids CSS selector warnings from the SVG rendering library
     /// - Works for all math elements including fraction lines
@@ -373,8 +380,17 @@ $ {typst_code} $")
         after_stroke.into_owned()
     }
 
+    /// Cache version — bump whenever the generated Typst or the SVG
+    /// post-processing changes, to invalidate on-disk SVGs from older builds.
+    ///
+    /// Base `{hash}.svg` files are written once and never cleaned (only the
+    /// `.styled.` variants are), so without this a rendering fix reaches new
+    /// installs only.
+    const CACHE_VERSION: &'static str = "v2";
+
     fn make_cache_key(&self, latex: &str, is_inline: bool) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(Self::CACHE_VERSION.as_bytes());
         hasher.update(latex.as_bytes());
         hasher.update(if is_inline { b"inline" } else { b"block " });
         hex::encode(hasher.finalize())
@@ -540,6 +556,24 @@ mod tests {
         let service = MathRendererService::new();
         service.render_to_svg("x^2", true).unwrap();
         assert_eq!(service.cache_size(), 1);
+    }
+
+    /// The transcript is dark; Typst's page fill defaults to white for SVG
+    /// export, and colour injection only rewrites glyph fills. A white page
+    /// rect here is a white card behind every equation.
+    #[test]
+    fn rendered_math_has_no_opaque_page_background() {
+        let service = MathRendererService::new();
+        for (latex, inline) in [
+            ("x^2", true),
+            ("\\sum_{n=1}^{\\infty} \\frac{1}{n^2}", false),
+        ] {
+            let svg = service.render_to_svg(latex, inline).expect("render");
+            assert!(
+                !svg.contains("#ffffff"),
+                "math SVG carries an opaque page background (inline={inline})"
+            );
+        }
     }
 
     #[test]
