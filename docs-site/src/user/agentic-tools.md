@@ -84,6 +84,7 @@ Git (`git_status`, `git_diff`, `git_commit`, …) and code search (`search_code`
 | `save_skill` / `read_skill` | Named procedures | — |
 | `list_tools` | List tools and schemas | — |
 | `list_agents` / `invoke_agent` | Discover and call configured agents | — |
+| `ask_user` | Pause and ask up to 4 clarifying questions, each with pre-made options plus a free-text answer | — |
 | `write_todos` / `update_todo` / `verify_completion` | Plan + verify | — |
 | `sub_agent` | Headless `chatty-tui` child agent | ✓ |
 | `publish_wasm_module` | Publish WASM to Hive (when Hive MCP is configured) | ✓ |
@@ -92,6 +93,12 @@ Git (`git_status`, `git_diff`, `git_commit`, …) and code search (`search_code`
 Access** in Settings → Search. `browser_use` and `daytona_run` also need API
 keys in that page's External Services section. Set the key to activate; use
 the toggle to disable without deleting the key.
+
+`ask_user` shows up as a card above the chat input; pick an option or type
+your own answer, then submit. Questions you leave blank are sent as
+unanswered so the agent knows what it still doesn't know. In the terminal
+interface it replaces the input row instead — see
+[Terminal interface](./terminal.md).
 
 ### The built-in browser
 

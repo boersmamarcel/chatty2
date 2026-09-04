@@ -59,8 +59,15 @@ unpins auto-scroll, `End` (or scrolling back down) re-pins it.
 | `PageUp` / `PageDown`, `Shift+↑/↓`, mouse wheel | Scroll |
 | `End` | Jump to bottom, resume auto-scroll |
 | `y` / `n` | Approve / deny a tool prompt |
+| `1`-`9` | Pick an option when the agent asks a clarifying question (`ask_user`) |
+| `t` | Type a custom answer instead of picking an option |
 | `Ctrl+C` | Stop streaming (or quit if idle) |
 | `Ctrl+Q` | Quit immediately |
+
+A pending clarifying question replaces the input row and takes over the
+keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
+answered one at a time; press `Esc` while typing a custom answer to go back
+to the options.
 
 Launch overrides: `--enable tool1,tool2` / `--disable tool1,tool2`.
 
