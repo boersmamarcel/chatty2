@@ -54,7 +54,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{Icon, IconName, VirtualListScrollHandle, v_virtual_list};
+use gpui_component::{Icon, IconName};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -68,15 +68,14 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, BASE_FONT_SIZE,
-    Block, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin,
-    RunPinKind, SessionChangeBar, TableOpen, TranscriptLayout, Turn, TurnFileOverview, TurnRole,
-    adapt_messages_with_traces, attach_plan_block, attachment_image_path, block_visible_in_turn,
-    estimate_turn_height, extract_table_preview, file_change_from_tool, file_changes_from_turn,
-    format_worked_for, format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool,
-    is_pdf_path, merge_file_changes, new_artifact_view, plan_block_bottom, plan_is_above_viewport,
-    plan_turn_index, read_artifact_source, render_typed_block, resolve_artifact_path,
-    tool_file_path, turn_has_work_fold,
+    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, FileChange,
+    OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind,
+    SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
+    attach_plan_block, attachment_image_path, block_visible_in_turn, extract_table_preview,
+    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
+    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
+    new_artifact_view, plan_turn_index, read_artifact_source, render_typed_block,
+    resolve_artifact_path, tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -97,8 +96,15 @@ pub struct ChatView {
     chat_input_state: Entity<ChatInputState>,
     messages: Vec<DisplayMessage>,
     conversation_id: Option<String>,
-    scroll_handle: ScrollHandle,
-    list_scroll: VirtualListScrollHandle,
+    /// Transcript list state. Owns the measured height of every turn it has
+    /// laid out, so nothing in this view predicts a height.
+    transcript_list: ListState,
+    /// Per-turn content fingerprints from the last frame, to spot which turns
+    /// changed shape and need re-measuring.
+    transcript_fingerprints: Vec<u64>,
+    /// Font size the list's cached heights were measured at. `List` drops its
+    /// cache when the list's *width* changes, but not when the font does.
+    last_font_size: f32,
     /// Explicit pin: auto-scroll only while this is false.
     user_scrolled_away: bool,
     /// Finished assistant turns fold unless the user expands them.
@@ -132,8 +138,9 @@ pub struct ChatView {
     thinking_indicator: Entity<ThinkingIndicator>,
     agent_task_snapshot: Option<AgentTaskSnapshot>,
     plan_overlay_open: bool,
-    plan_scroll_watch_armed: bool,
-    last_list_scroll_offset: Option<Point<Pixels>>,
+    /// Whether the inline plan card has scrolled above the viewport, resolved
+    /// from the list's measured geometry in `prepare_render`.
+    plan_above_viewport: bool,
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
@@ -158,8 +165,6 @@ pub struct ChatView {
     /// item would be quadratic. Shared rather than cloned: `Turn` owns its
     /// strings and block vectors.
     turns: Rc<Vec<Turn>>,
-    /// Usable transcript column width (px) for virtual-list height estimates.
-    transcript_content_width: f32,
     /// Wall clock for the in-flight assistant turn (work-fold timer + duration stamp).
     stream_started_at: Option<Instant>,
     /// Hide the session "N files changed" bar after Keep all.
@@ -184,6 +189,73 @@ pub enum ChatViewEvent {
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
 
+/// Hash of everything about a turn that changes how tall it renders.
+///
+/// Lengths and flags, never contents: this runs for every turn every frame.
+fn turn_fingerprint(turn: &Turn, activity_expanded: &HashMap<u64, bool>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    turn.id.hash(&mut hasher);
+    turn.collapsed.hash(&mut hasher);
+    turn.streaming.hash(&mut hasher);
+    turn.blocks.len().hash(&mut hasher);
+    for block in &turn.blocks {
+        std::mem::discriminant(block).hash(&mut hasher);
+        block.id().0.hash(&mut hasher);
+        match block {
+            Block::User {
+                content,
+                attachments,
+                ..
+            } => {
+                content.len().hash(&mut hasher);
+                attachments.len().hash(&mut hasher);
+            }
+            Block::Text {
+                content,
+                attachments,
+                ..
+            } => {
+                content.len().hash(&mut hasher);
+                attachments.len().hash(&mut hasher);
+            }
+            Block::Thinking { block, .. } => block.summary.len().hash(&mut hasher),
+            Block::Activity { id, tools } => {
+                tools.len().hash(&mut hasher);
+                activity_expanded.get(&id.0).hash(&mut hasher);
+                // A failed run renders an extra line and forces the card open.
+                tools
+                    .iter()
+                    .map(|tool| std::mem::discriminant(&tool.state))
+                    .for_each(|state| state.hash(&mut hasher));
+            }
+            Block::ArtifactBatch { files, .. } => files.len().hash(&mut hasher),
+            Block::Approval { approval, .. } => {
+                std::mem::discriminant(&approval.state).hash(&mut hasher)
+            }
+            Block::Error { message, .. } => message.len().hash(&mut hasher),
+            Block::Diff { .. }
+            | Block::Artifact { .. }
+            | Block::TablePreview { .. }
+            | Block::Plan { .. } => {}
+        }
+    }
+    hasher.finish()
+}
+
+/// How far beyond the viewport the list renders and measures turns.
+///
+/// Roughly half a screen: enough that a flick-scroll does not show unmeasured
+/// items popping into place, without measuring history nobody is looking at.
+const TRANSCRIPT_OVERDRAW: Pixels = px(400.0);
+
+/// Vertical separation between turns.
+///
+/// Padding, not margin: `List` measures each item with `layout_as_root`, and a
+/// root element's margin is not part of the box it reports.
+const TURN_GAP: Pixels = px(8.0);
+
 impl ChatView {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         let input = cx.new(|cx| {
@@ -194,8 +266,6 @@ impl ChatView {
         });
 
         let chat_input_state = cx.new(|_cx| ChatInputState::new(input.clone()));
-        let scroll_handle = ScrollHandle::new();
-        let list_scroll = VirtualListScrollHandle::new();
 
         // Subscribe to input events to handle Enter key
         let state_for_enter = chat_input_state.clone();
@@ -311,8 +381,9 @@ impl ChatView {
             chat_input_state,
             messages: Vec::new(),
             conversation_id: None,
-            scroll_handle,
-            list_scroll,
+            transcript_list: ListState::new(0, ListAlignment::Top, TRANSCRIPT_OVERDRAW),
+            transcript_fingerprints: Vec::new(),
+            last_font_size: GeneralSettingsModel::default().font_size,
             user_scrolled_away: false,
             collapsed_turns: HashMap::new(),
             pending_approval: None,
@@ -326,8 +397,7 @@ impl ChatView {
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
-            plan_scroll_watch_armed: false,
-            last_list_scroll_offset: None,
+            plan_above_viewport: false,
             artifact_view: new_artifact_view(window, cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
@@ -338,7 +408,6 @@ impl ChatView {
             activity_expanded: HashMap::new(),
             last_settled_assistant_idx: None,
             turns: Rc::new(Vec::new()),
-            transcript_content_width: 480.0,
             stream_started_at: None,
             session_review_dismissed: false,
             session_bar_expanded: false,
@@ -439,38 +508,6 @@ impl ChatView {
         self.agent_task_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.write_todos_called && !snapshot.todos.is_empty())
-    }
-
-    fn ensure_plan_scroll_watch(&mut self, cx: &mut Context<Self>) {
-        if self.plan_scroll_watch_armed || !self.plan_snapshot_active() {
-            return;
-        }
-        self.plan_scroll_watch_armed = true;
-        cx.spawn(async move |entity, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(80))
-                    .await;
-                let keep = entity
-                    .update(cx, |view, cx| {
-                        if !view.plan_snapshot_active() {
-                            view.plan_scroll_watch_armed = false;
-                            return false;
-                        }
-                        let offset = view.list_scroll.offset();
-                        if view.last_list_scroll_offset != Some(offset) {
-                            view.last_list_scroll_offset = Some(offset);
-                            cx.notify();
-                        }
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     fn typed_turns(&self, cx: &App) -> Vec<Turn> {
@@ -845,18 +882,17 @@ impl ChatView {
 
     /// Scroll the transcript to the true bottom of its content.
     ///
-    /// `VirtualListScrollHandle::scroll_to_bottom()` aligns the *top* of the
-    /// last item with the viewport top (gpui-component 0.5.1,
-    /// `virtual_list.rs`), so a last turn taller than the viewport can never
-    /// reach the bottom — and the pin's own click handler scrolled backwards
-    /// into the middle of that turn (AGE-180). Driving the offset from
-    /// `max_offset` lands on the content bottom whatever the last item's
-    /// height.
+    /// Anchoring past the last item rather than at a pixel offset is what
+    /// makes this correct: `ListState` backfills from the content end using
+    /// the heights it measured, so a last turn taller than the viewport still
+    /// reaches the bottom (AGE-180), and no arithmetic here can disagree with
+    /// what was painted.
     fn scroll_transcript_to_bottom(&mut self) {
-        let max_offset = self.list_scroll.max_offset();
-        let x = self.list_scroll.offset().x;
-        self.list_scroll.set_offset(point(x, -max_offset.height));
-        self.scroll_handle.scroll_to_bottom();
+        let item_ix = self.transcript_list.item_count();
+        self.transcript_list.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: px(0.0),
+        });
     }
 
     /// If sticky-scroll is active, re-assert the bottom for this frame.
@@ -1398,9 +1434,6 @@ impl ChatView {
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
-        self.transcript_content_width =
-            Self::compute_transcript_content_width(window, artifact_docked);
         self.turns = Rc::new(self.typed_turns(cx));
         self.last_settled_assistant_idx = self
             .turns
@@ -1408,6 +1441,20 @@ impl ChatView {
             .rev()
             .find(|turn| matches!(turn.role, TurnRole::Assistant) && !turn.streaming)
             .map(|turn| turn.message_index);
+
+        // Order matters for the rest of this function:
+        //   1. sync the list so its item count matches `turns`,
+        //   2. read the plan card's position from the geometry the last frame
+        //      measured — before any scrolling moves the anchor,
+        //   3. resolve the scroll policy and re-assert the bottom.
+        // Reading plan geometry after step 3 would see the anchor parked past
+        // the last item and report every turn as "above the viewport".
+        let font_size = cx
+            .try_global::<GeneralSettingsModel>()
+            .map(|settings| settings.font_size)
+            .unwrap_or_else(|| GeneralSettingsModel::default().font_size);
+        self.sync_transcript_list(font_size);
+        self.plan_above_viewport = self.compute_plan_above_viewport();
 
         let running = self.is_thinking_indicator_visible(cx);
         let pending_approval = self.pending_approval.is_some();
@@ -1418,8 +1465,8 @@ impl ChatView {
         // Sticky-scroll and pin visibility are both derived from how far the
         // transcript currently is from its bottom, rather than latched on the
         // first frame that drifts (AGE-180).
-        let offset = self.list_scroll.offset();
-        let max_offset = self.list_scroll.max_offset();
+        let offset = self.transcript_list.scroll_px_offset_for_scrollbar();
+        let max_offset = self.transcript_list.max_offset_for_scrollbar();
         let distance_from_bottom = max_offset.height + offset.y;
         let measured = max_offset.height > px(0.0);
 
@@ -1482,19 +1529,71 @@ impl ChatView {
         }
     }
 
-    /// Approximate message column width for virtual-list height estimates.
-    fn compute_transcript_content_width(window: &Window, artifact_docked: bool) -> f32 {
-        const SIDEBAR_AND_CHROME: f32 = 300.0;
-        const ARTIFACT_PANE: f32 = 400.0;
-        const LIST_AND_BUBBLE_INSET: f32 = 56.0;
+    /// Keep the list's item count and cached heights honest about `self.turns`.
+    ///
+    /// `List` re-renders and re-measures whatever is on screen every frame, so
+    /// this exists for the turns that are *not*: it tells the list which of
+    /// them changed shape, so the scroll range and `bounds_for_item` stay true.
+    ///
+    /// The fingerprint deliberately hashes lengths rather than contents —
+    /// O(blocks), not O(bytes). Streaming text is append-only, so its length
+    /// always moves; a change that preserved every length would go unnoticed,
+    /// and would cost only a slightly stale scroll range for an off-screen
+    /// turn, never an overlap.
+    fn sync_transcript_list(&mut self, font_size: f32) {
+        let next: Vec<u64> = self
+            .turns
+            .iter()
+            .map(|turn| turn_fingerprint(turn, &self.activity_expanded))
+            .collect();
+        let previous = std::mem::replace(&mut self.transcript_fingerprints, next);
+        let next = &self.transcript_fingerprints;
 
-        let mut width: f32 = window.viewport_size().width.into();
-        width -= SIDEBAR_AND_CHROME;
-        if artifact_docked {
-            width -= ARTIFACT_PANE;
+        // A font change re-flows every turn, and `List` only drops its cached
+        // heights when the list's width changes.
+        if font_size != self.last_font_size || self.transcript_list.item_count() != previous.len() {
+            self.last_font_size = font_size;
+            self.transcript_list.reset(next.len());
+            return;
         }
-        width -= LIST_AND_BUBBLE_INSET;
-        width.max(160.0)
+
+        let common = previous
+            .iter()
+            .zip(next.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if previous.len() == next.len() {
+            for ix in common..next.len() {
+                if previous[ix] != next[ix] {
+                    self.transcript_list.splice(ix..ix + 1, 1);
+                }
+            }
+        } else {
+            // Appends splice past the anchor, so the user's scroll position
+            // survives a new turn arriving.
+            self.transcript_list
+                .splice(common..previous.len(), next.len() - common);
+        }
+    }
+
+    /// Drop every measured height and anchor. For a conversation switch, where
+    /// nothing about the old transcript's geometry applies to the new one.
+    pub(super) fn reset_transcript_list(&mut self) {
+        self.transcript_list.reset(0);
+        self.transcript_fingerprints.clear();
+    }
+
+    /// Whether the inline plan card has scrolled above the viewport.
+    fn compute_plan_above_viewport(&self) -> bool {
+        let Some(ix) = plan_turn_index(&self.turns) else {
+            return false;
+        };
+        scroll::plan_is_above_viewport(
+            self.transcript_list.bounds_for_item(ix),
+            ix,
+            self.transcript_list.logical_scroll_top().item_ix,
+            self.transcript_list.viewport_bounds().top(),
+        )
     }
 
     /// Render the scrollable message list area including the loading skeleton.
@@ -1538,34 +1637,7 @@ impl ChatView {
             });
         }
         let thinking_indicator = self.thinking_indicator.clone();
-        let plan_steps = self
-            .agent_task_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.todos.len())
-            .unwrap_or(0);
-        let content_width = self.transcript_content_width;
-        // Font size is user-configurable; the estimator's pixel constants were
-        // measured at the 14px default, so it has to be told (AGE-179).
-        let font_size = cx
-            .try_global::<GeneralSettingsModel>()
-            .map(|s| s.font_size)
-            .unwrap_or(BASE_FONT_SIZE);
         let has_plan = self.plan_snapshot_active();
-        if has_plan {
-            self.ensure_plan_scroll_watch(cx);
-        }
-        let layout = TranscriptLayout {
-            content_width_px: content_width,
-            font_size,
-            plan_steps,
-            activity_expanded: &self.activity_expanded,
-        };
-        let sizes = Rc::new(
-            turns
-                .iter()
-                .map(|turn| estimate_turn_height(turn, &layout))
-                .collect::<Vec<_>>(),
-        );
         let entity = cx.entity();
         let session_entity = entity.clone();
         let session_bar_expanded = self.session_bar_expanded;
@@ -1576,9 +1648,8 @@ impl ChatView {
         };
         let user_away = self.user_scrolled_away;
         let has_approval = self.active_approval_for_display().is_some();
-        let show_strip = has_plan
-            && plan_block_bottom(&turns, px(16.0), &layout)
-                .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
+        // Resolved from the list's measured geometry in `prepare_render`.
+        let show_strip = has_plan && self.plan_above_viewport;
         if !show_strip {
             self.plan_overlay_open = false;
         }
@@ -1645,9 +1716,12 @@ impl ChatView {
                                                 view.collapsed_turns.insert(msg_index, false);
                                             }
                                             view.plan_overlay_open = false;
+                                            // Without this, the next frame's
+                                            // sticky re-assert yanks the view
+                                            // straight back to the bottom.
+                                            view.stick_to_bottom = false;
                                             if let Some(turn_ix) = jump_turn {
-                                                view.list_scroll
-                                                    .scroll_to_item(turn_ix, ScrollStrategy::Top);
+                                                view.transcript_list.scroll_to_reveal_item(turn_ix);
                                             }
                                             cx.notify();
                                         });
@@ -1681,19 +1755,20 @@ impl ChatView {
                             }
                         })
                         .child(
-                            v_virtual_list(
-                                entity,
-                                "transcript",
-                                sizes,
-                                move |this, range, window, cx| {
-                                    this.render_visible_turns(range, window, cx)
-                                },
-                            )
-                            .track_scroll(&self.list_scroll)
-                            .p_4()
+                            // Horizontal padding and the gap between turns live
+                            // on the item, not here: `List` places items at the
+                            // list's left edge and measures them at full width,
+                            // and an item's own margin is not part of the box it
+                            // reports.
+                            list(self.transcript_list.clone(), {
+                                let entity = entity.clone();
+                                move |ix, window, cx| {
+                                    entity.update(cx, |view, cx| view.render_turn(ix, window, cx))
+                                }
+                            })
+                            .pt_4()
                             .pb_12()
-                            .gap_y_2()
-                            .flex_1(),
+                            .size_full(),
                         )
                         .when(overlay_open, |this| {
                             this.child(
@@ -1722,7 +1797,7 @@ impl ChatView {
                             }),
                         ),
                 )
-                .vertical_scrollbar(&self.list_scroll)
+                .vertical_scrollbar(&self.transcript_list)
             })
             .when(!session_changes.is_empty(), |this| {
                 this.child(
@@ -1768,15 +1843,6 @@ impl ChatView {
             .when(thinking_visible, |this| this.child(thinking_indicator))
     }
 
-    fn render_visible_turns(
-        &mut self,
-        range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        range.map(|ix| self.render_turn(ix, window, cx)).collect()
-    }
-
     /// Render one transcript turn.
     ///
     /// One item at a time, because the measuring list asks for items
@@ -1786,12 +1852,28 @@ impl ChatView {
     fn render_turn(
         &mut self,
         ix: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(turn) = self.turns.get(ix).cloned() else {
             return div().into_any_element();
         };
+        let inner = self.render_turn_body(turn, window, cx);
+        div()
+            .w_full()
+            .px_4()
+            .pb(TURN_GAP)
+            .child(inner)
+            .into_any_element()
+    }
+
+    /// The turn itself, without the list's own insets.
+    fn render_turn_body(
+        &mut self,
+        turn: Turn,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let last_visible_assistant_idx = self.last_settled_assistant_idx;
 
         let entity = cx.entity();
@@ -1864,7 +1946,7 @@ impl ChatView {
                     activity_open,
                     Some(on_activity_toggle.clone()),
                     open_artifact.as_deref(),
-                    _window,
+                    window,
                     cx,
                 )
             })

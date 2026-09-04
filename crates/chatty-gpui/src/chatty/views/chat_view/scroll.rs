@@ -5,7 +5,7 @@
 //! without a window. The rendering side supplies the measurement and applies
 //! the decision (AGE-180).
 
-use gpui::{Pixels, px};
+use gpui::{Bounds, Pixels, px};
 
 /// How close to the bottom still counts as "at the bottom" for sticky scroll.
 ///
@@ -27,6 +27,29 @@ pub(super) const PIN_SHOW_DISTANCE: Pixels = px(300.0);
 /// Strictly less than [`PIN_SHOW_DISTANCE`]: with one threshold the pin
 /// flickers on and off while scrolling around the boundary.
 pub(super) const PIN_HIDE_DISTANCE: Pixels = px(120.0);
+
+/// Clearance the plan card must have above the viewport before the sticky
+/// strip replaces it. Without it the two swap back and forth on the boundary.
+const PLAN_STRIP_CLEARANCE: Pixels = px(8.0);
+
+/// True when the inline plan card has fully scrolled above the viewport.
+///
+/// `bounds` is `ListState::bounds_for_item(plan_ix)`, which is `None` in two
+/// different situations — the item starts above the list's scroll anchor, or it
+/// has never been measured. `anchor_ix` (`logical_scroll_top().item_ix`) tells
+/// them apart: an item before the anchor is above the viewport, an item after
+/// it that has not been measured is below.
+pub(super) fn plan_is_above_viewport(
+    bounds: Option<Bounds<Pixels>>,
+    plan_ix: usize,
+    anchor_ix: usize,
+    viewport_top: Pixels,
+) -> bool {
+    match bounds {
+        None => plan_ix < anchor_ix,
+        Some(bounds) => bounds.bottom() + PLAN_STRIP_CLEARANCE <= viewport_top,
+    }
+}
 
 /// What the transcript should do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +102,68 @@ pub(super) fn resolve_scroll_state(
     };
 
     ScrollDecision { stick, show_pin }
+}
+
+#[cfg(test)]
+mod plan_strip_tests {
+    use super::*;
+    use gpui::{Bounds, point, size};
+
+    fn bounds_at(top: f32, height: f32) -> Option<Bounds<Pixels>> {
+        Some(Bounds {
+            origin: point(px(0.0), px(top)),
+            size: size(px(400.0), px(height)),
+        })
+    }
+
+    #[test]
+    fn straddling_the_top_edge_keeps_the_strip_hidden() {
+        // Card runs 80..200, viewport starts at 100: still partly on screen.
+        assert!(!plan_is_above_viewport(
+            bounds_at(80.0, 120.0),
+            3,
+            0,
+            px(100.0)
+        ));
+    }
+
+    #[test]
+    fn clearance_keeps_the_boundary_quiet() {
+        // Bottom at 120, viewport top at 126: past, but inside the clearance.
+        assert!(!plan_is_above_viewport(
+            bounds_at(20.0, 100.0),
+            3,
+            0,
+            px(126.0)
+        ));
+    }
+
+    #[test]
+    fn fully_past_the_top_shows_the_strip() {
+        assert!(plan_is_above_viewport(
+            bounds_at(20.0, 100.0),
+            3,
+            0,
+            px(130.0)
+        ));
+    }
+
+    /// `bounds_for_item` returns `None` both for an item above the list's
+    /// anchor and for one it has never measured. Only the first is "above".
+    #[test]
+    fn unmeasured_above_the_anchor_counts_as_scrolled_past() {
+        assert!(plan_is_above_viewport(None, 2, 5, px(0.0)));
+    }
+
+    #[test]
+    fn unmeasured_below_the_anchor_does_not() {
+        assert!(!plan_is_above_viewport(None, 7, 5, px(0.0)));
+    }
+
+    #[test]
+    fn the_anchor_item_itself_is_not_above() {
+        assert!(!plan_is_above_viewport(None, 5, 5, px(0.0)));
+    }
 }
 
 #[cfg(test)]
