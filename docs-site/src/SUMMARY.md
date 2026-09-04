@@ -55,6 +55,7 @@
 - [Monty sandbox](./dev/architecture/monty-sandbox.md)
 - [Debug UI](./dev/architecture/debug_ui.md)
 - [Refactor follow-ups](./dev/architecture/refactor-followups.md)
+- [Chatty bugs plan](./dev/architecture/chatty-bugs-plan.md)
 
 # Crates
 

@@ -92,11 +92,19 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         uses: Swatinem/rust-cache@v2
         with:
+          # v1 retires a cache that a *cancelled* main run saved five minutes
+          # into a fresh-key compile (2026-09-03, "Adds chrome support"). An
+          # exact hit is never re-saved, so every run since restored that
+          # partial target/ and recompiled the missing ~240 crates plus all
+          # of clippy's. Bump again if the cache ever needs to be rebuilt.
+          prefix-key: v1-rust
           shared-key: linux-ci
           workspaces: |
             .
             modules/echo-agent
-          cache-on-failure: true
+          # Deliberately no `cache-on-failure: true`: it also saves on
+          # cancelled jobs, and cancel-in-progress above cancels main runs
+          # whenever two pushes land close together.
 
       - name: Install Linux dependencies
         if: needs.changes.outputs.rust == 'true'
@@ -158,3 +166,75 @@ jobs:
       - name: Check no chatty_core re-exports (AGE-177)
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-no-core-reexports.sh
+
+  # Warm the release-profile cache that release.yml restores. Release runs are
+  # restore-only (they must never write default-branch caches), so until this
+  # job existed every release built cold. Runs on pushes to main and is a
+  # no-op when a cache for this Cargo.lock + rustc already exists. The key
+  # ignores workspace version bumps (scripts/release-cache-key.sh), so the
+  # cache built from pre-bump main is an exact hit on the release tag.
+  # Linux only: there are no macOS/Windows CI builds to warm from.
+  warm-release-cache:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute release cache key
+        id: cache_key
+        run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing release cache
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache_key.outputs.key }}
+          lookup-only: true
+
+      - name: Install Linux dependencies
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libfontconfig1-dev \
+            libasound2-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Build release binary
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: cargo build --release
+
+      # A plain step, not a post step: a cancelled job never reaches it, so
+      # a half-built target/ can never be saved under this key.
+      - name: Save release cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache_key.outputs.key }}
