@@ -71,12 +71,12 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, BASE_FONT_SIZE,
     Block, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin,
     RunPinKind, SessionChangeBar, TableOpen, TranscriptLayout, Turn, TurnFileOverview, TurnRole,
-    adapt_messages_with_traces, attach_plan_block, attachment_image_path, estimate_turn_height,
-    extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
-    format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
-    merge_file_changes, new_artifact_view, plan_block_bottom, plan_is_above_viewport,
+    adapt_messages_with_traces, attach_plan_block, attachment_image_path, block_visible_in_turn,
+    estimate_turn_height, extract_table_preview, file_change_from_tool, file_changes_from_turn,
+    format_worked_for, format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool,
+    is_pdf_path, merge_file_changes, new_artifact_view, plan_block_bottom, plan_is_above_viewport,
     plan_turn_index, read_artifact_source, render_typed_block, resolve_artifact_path,
-    tool_file_path,
+    tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -149,6 +149,15 @@ pub struct ChatView {
     artifact_split: Entity<ResizableState>,
     /// User expand/collapse for settled activity groups (`BlockId.0` → open).
     activity_expanded: HashMap<u64, bool>,
+    /// Index into `messages` of the last assistant turn that is not streaming.
+    /// Resolved once per frame; drives the action bar's always-visible state.
+    last_settled_assistant_idx: Option<usize>,
+    /// Turns for the frame being rendered, adapted once in `prepare_render`.
+    ///
+    /// The list renders one item at a time, so re-adapting every message per
+    /// item would be quadratic. Shared rather than cloned: `Turn` owns its
+    /// strings and block vectors.
+    turns: Rc<Vec<Turn>>,
     /// Usable transcript column width (px) for virtual-list height estimates.
     transcript_content_width: f32,
     /// Wall clock for the in-flight assistant turn (work-fold timer + duration stamp).
@@ -327,6 +336,8 @@ impl ChatView {
             last_auto_opened_browser_tool_id: None,
             artifact_split: cx.new(|_| ResizableState::default()),
             activity_expanded: HashMap::new(),
+            last_settled_assistant_idx: None,
+            turns: Rc::new(Vec::new()),
             transcript_content_width: 480.0,
             stream_started_at: None,
             session_review_dismissed: false,
@@ -1390,6 +1401,13 @@ impl ChatView {
         let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         self.transcript_content_width =
             Self::compute_transcript_content_width(window, artifact_docked);
+        self.turns = Rc::new(self.typed_turns(cx));
+        self.last_settled_assistant_idx = self
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| matches!(turn.role, TurnRole::Assistant) && !turn.streaming)
+            .map(|turn| turn.message_index);
 
         let running = self.is_thinking_indicator_visible(cx);
         let pending_approval = self.pending_approval.is_some();
@@ -1482,7 +1500,8 @@ impl ChatView {
     /// Render the scrollable message list area including the loading skeleton.
     fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_awaiting = self.is_awaiting_response();
-        let turns = self.typed_turns(cx);
+        // Adapted once per frame in `prepare_render`.
+        let turns = self.turns.clone();
         let show_start_screen = turns.is_empty() && !is_awaiting;
         let thinking_visible = self.is_thinking_indicator_visible(cx);
         if thinking_visible {
@@ -1752,15 +1771,28 @@ impl ChatView {
     fn render_visible_turns(
         &mut self,
         range: std::ops::Range<usize>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let turns = self.typed_turns(cx);
-        let last_visible_assistant_idx = turns
-            .iter()
-            .rev()
-            .find(|turn| matches!(turn.role, TurnRole::Assistant) && !turn.streaming)
-            .map(|turn| turn.message_index);
+        range.map(|ix| self.render_turn(ix, window, cx)).collect()
+    }
+
+    /// Render one transcript turn.
+    ///
+    /// One item at a time, because the measuring list asks for items
+    /// individually. Everything shared across a frame — the adapted turns, the
+    /// index of the last settled assistant turn — is resolved in
+    /// `prepare_render`, not recomputed here.
+    fn render_turn(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(turn) = self.turns.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let last_visible_assistant_idx = self.last_settled_assistant_idx;
 
         let entity = cx.entity();
         let plan = self.agent_task_snapshot.clone();
@@ -1769,251 +1801,211 @@ impl ChatView {
             self.is_thinking_indicator_visible(cx)
                 .then(|| self.thinking_indicator.read(cx).elapsed())
         });
-        range
-            .filter_map(|ix| turns.get(ix).cloned())
-            .map(|turn| {
-                let Some(msg) = self.messages.get(turn.message_index) else {
-                    return div().into_any_element();
-                };
-                let history_index = msg.history_index;
-                let is_last_message = last_visible_assistant_idx == Some(turn.message_index);
-                let entity_clone = entity.clone();
-                let entity_for_diff = entity.clone();
-                let entity_for_feedback = entity.clone();
-                let entity_for_regenerate = entity.clone();
-                let mut streaming_slot = if msg.is_streaming {
-                    self.streaming_parse_cache.take()
-                } else {
-                    None
-                };
-                let on_open: OpenArtifact = {
-                    let entity = entity.clone();
-                    Rc::new(move |open: ArtifactOpen, cx| {
-                        entity.update(cx, |view, cx| {
-                            view.show_artifact(open.path, open.source, open.old, cx);
-                        });
-                    })
-                };
-                let on_open_table: OpenTable = {
-                    let entity = entity.clone();
-                    Rc::new(move |open: TableOpen, cx| {
-                        entity.update(cx, |view, cx| {
-                            view.show_table(open.preview, cx);
-                        });
-                    })
-                };
-                let on_activity_toggle = {
-                    let entity = entity.clone();
-                    Rc::new(move |block_id: u64, cx: &mut App| {
-                        entity.update(cx, |view, cx| {
-                            let current = view.activity_expanded.get(&block_id).copied();
-                            // Missing key → settled success is collapsed; toggle opens.
-                            let next = !current.unwrap_or(false);
-                            view.activity_expanded.insert(block_id, next);
-                            cx.notify();
-                        });
-                    })
-                };
-
-                // Folded turns keep receipts + the assistant message; only the
-                // work trace (thinking / activity / diffs) is hidden.
-                let typed: Vec<AnyElement> = turn
-                    .blocks
-                    .iter()
-                    .filter(|block| {
-                        if matches!(block, Block::User { .. } | Block::Text { .. }) {
-                            return false;
-                        }
-                        if turn.collapsed {
-                            matches!(
-                                block,
-                                Block::Artifact { .. }
-                                    | Block::ArtifactBatch { .. }
-                                    | Block::TablePreview { .. }
-                                    | Block::Approval { .. }
-                                    | Block::Plan { .. }
-                                    | Block::Error { .. }
-                            )
-                        } else {
-                            true
-                        }
-                    })
-                    .map(|block| {
-                        let activity_open = match block {
-                            Block::Activity { id, .. } => {
-                                self.activity_expanded.get(&id.0).copied()
-                            }
-                            _ => None,
-                        };
-                        render_typed_block(
-                            block,
-                            turn.message_index,
-                            Some(on_open.clone()),
-                            Some(on_open_table.clone()),
-                            plan.as_ref(),
-                            activity_open,
-                            Some(on_activity_toggle.clone()),
-                            open_artifact.as_deref(),
-                            _window,
-                            cx,
-                        )
-                    })
-                    .collect();
-
-                let show_work_fold = matches!(turn.role, TurnRole::Assistant)
-                    && (turn.streaming
-                        || turn.blocks.iter().any(|block| {
-                            matches!(
-                                block,
-                                Block::Thinking { .. }
-                                    | Block::Activity { .. }
-                                    | Block::Diff { .. }
-                                    | Block::Artifact { .. }
-                                    | Block::ArtifactBatch { .. }
-                                    | Block::TablePreview { .. }
-                                    | Block::Approval { .. }
-                                    | Block::Plan { .. }
-                                    | Block::Error { .. }
-                            )
-                        }));
-                let work_header = show_work_fold.then(|| {
-                    let streaming = turn.streaming;
-                    let label = if streaming {
-                        format_working_for(live_elapsed.unwrap_or_default())
-                    } else {
-                        format_worked_for(turn.elapsed)
-                    };
-                    let msg_index = turn.message_index;
-                    let entity = entity.clone();
-                    let collapsed = turn.collapsed;
-                    let chevron = if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    };
-                    div()
-                        .id(ElementId::NamedInteger("turn-fold".into(), turn.id))
-                        .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .when(streaming, |this| this.text_sm())
-                        .when(!streaming, |this| this.text_xs())
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if streaming {
-                            cx.theme().foreground
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            entity.update(cx, |view, cx| {
-                                view.collapsed_turns.insert(msg_index, !collapsed);
-                                cx.notify();
-                            });
-                        })
-                        .child(label)
-                        .child(
-                            Icon::new(chevron)
-                                .size_3()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .into_any_element()
+        let Some(msg) = self.messages.get(turn.message_index) else {
+            return div().into_any_element();
+        };
+        let history_index = msg.history_index;
+        let is_last_message = last_visible_assistant_idx == Some(turn.message_index);
+        let entity_clone = entity.clone();
+        let entity_for_diff = entity.clone();
+        let entity_for_feedback = entity.clone();
+        let entity_for_regenerate = entity.clone();
+        let mut streaming_slot = if msg.is_streaming {
+            self.streaming_parse_cache.take()
+        } else {
+            None
+        };
+        let on_open: OpenArtifact = {
+            let entity = entity.clone();
+            Rc::new(move |open: ArtifactOpen, cx| {
+                entity.update(cx, |view, cx| {
+                    view.show_artifact(open.path, open.source, open.old, cx);
                 });
-                let file_overview = (!turn.collapsed && show_work_fold).then(|| {
-                    let changes = file_changes_from_turn(&turn);
-                    (!changes.is_empty()).then(|| TurnFileOverview::new(changes).into_any_element())
-                });
-                let skip_empty_message = msg.content.is_empty() && work_header.is_some();
-
-                let mut msg_for_text = msg.clone();
-                if !typed.is_empty() || work_header.is_some() {
-                    msg_for_text.system_trace_view = None;
-                }
-                let text = render_message(
-                    &msg_for_text,
-                    turn.message_index,
-                    is_last_message,
-                    &self.collapsed_tool_calls,
-                    &self.diff_expanded,
-                    &mut MessageRenderCaches {
-                        parsed: &mut self.parsed_cache,
-                        streaming: &mut streaming_slot,
-                    },
-                    move |msg_idx, tool_idx, cx| {
-                        entity_clone.update(cx, |chat_view, cx| {
-                            let key = (msg_idx, tool_idx);
-                            let current = chat_view
-                                .collapsed_tool_calls
-                                .get(&key)
-                                .copied()
-                                .unwrap_or(true);
-                            chat_view.collapsed_tool_calls.insert(key, !current);
-                            cx.notify();
-                        });
-                    },
-                    move |msg_idx, tool_idx, cx| {
-                        entity_for_diff.update(cx, |chat_view, cx| {
-                            let key = (msg_idx, tool_idx);
-                            let current =
-                                chat_view.diff_expanded.get(&key).copied().unwrap_or(false);
-                            chat_view.diff_expanded.insert(key, !current);
-                            cx.notify();
-                        });
-                    },
-                    move |msg_idx, feedback, cx| {
-                        entity_for_feedback.update(cx, |chat_view, cx| {
-                            if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
-                                display_msg.feedback = feedback.clone();
-                            }
-                            if let Some(h_idx) = history_index {
-                                cx.emit(ChatViewEvent::FeedbackChanged {
-                                    history_index: h_idx,
-                                    feedback,
-                                });
-                            }
-                            cx.notify();
-                        });
-                    },
-                    move |_msg_idx, cx| {
-                        entity_for_regenerate.update(cx, |_chat_view, cx| {
-                            if let Some(h_idx) = history_index {
-                                cx.emit(ChatViewEvent::RegenerateMessage {
-                                    history_index: h_idx,
-                                });
-                            }
-                        });
-                    },
-                    Some(on_open_table.clone()),
-                    cx,
-                );
-                if streaming_slot.is_some() {
-                    self.streaming_parse_cache = streaming_slot;
-                }
-                if typed.is_empty() && work_header.is_none() {
-                    text
-                } else {
-                    let gap = if skip_empty_message && typed.is_empty() {
-                        px(2.)
-                    } else {
-                        px(8.)
-                    };
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(gap)
-                        .w_full()
-                        .children(work_header)
-                        .children(file_overview.flatten())
-                        .children(typed)
-                        .when(!skip_empty_message, |this| this.child(text))
-                        .into_any_element()
-                }
             })
-            .collect()
+        };
+        let on_open_table: OpenTable = {
+            let entity = entity.clone();
+            Rc::new(move |open: TableOpen, cx| {
+                entity.update(cx, |view, cx| {
+                    view.show_table(open.preview, cx);
+                });
+            })
+        };
+        let on_activity_toggle = {
+            let entity = entity.clone();
+            Rc::new(move |block_id: u64, cx: &mut App| {
+                entity.update(cx, |view, cx| {
+                    let current = view.activity_expanded.get(&block_id).copied();
+                    // Missing key → settled success is collapsed; toggle opens.
+                    let next = !current.unwrap_or(false);
+                    view.activity_expanded.insert(block_id, next);
+                    cx.notify();
+                });
+            })
+        };
+
+        // Folded turns keep receipts + the assistant message; only the
+        // work trace (thinking / activity / diffs) is hidden.
+        let typed: Vec<AnyElement> = turn
+            .blocks
+            .iter()
+            .filter(|block| block_visible_in_turn(&turn, block))
+            .map(|block| {
+                let activity_open = match block {
+                    Block::Activity { id, .. } => self.activity_expanded.get(&id.0).copied(),
+                    _ => None,
+                };
+                render_typed_block(
+                    block,
+                    turn.message_index,
+                    Some(on_open.clone()),
+                    Some(on_open_table.clone()),
+                    plan.as_ref(),
+                    activity_open,
+                    Some(on_activity_toggle.clone()),
+                    open_artifact.as_deref(),
+                    _window,
+                    cx,
+                )
+            })
+            .collect();
+
+        let show_work_fold = turn_has_work_fold(&turn);
+        let work_header = show_work_fold.then(|| {
+            let streaming = turn.streaming;
+            let label = if streaming {
+                format_working_for(live_elapsed.unwrap_or_default())
+            } else {
+                format_worked_for(turn.elapsed)
+            };
+            let msg_index = turn.message_index;
+            let entity = entity.clone();
+            let collapsed = turn.collapsed;
+            let chevron = if collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            };
+            div()
+                .id(ElementId::NamedInteger("turn-fold".into(), turn.id))
+                .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .when(streaming, |this| this.text_sm())
+                .when(!streaming, |this| this.text_xs())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if streaming {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.collapsed_turns.insert(msg_index, !collapsed);
+                        cx.notify();
+                    });
+                })
+                .child(label)
+                .child(
+                    Icon::new(chevron)
+                        .size_3()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .into_any_element()
+        });
+        let file_overview = (!turn.collapsed && show_work_fold).then(|| {
+            let changes = file_changes_from_turn(&turn);
+            (!changes.is_empty()).then(|| TurnFileOverview::new(changes).into_any_element())
+        });
+        let skip_empty_message = msg.content.is_empty() && work_header.is_some();
+
+        let mut msg_for_text = msg.clone();
+        if !typed.is_empty() || work_header.is_some() {
+            msg_for_text.system_trace_view = None;
+        }
+        let text = render_message(
+            &msg_for_text,
+            turn.message_index,
+            is_last_message,
+            &self.collapsed_tool_calls,
+            &self.diff_expanded,
+            &mut MessageRenderCaches {
+                parsed: &mut self.parsed_cache,
+                streaming: &mut streaming_slot,
+            },
+            move |msg_idx, tool_idx, cx| {
+                entity_clone.update(cx, |chat_view, cx| {
+                    let key = (msg_idx, tool_idx);
+                    let current = chat_view
+                        .collapsed_tool_calls
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(true);
+                    chat_view.collapsed_tool_calls.insert(key, !current);
+                    cx.notify();
+                });
+            },
+            move |msg_idx, tool_idx, cx| {
+                entity_for_diff.update(cx, |chat_view, cx| {
+                    let key = (msg_idx, tool_idx);
+                    let current = chat_view.diff_expanded.get(&key).copied().unwrap_or(false);
+                    chat_view.diff_expanded.insert(key, !current);
+                    cx.notify();
+                });
+            },
+            move |msg_idx, feedback, cx| {
+                entity_for_feedback.update(cx, |chat_view, cx| {
+                    if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
+                        display_msg.feedback = feedback.clone();
+                    }
+                    if let Some(h_idx) = history_index {
+                        cx.emit(ChatViewEvent::FeedbackChanged {
+                            history_index: h_idx,
+                            feedback,
+                        });
+                    }
+                    cx.notify();
+                });
+            },
+            move |_msg_idx, cx| {
+                entity_for_regenerate.update(cx, |_chat_view, cx| {
+                    if let Some(h_idx) = history_index {
+                        cx.emit(ChatViewEvent::RegenerateMessage {
+                            history_index: h_idx,
+                        });
+                    }
+                });
+            },
+            Some(on_open_table.clone()),
+            cx,
+        );
+        if streaming_slot.is_some() {
+            self.streaming_parse_cache = streaming_slot;
+        }
+        if typed.is_empty() && work_header.is_none() {
+            text
+        } else {
+            let gap = if skip_empty_message && typed.is_empty() {
+                px(2.)
+            } else {
+                px(8.)
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(gap)
+                .w_full()
+                .children(work_header)
+                .children(file_overview.flatten())
+                .children(typed)
+                .when(!skip_empty_message, |this| this.child(text))
+                .into_any_element()
+        }
     }
 
     /// Return the pending approval if it belongs to the current conversation.

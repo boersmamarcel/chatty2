@@ -1122,7 +1122,11 @@ fn is_work_trace_block(block: &Block) -> bool {
     )
 }
 
-fn turn_has_work_fold(turn: &Turn) -> bool {
+/// True when a turn renders the "Worked for …" fold header.
+///
+/// Shared with `ChatView::render_turn` so the header and the blocks under it
+/// can never disagree about whether a turn has a work trace.
+pub fn turn_has_work_fold(turn: &Turn) -> bool {
     matches!(turn.role, TurnRole::Assistant)
         && (turn.streaming || turn.blocks.iter().any(is_work_trace_block))
 }
@@ -1139,7 +1143,12 @@ fn turn_message_is_empty(turn: &Turn) -> bool {
     })
 }
 
-fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
+/// True when a block renders inside its turn.
+///
+/// A collapsed turn keeps its receipts (artifacts, tables, approvals, plan,
+/// errors) and hides the work trace. `User`/`Text` never render here — the
+/// message bubble draws them.
+pub fn block_visible_in_turn(turn: &Turn, block: &Block) -> bool {
     if turn.collapsed
         && matches!(
             block,
