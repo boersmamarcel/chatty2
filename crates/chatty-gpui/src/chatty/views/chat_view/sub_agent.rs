@@ -40,6 +40,7 @@ impl ChatView {
         self.streaming_parse_cache = None;
         self.sub_agent_progress_msg_idx = None;
         self.pending_approval = None;
+        self.pending_clarification = None;
         self.agent_task_snapshot = None;
         self.plan_overlay_open = false;
         cx.notify();

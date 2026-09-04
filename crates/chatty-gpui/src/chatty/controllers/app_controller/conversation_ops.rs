@@ -303,6 +303,7 @@ impl ChattyApp {
                     let (
                         exec_settings,
                         pending_approvals,
+                        pending_clarifications,
                         pending_write_approvals,
                         user_secrets,
                         theme_colors,
@@ -321,6 +322,9 @@ impl ChattyApp {
                         let approvals = cx
                             .global::<crate::chatty::models::ExecutionApprovalStore>()
                             .get_pending_approvals();
+                        let clarifications = cx
+                            .global::<crate::chatty::models::ClarificationStore>()
+                            .get_pending_clarifications();
                         let write_approvals = cx
                             .global::<crate::chatty::models::WriteApprovalStore>()
                             .get_pending_approvals();
@@ -334,6 +338,7 @@ impl ChattyApp {
                         (
                             Some(settings),
                             Some(approvals),
+                            Some(clarifications),
                             Some(write_approvals),
                             secrets,
                             Some(colors),
@@ -382,6 +387,7 @@ impl ChattyApp {
                             mcp_tools,
                             exec_settings,
                             pending_approvals,
+                            pending_clarifications,
                             pending_write_approvals,
                             pending_artifacts: None, // set inside Conversation::new
                             shell_session: None,
@@ -513,6 +519,7 @@ impl ChattyApp {
                 let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|s, _| s.clone())?;
                 let exec_settings = cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|s, _| s.clone())?;
                 let pending_approvals = cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|s, _| s.get_pending_approvals())?;
+                let pending_clarifications = cx.update_global::<crate::chatty::models::ClarificationStore, _>(|s, _| s.get_pending_clarifications())?;
                 let pending_write_approvals = cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|s, _| s.get_pending_approvals())?;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx
@@ -540,6 +547,7 @@ impl ChattyApp {
                                 mcp_tools: None,
                                 exec_settings: Some(exec_settings.clone()),
                                 pending_approvals: Some(pending_approvals),
+                                pending_clarifications: Some(pending_clarifications),
                                 pending_write_approvals: Some(pending_write_approvals),
                                 pending_artifacts: None,
                                 shell_session: None,

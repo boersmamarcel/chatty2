@@ -78,6 +78,26 @@ fn push_system_trace_markdown(md: &mut String, trace_json: &serde_json::Value) {
                             approval.command
                         ));
                     }
+                    TraceItem::ClarificationPrompt(clarification) => {
+                        let status = match clarification.state {
+                            ClarificationState::Pending => "pending",
+                            ClarificationState::Answered => "answered",
+                            ClarificationState::Cancelled => "unanswered",
+                        };
+
+                        md.push_str(&format!("{}. **Question** ({status})\n", index + 1));
+
+                        for question in &clarification.questions {
+                            let answer = clarification
+                                .answers
+                                .iter()
+                                .find(|a| a.id == question.id)
+                                .map(|a| a.answer.as_str())
+                                .unwrap_or("(no answer)");
+                            md.push_str(&format!("   - {} → {answer}\n", question.question.trim()));
+                        }
+                        md.push('\n');
+                    }
                 }
             }
         }

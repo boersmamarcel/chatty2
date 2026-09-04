@@ -119,6 +119,13 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                     approval: approval.clone(),
                 });
             }
+            TraceItem::ClarificationPrompt(clarification) => {
+                flush_activity(blocks, &mut activity_tools);
+                blocks.push(Block::Clarification {
+                    id: BlockId::from_parts(namespace, &clarification.id),
+                    clarification: clarification.clone(),
+                });
+            }
             TraceItem::ToolCall(tool) => {
                 if is_agent_todo_tool(&tool.tool_name) {
                     if tool.tool_name == "write_todos" && !plan_emitted {
@@ -1087,6 +1094,11 @@ pub fn block_estimated_height(block: &Block, layout: &TranscriptLayout<'_>) -> f
             ApprovalState::Pending => 72.0 * scale,
             ApprovalState::Approved | ApprovalState::Denied => 28.0 * scale,
         },
+        Block::Clarification { clarification, .. } => {
+            // Question line plus one answer line each; the live popover renders
+            // above the input, not here.
+            (28.0 + 32.0 * clarification.questions.len() as f32) * scale
+        }
         Block::Plan { .. } => (40.0 + 32.0 * layout.plan_steps.max(1) as f32) * scale,
         Block::Artifact { path, .. } => {
             if super::artifact_kind::is_image_path(path) {
@@ -1117,6 +1129,7 @@ fn is_work_trace_block(block: &Block) -> bool {
             | Block::ArtifactBatch { .. }
             | Block::TablePreview { .. }
             | Block::Approval { .. }
+            | Block::Clarification { .. }
             | Block::Plan { .. }
             | Block::Error { .. }
     )

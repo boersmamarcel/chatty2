@@ -47,6 +47,10 @@ pub enum AppEvent {
         id: String,
         approved: bool,
     },
+    ClarificationRequested {
+        id: String,
+        questions: Vec<chatty_core::models::clarification_store::ClarifyingQuestion>,
+    },
     TokenUsage {
         input_tokens: u32,
         output_tokens: u32,
@@ -117,6 +121,11 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("ApprovalResolved")
                 .field("id", id)
                 .field("approved", approved)
+                .finish(),
+            Self::ClarificationRequested { id, questions } => f
+                .debug_struct("ClarificationRequested")
+                .field("id", id)
+                .field("questions", &questions.len())
                 .finish(),
             Self::TokenUsage {
                 input_tokens,

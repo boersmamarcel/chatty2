@@ -78,6 +78,9 @@ pub(super) async fn run_llm_stream(
     .map_err(|e| warn!(error = ?e, "Failed to update approval store with notifiers"))
     .ok();
 
+    let (clarification_tx, clarification_rx) = tokio::sync::mpsc::unbounded_channel();
+    chatty_core::models::clarification_store::set_global_clarification_notifier(clarification_tx);
+
     // 2. Get max agent turns and workspace dir
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
@@ -199,6 +202,7 @@ pub(super) async fn run_llm_stream(
         llm_user_contents,
         Some(approval_rx),
         Some(resolution_rx),
+        Some(clarification_rx),
         max_agent_turns,
     )
     .await?;
@@ -508,7 +512,8 @@ pub(super) async fn run_llm_stream(
                         }
                     }
                     Ok(_) => {
-                        // ApprovalRequested, ApprovalResolved, TokenUsage, ToolCallError: no local state
+                        // ApprovalRequested, ApprovalResolved, ClarificationRequested,
+                        // TokenUsage, ToolCallError: no local state
                     }
                     Err(ref e) => {
                         error!(error = %e, conv_id = %conv_id, "Stream error");

@@ -47,6 +47,7 @@ mod scroll;
 mod start_screen;
 mod sub_agent;
 
+use chatty_core::models::clarification_store::{ClarifyingQuestion, MAX_CLARIFYING_QUESTIONS};
 use chatty_core::services::{AgentTaskSnapshot, AgentTodoStatus};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -69,14 +70,14 @@ use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, BASE_FONT_SIZE,
-    Block, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip, RunPin,
-    RunPinKind, SessionChangeBar, TableOpen, TranscriptLayout, Turn, TurnFileOverview, TurnRole,
-    adapt_messages_with_traces, attach_plan_block, attachment_image_path, estimate_turn_height,
-    extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
-    format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
-    merge_file_changes, new_artifact_view, plan_block_bottom, plan_is_above_viewport,
-    plan_turn_index, read_artifact_source, render_typed_block, resolve_artifact_path,
-    tool_file_path,
+    Block, ChosenOption, ClarificationCard, FileChange, OpenArtifact, OpenTable,
+    PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, SessionChangeBar, TableOpen,
+    TranscriptLayout, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
+    attach_plan_block, attachment_image_path, estimate_turn_height, extract_table_preview,
+    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
+    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
+    new_artifact_view, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    read_artifact_source, render_typed_block, resolve_artifact_path, tool_file_path,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -93,6 +94,23 @@ pub struct PendingApprovalInfo {
     pub conversation_id: String,
 }
 
+/// A clarification request the agent is currently blocked on.
+pub struct PendingClarificationInfo {
+    pub id: String,
+    pub conversation_id: String,
+    pub questions: Vec<ClarifyingQuestion>,
+    /// Options the user has clicked so far, keyed by question id. A question
+    /// with free text typed into its box does not need an entry here.
+    pub choices: HashMap<String, ChosenOption>,
+}
+
+/// Snapshot of the pending clarification handed to the card each render.
+struct PendingClarificationDisplay {
+    id: String,
+    questions: Vec<ClarifyingQuestion>,
+    choices: HashMap<String, ChosenOption>,
+}
+
 pub struct ChatView {
     chat_input_state: Entity<ChatInputState>,
     messages: Vec<DisplayMessage>,
@@ -104,6 +122,14 @@ pub struct ChatView {
     /// Finished assistant turns fold unless the user expands them.
     collapsed_turns: HashMap<usize, bool>,
     pending_approval: Option<PendingApprovalInfo>,
+    pending_clarification: Option<PendingClarificationInfo>,
+    /// Free-text answer boxes for the clarification popover, one per question
+    /// slot. Built up front because `InputState::new` needs a `Window`, which
+    /// the stream-event handler that receives the questions does not have.
+    clarification_inputs: Vec<Entity<InputState>>,
+    /// Set when a new clarification arrives; the boxes are emptied on the next
+    /// render, the first point that has the `&mut Window` `set_value` needs.
+    clarification_inputs_dirty: bool,
     /// Tracks which tool calls are collapsed: (message_idx, tool_idx) -> collapsed
     collapsed_tool_calls: HashMap<(usize, usize), bool>,
     /// Tracks which diff views are fully expanded: (message_idx, tool_idx) -> expanded
@@ -183,6 +209,15 @@ impl ChatView {
                 .clean_on_escape()
                 .auto_grow(2, 15)
         });
+
+        // One free-text box per question slot the popover can show. Built here
+        // because `InputState::new` needs a `Window`; the handler that receives
+        // the questions off the stream has none.
+        let clarification_inputs: Vec<Entity<InputState>> = (0..MAX_CLARIFYING_QUESTIONS)
+            .map(|_| {
+                cx.new(|cx| InputState::new(window, cx).placeholder("Or type your own answer…"))
+            })
+            .collect();
 
         let chat_input_state = cx.new(|_cx| ChatInputState::new(input.clone()));
         let scroll_handle = ScrollHandle::new();
@@ -307,6 +342,9 @@ impl ChatView {
             user_scrolled_away: false,
             collapsed_turns: HashMap::new(),
             pending_approval: None,
+            pending_clarification: None,
+            clarification_inputs,
+            clarification_inputs_dirty: false,
             collapsed_tool_calls: HashMap::new(),
             diff_expanded: HashMap::new(),
             parsed_cache: ParsedContentCache::new(),
@@ -1387,6 +1425,7 @@ impl ChatView {
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_clarification_inputs(window, cx);
         let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         self.transcript_content_width =
             Self::compute_transcript_content_width(window, artifact_docked);
@@ -2016,6 +2055,33 @@ impl ChatView {
             .collect()
     }
 
+    /// Empty the free-text boxes so answers from an earlier request cannot leak
+    /// into this one. Split out of the stream-event handler because
+    /// `InputState::set_value` needs `&mut Window`, which that handler lacks.
+    fn reset_clarification_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.clarification_inputs_dirty {
+            return;
+        }
+        for slot in &self.clarification_inputs {
+            slot.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        self.clarification_inputs_dirty = false;
+    }
+
+    /// Return the pending clarification if it belongs to the current conversation.
+    fn active_clarification_for_display(&self) -> Option<PendingClarificationDisplay> {
+        self.pending_clarification
+            .as_ref()
+            .filter(|pending| self.conversation_id.as_ref() == Some(&pending.conversation_id))
+            .map(|pending| PendingClarificationDisplay {
+                id: pending.id.clone(),
+                questions: pending.questions.clone(),
+                choices: pending.choices.clone(),
+            })
+    }
+
     /// Return the pending approval if it belongs to the current conversation.
     fn active_approval_for_display(&self) -> Option<PendingApprovalInfo> {
         self.pending_approval
@@ -2212,6 +2278,37 @@ impl Render for ChatView {
                             move |approved, cx| {
                                 entity.update(cx, |view, cx| {
                                     view.handle_floating_approval(approved, cx);
+                                });
+                            }
+                        }),
+                    ),
+                )
+            })
+            .when_some(self.active_clarification_for_display(), |this, pending| {
+                let view_entity = cx.entity();
+                let can_submit = self.clarification_ready(cx);
+                this.child(
+                    div().px_4().child(
+                        ClarificationCard::new(
+                            pending.id,
+                            pending.questions,
+                            pending.choices,
+                            self.clarification_inputs.clone(),
+                            can_submit,
+                        )
+                        .on_choose({
+                            let entity = view_entity.clone();
+                            move |question_id, option_ix, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.choose_clarification_option(question_id, option_ix, cx);
+                                });
+                            }
+                        })
+                        .on_submit({
+                            let entity = view_entity.clone();
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.submit_clarification(cx);
                                 });
                             }
                         }),

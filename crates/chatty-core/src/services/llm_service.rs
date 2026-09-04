@@ -8,6 +8,7 @@ use rig_core::message::UserContent;
 use tokio::sync::mpsc;
 
 use crate::factories::AgentClient;
+use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 
 /// Stream chunks emitted during responses
@@ -38,6 +39,10 @@ pub enum StreamChunk {
     ApprovalResolved {
         id: String,
         approved: bool,
+    },
+    ClarificationRequested {
+        id: String,
+        questions: Vec<ClarifyingQuestion>,
     },
     TokenUsage {
         input_tokens: u32,
@@ -184,11 +189,12 @@ macro_rules! process_agent_stream {
 
 /// Helper macro to process agent streams with approval notifications
 macro_rules! process_agent_stream_with_approvals {
-    ($stream:expr, $approval_rx:expr, $resolution_rx:expr) => {
+    ($stream:expr, $approval_rx:expr, $resolution_rx:expr, $clarification_rx:expr) => {
         Box::pin(async_stream::stream! {
             let mut agent_stream = $stream;
             let mut approval_rx = $approval_rx;
             let mut resolution_rx = $resolution_rx;
+            let mut clarification_rx = $clarification_rx;
 
             loop {
                 tokio::select! {
@@ -316,6 +322,20 @@ macro_rules! process_agent_stream_with_approvals {
                             approved: resolution.approved,
                         });
                     }
+
+                    // Process clarifying-question notifications
+                    Some(clarification) = clarification_rx.recv() => {
+                        use tracing::debug;
+                        debug!(
+                            id = %clarification.id,
+                            questions = clarification.questions.len(),
+                            "Stream received clarification notification, emitting ClarificationRequested chunk"
+                        );
+                        yield Ok(StreamChunk::ClarificationRequested {
+                            id: clarification.id,
+                            questions: clarification.questions,
+                        });
+                    }
                 }
             }
         })
@@ -330,6 +350,7 @@ macro_rules! process_agent_stream_with_approvals {
 /// * `contents` - The user content to send
 /// * `approval_rx` - Optional receiver for approval notifications
 /// * `resolution_rx` - Optional receiver for approval resolution notifications
+/// * `clarification_rx` - Optional receiver for clarifying-question notifications
 ///
 /// # Returns
 /// A tuple of (response_stream, user_message) where the stream contains the agent's response
@@ -339,6 +360,7 @@ pub async fn stream_prompt(
     contents: Vec<UserContent>,
     approval_rx: Option<mpsc::UnboundedReceiver<ApprovalNotification>>,
     resolution_rx: Option<mpsc::UnboundedReceiver<ApprovalResolution>>,
+    clarification_rx: Option<mpsc::UnboundedReceiver<ClarificationNotification>>,
     max_agent_turns: usize,
 ) -> Result<(ResponseStream, Message)> {
     let user_message = Message::User { content: contents };
@@ -352,12 +374,17 @@ pub async fn stream_prompt(
         .max_turns(max_agent_turns)
         .await;
 
-    let stream: ResponseStream =
-        if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
-            process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx)
-        } else {
-            process_agent_stream!(stream)
-        };
+    let stream: ResponseStream = if let (Some(approval_rx), Some(resolution_rx)) =
+        (approval_rx, resolution_rx)
+    {
+        // A frontend that wires approvals wires clarifications too. If it
+        // did not, the sender is dropped immediately and `recv()` yields
+        // `None`, which disables that `select!` arm.
+        let clarification_rx = clarification_rx.unwrap_or_else(|| mpsc::unbounded_channel().1);
+        process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx, clarification_rx)
+    } else {
+        process_agent_stream!(stream)
+    };
 
     Ok((stream, user_message))
 }

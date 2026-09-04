@@ -357,6 +357,36 @@ fn handle_key_event(
         }
     }
 
+    // A pending clarification owns the keyboard until it is answered.
+    if engine.pending_clarification.is_some() {
+        let typing = engine
+            .pending_clarification
+            .as_ref()
+            .is_some_and(|p| p.custom.is_some());
+
+        if typing {
+            match key.code {
+                KeyCode::Enter => engine.commit_clarification_custom(),
+                KeyCode::Esc => engine.cancel_clarification_custom(),
+                KeyCode::Backspace => engine.pop_clarification_char(),
+                KeyCode::Char(c) => engine.push_clarification_char(c),
+                _ => {}
+            }
+        } else {
+            match key.code {
+                // Options are shown 1-indexed.
+                KeyCode::Char(c @ '1'..='9') => {
+                    if let Some(ix) = c.to_digit(10) {
+                        engine.answer_clarification_option(ix as usize - 1);
+                    }
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => engine.start_clarification_custom(),
+                _ => {}
+            }
+        }
+        return KeyAction::None;
+    }
+
     // If there's a pending approval, handle y/n first
     if engine.pending_approval.is_some() {
         match key.code {
