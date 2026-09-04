@@ -4,19 +4,35 @@
 
 Developer lookup table: [Provider matrix](../dev/reference/provider-matrix.md).
 
-## Add a provider
+Models and providers share one page: **Settings → Models & Providers**. It
+lists every model as a row — favourite, default, provider, context window,
+input price and temperature visible without opening anything — with a status
+chip per provider across the top.
 
-**Settings → Providers → Add Provider.** Supported types include OpenRouter,
-Azure OpenAI, Ollama, Anthropic, OpenAI, Gemini, and Mistral.
+## Connect a provider
+
+**Settings → Models & Providers → Manage keys.** One sheet holds all three
+providers; each row shows its status and has a Test button.
 
 - **OpenRouter** — one key, many upstream models (Claude, GPT, Gemini, Mistral, …)
-- **Azure OpenAI** — API key or Entra ID
+- **Azure OpenAI** — API key or Entra ID, plus endpoint and deployment name
 - **Ollama** — local instance, no API key; Chatty probes `localhost:11434`
 
 ## Add a model
 
-**Settings → Models → Add Model.** Pick the provider, then enter a model ID
-such as `claude-sonnet-4-20250514`, `gpt-4o`, or `qwen2.5:0.5b`.
+**Settings → Models & Providers → Add model.** The sheet opens on the
+provider's catalogue: search it, tick as many models as you want, add them in
+one go — no identifiers to type. Models already in your roster show as added.
+For anything the catalogue doesn't list, expand **Enter an identifier
+manually** and type one such as `qwen2.5:0.5b` directly.
+
+Ollama models are the exception — they appear on their own as you pull them.
+
+## Favourites and the default model
+
+Click a row's star to pin a model to the top of the roster. A row's ⋯ menu
+sets the default — the model new conversations start with. Both survive
+provider syncs and restarts.
 
 Chatty records three capabilities per model and uses them to show or hide
 attachment buttons and the temperature control:

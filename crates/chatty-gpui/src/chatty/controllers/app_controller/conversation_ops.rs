@@ -194,14 +194,21 @@ impl ChattyApp {
     ) -> Task<anyhow::Result<String>> {
         info!("Creating new conversation");
 
-        // Use the selected model from chat input, falling back to first available
-        let selected_model_id = self
-            .chat_view
-            .read(cx)
-            .chat_input_state()
-            .read(cx)
-            .selected_model_id()
-            .cloned();
+        // A new chat starts on the model marked default in Settings → Models &
+        // Providers. Only when nothing is marked does it carry over whatever
+        // the last chat was using.
+        let selected_model_id = cx
+            .global::<ModelsModel>()
+            .default_model()
+            .map(|m| m.id.clone())
+            .or_else(|| {
+                self.chat_view
+                    .read(cx)
+                    .chat_input_state()
+                    .read(cx)
+                    .selected_model_id()
+                    .cloned()
+            });
         let selected_working_dir = self
             .chat_view
             .read(cx)
@@ -253,6 +260,10 @@ impl ChattyApp {
 
                     view.chat_input_state().update(cx, |state, cx| {
                         state.set_available_models(models_list, Some(model_config.id.clone()), cx);
+                        // set_available_models keeps a still-valid previous
+                        // selection, so the starting model has to be set
+                        // explicitly or a new chat inherits the last one.
+                        state.set_selected_model_id(model_config.id.clone());
                         state.set_capabilities(
                             model_config.supports_images,
                             model_config.supports_pdf,
