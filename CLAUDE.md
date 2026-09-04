@@ -137,7 +137,7 @@ cargo clippy --all-features -- -D warnings
 
 Dependencies are built with `debug = "line-tables-only"` and DuckDB with no
 debuginfo (root `Cargo.toml`, `[profile.dev.package.*]`); a full test build
-still needs >10 GiB of `target/`. See `docs/build-disk-usage.md`.
+still needs about 16 GiB of `target/`. See `docs/build-disk-usage.md`.
 
 ## Packaging
 
@@ -209,9 +209,9 @@ sudo apt-get install -y \
 
 | Workflow | Trigger | Purpose |
 |:---------|:--------|:--------|
-| **CI** (`ci.yml`) | PR / push to `main` | Tests, formatting, clippy. Docs-only diffs skip compile (required `test` job still passes). Stale PR runs are cancelled. `Swatinem/rust-cache` is warmed on `main`. |
+| **CI** (`ci.yml`) | PR / push to `main` | Tests, formatting, clippy. Docs-only diffs skip compile (required `test` job still passes). Stale PR runs are cancelled. `Swatinem/rust-cache` is warmed on `main` (never with `cache-on-failure`: a cancelled run would save a partial `target/` that is then never re-saved). On pushes to `main`, `warm-release-cache` also builds `--release` once per Cargo.lock + rustc and saves it under the key from `scripts/release-cache-key.sh`. |
 | **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version via a `cut-release` PR (main is protected), generates changelog, tags, creates the GitHub Release, then calls Release via `workflow_call`. |
-| **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Cargo cached per platform. |
+| **Release** (`release.yml`) | Called by Prepare Release via `workflow_call`, or manual GitHub Release publish | Builds cross-platform artifacts (Linux AppImage, macOS DMG, Windows EXE), generates checksums, uploads to release. Restore-only cache: Linux restores the release cache CI warmed on `main`; macOS and Windows build cold. |
 | **Claude Code Review** (`claude-code-review.yml`) | PR opened/updated (Rust/CI paths only) | Automated AI code review via Claude. Skipped for docs-only PRs. |
 | **Rig canary** (`rig-canary.yml`) | Weekly, or PR that touches Cargo manifests | Informational `cargo update` + `cargo check` against latest rig (AGE-26). |
 | **Claude** (`claude.yml`) | `@claude` mention on issues/PRs | Interactive AI assistance. |

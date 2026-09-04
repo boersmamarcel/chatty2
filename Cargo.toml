@@ -157,6 +157,12 @@ nix = { version = "0.31.3", features = ["signal"] }
 # ~1,400 crates (wasmtime, typst, gpui, chromiumoxide, ...) is no longer
 # written into every rlib and then copied into every test binary. `test`
 # inherits from `dev`, so `cargo test` gets the same treatment.
+[profile.dev]
+# Keep debuginfo in per-crate .dwo files beside the objects instead of
+# copying it into every linked executable (17 test/bin binaries share one
+# set). Backtraces and debuggers read the .dwo files from target/.
+split-debuginfo = "unpacked"
+
 [profile.dev.package."*"]
 debug = "line-tables-only"
 
