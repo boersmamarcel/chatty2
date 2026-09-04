@@ -85,52 +85,53 @@ impl Render for ChattyApp {
                             }),
                     ),
                 )
-                .child({
-                    // Unfold/fold the artifact panel, mirroring the sidebar's
-                    // own floating toggle. The caret opens a small picker for
-                    // manually starting an artifact — "Browser" for now — so
-                    // the panel is reachable even when the agent never opened
-                    // one and there is nothing to auto-open.
-                    let is_artifact_open =
-                        chat_view.read(cx).artifact_view().read(cx).mode != ArtifactMode::Closed;
-                    div().absolute().top(px(8.)).right(px(8.)).child(
-                        DropdownButton::new("toggle-artifact-floating")
-                            .small()
-                            .button(
-                                Button::new("toggle-artifact-floating-main")
-                                    .ghost()
-                                    .icon(Icon::new(if is_artifact_open {
-                                        IconName::PanelRightClose
-                                    } else {
-                                        IconName::PanelRightOpen
-                                    }))
-                                    .label("")
+                .when(
+                    chat_view.read(cx).artifact_view().read(cx).mode == ArtifactMode::Closed,
+                    |this| {
+                        // Unfold the artifact panel, mirroring the sidebar's own
+                        // floating toggle. Only while the panel is closed: once
+                        // open, its header occupies this same corner (maximize,
+                        // close) and the button would sit on top of those. The
+                        // caret opens a small picker for manually starting an
+                        // artifact — "Browser" for now — so the panel is reachable
+                        // even when the agent never opened one.
+                        this.child(
+                            div().absolute().top(px(8.)).right(px(8.)).child(
+                                DropdownButton::new("toggle-artifact-floating")
                                     .small()
-                                    .tooltip("Toggle artifact panel")
-                                    .on_click({
+                                    .button(
+                                        Button::new("toggle-artifact-floating-main")
+                                            .ghost()
+                                            .icon(Icon::new(IconName::PanelRightOpen))
+                                            .label("")
+                                            .small()
+                                            .tooltip("Open artifact panel")
+                                            .on_click({
+                                                let chat_view = chat_view.clone();
+                                                move |_event, _window, cx| {
+                                                    chat_view.update(cx, |view, cx| {
+                                                        view.toggle_artifact_panel(cx);
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                    .dropdown_menu({
                                         let chat_view = chat_view.clone();
-                                        move |_event, _window, cx| {
-                                            chat_view.update(cx, |view, cx| {
-                                                view.toggle_artifact_panel(cx);
-                                            });
+                                        move |menu, _window, _cx| {
+                                            menu.item(PopupMenuItem::new("Browser").on_click({
+                                                let chat_view = chat_view.clone();
+                                                move |_event, _window, cx| {
+                                                    chat_view.update(cx, |view, cx| {
+                                                        view.open_manual_browser(cx);
+                                                    });
+                                                }
+                                            }))
                                         }
                                     }),
-                            )
-                            .dropdown_menu({
-                                let chat_view = chat_view.clone();
-                                move |menu, _window, _cx| {
-                                    menu.item(PopupMenuItem::new("Browser").on_click({
-                                        let chat_view = chat_view.clone();
-                                        move |_event, _window, cx| {
-                                            chat_view.update(cx, |view, cx| {
-                                                view.open_manual_browser(cx);
-                                            });
-                                        }
-                                    }))
-                                }
-                            }),
-                    )
-                })
+                            ),
+                        )
+                    },
+                )
             })
             .children(dialog_layer)
     }

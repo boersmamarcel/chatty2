@@ -1890,7 +1890,7 @@ impl Render for ArtifactView {
         let header_kind = ArtifactHeaderKind::resolve(
             path_ref.as_deref(),
             is_tabular,
-            is_pdf || is_image || is_chart,
+            is_pdf || is_image || is_chart || is_browser,
         );
         let header_tabs = artifact_header_tabs(header_kind, has_diff);
         let copy_control = artifact_copy_control(header_kind);

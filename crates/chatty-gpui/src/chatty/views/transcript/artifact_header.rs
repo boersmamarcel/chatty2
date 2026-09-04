@@ -179,6 +179,16 @@ mod tests {
         assert_eq!(artifact_copy_control(kind), ArtifactCopy::Hidden);
     }
 
+    /// The browser view has no path and no text; without the opaque flag it
+    /// fell through to `Code` and showed a Copy button that copied nothing.
+    #[test]
+    fn browser_view_is_opaque_and_hides_copy() {
+        let kind = ArtifactHeaderKind::resolve(None, false, true);
+        assert_eq!(kind, ArtifactHeaderKind::Opaque);
+        assert_eq!(artifact_copy_control(kind), ArtifactCopy::Hidden);
+        assert!(artifact_header_tabs(kind, false).is_empty());
+    }
+
     /// Three menu items, one outcome. A code file gets one button instead.
     #[test]
     fn code_file_gets_a_single_copy_button() {
