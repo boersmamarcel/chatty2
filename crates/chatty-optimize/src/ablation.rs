@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct AblationConfig {
     /// M3 GEPA: replace Pareto `SelectCandidate` with always-pick-best.
+    /// Agrawal et al. Observation 3 / Table 3 (`SelectBestCandidate` ablation).
     pub select_best_candidate: bool,
     /// M2 AFlow: disable operator library (blank-template / free-form only).
     pub no_operator: bool,
