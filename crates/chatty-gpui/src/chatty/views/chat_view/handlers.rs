@@ -25,12 +25,13 @@ use std::time::SystemTime;
 use tracing::{debug, trace, warn};
 
 use super::super::message_types::{
-    ApprovalBlock, ApprovalState, SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock,
-    ToolCallState, ToolSource, TraceItem, classify_initial_execution_engine,
-    detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
+    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
+    ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+    classify_initial_execution_engine, detect_execution_engine, friendly_tool_name,
+    is_denial_result, predict_execution_engine,
 };
 use super::super::trace_components::SystemTraceView;
-use super::{ChatView, ChatViewEvent, PendingApprovalInfo};
+use super::{ChatView, ChatViewEvent, PendingApprovalInfo, PendingClarificationInfo};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::chatty::views::transcript::ChosenOption;
 use crate::chatty::views::transcript::{attachment_image_path, extract_table_preview};
