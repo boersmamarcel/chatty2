@@ -109,14 +109,6 @@ pub fn file_changes_from_turn(turn: &Turn) -> Vec<FileChange> {
     merge_file_changes(collected)
 }
 
-pub fn file_changes_height(changes: &[FileChange]) -> f32 {
-    if changes.is_empty() {
-        0.0
-    } else {
-        36.0 + changes.len() as f32 * 28.0
-    }
-}
-
 type SessionAction = Rc<dyn Fn(&mut App)>;
 type SessionOpenFile = Rc<dyn Fn(PathBuf, &mut App)>;
 

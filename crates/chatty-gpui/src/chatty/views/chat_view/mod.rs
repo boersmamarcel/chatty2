@@ -55,7 +55,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{Icon, IconName, VirtualListScrollHandle, v_virtual_list};
+use gpui_component::{Icon, IconName};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -69,15 +69,15 @@ use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, BASE_FONT_SIZE,
-    Block, ChosenOption, ClarificationCard, FileChange, OpenArtifact, OpenTable,
-    PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, SessionChangeBar, TableOpen,
-    TranscriptLayout, Turn, TurnFileOverview, TurnRole, adapt_messages_with_traces,
-    attach_plan_block, attachment_image_path, estimate_turn_height, extract_table_preview,
-    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
-    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
-    new_artifact_view, plan_block_bottom, plan_is_above_viewport, plan_turn_index,
+    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, ChosenOption,
+    ClarificationCard, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip,
+    RunPin, RunPinKind, SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole,
+    adapt_messages_with_traces, attach_plan_block, attachment_image_path, block_visible_in_turn,
+    extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
+    format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
+    merge_file_changes, new_artifact_view, plan_turn_index, produced_path_is_openable,
     read_artifact_source, render_typed_block, resolve_artifact_path, tool_file_path,
+    turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -115,8 +115,15 @@ pub struct ChatView {
     chat_input_state: Entity<ChatInputState>,
     messages: Vec<DisplayMessage>,
     conversation_id: Option<String>,
-    scroll_handle: ScrollHandle,
-    list_scroll: VirtualListScrollHandle,
+    /// Transcript list state. Owns the measured height of every turn it has
+    /// laid out, so nothing in this view predicts a height.
+    transcript_list: ListState,
+    /// Per-turn content fingerprints from the last frame, to spot which turns
+    /// changed shape and need re-measuring.
+    transcript_fingerprints: Vec<u64>,
+    /// Font size the list's cached heights were measured at. `List` drops its
+    /// cache when the list's *width* changes, but not when the font does.
+    last_font_size: f32,
     /// Explicit pin: auto-scroll only while this is false.
     user_scrolled_away: bool,
     /// Finished assistant turns fold unless the user expands them.
@@ -158,8 +165,12 @@ pub struct ChatView {
     thinking_indicator: Entity<ThinkingIndicator>,
     agent_task_snapshot: Option<AgentTaskSnapshot>,
     plan_overlay_open: bool,
-    plan_scroll_watch_armed: bool,
-    last_list_scroll_offset: Option<Point<Pixels>>,
+    /// Whether the inline plan card has scrolled above the viewport, resolved
+    /// from the list's measured geometry in `prepare_render`.
+    plan_above_viewport: bool,
+    /// Whether the transcript list's scroll handler has been installed. Needs
+    /// an entity handle, which `ChatView::new` does not have yet.
+    scroll_handler_armed: bool,
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
@@ -175,8 +186,15 @@ pub struct ChatView {
     artifact_split: Entity<ResizableState>,
     /// User expand/collapse for settled activity groups (`BlockId.0` → open).
     activity_expanded: HashMap<u64, bool>,
-    /// Usable transcript column width (px) for virtual-list height estimates.
-    transcript_content_width: f32,
+    /// Index into `messages` of the last assistant turn that is not streaming.
+    /// Resolved once per frame; drives the action bar's always-visible state.
+    last_settled_assistant_idx: Option<usize>,
+    /// Turns for the frame being rendered, adapted once in `prepare_render`.
+    ///
+    /// The list renders one item at a time, so re-adapting every message per
+    /// item would be quadratic. Shared rather than cloned: `Turn` owns its
+    /// strings and block vectors.
+    turns: Rc<Vec<Turn>>,
     /// Wall clock for the in-flight assistant turn (work-fold timer + duration stamp).
     stream_started_at: Option<Instant>,
     /// Hide the session "N files changed" bar after Keep all.
@@ -201,6 +219,79 @@ pub enum ChatViewEvent {
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
 
+/// Hash of everything about a turn that changes how tall it renders.
+///
+/// Lengths and flags, never contents: this runs for every turn every frame.
+fn turn_fingerprint(turn: &Turn, activity_expanded: &HashMap<u64, bool>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    turn.id.hash(&mut hasher);
+    turn.collapsed.hash(&mut hasher);
+    turn.streaming.hash(&mut hasher);
+    turn.blocks.len().hash(&mut hasher);
+    for block in &turn.blocks {
+        std::mem::discriminant(block).hash(&mut hasher);
+        block.id().0.hash(&mut hasher);
+        match block {
+            Block::User {
+                content,
+                attachments,
+                ..
+            } => {
+                content.len().hash(&mut hasher);
+                attachments.len().hash(&mut hasher);
+            }
+            Block::Text {
+                content,
+                attachments,
+                ..
+            } => {
+                content.len().hash(&mut hasher);
+                attachments.len().hash(&mut hasher);
+            }
+            Block::Thinking { block, .. } => block.summary.len().hash(&mut hasher),
+            Block::Activity { id, tools } => {
+                tools.len().hash(&mut hasher);
+                activity_expanded.get(&id.0).hash(&mut hasher);
+                // A failed run renders an extra line and forces the card open.
+                tools
+                    .iter()
+                    .map(|tool| std::mem::discriminant(&tool.state))
+                    .for_each(|state| state.hash(&mut hasher));
+            }
+            Block::ArtifactBatch { files, .. } => files.len().hash(&mut hasher),
+            Block::Approval { approval, .. } => {
+                std::mem::discriminant(&approval.state).hash(&mut hasher)
+            }
+            Block::Clarification { clarification, .. } => {
+                // The summary gains an answer line per question once the user
+                // replies, so the cached render must not outlive that.
+                std::mem::discriminant(&clarification.state).hash(&mut hasher);
+                clarification.answers.len().hash(&mut hasher);
+            }
+            Block::Error { message, .. } => message.len().hash(&mut hasher),
+            Block::Diff { .. }
+            | Block::Artifact { .. }
+            | Block::TablePreview { .. }
+            | Block::Plan { .. } => {}
+        }
+    }
+    hasher.finish()
+}
+
+/// How far beyond the viewport the list renders and measures turns.
+///
+/// Roughly half a screen: enough that a flick-scroll does not show unmeasured
+/// items popping into place, without measuring history nobody is looking at.
+const TRANSCRIPT_OVERDRAW: Pixels = px(400.0);
+
+/// Vertical separation between turns.
+///
+/// Padding, not margin: `List` measures each item with `layout_as_root`, and a
+/// root element's margin is not part of the box it reports.
+const TURN_GAP: Pixels = px(8.0);
+
 impl ChatView {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         let input = cx.new(|cx| {
@@ -220,8 +311,6 @@ impl ChatView {
             .collect();
 
         let chat_input_state = cx.new(|_cx| ChatInputState::new(input.clone()));
-        let scroll_handle = ScrollHandle::new();
-        let list_scroll = VirtualListScrollHandle::new();
 
         // Subscribe to input events to handle Enter key
         let state_for_enter = chat_input_state.clone();
@@ -337,8 +426,9 @@ impl ChatView {
             chat_input_state,
             messages: Vec::new(),
             conversation_id: None,
-            scroll_handle,
-            list_scroll,
+            transcript_list: ListState::new(0, ListAlignment::Top, TRANSCRIPT_OVERDRAW),
+            transcript_fingerprints: Vec::new(),
+            last_font_size: GeneralSettingsModel::default().font_size,
             user_scrolled_away: false,
             collapsed_turns: HashMap::new(),
             pending_approval: None,
@@ -355,8 +445,8 @@ impl ChatView {
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
-            plan_scroll_watch_armed: false,
-            last_list_scroll_offset: None,
+            plan_above_viewport: false,
+            scroll_handler_armed: false,
             artifact_view: new_artifact_view(window, cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
@@ -365,7 +455,8 @@ impl ChatView {
             last_auto_opened_browser_tool_id: None,
             artifact_split: cx.new(|_| ResizableState::default()),
             activity_expanded: HashMap::new(),
-            transcript_content_width: 480.0,
+            last_settled_assistant_idx: None,
+            turns: Rc::new(Vec::new()),
             stream_started_at: None,
             session_review_dismissed: false,
             session_bar_expanded: false,
@@ -466,38 +557,6 @@ impl ChatView {
         self.agent_task_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.write_todos_called && !snapshot.todos.is_empty())
-    }
-
-    fn ensure_plan_scroll_watch(&mut self, cx: &mut Context<Self>) {
-        if self.plan_scroll_watch_armed || !self.plan_snapshot_active() {
-            return;
-        }
-        self.plan_scroll_watch_armed = true;
-        cx.spawn(async move |entity, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(80))
-                    .await;
-                let keep = entity
-                    .update(cx, |view, cx| {
-                        if !view.plan_snapshot_active() {
-                            view.plan_scroll_watch_armed = false;
-                            return false;
-                        }
-                        let offset = view.list_scroll.offset();
-                        if view.last_list_scroll_offset != Some(offset) {
-                            view.last_list_scroll_offset = Some(offset);
-                            cx.notify();
-                        }
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     fn typed_turns(&self, cx: &App) -> Vec<Turn> {
@@ -872,18 +931,17 @@ impl ChatView {
 
     /// Scroll the transcript to the true bottom of its content.
     ///
-    /// `VirtualListScrollHandle::scroll_to_bottom()` aligns the *top* of the
-    /// last item with the viewport top (gpui-component 0.5.1,
-    /// `virtual_list.rs`), so a last turn taller than the viewport can never
-    /// reach the bottom — and the pin's own click handler scrolled backwards
-    /// into the middle of that turn (AGE-180). Driving the offset from
-    /// `max_offset` lands on the content bottom whatever the last item's
-    /// height.
+    /// Anchoring past the last item rather than at a pixel offset is what
+    /// makes this correct: `ListState` backfills from the content end using
+    /// the heights it measured, so a last turn taller than the viewport still
+    /// reaches the bottom (AGE-180), and no arithmetic here can disagree with
+    /// what was painted.
     fn scroll_transcript_to_bottom(&mut self) {
-        let max_offset = self.list_scroll.max_offset();
-        let x = self.list_scroll.offset().x;
-        self.list_scroll.set_offset(point(x, -max_offset.height));
-        self.scroll_handle.scroll_to_bottom();
+        let item_ix = self.transcript_list.item_count();
+        self.transcript_list.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: px(0.0),
+        });
     }
 
     /// If sticky-scroll is active, re-assert the bottom for this frame.
@@ -1043,15 +1101,22 @@ impl ChatView {
                 let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
                     continue;
                 };
-                if !is_pdf_artifact_tool(&tool.tool_name, &tool.input, tool.output.as_deref()) {
+                if !matches!(
+                    tool.state,
+                    chatty_core::models::message_types::ToolCallState::Success
+                ) || !is_pdf_artifact_tool(&tool.tool_name, &tool.input, tool.output.as_deref())
+                {
                     continue;
                 }
-                let path = tool
+                let Some(path) = tool
                     .output
                     .as_deref()
                     .and_then(tool_file_path)
-                    .or_else(|| tool_file_path(&tool.input))?;
-                if !is_pdf_path(&path) {
+                    .or_else(|| tool_file_path(&tool.input))
+                else {
+                    continue;
+                };
+                if !is_pdf_path(&path) || !produced_path_is_openable(&path) {
                     continue;
                 }
                 return Some((path.clone(), read_artifact_source(&path)));
@@ -1290,6 +1355,18 @@ impl ChatView {
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
         let resolved = super::transcript::resolve_artifact_path(&path, workspace.as_deref());
+        // `resolve_artifact_path` hands back the original path when it finds
+        // the file nowhere, and the PDF viewer then asks pdfium to open it
+        // relative to the process CWD — which is how a compile that never wrote
+        // its file surfaced as "No such file or directory" in the panel.
+        if !resolved.exists() {
+            warn!(
+                path = %path.display(),
+                resolved = %resolved.display(),
+                "Refusing to open an artifact that is not on disk"
+            );
+            return;
+        }
         // Relative tool paths often yield an empty source; re-read after resolve.
         let source = {
             let from_disk = super::transcript::read_artifact_source(&resolved);
@@ -1426,9 +1503,28 @@ impl ChatView {
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_clarification_inputs(window, cx);
-        let artifact_docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
-        self.transcript_content_width =
-            Self::compute_transcript_content_width(window, artifact_docked);
+        self.ensure_scroll_handler(cx);
+        self.turns = Rc::new(self.typed_turns(cx));
+        self.last_settled_assistant_idx = self
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| matches!(turn.role, TurnRole::Assistant) && !turn.streaming)
+            .map(|turn| turn.message_index);
+
+        // Order matters for the rest of this function:
+        //   1. sync the list so its item count matches `turns`,
+        //   2. read the plan card's position from the geometry the last frame
+        //      measured — before any scrolling moves the anchor,
+        //   3. resolve the scroll policy and re-assert the bottom.
+        // Reading plan geometry after step 3 would see the anchor parked past
+        // the last item and report every turn as "above the viewport".
+        let font_size = cx
+            .try_global::<GeneralSettingsModel>()
+            .map(|settings| settings.font_size)
+            .unwrap_or_else(|| GeneralSettingsModel::default().font_size);
+        self.sync_transcript_list(font_size);
+        self.plan_above_viewport = self.compute_plan_above_viewport();
 
         let running = self.is_thinking_indicator_visible(cx);
         let pending_approval = self.pending_approval.is_some();
@@ -1439,8 +1535,8 @@ impl ChatView {
         // Sticky-scroll and pin visibility are both derived from how far the
         // transcript currently is from its bottom, rather than latched on the
         // first frame that drifts (AGE-180).
-        let offset = self.list_scroll.offset();
-        let max_offset = self.list_scroll.max_offset();
+        let offset = self.transcript_list.scroll_px_offset_for_scrollbar();
+        let max_offset = self.transcript_list.max_offset_for_scrollbar();
         let distance_from_bottom = max_offset.height + offset.y;
         let measured = max_offset.height > px(0.0);
 
@@ -1503,25 +1599,114 @@ impl ChatView {
         }
     }
 
-    /// Approximate message column width for virtual-list height estimates.
-    fn compute_transcript_content_width(window: &Window, artifact_docked: bool) -> f32 {
-        const SIDEBAR_AND_CHROME: f32 = 300.0;
-        const ARTIFACT_PANE: f32 = 400.0;
-        const LIST_AND_BUBBLE_INSET: f32 = 56.0;
+    /// Keep the list's item count and cached heights honest about `self.turns`.
+    ///
+    /// `List` re-renders and re-measures whatever is on screen every frame, so
+    /// this exists for the turns that are *not*: it tells the list which of
+    /// them changed shape, so the scroll range and `bounds_for_item` stay true.
+    ///
+    /// The fingerprint deliberately hashes lengths rather than contents —
+    /// O(blocks), not O(bytes). Streaming text is append-only, so its length
+    /// always moves; a change that preserved every length would go unnoticed,
+    /// and would cost only a slightly stale scroll range for an off-screen
+    /// turn, never an overlap.
+    fn sync_transcript_list(&mut self, font_size: f32) {
+        let next: Vec<u64> = self
+            .turns
+            .iter()
+            .map(|turn| turn_fingerprint(turn, &self.activity_expanded))
+            .collect();
+        let previous = std::mem::replace(&mut self.transcript_fingerprints, next);
+        let next = &self.transcript_fingerprints;
 
-        let mut width: f32 = window.viewport_size().width.into();
-        width -= SIDEBAR_AND_CHROME;
-        if artifact_docked {
-            width -= ARTIFACT_PANE;
+        // A font change re-flows every turn, and `List` only drops its cached
+        // heights when the list's width changes.
+        if font_size != self.last_font_size || self.transcript_list.item_count() != previous.len() {
+            self.last_font_size = font_size;
+            self.transcript_list.reset(next.len());
+            return;
         }
-        width -= LIST_AND_BUBBLE_INSET;
-        width.max(160.0)
+
+        let common = previous
+            .iter()
+            .zip(next.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if previous.len() == next.len() {
+            for ix in common..next.len() {
+                if previous[ix] != next[ix] {
+                    self.transcript_list.splice(ix..ix + 1, 1);
+                }
+            }
+        } else {
+            // Appends splice past the anchor, so the user's scroll position
+            // survives a new turn arriving.
+            self.transcript_list
+                .splice(common..previous.len(), next.len() - common);
+        }
+    }
+
+    /// Stop following the bottom as soon as the user scrolls the transcript.
+    ///
+    /// The distance-based policy in `prepare_render` cannot do this on its own:
+    /// a trackpad delivers a few pixels per event, and each event re-renders,
+    /// so a slow scroll would be pulled back to the bottom before it ever
+    /// accumulated past [`scroll::STICKY_BOTTOM_EPSILON`]. This ends following
+    /// on the first event instead; `prepare_render` restores it when the user
+    /// scrolls back down, since scrolling at the bottom clamps and leaves the
+    /// distance at zero.
+    ///
+    /// Scrollbar drags do not come through here (`set_offset_from_scrollbar`
+    /// never calls the handler) — they move far enough in one event for the
+    /// distance check to handle them.
+    ///
+    /// The handler runs while `ListState`'s `RefCell` is mutably borrowed, so
+    /// it must only touch `ChatView`: calling back into `self.transcript_list`
+    /// from in here would panic.
+    fn ensure_scroll_handler(&mut self, cx: &mut Context<Self>) {
+        if self.scroll_handler_armed {
+            return;
+        }
+        self.scroll_handler_armed = true;
+
+        let view = cx.entity().downgrade();
+        self.transcript_list
+            .set_scroll_handler(move |_event, _window, cx| {
+                view.update(cx, |view, cx| {
+                    if view.stick_to_bottom {
+                        view.stick_to_bottom = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            });
+    }
+
+    /// Drop every measured height and anchor. For a conversation switch, where
+    /// nothing about the old transcript's geometry applies to the new one.
+    pub(super) fn reset_transcript_list(&mut self) {
+        self.transcript_list.reset(0);
+        self.transcript_fingerprints.clear();
+    }
+
+    /// Whether the inline plan card has scrolled above the viewport.
+    fn compute_plan_above_viewport(&self) -> bool {
+        let Some(ix) = plan_turn_index(&self.turns) else {
+            return false;
+        };
+        scroll::plan_is_above_viewport(
+            self.transcript_list.bounds_for_item(ix),
+            ix,
+            self.transcript_list.logical_scroll_top().item_ix,
+            self.transcript_list.viewport_bounds().top(),
+        )
     }
 
     /// Render the scrollable message list area including the loading skeleton.
     fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_awaiting = self.is_awaiting_response();
-        let turns = self.typed_turns(cx);
+        // Adapted once per frame in `prepare_render`.
+        let turns = self.turns.clone();
         let show_start_screen = turns.is_empty() && !is_awaiting;
         let thinking_visible = self.is_thinking_indicator_visible(cx);
         if thinking_visible {
@@ -1558,34 +1743,7 @@ impl ChatView {
             });
         }
         let thinking_indicator = self.thinking_indicator.clone();
-        let plan_steps = self
-            .agent_task_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.todos.len())
-            .unwrap_or(0);
-        let content_width = self.transcript_content_width;
-        // Font size is user-configurable; the estimator's pixel constants were
-        // measured at the 14px default, so it has to be told (AGE-179).
-        let font_size = cx
-            .try_global::<GeneralSettingsModel>()
-            .map(|s| s.font_size)
-            .unwrap_or(BASE_FONT_SIZE);
         let has_plan = self.plan_snapshot_active();
-        if has_plan {
-            self.ensure_plan_scroll_watch(cx);
-        }
-        let layout = TranscriptLayout {
-            content_width_px: content_width,
-            font_size,
-            plan_steps,
-            activity_expanded: &self.activity_expanded,
-        };
-        let sizes = Rc::new(
-            turns
-                .iter()
-                .map(|turn| estimate_turn_height(turn, &layout))
-                .collect::<Vec<_>>(),
-        );
         let entity = cx.entity();
         let session_entity = entity.clone();
         let session_bar_expanded = self.session_bar_expanded;
@@ -1596,9 +1754,8 @@ impl ChatView {
         };
         let user_away = self.user_scrolled_away;
         let has_approval = self.active_approval_for_display().is_some();
-        let show_strip = has_plan
-            && plan_block_bottom(&turns, px(16.0), &layout)
-                .is_some_and(|bottom| plan_is_above_viewport(bottom, -self.list_scroll.offset().y));
+        // Resolved from the list's measured geometry in `prepare_render`.
+        let show_strip = has_plan && self.plan_above_viewport;
         if !show_strip {
             self.plan_overlay_open = false;
         }
@@ -1665,9 +1822,12 @@ impl ChatView {
                                                 view.collapsed_turns.insert(msg_index, false);
                                             }
                                             view.plan_overlay_open = false;
+                                            // Without this, the next frame's
+                                            // sticky re-assert yanks the view
+                                            // straight back to the bottom.
+                                            view.stick_to_bottom = false;
                                             if let Some(turn_ix) = jump_turn {
-                                                view.list_scroll
-                                                    .scroll_to_item(turn_ix, ScrollStrategy::Top);
+                                                view.transcript_list.scroll_to_reveal_item(turn_ix);
                                             }
                                             cx.notify();
                                         });
@@ -1701,19 +1861,20 @@ impl ChatView {
                             }
                         })
                         .child(
-                            v_virtual_list(
-                                entity,
-                                "transcript",
-                                sizes,
-                                move |this, range, window, cx| {
-                                    this.render_visible_turns(range, window, cx)
-                                },
-                            )
-                            .track_scroll(&self.list_scroll)
-                            .p_4()
+                            // Horizontal padding and the gap between turns live
+                            // on the item, not here: `List` places items at the
+                            // list's left edge and measures them at full width,
+                            // and an item's own margin is not part of the box it
+                            // reports.
+                            list(self.transcript_list.clone(), {
+                                let entity = entity.clone();
+                                move |ix, window, cx| {
+                                    entity.update(cx, |view, cx| view.render_turn(ix, window, cx))
+                                }
+                            })
+                            .pt_4()
                             .pb_12()
-                            .gap_y_2()
-                            .flex_1(),
+                            .size_full(),
                         )
                         .when(overlay_open, |this| {
                             this.child(
@@ -1742,7 +1903,7 @@ impl ChatView {
                             }),
                         ),
                 )
-                .vertical_scrollbar(&self.list_scroll)
+                .vertical_scrollbar(&self.transcript_list)
             })
             .when(!session_changes.is_empty(), |this| {
                 this.child(
@@ -1788,18 +1949,38 @@ impl ChatView {
             .when(thinking_visible, |this| this.child(thinking_indicator))
     }
 
-    fn render_visible_turns(
+    /// Render one transcript turn.
+    ///
+    /// One item at a time, because the measuring list asks for items
+    /// individually. Everything shared across a frame — the adapted turns, the
+    /// index of the last settled assistant turn — is resolved in
+    /// `prepare_render`, not recomputed here.
+    fn render_turn(
         &mut self,
-        range: std::ops::Range<usize>,
-        _window: &mut Window,
+        ix: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let turns = self.typed_turns(cx);
-        let last_visible_assistant_idx = turns
-            .iter()
-            .rev()
-            .find(|turn| matches!(turn.role, TurnRole::Assistant) && !turn.streaming)
-            .map(|turn| turn.message_index);
+    ) -> AnyElement {
+        let Some(turn) = self.turns.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let inner = self.render_turn_body(turn, window, cx);
+        div()
+            .w_full()
+            .px_4()
+            .pb(TURN_GAP)
+            .child(inner)
+            .into_any_element()
+    }
+
+    /// The turn itself, without the list's own insets.
+    fn render_turn_body(
+        &mut self,
+        turn: Turn,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let last_visible_assistant_idx = self.last_settled_assistant_idx;
 
         let entity = cx.entity();
         let plan = self.agent_task_snapshot.clone();
@@ -1808,251 +1989,211 @@ impl ChatView {
             self.is_thinking_indicator_visible(cx)
                 .then(|| self.thinking_indicator.read(cx).elapsed())
         });
-        range
-            .filter_map(|ix| turns.get(ix).cloned())
-            .map(|turn| {
-                let Some(msg) = self.messages.get(turn.message_index) else {
-                    return div().into_any_element();
-                };
-                let history_index = msg.history_index;
-                let is_last_message = last_visible_assistant_idx == Some(turn.message_index);
-                let entity_clone = entity.clone();
-                let entity_for_diff = entity.clone();
-                let entity_for_feedback = entity.clone();
-                let entity_for_regenerate = entity.clone();
-                let mut streaming_slot = if msg.is_streaming {
-                    self.streaming_parse_cache.take()
-                } else {
-                    None
-                };
-                let on_open: OpenArtifact = {
-                    let entity = entity.clone();
-                    Rc::new(move |open: ArtifactOpen, cx| {
-                        entity.update(cx, |view, cx| {
-                            view.show_artifact(open.path, open.source, open.old, cx);
-                        });
-                    })
-                };
-                let on_open_table: OpenTable = {
-                    let entity = entity.clone();
-                    Rc::new(move |open: TableOpen, cx| {
-                        entity.update(cx, |view, cx| {
-                            view.show_table(open.preview, cx);
-                        });
-                    })
-                };
-                let on_activity_toggle = {
-                    let entity = entity.clone();
-                    Rc::new(move |block_id: u64, cx: &mut App| {
-                        entity.update(cx, |view, cx| {
-                            let current = view.activity_expanded.get(&block_id).copied();
-                            // Missing key → settled success is collapsed; toggle opens.
-                            let next = !current.unwrap_or(false);
-                            view.activity_expanded.insert(block_id, next);
-                            cx.notify();
-                        });
-                    })
-                };
-
-                // Folded turns keep receipts + the assistant message; only the
-                // work trace (thinking / activity / diffs) is hidden.
-                let typed: Vec<AnyElement> = turn
-                    .blocks
-                    .iter()
-                    .filter(|block| {
-                        if matches!(block, Block::User { .. } | Block::Text { .. }) {
-                            return false;
-                        }
-                        if turn.collapsed {
-                            matches!(
-                                block,
-                                Block::Artifact { .. }
-                                    | Block::ArtifactBatch { .. }
-                                    | Block::TablePreview { .. }
-                                    | Block::Approval { .. }
-                                    | Block::Plan { .. }
-                                    | Block::Error { .. }
-                            )
-                        } else {
-                            true
-                        }
-                    })
-                    .map(|block| {
-                        let activity_open = match block {
-                            Block::Activity { id, .. } => {
-                                self.activity_expanded.get(&id.0).copied()
-                            }
-                            _ => None,
-                        };
-                        render_typed_block(
-                            block,
-                            turn.message_index,
-                            Some(on_open.clone()),
-                            Some(on_open_table.clone()),
-                            plan.as_ref(),
-                            activity_open,
-                            Some(on_activity_toggle.clone()),
-                            open_artifact.as_deref(),
-                            _window,
-                            cx,
-                        )
-                    })
-                    .collect();
-
-                let show_work_fold = matches!(turn.role, TurnRole::Assistant)
-                    && (turn.streaming
-                        || turn.blocks.iter().any(|block| {
-                            matches!(
-                                block,
-                                Block::Thinking { .. }
-                                    | Block::Activity { .. }
-                                    | Block::Diff { .. }
-                                    | Block::Artifact { .. }
-                                    | Block::ArtifactBatch { .. }
-                                    | Block::TablePreview { .. }
-                                    | Block::Approval { .. }
-                                    | Block::Plan { .. }
-                                    | Block::Error { .. }
-                            )
-                        }));
-                let work_header = show_work_fold.then(|| {
-                    let streaming = turn.streaming;
-                    let label = if streaming {
-                        format_working_for(live_elapsed.unwrap_or_default())
-                    } else {
-                        format_worked_for(turn.elapsed)
-                    };
-                    let msg_index = turn.message_index;
-                    let entity = entity.clone();
-                    let collapsed = turn.collapsed;
-                    let chevron = if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    };
-                    div()
-                        .id(ElementId::NamedInteger("turn-fold".into(), turn.id))
-                        .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .when(streaming, |this| this.text_sm())
-                        .when(!streaming, |this| this.text_xs())
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if streaming {
-                            cx.theme().foreground
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            entity.update(cx, |view, cx| {
-                                view.collapsed_turns.insert(msg_index, !collapsed);
-                                cx.notify();
-                            });
-                        })
-                        .child(label)
-                        .child(
-                            Icon::new(chevron)
-                                .size_3()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .into_any_element()
+        let Some(msg) = self.messages.get(turn.message_index) else {
+            return div().into_any_element();
+        };
+        let history_index = msg.history_index;
+        let is_last_message = last_visible_assistant_idx == Some(turn.message_index);
+        let entity_clone = entity.clone();
+        let entity_for_diff = entity.clone();
+        let entity_for_feedback = entity.clone();
+        let entity_for_regenerate = entity.clone();
+        let mut streaming_slot = if msg.is_streaming {
+            self.streaming_parse_cache.take()
+        } else {
+            None
+        };
+        let on_open: OpenArtifact = {
+            let entity = entity.clone();
+            Rc::new(move |open: ArtifactOpen, cx| {
+                entity.update(cx, |view, cx| {
+                    view.show_artifact(open.path, open.source, open.old, cx);
                 });
-                let file_overview = (!turn.collapsed && show_work_fold).then(|| {
-                    let changes = file_changes_from_turn(&turn);
-                    (!changes.is_empty()).then(|| TurnFileOverview::new(changes).into_any_element())
-                });
-                let skip_empty_message = msg.content.is_empty() && work_header.is_some();
-
-                let mut msg_for_text = msg.clone();
-                if !typed.is_empty() || work_header.is_some() {
-                    msg_for_text.system_trace_view = None;
-                }
-                let text = render_message(
-                    &msg_for_text,
-                    turn.message_index,
-                    is_last_message,
-                    &self.collapsed_tool_calls,
-                    &self.diff_expanded,
-                    &mut MessageRenderCaches {
-                        parsed: &mut self.parsed_cache,
-                        streaming: &mut streaming_slot,
-                    },
-                    move |msg_idx, tool_idx, cx| {
-                        entity_clone.update(cx, |chat_view, cx| {
-                            let key = (msg_idx, tool_idx);
-                            let current = chat_view
-                                .collapsed_tool_calls
-                                .get(&key)
-                                .copied()
-                                .unwrap_or(true);
-                            chat_view.collapsed_tool_calls.insert(key, !current);
-                            cx.notify();
-                        });
-                    },
-                    move |msg_idx, tool_idx, cx| {
-                        entity_for_diff.update(cx, |chat_view, cx| {
-                            let key = (msg_idx, tool_idx);
-                            let current =
-                                chat_view.diff_expanded.get(&key).copied().unwrap_or(false);
-                            chat_view.diff_expanded.insert(key, !current);
-                            cx.notify();
-                        });
-                    },
-                    move |msg_idx, feedback, cx| {
-                        entity_for_feedback.update(cx, |chat_view, cx| {
-                            if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
-                                display_msg.feedback = feedback.clone();
-                            }
-                            if let Some(h_idx) = history_index {
-                                cx.emit(ChatViewEvent::FeedbackChanged {
-                                    history_index: h_idx,
-                                    feedback,
-                                });
-                            }
-                            cx.notify();
-                        });
-                    },
-                    move |_msg_idx, cx| {
-                        entity_for_regenerate.update(cx, |_chat_view, cx| {
-                            if let Some(h_idx) = history_index {
-                                cx.emit(ChatViewEvent::RegenerateMessage {
-                                    history_index: h_idx,
-                                });
-                            }
-                        });
-                    },
-                    Some(on_open_table.clone()),
-                    cx,
-                );
-                if streaming_slot.is_some() {
-                    self.streaming_parse_cache = streaming_slot;
-                }
-                if typed.is_empty() && work_header.is_none() {
-                    text
-                } else {
-                    let gap = if skip_empty_message && typed.is_empty() {
-                        px(2.)
-                    } else {
-                        px(8.)
-                    };
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(gap)
-                        .w_full()
-                        .children(work_header)
-                        .children(file_overview.flatten())
-                        .children(typed)
-                        .when(!skip_empty_message, |this| this.child(text))
-                        .into_any_element()
-                }
             })
-            .collect()
+        };
+        let on_open_table: OpenTable = {
+            let entity = entity.clone();
+            Rc::new(move |open: TableOpen, cx| {
+                entity.update(cx, |view, cx| {
+                    view.show_table(open.preview, cx);
+                });
+            })
+        };
+        let on_activity_toggle = {
+            let entity = entity.clone();
+            Rc::new(move |block_id: u64, cx: &mut App| {
+                entity.update(cx, |view, cx| {
+                    let current = view.activity_expanded.get(&block_id).copied();
+                    // Missing key → settled success is collapsed; toggle opens.
+                    let next = !current.unwrap_or(false);
+                    view.activity_expanded.insert(block_id, next);
+                    cx.notify();
+                });
+            })
+        };
+
+        // Folded turns keep receipts + the assistant message; only the
+        // work trace (thinking / activity / diffs) is hidden.
+        let typed: Vec<AnyElement> = turn
+            .blocks
+            .iter()
+            .filter(|block| block_visible_in_turn(&turn, block))
+            .map(|block| {
+                let activity_open = match block {
+                    Block::Activity { id, .. } => self.activity_expanded.get(&id.0).copied(),
+                    _ => None,
+                };
+                render_typed_block(
+                    block,
+                    turn.message_index,
+                    Some(on_open.clone()),
+                    Some(on_open_table.clone()),
+                    plan.as_ref(),
+                    activity_open,
+                    Some(on_activity_toggle.clone()),
+                    open_artifact.as_deref(),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+
+        let show_work_fold = turn_has_work_fold(&turn);
+        let work_header = show_work_fold.then(|| {
+            let streaming = turn.streaming;
+            let label = if streaming {
+                format_working_for(live_elapsed.unwrap_or_default())
+            } else {
+                format_worked_for(turn.elapsed)
+            };
+            let msg_index = turn.message_index;
+            let entity = entity.clone();
+            let collapsed = turn.collapsed;
+            let chevron = if collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            };
+            div()
+                .id(ElementId::NamedInteger("turn-fold".into(), turn.id))
+                .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .when(streaming, |this| this.text_sm())
+                .when(!streaming, |this| this.text_xs())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if streaming {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.collapsed_turns.insert(msg_index, !collapsed);
+                        cx.notify();
+                    });
+                })
+                .child(label)
+                .child(
+                    Icon::new(chevron)
+                        .size_3()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .into_any_element()
+        });
+        let file_overview = (!turn.collapsed && show_work_fold).then(|| {
+            let changes = file_changes_from_turn(&turn);
+            (!changes.is_empty()).then(|| TurnFileOverview::new(changes).into_any_element())
+        });
+        let skip_empty_message = msg.content.is_empty() && work_header.is_some();
+
+        let mut msg_for_text = msg.clone();
+        if !typed.is_empty() || work_header.is_some() {
+            msg_for_text.system_trace_view = None;
+        }
+        let text = render_message(
+            &msg_for_text,
+            turn.message_index,
+            is_last_message,
+            &self.collapsed_tool_calls,
+            &self.diff_expanded,
+            &mut MessageRenderCaches {
+                parsed: &mut self.parsed_cache,
+                streaming: &mut streaming_slot,
+            },
+            move |msg_idx, tool_idx, cx| {
+                entity_clone.update(cx, |chat_view, cx| {
+                    let key = (msg_idx, tool_idx);
+                    let current = chat_view
+                        .collapsed_tool_calls
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(true);
+                    chat_view.collapsed_tool_calls.insert(key, !current);
+                    cx.notify();
+                });
+            },
+            move |msg_idx, tool_idx, cx| {
+                entity_for_diff.update(cx, |chat_view, cx| {
+                    let key = (msg_idx, tool_idx);
+                    let current = chat_view.diff_expanded.get(&key).copied().unwrap_or(false);
+                    chat_view.diff_expanded.insert(key, !current);
+                    cx.notify();
+                });
+            },
+            move |msg_idx, feedback, cx| {
+                entity_for_feedback.update(cx, |chat_view, cx| {
+                    if let Some(display_msg) = chat_view.messages.get_mut(msg_idx) {
+                        display_msg.feedback = feedback.clone();
+                    }
+                    if let Some(h_idx) = history_index {
+                        cx.emit(ChatViewEvent::FeedbackChanged {
+                            history_index: h_idx,
+                            feedback,
+                        });
+                    }
+                    cx.notify();
+                });
+            },
+            move |_msg_idx, cx| {
+                entity_for_regenerate.update(cx, |_chat_view, cx| {
+                    if let Some(h_idx) = history_index {
+                        cx.emit(ChatViewEvent::RegenerateMessage {
+                            history_index: h_idx,
+                        });
+                    }
+                });
+            },
+            Some(on_open_table.clone()),
+            cx,
+        );
+        if streaming_slot.is_some() {
+            self.streaming_parse_cache = streaming_slot;
+        }
+        if typed.is_empty() && work_header.is_none() {
+            text
+        } else {
+            let gap = if skip_empty_message && typed.is_empty() {
+                px(2.)
+            } else {
+                px(8.)
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(gap)
+                .w_full()
+                .children(work_header)
+                .children(file_overview.flatten())
+                .children(typed)
+                .when(!skip_empty_message, |this| this.child(text))
+                .into_any_element()
+        }
     }
 
     /// Empty the free-text boxes so answers from an earlier request cannot leak

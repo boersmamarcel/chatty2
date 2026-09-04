@@ -56,6 +56,7 @@ impl ChatView {
         self.sub_agent_progress_msg_idx = None;
 
         self.messages.clear();
+        self.reset_transcript_list();
         self.last_auto_opened_table_id = None;
         self.last_auto_opened_chart_id = None;
         // Tool-call IDs are per-turn sequential (e.g. "browser_navigate:0"),

@@ -55,7 +55,13 @@ pub enum StreamChunk {
 /// Type alias for response streams
 pub type ResponseStream = BoxStream<'static, Result<StreamChunk>>;
 
-fn tool_result_looks_like_error(content_text: &str) -> bool {
+/// Whether a streamed tool result is reporting a failure.
+///
+/// The stream carries no error flag — `rig_core`'s streamed `ToolResult` has
+/// only the content, and the typed `is_error()` lives on `rig_agent`'s
+/// `ToolExecutionResult`, which never reaches here — so the text is the signal.
+/// [`crate::tools::map_tool_error`] writes the `Error:` prefix this reads.
+pub(crate) fn tool_result_looks_like_error(content_text: &str) -> bool {
     let trimmed = content_text.trim_start();
     trimmed.starts_with("Error:")
         || trimmed.starts_with("ERROR:")

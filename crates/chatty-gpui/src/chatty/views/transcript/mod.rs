@@ -56,10 +56,9 @@ mod artifact_header;
 pub use action_bar::MessageActionBar;
 pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
-    BASE_FONT_SIZE, COLLAPSED_TURN_HEIGHT, TranscriptLayout, adapt_message,
-    adapt_message_with_trace, adapt_messages, adapt_messages_with_traces, attach_plan_block,
-    estimate_turn_height, format_worked_for, format_working_for, plan_block_bottom,
-    plan_is_above_viewport, plan_turn_index,
+    COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
+    adapt_messages_with_traces, attach_plan_block, block_visible_in_turn, format_worked_for,
+    format_working_for, plan_turn_index, turn_has_work_fold,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;
@@ -76,8 +75,8 @@ pub use artifact_kind::{
     is_code_artifact_path, is_image_artifact_tool, is_image_path, is_lane_a_browser_tool,
     is_markdown_artifact_path, is_pdf_artifact_tool, is_pdf_path, is_produced_file_tool,
     is_standalone_artifact_path, is_tabular_path, is_transcript_artifact_receipt,
-    markdown_headings, read_artifact_source, resolve_artifact_path, source_line_from_anchor,
-    tool_file_path,
+    markdown_headings, produced_path_is_openable, read_artifact_source, resolve_artifact_path,
+    source_line_from_anchor, tool_file_path,
 };
 pub use artifact_view::{
     ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view, presentation_on_open,
@@ -92,7 +91,7 @@ pub use session_changes::{
     FileChange, SessionChangeBar, TurnFileOverview, collect_file_changes_from_tools,
     file_change_from_tool, file_changes_from_turn, merge_file_changes,
 };
-pub use table::{extract_table_preview, inline_table_card_height, render_table_preview_card};
+pub use table::{extract_table_preview, render_table_preview_card};
 pub use ticker::HeadlineTicker;
 pub use tool_row::ToolRow;
 pub use types::{Block, BlockId, Turn, TurnRole};
