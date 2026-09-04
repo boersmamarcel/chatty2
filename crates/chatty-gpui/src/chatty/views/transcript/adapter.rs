@@ -11,7 +11,7 @@ use super::activity::{RunTally, classify_tool};
 use super::artifact_kind::{
     artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
     is_produced_file_tool, is_standalone_artifact_path, is_transcript_artifact_receipt,
-    tool_file_path,
+    produced_path_is_openable, tool_file_path,
 };
 use super::session_changes::{file_change_from_tool, file_changes_from_turn, merge_file_changes};
 use super::table::extract_table_preview;
@@ -176,9 +176,16 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                             old_content: None,
                         });
                     }
-                } else if is_produced_file_tool(&tool.tool_name, &tool.input) {
+                } else if matches!(tool.state, ToolCallState::Success)
+                    && is_produced_file_tool(&tool.tool_name, &tool.input)
+                {
                     // Count/show the write in the activity group, then attach
                     // an artifact receipt so provenance stays next to the turn.
+                    //
+                    // Success-gated like every other receipt above: without it
+                    // this arm also swallowed *failed* writes, which both hid
+                    // the error (the `tool_error` arm below never ran) and
+                    // minted a card for a file that was never written.
                     activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
                     if let Some(path) = artifact_path(tool)
@@ -396,14 +403,20 @@ fn is_diff_tool(tool: &chatty_core::models::message_types::ToolCallBlock) -> boo
     ) && !is_produced_file_tool(&tool.tool_name, &tool.input)
 }
 
+/// Where a produced-file tool wrote, as far as its result can be trusted.
+///
+/// Output first (e.g. Typst's absolute `saved_path`), falling back to the
+/// input, because tools like `write_file` report no structured output and the
+/// requested path is all there is. Either way the path has to be openable: an
+/// absolute path that is not on disk is a path the tool never wrote.
 fn artifact_path(
     tool: &chatty_core::models::message_types::ToolCallBlock,
 ) -> Option<std::path::PathBuf> {
-    // Prefer the resolved on-disk path from tool output (e.g. Typst saved_path).
     tool.output
         .as_deref()
         .and_then(tool_file_path)
         .or_else(|| tool_file_path(&tool.input))
+        .filter(|path| produced_path_is_openable(path))
 }
 
 fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Option<String> {
@@ -464,6 +477,17 @@ pub fn format_working_for(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// A PDF that really is on disk. The adapter refuses to build a card for an
+    /// absolute path that is not there, which is the point — a fixture that
+    /// skips this is testing a case the renderer no longer accepts.
+    fn written_pdf(dir_name: &str, file_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(file_name);
+        std::fs::write(&path, b"%PDF-1.4").expect("write pdf");
+        path
+    }
+
     #[test]
     fn worked_for_formats_seconds_and_minutes() {
         assert_eq!(format_worked_for(None), "Worked for a moment");
@@ -503,7 +527,10 @@ mod tests {
             tool_name: "compile_typst".into(),
             display_name: "Generating PDF".into(),
             input: r#"{"content":"= Hi","output_path":"workspace_notes.pdf"}"#.into(),
-            output: Some(r#"{"saved_path":"/tmp/workspace_notes.pdf","page_count":2}"#.into()),
+            output: Some(format!(
+                r#"{{"saved_path":"{}","page_count":2}}"#,
+                written_pdf("adapter_collapsed_receipt", "workspace_notes.pdf").display()
+            )),
             output_preview: None,
             state: ToolCallState::Success,
             duration: None,
@@ -645,7 +672,10 @@ mod tests {
             tool_name: "compile_typst".into(),
             display_name: "Generating PDF".into(),
             input: r#"{"content":"= Hi","output_path":"reports/sales.pdf"}"#.into(),
-            output: Some(r#"{"saved_path":"/tmp/reports/sales.pdf","page_count":1}"#.into()),
+            output: Some(format!(
+                r#"{{"saved_path":"{}","page_count":1}}"#,
+                written_pdf("adapter_typst_saved_path", "sales.pdf").display()
+            )),
             output_preview: None,
             state: ToolCallState::Success,
             duration: None,

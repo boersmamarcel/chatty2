@@ -74,8 +74,8 @@ use super::transcript::{
     attach_plan_block, attachment_image_path, block_visible_in_turn, extract_table_preview,
     file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
     is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
-    new_artifact_view, plan_turn_index, read_artifact_source, render_typed_block,
-    resolve_artifact_path, tool_file_path, turn_has_work_fold,
+    new_artifact_view, plan_turn_index, produced_path_is_openable, read_artifact_source,
+    render_typed_block, resolve_artifact_path, tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -1056,15 +1056,22 @@ impl ChatView {
                 let crate::chatty::views::message_types::TraceItem::ToolCall(tool) = item else {
                     continue;
                 };
-                if !is_pdf_artifact_tool(&tool.tool_name, &tool.input, tool.output.as_deref()) {
+                if !matches!(
+                    tool.state,
+                    chatty_core::models::message_types::ToolCallState::Success
+                ) || !is_pdf_artifact_tool(&tool.tool_name, &tool.input, tool.output.as_deref())
+                {
                     continue;
                 }
-                let path = tool
+                let Some(path) = tool
                     .output
                     .as_deref()
                     .and_then(tool_file_path)
-                    .or_else(|| tool_file_path(&tool.input))?;
-                if !is_pdf_path(&path) {
+                    .or_else(|| tool_file_path(&tool.input))
+                else {
+                    continue;
+                };
+                if !is_pdf_path(&path) || !produced_path_is_openable(&path) {
                     continue;
                 }
                 return Some((path.clone(), read_artifact_source(&path)));
@@ -1303,6 +1310,18 @@ impl ChatView {
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
         let resolved = super::transcript::resolve_artifact_path(&path, workspace.as_deref());
+        // `resolve_artifact_path` hands back the original path when it finds
+        // the file nowhere, and the PDF viewer then asks pdfium to open it
+        // relative to the process CWD — which is how a compile that never wrote
+        // its file surfaced as "No such file or directory" in the panel.
+        if !resolved.exists() {
+            warn!(
+                path = %path.display(),
+                resolved = %resolved.display(),
+                "Refusing to open an artifact that is not on disk"
+            );
+            return;
+        }
         // Relative tool paths often yield an empty source; re-read after resolve.
         let source = {
             let from_disk = super::transcript::read_artifact_source(&resolved);

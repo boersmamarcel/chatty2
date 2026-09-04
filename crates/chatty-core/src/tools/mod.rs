@@ -35,7 +35,14 @@ where
 {
     let message = error.to_string();
     let kind = classify_tool_error(&message);
-    rig_agent::tool::ToolExecutionError::new(kind, format!("{tool_name}: {message}"))
+    // The `Error:` prefix is load-bearing, not decoration. The streamed
+    // `ToolResult` carries no error flag (rig's `is_error()` lives on
+    // `ToolExecutionResult`, which never reaches the stream), so
+    // `llm_service::tool_result_looks_like_error` has to recognise a failure
+    // from its text. Dropping the prefix files every typed failure as a
+    // success — which is how a failed `compile_typst` once minted an artifact
+    // card for a PDF that was never written.
+    rig_agent::tool::ToolExecutionError::new(kind, format!("Error: {tool_name}: {message}"))
         .with_source(error)
 }
 
@@ -93,6 +100,21 @@ mod map_tool_error_tests {
             "the model must see which tool failed, got {feedback:?}"
         );
         assert_ne!(feedback, "the tool failed");
+    }
+
+    /// The prefix and the sniffer in `llm_service` are one contract: this text
+    /// is the only signal that the call failed. They broke apart silently once.
+    #[test]
+    fn failures_are_recognisable_as_errors_downstream() {
+        let mapped = map_tool_error(
+            "compile_typst",
+            ToolError::OperationFailed("Typst compilation failed:\nunknown variable".into()),
+        );
+        let feedback = mapped.model_feedback().unwrap_or_default();
+        assert!(
+            crate::services::llm_service::tool_result_looks_like_error(feedback),
+            "a failure the transport reads as success becomes a phantom result, got {feedback:?}"
+        );
     }
 
     #[test]
