@@ -59,6 +59,7 @@ points here.
 | File | When to read | What it covers |
 |---|---|---|
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Version bump, changelog, GH Release |
+| [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, workspace debuginfo profile, local pruning |
 | [`stale-doc-policy.md`](stale-doc-policy.md) | Code changed, unsure if docs must | Same-PR rule, drift reports, update-agent-docs |
 | [`monty-sandbox.md`](monty-sandbox.md) | Code execution | Docker / Monty sandbox |
 | [`debug_ui.md`](debug_ui.md) | Layout/rendering bugs | `CHATTY_DEBUG_UI` overlay |

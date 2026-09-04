@@ -135,6 +135,10 @@ cargo fmt --check
 cargo clippy --all-features -- -D warnings
 ```
 
+Dependencies are built with `debug = "line-tables-only"` and DuckDB with no
+debuginfo (root `Cargo.toml`, `[profile.dev.package.*]`); a full test build
+still needs >10 GiB of `target/`. See `docs/build-disk-usage.md`.
+
 ## Packaging
 
 Scripts are in `scripts/`:

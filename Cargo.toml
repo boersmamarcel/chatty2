@@ -148,3 +148,21 @@ clap = { version = "4.6.0", features = ["derive"] }
 
 # Unix-specific
 nix = { version = "0.31.3", features = ["signal"] }
+
+# Disk-conscious dev/test profile (see docs/build-disk-usage.md).
+#
+# Workspace crates keep full debuginfo (Cargo's default) so debugging Chatty
+# itself is unchanged. Dependencies keep only line tables: panics and
+# backtraces still resolve to file:line inside them, but the full DWARF for
+# ~1,400 crates (wasmtime, typst, gpui, chromiumoxide, ...) is no longer
+# written into every rlib and then copied into every test binary. `test`
+# inherits from `dev`, so `cargo test` gets the same treatment.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+# The bundled DuckDB is a C++ build driven by the `cc` crate, which emits
+# `-g` whenever the package profile has any debuginfo at all. With debuginfo
+# it is ~7 GiB of `target/` on its own (object files + rlib); nobody debugs
+# DuckDB internals from Chatty, so drop it entirely.
+[profile.dev.package.libduckdb-sys]
+debug = false

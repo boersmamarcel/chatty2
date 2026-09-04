@@ -24,6 +24,11 @@ make wasm-modules # before full test suite
 make ci           # same compile/test/lint path GitHub runs for Rust PRs
 ```
 
+A full `cargo test --all-features` needs well over 10 GiB of `target/` even
+with the workspace's trimmed debuginfo profile; see
+[`docs/build-disk-usage.md`](docs/build-disk-usage.md) before building on a
+small disk.
+
 Docs-only pull requests do not compile the workspace on GitHub. Run `make docs`
 and `make docs-check-links` for documentation changes.
 
