@@ -1,4 +1,5 @@
 pub mod attachment_validation;
+pub mod clarification_store;
 pub mod conversation;
 pub mod conversations_store;
 pub mod error_store;
@@ -7,6 +8,7 @@ pub mod message_types;
 pub mod token_usage;
 pub mod write_approval_store;
 
+pub use clarification_store::ClarificationStore;
 #[allow(unused_imports)]
 pub use conversation::RegenerationRecord;
 pub use conversation::{Conversation, MessageEntry, MessageFeedback};

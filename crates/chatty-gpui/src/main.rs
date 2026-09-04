@@ -329,6 +329,7 @@ fn main() {
 
         // Initialize execution approval store for tracking pending approvals
         cx.set_global(chatty::models::ExecutionApprovalStore::new());
+        cx.set_global(chatty::models::ClarificationStore::new());
 
         // Initialize write approval store for tracking filesystem write approvals
         cx.set_global(chatty::models::WriteApprovalStore::new());

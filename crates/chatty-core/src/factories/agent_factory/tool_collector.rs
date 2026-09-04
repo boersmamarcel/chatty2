@@ -5,15 +5,15 @@ use crate::tools::CompileTypstTool;
 #[cfg(feature = "browser")]
 use crate::tools::browser_tools::BrowserTools;
 use crate::tools::{
-    AddAttachmentTool, ApplyDiffTool, BrowserUseTool, CreateChartTool, CreateDirectoryTool,
-    DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool, FinalAnswerTool,
-    FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool,
-    GitLogTool, GitStatusTool, GitSwitchBranchTool, GlobSearchTool, InvokeAgentTool,
-    ListAgentsTool, ListDirectoryTool, ListToolsTool, MoveFileTool, PublishModuleTool,
-    ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool,
-    SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool,
-    ShellStatusTool, SubAgentTool, UpdateTodoTool, VerifyCompletionTool, WriteFileTool,
-    WriteTodosTool,
+    AddAttachmentTool, ApplyDiffTool, AskUserTool, BrowserUseTool, CreateChartTool,
+    CreateDirectoryTool, DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool,
+    FinalAnswerTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool,
+    GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
+    GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListToolsTool,
+    MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
+    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    ShellSetEnvTool, ShellStatusTool, SubAgentTool, UpdateTodoTool, VerifyCompletionTool,
+    WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -137,6 +137,7 @@ pub(super) struct NativeTools {
     pub list_agents_tool: ListAgentsTool,
     pub invoke_agent_tool: InvokeAgentTool,
     pub publish_module_tool: Option<PublishModuleTool>,
+    pub ask_user_tool: Option<AskUserTool>,
 }
 
 impl NativeTools {
@@ -150,6 +151,9 @@ impl NativeTools {
             .tool(self.list_agents_tool)
             .tool(self.invoke_agent_tool);
 
+        if let Some(t) = self.ask_user_tool {
+            b = b.tool(t);
+        }
         if let Some(t) = self.mcp_mgmt.list {
             b = b.tool(t);
         }
@@ -317,7 +321,8 @@ macro_rules! native_tools {
         daytona_tool: $daytona_tool:expr,
         list_agents_tool: $list_agents_tool:expr,
         invoke_agent_tool: $invoke_agent_tool:expr,
-        publish_module_tool: $publish_module_tool:expr $(,)?
+        publish_module_tool: $publish_module_tool:expr,
+        ask_user_tool: $ask_user_tool:expr $(,)?
     ) => {
         NativeTools {
             list_tools: $list_tools,
@@ -370,6 +375,7 @@ macro_rules! native_tools {
             list_agents_tool: $list_agents_tool,
             invoke_agent_tool: $invoke_agent_tool,
             publish_module_tool: $publish_module_tool,
+            ask_user_tool: $ask_user_tool,
         }
     };
 }

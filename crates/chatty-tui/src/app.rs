@@ -357,6 +357,46 @@ fn handle_key_event(
         }
     }
 
+    // A pending clarification owns the keyboard until it is answered — except
+    // for the Ctrl shortcuts handled below. Swallowing those would leave no way
+    // to stop the stream or quit while the prompt is up, and `ask_user` blocks
+    // for five minutes.
+    if engine.pending_clarification.is_some() && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        let typing = engine
+            .pending_clarification
+            .as_ref()
+            .is_some_and(|p| p.custom.is_some());
+
+        if typing {
+            match key.code {
+                KeyCode::Enter => engine.commit_clarification_custom(),
+                KeyCode::Esc => engine.cancel_clarification_custom(),
+                KeyCode::Backspace => engine.pop_clarification_char(),
+                // Shift is how capitals arrive, so only Alt is excluded here.
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
+                    engine.push_clarification_char(c)
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                // Options are shown 1-indexed.
+                KeyCode::Char(c @ '1'..='9') if !key.modifiers.contains(KeyModifiers::ALT) => {
+                    if let Some(ix) = c.to_digit(10) {
+                        engine.answer_clarification_option(ix as usize - 1);
+                    }
+                }
+                KeyCode::Char('t') | KeyCode::Char('T')
+                    if !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    engine.start_clarification_custom()
+                }
+                _ => {}
+            }
+        }
+        return KeyAction::None;
+    }
+
     // If there's a pending approval, handle y/n first
     if engine.pending_approval.is_some() {
         match key.code {

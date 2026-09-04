@@ -6,7 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::AgentBuildContext;
+use chatty_core::models::ClarificationStore;
 use chatty_core::models::Conversation;
+use chatty_core::models::clarification_store::{
+    ClarificationAnswer, ClarificationNotification, ClarifyingQuestion,
+};
 use chatty_core::models::execution_approval_store::{
     ApprovalDecision, ApprovalNotification, ApprovalResolution, ExecutionApprovalStore,
 };
@@ -61,6 +65,25 @@ pub struct PendingApproval {
     pub id: String,
     pub command: String,
     pub is_sandboxed: bool,
+}
+
+/// Clarifying questions the agent is blocked on, answered one at a time.
+#[derive(Debug, Clone)]
+pub struct PendingClarification {
+    pub id: String,
+    pub questions: Vec<ClarifyingQuestion>,
+    /// Which question the user is answering now.
+    pub current: usize,
+    /// Answers gathered so far, in question order.
+    pub answers: Vec<ClarificationAnswer>,
+    /// Buffer for a typed answer; `None` unless the user chose to type one.
+    pub custom: Option<String>,
+}
+
+impl PendingClarification {
+    pub fn current_question(&self) -> Option<&ClarifyingQuestion> {
+        self.questions.get(self.current)
+    }
 }
 
 /// A message for display in the TUI
@@ -246,6 +269,7 @@ pub struct ChatEngine {
     pub embedding_service: Option<chatty_core::services::EmbeddingService>,
     pub skill_service: chatty_core::services::SkillService,
     pub execution_approval_store: ExecutionApprovalStore,
+    pub clarification_store: ClarificationStore,
     pub write_approval_store: WriteApprovalStore,
     pub user_secrets: Vec<(String, String)>,
     /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
@@ -260,6 +284,7 @@ pub struct ChatEngine {
     pub is_streaming: bool,
     pub cancel_flag: Option<Arc<AtomicBool>>,
     pub pending_approval: Option<PendingApproval>,
+    pub pending_clarification: Option<PendingClarification>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub title: String,
@@ -335,6 +360,8 @@ impl ChatEngine {
             embedding_service: config.embedding_service,
             skill_service,
             execution_approval_store: ExecutionApprovalStore::new(),
+            clarification_store: ClarificationStore::new(),
+            pending_clarification: None,
             write_approval_store: WriteApprovalStore::new(),
             user_secrets: config.user_secrets,
             remote_agents: config.remote_agents,
@@ -430,6 +457,7 @@ impl ChatEngine {
         };
 
         let pending_approvals = self.execution_approval_store.get_pending_approvals();
+        let pending_clarifications = self.clarification_store.get_pending_clarifications();
         let pending_write_approvals = self.write_approval_store.get_pending_approvals();
 
         let conversation = Conversation::new(
@@ -441,6 +469,7 @@ impl ChatEngine {
                 mcp_tools,
                 exec_settings,
                 pending_approvals: Some(pending_approvals),
+                pending_clarifications: Some(pending_clarifications),
                 pending_write_approvals: Some(pending_write_approvals),
                 pending_artifacts: None,
                 shell_session: None,
@@ -486,6 +515,7 @@ impl ChatEngine {
         let mcp_service = self.mcp_service.clone();
         let execution_settings = self.execution_settings.clone();
         let pending_approvals = self.execution_approval_store.get_pending_approvals();
+        let pending_clarifications = self.clarification_store.get_pending_clarifications();
         let pending_write_approvals = self.write_approval_store.get_pending_approvals();
         let user_secrets = self.user_secrets.clone();
         let remote_agents = self.remote_agents.clone();
@@ -528,6 +558,7 @@ impl ChatEngine {
                     mcp_tools,
                     exec_settings,
                     pending_approvals: Some(pending_approvals),
+                    pending_clarifications: Some(pending_clarifications),
                     pending_write_approvals: Some(pending_write_approvals),
                     pending_artifacts: None,
                     shell_session: None,
@@ -624,6 +655,12 @@ impl ChatEngine {
         self.execution_approval_store
             .set_notifiers(approval_tx, resolution_tx);
 
+        let (clarification_tx, clarification_rx) =
+            mpsc::unbounded_channel::<ClarificationNotification>();
+        chatty_core::models::clarification_store::set_global_clarification_notifier(
+            clarification_tx,
+        );
+
         // Spawn stream task
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(cancel_flag.clone());
@@ -655,6 +692,7 @@ impl ChatEngine {
                 cancel_flag,
                 event_tx: event_tx.clone(),
                 approval_rx,
+                clarification_rx,
                 resolution_rx,
                 max_agent_turns,
                 invoke_agent_progress_slot,
@@ -767,6 +805,16 @@ impl ChatEngine {
             }
             AppEvent::ApprovalResolved { id: _, approved: _ } => {
                 self.pending_approval = None;
+                EngineAction::Redraw
+            }
+            AppEvent::ClarificationRequested { id, questions } => {
+                self.pending_clarification = Some(PendingClarification {
+                    id,
+                    questions,
+                    current: 0,
+                    answers: Vec::new(),
+                    custom: None,
+                });
                 EngineAction::Redraw
             }
             AppEvent::TokenUsage {
@@ -897,6 +945,11 @@ impl ChatEngine {
         if let Some(flag) = &self.cancel_flag {
             flag.store(true, Ordering::Relaxed);
         }
+        // A blocked `ask_user` call never reaches the stream loop's cancel-flag
+        // check, so drop the pending request too. Without this, stopping does
+        // nothing visible until the tool's five-minute timeout expires.
+        self.pending_clarification = None;
+        self.clarification_store.cancel_all();
     }
 
     /// Approve a pending tool execution (checks both execution and write stores)
@@ -920,6 +973,100 @@ impl ChatEngine {
         {
             self.write_approval_store
                 .resolve(&approval.id, WriteApprovalDecision::Denied);
+        }
+    }
+
+    /// Record the user's pick for the current clarifying question and move on.
+    pub fn answer_clarification_option(&mut self, option_ix: usize) {
+        let Some(pending) = self.pending_clarification.as_mut() else {
+            return;
+        };
+        let Some(question) = pending.questions.get(pending.current) else {
+            return;
+        };
+        let Some(option) = question.options.get(option_ix) else {
+            return;
+        };
+
+        pending.answers.push(ClarificationAnswer {
+            id: question.id.clone(),
+            answer: option.clone(),
+            custom: false,
+        });
+        pending.custom = None;
+        pending.current += 1;
+        self.finish_clarification_if_complete();
+    }
+
+    /// Start typing a free-text answer to the current question.
+    pub fn start_clarification_custom(&mut self) {
+        if let Some(pending) = self.pending_clarification.as_mut() {
+            pending.custom = Some(String::new());
+        }
+    }
+
+    /// Abandon the free-text answer and go back to the options.
+    pub fn cancel_clarification_custom(&mut self) {
+        if let Some(pending) = self.pending_clarification.as_mut() {
+            pending.custom = None;
+        }
+    }
+
+    pub fn push_clarification_char(&mut self, c: char) {
+        if let Some(pending) = self.pending_clarification.as_mut()
+            && let Some(buf) = pending.custom.as_mut()
+        {
+            buf.push(c);
+        }
+    }
+
+    pub fn pop_clarification_char(&mut self) {
+        if let Some(pending) = self.pending_clarification.as_mut()
+            && let Some(buf) = pending.custom.as_mut()
+        {
+            buf.pop();
+        }
+    }
+
+    /// Commit the typed answer for the current question and move on.
+    pub fn commit_clarification_custom(&mut self) {
+        let Some(pending) = self.pending_clarification.as_mut() else {
+            return;
+        };
+        let typed = pending
+            .custom
+            .as_ref()
+            .map(|b| b.trim().to_string())
+            .unwrap_or_default();
+        if typed.is_empty() {
+            return;
+        }
+        let Some(question) = pending.questions.get(pending.current) else {
+            return;
+        };
+
+        pending.answers.push(ClarificationAnswer {
+            id: question.id.clone(),
+            answer: typed,
+            custom: true,
+        });
+        pending.custom = None;
+        pending.current += 1;
+        self.finish_clarification_if_complete();
+    }
+
+    /// Send the answers back once every question has one.
+    fn finish_clarification_if_complete(&mut self) {
+        let done = self
+            .pending_clarification
+            .as_ref()
+            .is_some_and(|p| p.current >= p.questions.len());
+        if !done {
+            return;
+        }
+        if let Some(pending) = self.pending_clarification.take() {
+            self.clarification_store
+                .resolve(&pending.id, pending.answers);
         }
     }
 
@@ -992,6 +1139,10 @@ impl ChatEngine {
         self.is_streaming = false;
         self.cancel_flag = None;
         self.pending_approval = None;
+        // Drop the popover and unblock any `ask_user` call still waiting, so a
+        // cancelled stream cannot leave a tool parked until its timeout.
+        self.pending_clarification = None;
+        self.clarification_store.cancel_all();
     }
 }
 

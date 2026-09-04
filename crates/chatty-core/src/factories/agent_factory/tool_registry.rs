@@ -34,6 +34,7 @@ pub struct ToolAvailability {
     pub browser_use: bool,
     pub daytona: bool,
     pub publish_module: bool,
+    pub ask_user: bool,
 }
 
 pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<String> {
@@ -47,6 +48,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
         String::from("invoke_agent"),
     ]);
 
+    if tools.ask_user {
+        names.insert(String::from("ask_user"));
+    }
     if tools.list_mcp {
         names.insert(String::from("list_mcp_services"));
     }
@@ -467,6 +471,7 @@ mod tests {
             browser_use: true,
             daytona: true,
             publish_module: true,
+            ask_user: true,
         };
         let names = active_native_tool_names(&all);
         // Every individual flag's tools should be present
