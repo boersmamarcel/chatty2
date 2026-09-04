@@ -9,12 +9,12 @@ use gpui::{Bounds, Pixels, px};
 
 /// How close to the bottom still counts as "at the bottom" for sticky scroll.
 ///
-/// Deliberately loose. Layout settling — an image loading, a math SVG
-/// rendering, a code block expanding, a streamed turn re-measuring — moves the
-/// content by more than a few pixels without the user touching anything. The
-/// old 10px threshold treated every one of those as a deliberate scroll-away
-/// and latched the pin on for the rest of the conversation.
-pub(super) const STICKY_BOTTOM_EPSILON: Pixels = px(48.0);
+/// Tight on purpose. This was 48px back when the transcript predicted its own
+/// heights and the measurement drifted; the list now measures every turn, so
+/// `distance_from_bottom` is exact and slack here only steals the user's
+/// scrolling. Sticky mode re-asserts the bottom every frame, so a turn growing
+/// below the viewport cannot drift out of this window on its own.
+pub(super) const STICKY_BOTTOM_EPSILON: Pixels = px(8.0);
 
 /// How far above the bottom the user must be before the pin appears.
 ///
@@ -93,13 +93,15 @@ pub(super) fn resolve_scroll_state(
         pin_was_visible
     };
 
-    // Following resumes on its own once the user is back at the bottom, and
-    // stops the moment they scroll meaningfully away.
-    let stick = if at_bottom {
-        true
-    } else {
-        was_sticky && !show_pin
-    };
+    // Following is exactly "the view is at the bottom" — it resumes when the
+    // user scrolls back down and ends the moment they scroll away.
+    //
+    // There used to be a `was_sticky && !show_pin` fallback here, which held
+    // following on until the user was a full 300px away. Every wheel event
+    // re-renders (gpui `ListState::scroll` notifies), so that fallback undid
+    // any scroll shorter than the pin distance before it could be seen: the
+    // wheel appeared dead and only a scrollbar drag could escape.
+    let stick = at_bottom;
 
     ScrollDecision { stick, show_pin }
 }
@@ -191,11 +193,21 @@ mod tests {
     /// and it must not latch the pin on — the old 10px threshold did.
     #[test]
     fn layout_settling_does_not_show_the_pin() {
+        // Following stops within a few px now (see the epsilon's doc comment),
+        // but the pin is about intent and must stay hidden through settling.
         for jitter in [1.0, 10.0, 40.0, 47.0] {
             let d = resolve_scroll_state(px(jitter), true, true, false);
             assert!(!d.show_pin, "{jitter}px of settling showed the pin");
-            assert!(d.stick, "{jitter}px of settling stopped sticky scroll");
         }
+    }
+
+    /// The wheel bug: every scroll event re-renders, so following had to end on
+    /// the first small scroll or the next frame dragged the user back down.
+    #[test]
+    fn a_small_scroll_away_from_the_bottom_stops_following() {
+        let d = resolve_scroll_state(px(40.0), true, true, false);
+        assert!(!d.stick, "one wheel notch must not be undone");
+        assert!(!d.show_pin, "…and is too small to be worth the pin");
     }
 
     #[test]
@@ -212,7 +224,7 @@ mod tests {
         let away = resolve_scroll_state(px(600.0), true, true, false);
         assert!(away.show_pin);
 
-        let back = resolve_scroll_state(px(20.0), true, away.stick, away.show_pin);
+        let back = resolve_scroll_state(px(2.0), true, away.stick, away.show_pin);
         assert!(!back.show_pin, "the pin must clear when the user returns");
         assert!(back.stick, "following must resume at the bottom");
     }
@@ -220,7 +232,7 @@ mod tests {
     #[test]
     fn pin_holds_state_between_the_two_thresholds() {
         // Coming from hidden, mid-band stays hidden.
-        let d = resolve_scroll_state(px(200.0), true, true, false);
+        let d = resolve_scroll_state(px(200.0), true, false, false);
         assert!(!d.show_pin);
         // Coming from visible, mid-band stays visible — no flicker.
         let d = resolve_scroll_state(px(200.0), true, false, true);

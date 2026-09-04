@@ -141,6 +141,9 @@ pub struct ChatView {
     /// Whether the inline plan card has scrolled above the viewport, resolved
     /// from the list's measured geometry in `prepare_render`.
     plan_above_viewport: bool,
+    /// Whether the transcript list's scroll handler has been installed. Needs
+    /// an entity handle, which `ChatView::new` does not have yet.
+    scroll_handler_armed: bool,
     artifact_view: Entity<ArtifactView>,
     artifact_dismissed: bool,
     artifact_close_wired: bool,
@@ -398,6 +401,7 @@ impl ChatView {
             agent_task_snapshot: None,
             plan_overlay_open: false,
             plan_above_viewport: false,
+            scroll_handler_armed: false,
             artifact_view: new_artifact_view(window, cx),
             artifact_dismissed: false,
             artifact_close_wired: false,
@@ -1434,6 +1438,7 @@ impl ChatView {
 
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_scroll_handler(cx);
         self.turns = Rc::new(self.typed_turns(cx));
         self.last_settled_assistant_idx = self
             .turns
@@ -1574,6 +1579,42 @@ impl ChatView {
             self.transcript_list
                 .splice(common..previous.len(), next.len() - common);
         }
+    }
+
+    /// Stop following the bottom as soon as the user scrolls the transcript.
+    ///
+    /// The distance-based policy in `prepare_render` cannot do this on its own:
+    /// a trackpad delivers a few pixels per event, and each event re-renders,
+    /// so a slow scroll would be pulled back to the bottom before it ever
+    /// accumulated past [`scroll::STICKY_BOTTOM_EPSILON`]. This ends following
+    /// on the first event instead; `prepare_render` restores it when the user
+    /// scrolls back down, since scrolling at the bottom clamps and leaves the
+    /// distance at zero.
+    ///
+    /// Scrollbar drags do not come through here (`set_offset_from_scrollbar`
+    /// never calls the handler) — they move far enough in one event for the
+    /// distance check to handle them.
+    ///
+    /// The handler runs while `ListState`'s `RefCell` is mutably borrowed, so
+    /// it must only touch `ChatView`: calling back into `self.transcript_list`
+    /// from in here would panic.
+    fn ensure_scroll_handler(&mut self, cx: &mut Context<Self>) {
+        if self.scroll_handler_armed {
+            return;
+        }
+        self.scroll_handler_armed = true;
+
+        let view = cx.entity().downgrade();
+        self.transcript_list
+            .set_scroll_handler(move |_event, _window, cx| {
+                view.update(cx, |view, cx| {
+                    if view.stick_to_bottom {
+                        view.stick_to_bottom = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            });
     }
 
     /// Drop every measured height and anchor. For a conversation switch, where
