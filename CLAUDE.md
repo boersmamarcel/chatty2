@@ -177,7 +177,7 @@ sudo apt-get install -y \
 - **Tokio Runtime**: The app uses Tokio for all async operations. The runtime is entered at startup and maintained throughout the application lifecycle.
 - **Global State**: Uses GPUI's global state system (`cx.set_global`, `cx.global`) for app-wide state like providers, models, and settings.
 - **Async Loading**: Providers, models, and settings are loaded asynchronously to avoid blocking the UI during startup.
-- **Stream Lifecycle**: LLM response streams are managed by `StreamManager` (`src/chatty/models/stream_manager.rs`), a centralized GPUI entity that owns all stream state, emits events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. See Idiomatic Patterns > StreamManager Pattern for details.
+- **Stream Lifecycle**: LLM response streams are managed by `StreamManager` (`src/chatty/models/stream_manager.rs`), a centralized GPUI entity that owns all stream state, emits events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. Each registered stream carries a monotonic epoch so a `StreamEnded` event from a superseded stream (e.g. a synchronously re-registered follow-up turn) is ignored rather than tearing down the new one. A stall watchdog in chatty-core's shared `run_stream_loop` (`crates/chatty-core/src/services/stream_processor.rs`, `STALL_TIMEOUT` = 180s) ends a turn that yields nothing for too long; both chatty-gpui and chatty-tui share it. See Idiomatic Patterns > StreamManager Pattern for details.
 - **Theme System**: Themes are loaded from `./themes` directory. User preferences (theme name + dark mode) are persisted to JSON.
 - **Math Cache**: LaTeX math expressions are compiled to SVG using Typst and cached in platform-specific directories:
   - **macOS**: `~/Library/Application Support/chatty/math_cache/`
@@ -196,7 +196,7 @@ sudo apt-get install -y \
   - **macOS**: `~/Library/Application Support/chatty/browsers/<version>/`
   - **Linux**: `~/.local/share/chatty/browsers/<version>/` or `$XDG_DATA_HOME/chatty/browsers/<version>/`
   - **Windows**: `%APPDATA%\chatty\browsers\<version>\`
-- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui.
+- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui. `artifact_header.rs` decides which tabs (if any) and which copy control an artifact card gets, keyed off file kind, whether it's tabular/opaque, and whether a diff snapshot exists — a file with no meaningful second view (e.g. an HTML file with no diff) gets no tab bar at all.
 
 ## CI/CD
 
@@ -1011,6 +1011,20 @@ cx.update(|_, cx| {
 **When to propagate vs log:**
 - **Log as `warn!()`**: UI refresh failures, non-critical updates
 - **Propagate with `?`**: File I/O failures, download failures, critical operations
+
+## Tool Error Reporting Pattern
+
+Every `impl Tool` block's error path must route through `map_tool_error(tool_name, error)` (`crates/chatty-core/src/tools/mod.rs`) instead of relying on rig's default `Tool::map_error`. rig's default (`ToolExecutionError::from_error`) redacts arbitrary source errors down to a generic per-kind message — for `ToolErrorKind::Other` that message is the literal string `"the tool failed"`, which is all the model and the transcript ever see, regardless of what actually went wrong.
+
+```rust
+// WRONG — real failure reason is redacted to "the tool failed"
+.map_err(|e| ToolExecutionError::from_error(e))
+
+// CORRECT — tool name + real message stay visible to the model and the UI
+.map_err(|e| map_tool_error("my_tool_name", e))
+```
+
+`map_tool_error` prefixes the tool name onto the message and best-effort classifies the failure (timeout/permission/not-found/network/other) for rig's retryability hint — the classification only affects telemetry, the full message reaches the model either way. Only do this for errors the tool authored itself; don't route raw provider/third-party error text through it without checking it first, since that's the case rig's redaction exists for.
 
 ## Complex Function Documentation Pattern
 
