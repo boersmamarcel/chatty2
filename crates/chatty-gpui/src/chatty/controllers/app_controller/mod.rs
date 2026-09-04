@@ -21,8 +21,9 @@ use crate::chatty::token_budget::{
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
-    ApprovalBlock, ApprovalState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
-    ToolSource, TraceItem, friendly_tool_name, is_denial_result,
+    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
+    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem, friendly_tool_name,
+    is_denial_result,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
@@ -219,6 +220,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let (
         exec_settings,
         pending_approvals,
+        pending_clarifications,
         pending_write_approvals,
         pending_artifacts,
         shell_session,
@@ -234,6 +236,9 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             let approvals = cx
                 .global::<crate::chatty::models::ExecutionApprovalStore>()
                 .get_pending_approvals();
+            let clarifications = cx
+                .global::<crate::chatty::models::ClarificationStore>()
+                .get_pending_clarifications();
             let write_approvals = cx
                 .global::<crate::chatty::models::WriteApprovalStore>()
                 .get_pending_approvals();
@@ -285,6 +290,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             (
                 Some(settings),
                 Some(approvals),
+                Some(clarifications),
                 Some(write_approvals),
                 artifacts,
                 session,
@@ -331,6 +337,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 mcp_tools,
                 exec_settings,
                 pending_approvals,
+                pending_clarifications,
                 pending_write_approvals,
                 pending_artifacts,
                 shell_session,

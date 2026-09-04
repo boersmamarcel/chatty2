@@ -117,6 +117,13 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                     approval: approval.clone(),
                 });
             }
+            TraceItem::ClarificationPrompt(clarification) => {
+                flush_activity(blocks, &mut activity_tools);
+                blocks.push(Block::Clarification {
+                    id: BlockId::from_parts(namespace, &clarification.id),
+                    clarification: clarification.clone(),
+                });
+            }
             TraceItem::ToolCall(tool) => {
                 if is_agent_todo_tool(&tool.tool_name) {
                     if tool.tool_name == "write_todos" && !plan_emitted {
@@ -365,6 +372,7 @@ fn is_work_trace_block(block: &Block) -> bool {
             | Block::ArtifactBatch { .. }
             | Block::TablePreview { .. }
             | Block::Approval { .. }
+            | Block::Clarification { .. }
             | Block::Plan { .. }
             | Block::Error { .. }
     )

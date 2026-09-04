@@ -105,6 +105,11 @@ pub enum StreamManagerEvent {
         id: String,
         approved: bool,
     },
+    ClarificationRequested {
+        conversation_id: String,
+        id: String,
+        questions: Vec<chatty_core::models::clarification_store::ClarifyingQuestion>,
+    },
     TokenUsage {
         conversation_id: String,
         input_tokens: u32,
@@ -445,6 +450,13 @@ impl StreamManager {
                     conversation_id: conv_id.to_string(),
                     id,
                     approved,
+                });
+            }
+            StreamChunk::ClarificationRequested { id, questions } => {
+                cx.emit(StreamManagerEvent::ClarificationRequested {
+                    conversation_id: conv_id.to_string(),
+                    id,
+                    questions,
                 });
             }
             StreamChunk::TokenUsage {

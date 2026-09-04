@@ -1,6 +1,7 @@
 mod approval;
 mod at_menu;
 mod chat_view;
+mod clarification;
 mod hint_bar;
 mod input;
 mod model_picker;
@@ -18,13 +19,20 @@ pub use input::InputState;
 
 /// Render the full TUI layout
 pub fn render(frame: &mut Frame, engine: &mut ChatEngine, input_state: &mut InputState) {
+    // The clarification prompt needs more room than the input line it replaces.
+    let prompt_height = if engine.pending_clarification.is_some() {
+        clarification::CLARIFICATION_HEIGHT
+    } else {
+        3
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),    // Chat messages (fills remaining space)
-            Constraint::Length(1), // Status bar
-            Constraint::Length(3), // Input area
-            Constraint::Length(1), // Hint footer
+            Constraint::Min(3),                // Chat messages (fills remaining space)
+            Constraint::Length(1),             // Status bar
+            Constraint::Length(prompt_height), // Input area / pending prompt
+            Constraint::Length(1),             // Hint footer
         ])
         .split(frame.area());
 
@@ -34,9 +42,11 @@ pub fn render(frame: &mut Frame, engine: &mut ChatEngine, input_state: &mut Inpu
     // Status bar
     status_bar::render_status_bar(frame, chunks[1], engine);
 
-    // Input area (or approval prompt if pending)
+    // Input area (or a pending prompt that needs answering first)
     if engine.pending_approval.is_some() {
         approval::render_approval_prompt(frame, chunks[2], engine);
+    } else if engine.pending_clarification.is_some() {
+        clarification::render_clarification_prompt(frame, chunks[2], engine);
     } else {
         input::render_input(frame, chunks[2], input_state);
     }
@@ -58,6 +68,7 @@ pub fn render(frame: &mut Frame, engine: &mut ChatEngine, input_state: &mut Inpu
     if engine.model_picker.is_none()
         && engine.tool_picker.is_none()
         && engine.pending_approval.is_none()
+        && engine.pending_clarification.is_none()
         && input_state.is_slash_menu_open()
     {
         slash_menu::render_slash_menu(frame, frame.area(), input_state);
@@ -67,6 +78,7 @@ pub fn render(frame: &mut Frame, engine: &mut ChatEngine, input_state: &mut Inpu
     if engine.model_picker.is_none()
         && engine.tool_picker.is_none()
         && engine.pending_approval.is_none()
+        && engine.pending_clarification.is_none()
         && !input_state.is_slash_menu_open()
         && input_state.is_at_menu_open()
     {

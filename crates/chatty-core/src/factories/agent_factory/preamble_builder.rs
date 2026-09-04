@@ -184,6 +184,13 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         tool_sections
             .push("- **publish_wasm_module** (publish WASM module to hive registry)".to_string());
     }
+    if tools.ask_user {
+        tool_sections.push(
+            "- **ask_user** (ask the user to settle a genuine ambiguity before you commit to an \
+             approach; prefer stating an assumption when there is an obvious default)"
+                .to_string(),
+        );
+    }
     // read_skill is always present
     tool_sections
         .push("- **read_skill** (load full skill instructions before executing)".to_string());

@@ -607,6 +607,39 @@ impl ChattyApp {
                     }
                 });
             }
+            StreamManagerEvent::ClarificationRequested {
+                conversation_id,
+                id,
+                questions,
+            } => {
+                debug!(id = %id, questions = questions.len(), "StreamManager: clarification requested");
+                let id = id.clone();
+                let questions = questions.clone();
+
+                // Update Conversation model unconditionally so the questions
+                // survive a conversation switch mid-stream.
+                cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
+                        let clarification = ClarificationBlock {
+                            id: id.clone(),
+                            questions: questions.clone(),
+                            answers: Vec::new(),
+                            state: ClarificationState::Pending,
+                            created_at: std::time::SystemTime::now(),
+                        };
+                        let trace = conv.ensure_streaming_trace();
+                        let index = trace.items.len();
+                        trace.add_clarification(clarification);
+                        trace.set_active_tool(index);
+                    }
+                });
+
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.handle_clarification_requested(id, questions, cx);
+                    }
+                });
+            }
             StreamManagerEvent::ApprovalResolved {
                 conversation_id,
                 id,
@@ -771,6 +804,15 @@ impl ChattyApp {
             .unwrap_or_else(|| "__pending__".to_string());
 
         debug!(conv_id = %conv_id, "stop_stream called");
+
+        // Unblock any `ask_user` call still waiting on an answer, so cancelling
+        // cannot leave a tool parked until its timeout.
+        if let Some(store) = cx.try_global::<chatty_core::models::ClarificationStore>() {
+            store.cancel_all();
+        }
+        self.chat_view.update(cx, |view, cx| {
+            view.clear_pending_clarification(cx);
+        });
 
         // Extract trace before stopping.
         // Try ChatView first, fall back to Conversation model streaming_trace.

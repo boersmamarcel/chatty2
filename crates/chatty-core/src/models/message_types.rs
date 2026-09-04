@@ -1,3 +1,4 @@
+use crate::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
@@ -51,6 +52,8 @@ pub enum TraceItem {
     ToolCall(ToolCallBlock),
     /// An execution approval prompt
     ApprovalPrompt(ApprovalBlock),
+    /// A set of clarifying questions the agent asked the user
+    ClarificationPrompt(ClarificationBlock),
 }
 
 /// Events emitted by SystemTraceView when trace state changes
@@ -210,6 +213,32 @@ pub enum ApprovalState {
     Denied,
 }
 
+/// A set of clarifying questions the agent asked mid-turn, plus the answers
+/// once the user has given them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClarificationBlock {
+    /// Unique ID for tracking this request
+    pub id: String,
+    /// The questions put to the user
+    pub questions: Vec<ClarifyingQuestion>,
+    /// The user's answers, empty while still pending
+    pub answers: Vec<ClarificationAnswer>,
+    /// Current state of the request
+    pub state: ClarificationState,
+    /// When the questions were asked
+    pub created_at: std::time::SystemTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ClarificationState {
+    /// Awaiting the user's answers
+    Pending,
+    /// The user answered
+    Answered,
+    /// The request was cancelled or timed out without an answer
+    Cancelled,
+}
+
 impl ThinkingState {
     pub fn is_processing(&self) -> bool {
         matches!(self, ThinkingState::Processing)
@@ -260,6 +289,30 @@ impl SystemTrace {
                 && approval.id == id
             {
                 approval.state = state;
+                break;
+            }
+        }
+    }
+
+    /// Add a clarifying-question prompt to the trace
+    pub fn add_clarification(&mut self, clarification: ClarificationBlock) {
+        self.items
+            .push(TraceItem::ClarificationPrompt(clarification));
+    }
+
+    /// Record the user's answers against a clarification prompt by ID
+    pub fn resolve_clarification(
+        &mut self,
+        id: &str,
+        answers: Vec<ClarificationAnswer>,
+        state: ClarificationState,
+    ) {
+        for item in &mut self.items {
+            if let TraceItem::ClarificationPrompt(clarification) = item
+                && clarification.id == id
+            {
+                clarification.answers = answers;
+                clarification.state = state;
                 break;
             }
         }
@@ -968,5 +1021,85 @@ mod tests {
             predict_execution_engine("execute_code", typescript),
             Some(ExecutionEngine::Docker)
         );
+    }
+
+    fn clarification(id: &str) -> ClarificationBlock {
+        ClarificationBlock {
+            id: id.to_string(),
+            questions: vec![ClarifyingQuestion {
+                id: "q1".to_string(),
+                question: "Which database?".to_string(),
+                options: vec!["Postgres".to_string(), "SQLite".to_string()],
+            }],
+            answers: Vec::new(),
+            state: ClarificationState::Pending,
+            created_at: SystemTime::now(),
+        }
+    }
+
+    /// The transcript must show what the user picked after a reload, so the
+    /// answers have to land on the stored block, not just in the popover.
+    #[test]
+    fn resolve_clarification_records_answers_on_the_block() {
+        let mut trace = SystemTrace::new();
+        trace.add_clarification(clarification("c1"));
+
+        trace.resolve_clarification(
+            "c1",
+            vec![ClarificationAnswer {
+                id: "q1".to_string(),
+                answer: "I want DuckDB".to_string(),
+                custom: true,
+            }],
+            ClarificationState::Answered,
+        );
+
+        let TraceItem::ClarificationPrompt(block) = &trace.items[0] else {
+            panic!("expected a clarification prompt");
+        };
+        assert_eq!(block.state, ClarificationState::Answered);
+        assert_eq!(block.answers.len(), 1);
+        assert_eq!(block.answers[0].answer, "I want DuckDB");
+        assert!(block.answers[0].custom);
+    }
+
+    #[test]
+    fn resolve_clarification_ignores_unknown_ids() {
+        let mut trace = SystemTrace::new();
+        trace.add_clarification(clarification("c1"));
+
+        trace.resolve_clarification("other", Vec::new(), ClarificationState::Answered);
+
+        let TraceItem::ClarificationPrompt(block) = &trace.items[0] else {
+            panic!("expected a clarification prompt");
+        };
+        assert_eq!(block.state, ClarificationState::Pending);
+    }
+
+    /// A clarification block must survive the JSON round-trip used to persist
+    /// `system_trace` with the conversation.
+    #[test]
+    fn clarification_block_survives_serde_round_trip() {
+        let mut trace = SystemTrace::new();
+        trace.add_clarification(clarification("c1"));
+        trace.resolve_clarification(
+            "c1",
+            vec![ClarificationAnswer {
+                id: "q1".to_string(),
+                answer: "Postgres".to_string(),
+                custom: false,
+            }],
+            ClarificationState::Answered,
+        );
+
+        let json = serde_json::to_string(&trace).expect("serialize");
+        let restored: SystemTrace = serde_json::from_str(&json).expect("deserialize");
+
+        let TraceItem::ClarificationPrompt(block) = &restored.items[0] else {
+            panic!("expected a clarification prompt");
+        };
+        assert_eq!(block.questions[0].options, vec!["Postgres", "SQLite"]);
+        assert_eq!(block.answers[0].answer, "Postgres");
+        assert_eq!(block.state, ClarificationState::Answered);
     }
 }
