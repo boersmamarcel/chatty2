@@ -110,10 +110,10 @@ pub async fn sync_openrouter_models(cx: &mut AsyncApp) -> Result<usize> {
             for config in &new_configs {
                 match model.get_model(&config.id) {
                     Some(existing) => {
-                        let mut config = config.clone();
-                        config.is_favorite = existing.is_favorite;
-                        config.is_default = existing.is_default;
-                        model.update_model(config);
+                        let mut refreshed = config.clone();
+                        refreshed.is_favorite = existing.is_favorite;
+                        refreshed.is_default = existing.is_default;
+                        model.update_model(refreshed);
                         debug!(id = %config.id, "Updated existing OpenRouter model");
                     }
                     None => {

@@ -32,7 +32,10 @@ fn set_test_state(
     states.push((provider_type, state));
 }
 
-fn azure_field(cx: &App, read: impl Fn(&crate::settings::models::providers_store::ProviderConfig) -> Option<String>) -> String {
+fn azure_field(
+    cx: &App,
+    read: impl Fn(&crate::settings::models::providers_store::ProviderConfig) -> Option<String>,
+) -> String {
     cx.global::<ProviderModel>()
         .providers()
         .iter()
@@ -71,7 +74,9 @@ impl ModelsListView {
             state
         });
         let azure_key = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("Paste key").masked(true);
+            let mut state = InputState::new(window, cx)
+                .placeholder("Paste key")
+                .masked(true);
             let current = azure_field(cx, |p| p.api_key.clone());
             state.set_value(current, window, cx);
             state
@@ -91,14 +96,7 @@ impl ModelsListView {
         });
 
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let fg = cx.theme().foreground;
-            let muted_fg = cx.theme().muted_foreground;
-            let border = cx.theme().border;
-            let accent = cx.theme().primary;
-            let accent_bg = cx.theme().accent;
-            let success = cx.theme().success;
-            let warning = cx.theme().warning;
-            let danger = cx.theme().danger;
+            let colors = RosterColors::of(cx);
 
             let configured: Vec<ProviderType> = cx
                 .global::<ProviderModel>()
@@ -121,10 +119,10 @@ impl ModelsListView {
                     .filter(|m| &m.provider_type == provider_type)
                     .count();
                 if configured.contains(provider_type) {
-                    (success, format!("Connected · {count} models"))
+                    (colors.success, format!("Connected · {count} models"))
                 } else {
                     (
-                        warning,
+                        colors.warning,
                         "Key missing — models hidden until connected".to_string(),
                     )
                 }
@@ -136,9 +134,9 @@ impl ModelsListView {
                     .iter()
                     .find(|(p, _)| p == provider_type)
                     .map(|(_, state)| match state {
-                        TestState::Testing => (muted_fg, "Testing…".to_string()),
-                        TestState::Ok(msg) => (success, msg.clone()),
-                        TestState::Failed(msg) => (danger, msg.clone()),
+                        TestState::Testing => (colors.muted_fg, "Testing…".to_string()),
+                        TestState::Ok(msg) => (colors.success, msg.clone()),
+                        TestState::Failed(msg) => (colors.danger, msg.clone()),
                     })
             };
 
@@ -156,7 +154,7 @@ impl ModelsListView {
                                 .px_4()
                                 .pb_3()
                                 .text_xs()
-                                .text_color(muted_fg)
+                                .text_color(colors.muted_fg)
                                 .child("Stored with your app settings, not in your project files"),
                         )
                         // ── OpenRouter ────────────────────────────────────
@@ -167,17 +165,17 @@ impl ModelsListView {
                                 .py_3()
                                 .gap_2()
                                 .border_b_1()
-                                .border_color(border)
+                                .border_color(colors.border)
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .items_center()
                                         .child(div().size(px(7.)).rounded_full().bg(dot))
-                                        .child(div().flex_1().text_sm().text_color(fg).child("OpenRouter"))
+                                        .child(div().flex_1().text_sm().text_color(colors.fg).child("OpenRouter"))
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(muted_fg)
+                                                .text_color(colors.muted_fg)
                                                 .child(status),
                                         ),
                                 )
@@ -255,14 +253,14 @@ impl ModelsListView {
                                 .py_3()
                                 .gap_2()
                                 .border_b_1()
-                                .border_color(border)
+                                .border_color(colors.border)
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .items_center()
                                         .child(div().size(px(7.)).rounded_full().bg(dot))
-                                        .child(div().flex_1().text_sm().text_color(fg).child("Ollama"))
-                                        .child(div().text_xs().text_color(muted_fg).child(status)),
+                                        .child(div().flex_1().text_sm().text_color(colors.fg).child("Ollama"))
+                                        .child(div().text_xs().text_color(colors.muted_fg).child(status)),
                                 )
                                 .child(
                                     h_flex()
@@ -325,7 +323,7 @@ impl ModelsListView {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(muted_fg)
+                                        .text_color(colors.muted_fg)
                                         .child("No key needed — a local instance is detected automatically."),
                                 )
                         })
@@ -338,7 +336,7 @@ impl ModelsListView {
                                 .px_4()
                                 .py_3()
                                 .gap_2()
-                                .when(azure_expanded, |this| this.bg(accent_bg))
+                                .when(azure_expanded, |this| this.bg(colors.accent_bg))
                                 .child(
                                     h_flex()
                                         .id("azure-row-header")
@@ -350,7 +348,7 @@ impl ModelsListView {
                                             div()
                                                 .flex_1()
                                                 .text_sm()
-                                                .text_color(fg)
+                                                .text_color(colors.fg)
                                                 .child("Azure OpenAI"),
                                         )
                                         .child(
@@ -359,9 +357,9 @@ impl ModelsListView {
                                                 .text_color(if configured
                                                     .contains(&ProviderType::AzureOpenAI)
                                                 {
-                                                    muted_fg
+                                                    colors.muted_fg
                                                 } else {
-                                                    warning
+                                                    colors.warning
                                                 })
                                                 .child(status),
                                         )
@@ -372,7 +370,7 @@ impl ModelsListView {
                                                 IconName::ChevronRight
                                             })
                                             .size_3()
-                                            .text_color(muted_fg),
+                                            .text_color(colors.muted_fg),
                                         )
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                             let mut slot = expanded_for_click.borrow_mut();
@@ -405,7 +403,7 @@ impl ModelsListView {
                                                             .child(
                                                                 div()
                                                                     .text_xs()
-                                                                    .text_color(muted_fg)
+                                                                    .text_color(colors.muted_fg)
                                                                     .child(
                                                                         "Authenticate with your Azure AD account",
                                                                     ),
@@ -435,7 +433,7 @@ impl ModelsListView {
                                                             .child(
                                                                 div()
                                                                     .text_xs()
-                                                                    .text_color(muted_fg)
+                                                                    .text_color(colors.muted_fg)
                                                                     .child("API key"),
                                                             )
                                                             .child(
@@ -451,7 +449,7 @@ impl ModelsListView {
                                                             .child(
                                                                 div()
                                                                     .text_xs()
-                                                                    .text_color(muted_fg)
+                                                                    .text_color(colors.muted_fg)
                                                                     .child("Endpoint URL"),
                                                             )
                                                             .child(Input::new(&azure_endpoint).small()),
@@ -468,7 +466,7 @@ impl ModelsListView {
                                                             .child(
                                                                 div()
                                                                     .text_xs()
-                                                                    .text_color(muted_fg)
+                                                                    .text_color(colors.muted_fg)
                                                                     .child("Deployment name"),
                                                             )
                                                             .child(Input::new(&azure_deployment).small()),
@@ -504,12 +502,12 @@ impl ModelsListView {
                                 .gap_3()
                                 .items_center()
                                 .border_t_1()
-                                .border_color(border)
+                                .border_color(colors.border)
                                 .child(
                                     div()
                                         .flex_1()
                                         .text_xs()
-                                        .text_color(muted_fg)
+                                        .text_color(colors.muted_fg)
                                         .child("Removing a key hides its models but keeps their settings."),
                                 )
                                 .child(

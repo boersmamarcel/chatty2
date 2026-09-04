@@ -66,6 +66,18 @@ enum Catalog {
     Unavailable(&'static str),
 }
 
+/// How many models a provider's catalogue holds, for the chip label. Cheap —
+/// the chips render on every frame and don't need the entries themselves.
+fn catalog_len(provider_type: &ProviderType, cx: &App) -> Option<usize> {
+    match provider_type {
+        ProviderType::OpenRouter => cx
+            .try_global::<OpenRouterCatalog>()
+            .map(|c| c.models.len())
+            .filter(|n| *n > 0),
+        ProviderType::Ollama | ProviderType::AzureOpenAI => None,
+    }
+}
+
 fn catalog_for(provider_type: &ProviderType, cx: &App) -> Catalog {
     match provider_type {
         ProviderType::OpenRouter => match cx.try_global::<OpenRouterCatalog>() {
@@ -115,11 +127,7 @@ impl ModelsListView {
         let view = cx.entity();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let fg = cx.theme().foreground;
-            let muted_fg = cx.theme().muted_foreground;
-            let border = cx.theme().border;
-            let accent = cx.theme().primary;
-            let accent_bg = cx.theme().accent;
+            let colors = RosterColors::of(cx);
 
             let provider_type = active_provider.borrow().clone();
             let catalog = catalog_for(&provider_type, cx);
@@ -151,7 +159,7 @@ impl ModelsListView {
                                 .px_4()
                                 .pb_3()
                                 .text_xs()
-                                .text_color(muted_fg)
+                                .text_color(colors.muted_fg)
                                 .child("Pick from a provider's catalogue — no identifiers to type"),
                         )
                         // ── Provider chips ────────────────────────────────
@@ -162,16 +170,12 @@ impl ModelsListView {
                                     .map(|candidate| {
                                         let candidate = candidate.clone();
                                         let is_active = candidate == provider_type;
-                                        let count = match catalog_for(&candidate, cx) {
-                                            Catalog::Entries(entries) => {
-                                                format!(" · {}", entries.len())
-                                            }
-                                            Catalog::Unavailable(_) => String::new(),
+                                        let count = match catalog_len(&candidate, cx) {
+                                            Some(n) => format!(" · {n}"),
+                                            None => String::new(),
                                         };
-                                        let label = format!(
-                                            "{}{count}",
-                                            candidate.display_name()
-                                        );
+                                        let label =
+                                            format!("{}{count}", candidate.display_name());
                                         let active_provider = active_provider.clone();
 
                                         chip(
@@ -180,10 +184,7 @@ impl ModelsListView {
                                                 candidate.display_name()
                                             )),
                                             is_active,
-                                            fg,
-                                            muted_fg,
-                                            accent,
-                                            accent_bg,
+                                            colors,
                                             move |cx| {
                                                 *active_provider.borrow_mut() = candidate.clone();
                                                 cx.refresh_windows();
@@ -204,7 +205,7 @@ impl ModelsListView {
                                 .px_4()
                                 .py_8()
                                 .text_sm()
-                                .text_color(muted_fg)
+                                .text_color(colors.muted_fg)
                                 .child(*reason)
                                 .into_any_element(),
                             Catalog::Entries(entries) => {
@@ -231,7 +232,7 @@ impl ModelsListView {
                                                 .px_4()
                                                 .py_8()
                                                 .text_sm()
-                                                .text_color(muted_fg)
+                                                .text_color(colors.muted_fg)
                                                 .child("No models match that search"),
                                         )
                                     })
@@ -255,7 +256,7 @@ impl ModelsListView {
                                                     .gap_3()
                                                     .px_4()
                                                     .border_b_1()
-                                                    .border_color(border)
+                                                    .border_color(colors.border)
                                                     .when(already_added, |this| this.opacity(0.5))
                                                     .when(!already_added, |this| {
                                                         this.cursor_pointer().on_mouse_down(
@@ -270,7 +271,7 @@ impl ModelsListView {
                                                             },
                                                         )
                                                     })
-                                                    .when(is_selected, |this| this.bg(accent_bg))
+                                                    .when(is_selected, |this| this.bg(colors.accent_bg))
                                                     // Tick box
                                                     .child(
                                                         div()
@@ -278,9 +279,9 @@ impl ModelsListView {
                                                             .rounded_sm()
                                                             .border_1()
                                                             .border_color(if is_selected {
-                                                                accent
+                                                                colors.accent
                                                             } else {
-                                                                muted_fg
+                                                                colors.muted_fg
                                                             })
                                                             .when(
                                                                 is_selected || already_added,
@@ -288,7 +289,7 @@ impl ModelsListView {
                                                                     this.child(
                                                                         Icon::new(IconName::Check)
                                                                             .size_3()
-                                                                            .text_color(accent),
+                                                                            .text_color(colors.accent),
                                                                     )
                                                                 },
                                                             ),
@@ -301,14 +302,14 @@ impl ModelsListView {
                                                                 h_flex()
                                                                     .gap_2()
                                                                     .text_sm()
-                                                                    .text_color(fg)
+                                                                    .text_color(colors.fg)
                                                                     .child(entry.name.clone())
                                                                     .when(already_added, |this| {
                                                                         this.child(
                                                                             div()
                                                                                 .text_xs()
                                                                                 .text_color(
-                                                                                    muted_fg,
+                                                                                    colors.muted_fg,
                                                                                 )
                                                                                 .child(
                                                                                     "· already added",
@@ -320,7 +321,7 @@ impl ModelsListView {
                                                                 div()
                                                                     .truncate()
                                                                     .text_xs()
-                                                                    .text_color(muted_fg)
+                                                                    .text_color(colors.muted_fg)
                                                                     .child(entry.identifier.clone()),
                                                             ),
                                                     )
@@ -328,14 +329,14 @@ impl ModelsListView {
                                                         div()
                                                             .w(px(64.))
                                                             .text_xs()
-                                                            .text_color(muted_fg)
+                                                            .text_color(colors.muted_fg)
                                                             .child(format_context(entry.context)),
                                                     )
                                                     .child(
                                                         div()
                                                             .w(px(64.))
                                                             .text_xs()
-                                                            .text_color(muted_fg)
+                                                            .text_color(colors.muted_fg)
                                                             .child(match entry.input_cost {
                                                                 Some(c) => format!("${c:.2}"),
                                                                 None => "—".to_string(),
@@ -353,7 +354,7 @@ impl ModelsListView {
                                 .px_4()
                                 .py_2()
                                 .border_t_1()
-                                .border_color(border)
+                                .border_color(colors.border)
                                 .child(
                                     h_flex()
                                         .id("manual-entry-toggle")
@@ -361,7 +362,7 @@ impl ModelsListView {
                                         .items_center()
                                         .cursor_pointer()
                                         .text_xs()
-                                        .text_color(accent)
+                                        .text_color(colors.accent)
                                         .child(
                                             Icon::new(if manual_open.get() {
                                                 IconName::ChevronDown
@@ -390,7 +391,7 @@ impl ModelsListView {
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(muted_fg)
+                                                            .text_color(colors.muted_fg)
                                                             .child("Display name"),
                                                     )
                                                     .child(Input::new(&manual_name).small()),
@@ -401,7 +402,7 @@ impl ModelsListView {
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(muted_fg)
+                                                            .text_color(colors.muted_fg)
                                                             .child("Model identifier"),
                                                     )
                                                     .child(Input::new(&manual_identifier).small()),
@@ -417,12 +418,12 @@ impl ModelsListView {
                                 .gap_3()
                                 .items_center()
                                 .border_t_1()
-                                .border_color(border)
+                                .border_color(colors.border)
                                 .child(
                                     div()
                                         .flex_1()
                                         .text_xs()
-                                        .text_color(muted_fg)
+                                        .text_color(colors.muted_fg)
                                         .child(if selected_count > 0 {
                                             format!(
                                                 "{selected_count} selected · added as enabled, not favourites"

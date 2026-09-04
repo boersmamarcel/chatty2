@@ -10,7 +10,7 @@ use crate::models::conversation::RegenerationRecord;
 use crate::models::message_types::{SystemTrace, TraceItem};
 use crate::repositories::ConversationData;
 use crate::services::extract_user_text_lines;
-use crate::settings::models::models_store::{ModelConfig, ModelSource};
+use crate::settings::models::models_store::ModelConfig;
 
 /// Configuration options for SFT JSONL export
 #[derive(Clone, Debug)]

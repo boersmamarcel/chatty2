@@ -280,6 +280,7 @@ impl ModelsListView {
                                                 let provider_select = provider_select.clone();
                                                 let model_id_for_update =
                                                     model_id_for_update.clone();
+                                                let stored_model = stored_model.clone();
 
                                                 move |_, window, cx| {
                                                     // Validate and collect form data

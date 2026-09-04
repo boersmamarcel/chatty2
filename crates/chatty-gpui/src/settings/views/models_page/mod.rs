@@ -23,15 +23,15 @@ use crate::settings::controllers::models_controller;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::{ProviderModel, ProviderType};
 use gpui::{
-    App, Context, Corner, Entity, FocusHandle, Focusable, Hsla, IntoElement, MouseButton, Render,
-    SharedString, Styled, Window, div, prelude::*, px,
+    AnyElement, App, Context, Corner, Entity, FocusHandle, Focusable, Hsla, IntoElement,
+    MouseButton, Render, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, WindowExt as _,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::PopupMenuItem,
+    menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement,
     select::{Select, SelectState},
     tab::{Tab, TabBar},
@@ -41,6 +41,16 @@ use tracing::trace;
 
 // Global state to store the models list view
 pub type GlobalModelsListView = crate::global_entity::GlobalStrongEntity<ModelsListView>;
+
+/// Map a provider's display name back to its type — the edit form's provider
+/// select works in display names.
+fn string_to_provider_type(s: &str) -> ProviderType {
+    match s {
+        "Ollama" => ProviderType::Ollama,
+        "Azure OpenAI" => ProviderType::AzureOpenAI,
+        _ => ProviderType::OpenRouter,
+    }
+}
 
 /// The providers the roster knows about, in the order their chips appear.
 const PROVIDERS: [ProviderType; 3] = [
@@ -113,6 +123,38 @@ impl SortKey {
             Self::Provider => Self::Context,
             Self::Context => Self::Price,
             Self::Price => Self::Name,
+        }
+    }
+}
+
+/// The theme colours the roster and its sheets draw with, resolved once per
+/// render and passed down rather than re-read (and re-borrowed) per element.
+#[derive(Clone, Copy)]
+pub(super) struct RosterColors {
+    pub fg: Hsla,
+    pub muted_fg: Hsla,
+    pub border: Hsla,
+    pub muted: Hsla,
+    pub accent: Hsla,
+    pub accent_bg: Hsla,
+    pub success: Hsla,
+    pub warning: Hsla,
+    pub danger: Hsla,
+}
+
+impl RosterColors {
+    pub(super) fn of(cx: &App) -> Self {
+        let theme = cx.theme();
+        Self {
+            fg: theme.foreground,
+            muted_fg: theme.muted_foreground,
+            border: theme.border,
+            muted: theme.muted,
+            accent: theme.primary,
+            accent_bg: theme.accent,
+            success: theme.success,
+            warning: theme.warning,
+            danger: theme.danger,
         }
     }
 }
@@ -275,13 +317,13 @@ fn format_price(model: &ModelConfig) -> String {
 }
 
 /// A pill — the `Default` and `Local` markers on a row.
-fn pill(label: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> impl IntoElement {
+fn pill(label: impl Into<SharedString>, text: Hsla, bg: Hsla) -> impl IntoElement {
     div()
         .px_2()
         .rounded_full()
         .bg(bg)
         .text_xs()
-        .text_color(fg)
+        .text_color(text)
         .child(label.into())
 }
 
@@ -289,10 +331,7 @@ fn pill(label: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> impl IntoElement 
 fn chip(
     id: impl Into<gpui::ElementId>,
     active: bool,
-    theme_fg: Hsla,
-    theme_muted_fg: Hsla,
-    accent: Hsla,
-    accent_bg: Hsla,
+    colors: RosterColors,
     on_click: impl Fn(&mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     h_flex()
@@ -304,22 +343,17 @@ fn chip(
         .rounded_full()
         .cursor_pointer()
         .text_xs()
-        .when(active, |this| this.bg(accent_bg).text_color(accent))
-        .when(!active, |this| this.text_color(theme_muted_fg))
-        .hover(move |this| this.text_color(theme_fg))
+        .when(active, |this| {
+            this.bg(colors.accent_bg).text_color(colors.accent)
+        })
+        .when(!active, |this| this.text_color(colors.muted_fg))
+        .hover(move |this| this.text_color(colors.fg))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx))
 }
 
 impl Render for ModelsListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let fg = cx.theme().foreground;
-        let muted_fg = cx.theme().muted_foreground;
-        let border = cx.theme().border;
-        let muted = cx.theme().muted;
-        let accent = cx.theme().primary;
-        let accent_bg = cx.theme().accent;
-        let success = cx.theme().success;
-        let warning = cx.theme().warning;
+        let colors = RosterColors::of(cx);
 
         let statuses = Self::provider_statuses(cx);
         let models = self.visible_models(cx);
@@ -349,7 +383,7 @@ impl Render for ModelsListView {
                             .gap_1()
                             .child(div().text_lg().child("Models & Providers"))
                             .child(
-                                div().text_xs().text_color(muted_fg).child(format!(
+                                div().text_xs().text_color(colors.muted_fg).child(format!(
                                     "{total} models across {configured_count} providers · {favourites} favourites"
                                 )),
                             ),
@@ -388,7 +422,7 @@ impl Render for ModelsListView {
                             let provider_type = status.provider_type.clone();
                             let selected = self.provider_filter.as_ref() == Some(&provider_type);
                             let entity = entity.clone();
-                            let dot = if status.configured { success } else { warning };
+                            let dot = if status.configured { colors.success } else { colors.warning };
 
                             chip(
                                 SharedString::from(format!(
@@ -396,10 +430,7 @@ impl Render for ModelsListView {
                                     provider_type.display_name()
                                 )),
                                 selected,
-                                fg,
-                                muted_fg,
-                                accent,
-                                accent_bg,
+                                colors,
                                 move |cx| {
                                     let provider_type = provider_type.clone();
                                     entity.update(cx, |this, cx| {
@@ -437,7 +468,7 @@ impl Render for ModelsListView {
                     .items_center()
                     .pb_2()
                     .border_b_1()
-                    .border_color(border)
+                    .border_color(colors.border)
                     .child(div().w(px(240.)).child(Input::new(&self.search).small()))
                     .children(
                         [RosterFilter::All, RosterFilter::Favourites, RosterFilter::Local]
@@ -447,10 +478,7 @@ impl Render for ModelsListView {
                                 chip(
                                     SharedString::from(format!("filter-{}", filter.label())),
                                     self.filter == filter,
-                                    fg,
-                                    muted_fg,
-                                    accent,
-                                    accent_bg,
+                                    colors,
                                     move |cx| {
                                         entity.update(cx, |this, cx| {
                                             this.filter = filter;
@@ -487,7 +515,7 @@ impl Render for ModelsListView {
                     .items_center()
                     .px_3()
                     .text_xs()
-                    .text_color(muted_fg)
+                    .text_color(colors.muted_fg)
                     .child(div().w(col::STAR))
                     .child(div().flex_1().min_w_0().child("Model"))
                     .child(div().w(col::PROVIDER).child("Provider"))
@@ -509,7 +537,7 @@ impl Render for ModelsListView {
                                 .py_8()
                                 .gap_1()
                                 .items_center()
-                                .child(div().text_color(muted_fg).child(if total == 0 {
+                                .child(div().text_color(colors.muted_fg).child(if total == 0 {
                                     "No models yet — add one to get started"
                                 } else {
                                     "No models match these filters"
@@ -520,7 +548,7 @@ impl Render for ModelsListView {
                         models
                             .iter()
                             .map(|model| {
-                                self.render_row(model, fg, muted_fg, border, muted, accent, accent_bg, cx)
+                                Self::render_row(model, colors, &entity)
                             })
                             .collect::<Vec<_>>(),
                     ),
@@ -531,9 +559,9 @@ impl Render for ModelsListView {
                     .justify_between()
                     .pt_2()
                     .border_t_1()
-                    .border_color(border)
+                    .border_color(colors.border)
                     .text_xs()
-                    .text_color(muted_fg)
+                    .text_color(colors.muted_fg)
                     .child(format!("Showing {} of {}", models.len(), total))
                     .child("Changes save automatically"),
             )
@@ -543,21 +571,12 @@ impl Render for ModelsListView {
 impl ModelsListView {
     /// One roster row: favourite star, name + markers + identifier, then the
     /// numbers, then the ⋯ menu.
-    #[allow(clippy::too_many_arguments)]
-    fn render_row(
-        &self,
-        model: &ModelConfig,
-        fg: Hsla,
-        muted_fg: Hsla,
-        border: Hsla,
-        muted: Hsla,
-        accent: Hsla,
-        accent_bg: Hsla,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// Takes the view entity rather than a context: the row is built inside a
+    /// `map` closure, and an element borrowing `cx` can't escape it.
+    fn render_row(model: &ModelConfig, colors: RosterColors, entity: &Entity<Self>) -> AnyElement {
         let model_id = model.id.clone();
         let is_favorite = model.is_favorite;
-        let entity = cx.entity();
+        let entity = entity.clone();
 
         h_flex()
             .id(SharedString::from(format!("row-{}", model.id)))
@@ -566,15 +585,19 @@ impl ModelsListView {
             .px_3()
             .text_sm()
             .border_b_1()
-            .border_color(border)
-            .when(model.is_default, |this| this.bg(accent_bg))
+            .border_color(colors.border)
+            .when(model.is_default, |this| this.bg(colors.accent_bg))
             // Star
             .child(
                 div()
                     .id(SharedString::from(format!("star-{}", model.id)))
                     .w(col::STAR)
                     .cursor_pointer()
-                    .text_color(if is_favorite { accent } else { muted_fg })
+                    .text_color(if is_favorite {
+                        colors.accent
+                    } else {
+                        colors.muted_fg
+                    })
                     .child(if is_favorite { "★" } else { "☆" })
                     .on_mouse_down(MouseButton::Left, {
                         let model_id = model_id.clone();
@@ -590,19 +613,19 @@ impl ModelsListView {
                     .min_w_0()
                     .gap_2()
                     .items_center()
-                    .child(div().text_color(fg).child(model.name.clone()))
+                    .child(div().text_color(colors.fg).child(model.name.clone()))
                     .when(model.is_default, |this| {
-                        this.child(pill("Default", accent, muted))
+                        this.child(pill("Default", colors.accent, colors.muted))
                     })
                     .when(model.provider_type == ProviderType::Ollama, |this| {
-                        this.child(pill("Local", muted_fg, muted))
+                        this.child(pill("Local", colors.muted_fg, colors.muted))
                     })
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
                             .text_xs()
-                            .text_color(muted_fg)
+                            .text_color(colors.muted_fg)
                             .child(model.model_identifier.clone()),
                     ),
             )
@@ -610,28 +633,28 @@ impl ModelsListView {
                 div()
                     .w(col::PROVIDER)
                     .text_xs()
-                    .text_color(muted_fg)
+                    .text_color(colors.muted_fg)
                     .child(model.provider_type.display_name().to_string()),
             )
             .child(
                 div()
                     .w(col::CONTEXT)
                     .text_xs()
-                    .text_color(muted_fg)
+                    .text_color(colors.muted_fg)
                     .child(format_context(model.max_context_window)),
             )
             .child(
                 div()
                     .w(col::PRICE)
                     .text_xs()
-                    .text_color(muted_fg)
+                    .text_color(colors.muted_fg)
                     .child(format_price(model)),
             )
             .child(
                 div()
                     .w(col::TEMP)
                     .text_xs()
-                    .text_color(muted_fg)
+                    .text_color(colors.muted_fg)
                     .child(format!("{:.1}", model.temperature)),
             )
             // Row menu
@@ -662,26 +685,25 @@ impl ModelsListView {
                                             );
                                         }),
                                 )
-                                .item(PopupMenuItem::new("Edit…").on_click(
-                                    move |_, window, cx| {
-                                        let edit_id = edit_id.clone();
-                                        entity_for_edit.update(cx, |view, cx| {
-                                            view.show_edit_model_dialog(edit_id, window, cx);
-                                        });
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("Remove").on_click(
-                                    move |_, _, cx| {
+                                .item(PopupMenuItem::new("Edit…").on_click(move |_, window, cx| {
+                                    let edit_id = edit_id.clone();
+                                    entity_for_edit.update(cx, |view, cx| {
+                                        view.show_edit_model_dialog(edit_id, window, cx);
+                                    });
+                                }))
+                                .item(
+                                    PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
                                         models_controller::delete_model(delete_id.clone(), cx);
                                         entity_for_delete.update(cx, |view, cx| {
                                             view.refresh(cx);
                                         });
-                                    },
-                                ))
+                                    }),
+                                )
                             }
                         }),
                 ),
             )
+            .into_any_element()
     }
 }
 

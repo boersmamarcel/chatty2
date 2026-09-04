@@ -5,9 +5,11 @@
 //! sheet (`views::models_page::provider_keys_sheet`). This field is still
 //! used by other settings pages that hold an API key of their own.
 
-use gpui::{App, Entity, SharedString, Styled, Window, prelude::FluentBuilder as _};
+use gpui::{
+    App, AppContext as _, Entity, SharedString, Styled, Window, prelude::FluentBuilder as _,
+};
 use gpui_component::{
-    AxisExt as _,
+    AxisExt as _, Sizable,
     input::{Input, InputEvent, InputState},
     setting::{RenderOptions, SettingField},
 };

@@ -1544,9 +1544,14 @@ impl ChatView {
                 .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
                 .collect();
 
+            // Prefer the model marked default in settings over list order.
+            let default_model_id = models_model
+                .default_model()
+                .map(|m| m.id.clone())
+                .or_else(|| models_list.first().map(|model| model.id.clone()));
+
             self.chat_input_state.update(cx, |state, cx| {
                 if state.available_models() != models_list.as_slice() {
-                    let default_model_id = models_list.first().map(|model| model.id.clone());
                     state.set_available_models(models_list, default_model_id, cx);
                 }
             });

@@ -648,7 +648,12 @@ impl ChattyApp {
             .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
             .collect();
 
-        let default_model_id = models_list.first().map(|model| model.id.clone());
+        // The model marked default in Settings → Models & Providers, falling
+        // back to the first in the list when nothing is marked.
+        let default_model_id = models_model
+            .default_model()
+            .map(|m| m.id.clone())
+            .or_else(|| models_list.first().map(|model| model.id.clone()));
 
         let selected_capabilities = {
             let selected_id = chat_view

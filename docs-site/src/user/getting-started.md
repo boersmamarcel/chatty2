@@ -15,14 +15,15 @@ Grab the latest release from [GitHub Releases](https://github.com/boersmamarcel/
 | Linux (x86_64) | `.tar.gz` archive |
 | Windows (x86_64) | `.exe` installer |
 
-## 2. Add a provider
+## 2. Connect a provider
 
 On first launch, connect at least one LLM provider.
 
 1. Click the **gear icon** in the title bar to open Settings
-2. Open the **Providers** tab
-3. **Add Provider** and pick one (OpenRouter, Ollama, Azure OpenAI, …)
-4. Paste your API key (Ollama needs none — it connects to your local instance)
+2. Open the **Models & Providers** tab
+3. Click **Manage keys** — one sheet holds OpenRouter, Ollama and Azure OpenAI
+4. Paste your API key next to the provider you want (Ollama needs none — it
+   connects to your local instance), then press **Test** to check it
 
 A recorded walkthrough lives in the repo
 ([`add_provider_and_model.gif`](https://github.com/boersmamarcel/chatty2/blob/main/assets/animations/add_provider_and_model.gif);
@@ -31,11 +32,13 @@ A recorded walkthrough lives in the repo
 
 ## 3. Add a model
 
-1. Still in Settings, open the **Models** tab
-2. **Add Model**
-3. Pick a provider and enter a model ID (e.g. `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.0-flash`)
+1. Still on **Models & Providers**, click **Add model**
+2. Search the provider's catalogue and tick the models you want
+3. **Add** — they land in the roster straight away
 
 Chatty auto-detects vision and PDF support. No extra capability flags to set.
+Star a row to pin it to the top; its ⋯ menu sets the model new conversations
+start with.
 
 ## 4. Start chatting
 
