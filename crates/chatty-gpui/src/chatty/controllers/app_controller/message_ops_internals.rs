@@ -6,10 +6,11 @@
 //! orchestrate these helpers.
 
 use super::*;
-// The desktop keeps its own copy of the stream loop (it interleaves GPUI entity
-// updates that the shared `run_stream_loop` cannot), so it imports the stall
-// watchdog's constants rather than redefining them: one timeout for both UIs.
-use chatty_core::services::{STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE};
+// The desktop drives chatty-core's stream loop, same as chatty-tui: the loop,
+// its cancellation checks and its stall watchdog live there, and only the
+// dispatch below is desktop-specific (AGE-192).
+use chatty_core::services::ChunkAction;
+use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Parameters for the shared LLM stream processing.
 pub(super) struct LlmStreamParams {
@@ -31,6 +32,374 @@ pub(super) struct LlmStreamParams {
     /// Weak controller handle — used to inject follow-up messages when
     /// AgentLoopGuard detects a loop or deadline.
     pub(super) weak_ctrl: gpui::WeakEntity<ChattyApp>,
+}
+
+/// Maps [`StreamChunk`]s and sub-agent progress onto the desktop's UI state.
+///
+/// The desktop's half of the seam `chatty-tui` has used since AGE-188: the loop
+/// itself lives in `chatty_core::services::run_stream_loop`, and this type is
+/// only the dispatch. It holds its own [`AsyncApp`], because the trait's methods
+/// take `&mut self` rather than a context — which is also why nothing here may
+/// be `Send`.
+///
+/// Every arm writes to two places, in this order: the `Conversation` model,
+/// which is the source of truth for a stream whose conversation is not on
+/// screen, and then `StreamManager`, which emits the event the UI subscribes to.
+///
+/// Finalization is deliberately *not* here. `run_llm_stream` still owns trace
+/// extraction, `finalize_stream` and follow-up injection, and reads
+/// [`Self::pending_follow_up`] and [`Self::stream_errored`] back off the handler
+/// once the loop returns.
+pub(super) struct GpuiStreamHandler {
+    conv_id: String,
+    cx: AsyncApp,
+    chat_view: Entity<ChatView>,
+    stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
+    weak_ctrl: gpui::WeakEntity<ChattyApp>,
+    provider_type: chatty_core::settings::models::providers_store::ProviderType,
+    agent_task_controller: chatty_core::services::AgentTaskController,
+    loop_guard: chatty_core::services::AgentLoopGuard,
+    cancel_flag: Arc<AtomicBool>,
+    /// id → name and id → args for the tool call currently in flight.
+    pending_tool_name: std::collections::HashMap<String, String>,
+    pending_tool_args: std::collections::HashMap<String, String>,
+    /// Injected by `run_llm_stream` after the loop; see the type docs.
+    pub(super) pending_follow_up: Option<String>,
+    /// Set when the stream ended via `StreamChunk::Error` or a transport `Err`,
+    /// which already emitted `StreamEnded` and dropped the stream from the
+    /// manager. `run_llm_stream` skips its own finalize when this is set.
+    pub(super) stream_errored: bool,
+    text_overflow_stop_requested: bool,
+}
+
+impl GpuiStreamHandler {
+    /// Forward a chunk to `StreamManager`, which is what turns it into a
+    /// `StreamManagerEvent` the UI is subscribed to.
+    fn forward(&mut self, chunk: StreamChunk) {
+        let Some(sm) = self.stream_manager.clone() else {
+            return;
+        };
+        let conv_id = self.conv_id.clone();
+        sm.update(
+            &mut self.cx,
+            |sm: &mut crate::chatty::models::StreamManager, cx| {
+                sm.handle_chunk(&conv_id, chunk, cx)
+            },
+        )
+        .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
+        .ok();
+    }
+
+    /// Attach the turn's trace before a terminal error drops the stream.
+    ///
+    /// `handle_chunk`'s Error arm removes the stream from the manager, so the
+    /// trace has to be set first or the failed turn loses its tool calls.
+    fn capture_trace_before_error(&mut self) {
+        let trace_json = extract_trace_json(&self.chat_view, &self.conv_id, &mut self.cx);
+        self.stream_errored = true;
+        let Some(sm) = self.stream_manager.clone() else {
+            return;
+        };
+        let conv_id = self.conv_id.clone();
+        sm.update(
+            &mut self.cx,
+            |sm: &mut crate::chatty::models::StreamManager, _cx| {
+                sm.set_trace(&conv_id, trace_json);
+            },
+        )
+        .map_err(|e| warn!(error = ?e, "Failed to set trace before error"))
+        .ok();
+    }
+
+    /// Push the agent's todo snapshot into the conversation, the plan strip and
+    /// disk, after a tool that can have changed it.
+    fn publish_todo_snapshot(&mut self) {
+        let snapshot = self.agent_task_controller.snapshot();
+        let conv_id = self.conv_id.clone();
+
+        self.cx
+            .update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    conv.set_agent_task_snapshot(Some(snapshot.clone()));
+                }
+            })
+            .map_err(|e| {
+                warn!(error = ?e, "Failed to persist agent todo panel snapshot in conversation state")
+            })
+            .ok();
+
+        let snapshot_for_view = snapshot.clone();
+        self.chat_view
+            .update(&mut self.cx, |view, cx| {
+                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                    view.set_agent_task_snapshot(snapshot_for_view, cx);
+                }
+            })
+            .map_err(
+                |e| warn!(error = ?e, "Failed to update agent todo panel after todo tool result"),
+            )
+            .ok();
+
+        self.weak_ctrl
+            .update(&mut self.cx, |app, cx| {
+                app.persist_conversation(&conv_id, cx);
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to persist agent todo panel snapshot to disk"))
+            .ok();
+    }
+}
+
+impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
+    fn on_stream_started(&mut self) {
+        debug!(conv_id = %self.conv_id, "Entering stream processing loop");
+    }
+
+    async fn on_chunk(
+        &mut self,
+        chunk_result: anyhow::Result<StreamChunk>,
+    ) -> anyhow::Result<ChunkAction> {
+        // PHASE 1: local state that has to change before the chunk is forwarded.
+        match chunk_result {
+            Ok(StreamChunk::Text(ref text)) => {
+                let conv_id = self.conv_id.clone();
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.append_streaming_content(text);
+                        }
+                    })
+                    .map_err(
+                        |e| warn!(error = ?e, "Failed to update conversation streaming content"),
+                    )
+                    .ok();
+                // Verbosity guard: flag if the model is writing a wall of text
+                // with no tools.
+                if !self.text_overflow_stop_requested && self.loop_guard.on_text_chunk(text.len()) {
+                    self.text_overflow_stop_requested = true;
+                    debug!(conv_id = %self.conv_id,
+                        "Text-only response exceeded verbosity limit; will inject brevity prompt after response completes.");
+                }
+            }
+            Ok(StreamChunk::TokenUsage { .. }) => {
+                // Token usage tracked by StreamManager
+            }
+            Ok(StreamChunk::Done) => {
+                debug!(conv_id = %self.conv_id, "Received Done chunk");
+                // If the model produced too much text without a tool call, queue
+                // a brevity prompt.
+                if self.text_overflow_stop_requested && self.pending_follow_up.is_none() {
+                    self.pending_follow_up = Some(
+                        "You produced a long response without any tool call. \
+                         If you have enough information, give your final answer now. \
+                         Otherwise, make a single focused tool call to get what you need."
+                            .to_string(),
+                    );
+                }
+                if self.pending_follow_up.is_none() {
+                    self.pending_follow_up = self.agent_task_controller.stream_end_follow_up();
+                }
+                // Forward before breaking, so the UI sees the turn close.
+                self.forward(StreamChunk::Done);
+                return Ok(ChunkAction::Break);
+            }
+            Ok(StreamChunk::Error(ref err)) => {
+                error!(error = %err, conv_id = %self.conv_id, "Stream error");
+
+                // Detect authentication errors (401/Unauthorized)
+                if should_refresh_azure_auth(&self.provider_type, err) {
+                    tracing::warn!("Detected Azure auth error - token likely expired");
+                    if let Some(cache) = self
+                        .cx
+                        .update(|cx| {
+                            cx.try_global::<chatty_core::auth::AzureTokenCache>()
+                                .cloned()
+                        })
+                        .map_err(|e| warn!(error = ?e, "Failed to read Azure token cache global"))
+                        .ok()
+                        .flatten()
+                    {
+                        if let Err(e) = cache.refresh_token().await {
+                            error!(error = ?e, "Failed to refresh Azure token after 401 error");
+                        } else {
+                            tracing::info!("Azure token refreshed successfully.");
+                        }
+                    }
+                } else if matches!(
+                    self.provider_type,
+                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter
+                ) && is_auth_stream_error(err)
+                {
+                    tracing::warn!(
+                        "Detected OpenRouter authentication error - check the configured API key/header"
+                    );
+                }
+            }
+            Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
+                self.pending_tool_name.insert(id.clone(), name.clone());
+            }
+            Ok(StreamChunk::ToolCallInput {
+                ref id,
+                ref arguments,
+            }) => {
+                self.pending_tool_args.insert(id.clone(), arguments.clone());
+            }
+            Ok(StreamChunk::ToolCallResult { ref id, .. }) => {
+                let tool_name = self.pending_tool_name.remove(id).unwrap_or_default();
+                let tool_args = self.pending_tool_args.remove(id).unwrap_or_default();
+                if is_agent_todo_tool(&tool_name) {
+                    self.publish_todo_snapshot();
+                }
+                if self.pending_follow_up.is_none()
+                    && let Some(prompt) = self.agent_task_controller.observe_tool_result(&tool_name)
+                {
+                    debug!(
+                        conv_id = %self.conv_id,
+                        "Agent todo protocol: multiple tool results observed before write_todos"
+                    );
+                    if follow_up_requires_cancel(FollowUpReason::TodoProtocol) {
+                        self.cancel_flag.store(true, Ordering::Relaxed);
+                    }
+                    self.pending_follow_up = Some(prompt);
+                }
+                if let Some(pivot) = self.loop_guard.on_tool_completed(&tool_name, &tool_args) {
+                    debug!(conv_id = %self.conv_id, pivot = %pivot,
+                        "AgentLoopGuard loop detected; cancelling stream");
+                    if follow_up_requires_cancel(FollowUpReason::LoopGuard) {
+                        self.cancel_flag.store(true, Ordering::Relaxed);
+                    }
+                    self.pending_follow_up = Some(pivot);
+                }
+            }
+            Ok(_) => {
+                // ApprovalRequested, ApprovalResolved, ClarificationRequested,
+                // ToolCallError: no local state
+            }
+            Err(ref e) => {
+                error!(error = %e, conv_id = %self.conv_id, "Stream error");
+            }
+        }
+
+        // PHASE 2: forward every chunk, so the UI's subscription sees it.
+        match chunk_result {
+            Ok(chunk) => {
+                let is_break = matches!(chunk, StreamChunk::Error(_));
+                if is_break {
+                    // Same terminal path as the Err arm below: the manager drops
+                    // the stream, so keep the trace and skip the redundant
+                    // finalize afterwards.
+                    self.capture_trace_before_error();
+                }
+                self.forward(chunk);
+                if is_break {
+                    Ok(ChunkAction::Break)
+                } else {
+                    Ok(ChunkAction::Continue)
+                }
+            }
+            Err(e) => {
+                let message = e.to_string();
+
+                // A truncated tool call is a model defect, not a dead
+                // connection: hand the parse error back and let it retry.
+                //
+                // The cap has to live in conversation history, not in a field:
+                // the handler is rebuilt for every injected follow-up, so a flag
+                // here would reset each time and the retry would never
+                // terminate. That is AGE-150 Defect 2, and it is easy to rebuild
+                // by accident.
+                if is_malformed_tool_call_error(&message)
+                    && self.pending_follow_up.is_none()
+                    && !already_asked_to_retry(&self.conv_id, &mut self.cx)
+                {
+                    warn!(conv_id = %self.conv_id, error = %message,
+                        "Malformed tool-call JSON; asking the model to retry");
+                    self.pending_follow_up = Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
+                }
+
+                // Keep the failed turn's tool calls in the transcript.
+                self.capture_trace_before_error();
+                self.forward(StreamChunk::Error(message));
+                Ok(ChunkAction::Break)
+            }
+        }
+    }
+
+    fn on_progress(&mut self, progress: InvokeAgentProgress) {
+        let conv_id = self.conv_id.clone();
+        match progress {
+            InvokeAgentProgress::Started {
+                agent_name,
+                prompt,
+                source,
+            } => {
+                let label = format!("[Agent: {}] {}", agent_name, prompt);
+                let label_for_store = label.clone();
+                let source_for_store = source.clone();
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.start_sub_agent_progress(&label_for_store, source_for_store);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent start"))
+                    .ok();
+                self.chat_view
+                    .update(&mut self.cx, |view, cx| {
+                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                            view.start_sub_agent_progress(&label, source, cx);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent start"))
+                    .ok();
+            }
+            InvokeAgentProgress::Text(text) => {
+                let text_for_store = text.clone();
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.append_sub_agent_progress(&text_for_store);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent progress"))
+                    .ok();
+                self.chat_view
+                    .update(&mut self.cx, |view, cx| {
+                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                            view.append_sub_agent_progress(&text, cx);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent progress"))
+                    .ok();
+            }
+            InvokeAgentProgress::Finished { success, result } => {
+                let result_for_store = result.clone();
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.finalize_sub_agent_progress(success, result_for_store);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent final state"))
+                    .ok();
+                self.chat_view
+                    .update(&mut self.cx, |view, cx| {
+                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
+                            view.finalize_sub_agent_progress(success, result, cx);
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent finish"))
+                    .ok();
+            }
+        }
+    }
+
+    fn on_cancelled(&mut self) {
+        debug!(conv_id = %self.conv_id, "Stream cancelled via cancellation token");
+    }
+
+    fn on_stream_ended(&mut self) {
+        debug!(conv_id = %self.conv_id, "Stream loop finished, finalizing via StreamManager");
+    }
 }
 
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
@@ -224,410 +593,47 @@ pub(super) async fn run_llm_stream(
     let mut progress_rx =
         chatty_core::services::install_progress_channel(&invoke_agent_progress_slot);
 
-    // 5b. AgentLoopGuard: detects repeated tool calls (loops) and verbosity bursts.
-    // Desktop streams don't require an answer file, so answer_file_required=false.
-    let mut loop_guard = chatty_core::services::AgentLoopGuard::new(max_agent_turns, false);
-    // Track id→name and id→args for the current tool call in flight.
-    let mut pending_tool_name: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut pending_tool_args: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    // If loop detection fires, we cancel the stream and inject this follow-up.
-    let mut pending_follow_up: Option<String> = None;
-    let mut text_overflow_stop_requested = false;
-    // Set when the stream terminated via StreamChunk::Error, which already
-    // emitted StreamEnded and removed the stream from the manager.
-    let mut stream_errored = false;
-    // Last time the provider yielded anything, for the stall watchdog below.
-    let mut last_activity = std::time::Instant::now();
+    // 5b. Drive the shared stream loop.
+    //
+    // The dispatch lives in `GpuiStreamHandler` above; the loop, its
+    // cancellation checks and its stall watchdog are `chatty-core`'s, the same
+    // ones chatty-tui runs. Behaviour that belongs to a turn is changed there
+    // now, once, rather than twice (AGE-192).
+    //
+    // AgentLoopGuard detects repeated tool calls and verbosity bursts. Desktop
+    // streams don't require an answer file, so answer_file_required=false.
+    let mut handler = GpuiStreamHandler {
+        conv_id: conv_id.clone(),
+        cx: cx.clone(),
+        chat_view: chat_view.clone(),
+        stream_manager: stream_manager.clone(),
+        weak_ctrl: weak_ctrl.clone(),
+        provider_type,
+        agent_task_controller: agent_task_controller.clone(),
+        loop_guard: chatty_core::services::AgentLoopGuard::new(max_agent_turns, false),
+        cancel_flag: cancel_flag.clone(),
+        pending_tool_name: std::collections::HashMap::new(),
+        pending_tool_args: std::collections::HashMap::new(),
+        pending_follow_up: None,
+        stream_errored: false,
+        text_overflow_stop_requested: false,
+    };
 
-    // 6. Stream processing loop
-    debug!(conv_id = %conv_id, "Entering stream processing loop");
-    use futures::StreamExt;
+    chatty_core::services::run_stream_loop(
+        &mut stream,
+        &mut progress_rx,
+        &cancel_flag,
+        &mut handler,
+    )
+    .await?;
 
-    loop {
-        // Check cancellation before each iteration
-        if cancel_flag.load(Ordering::Relaxed) {
-            debug!(conv_id = %conv_id, "Stream cancelled via cancellation token");
-            break;
-        }
-
-        tokio::select! {
-            biased;
-            // Handle invoke_agent progress events first (sub-agent visualisation)
-            Some(progress) = progress_rx.recv() => {
-                use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
-                match progress {
-                    InvokeAgentProgress::Started {
-                        agent_name,
-                        prompt,
-                        source,
-                    } => {
-                        let label = format!("[Agent: {}] {}", agent_name, prompt);
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.start_sub_agent_progress(&label, source.clone());
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent start"))
-                        .ok();
-                        chat_view
-                            .update(cx, |view, cx| {
-                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                                    view.start_sub_agent_progress(&label, source, cx);
-                                }
-                            })
-                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent start"))
-                            .ok();
-                    }
-                    InvokeAgentProgress::Text(text) => {
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.append_sub_agent_progress(&text);
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent progress"))
-                        .ok();
-                        chat_view
-                            .update(cx, |view, cx| {
-                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                                    view.append_sub_agent_progress(&text, cx);
-                                }
-                            })
-                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent progress"))
-                            .ok();
-                    }
-                    InvokeAgentProgress::Finished { success, result } => {
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.finalize_sub_agent_progress(success, result.clone());
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent final state"))
-                        .ok();
-                        chat_view
-                            .update(cx, |view, cx| {
-                                if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                                    view.finalize_sub_agent_progress(success, result, cx);
-                                }
-                            })
-                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent finish"))
-                            .ok();
-                    }
-                }
-                continue;
-            }
-            // Wake periodically even when the provider yields nothing, so a
-            // stalled stream is noticed instead of counting up forever.
-            //
-            // `cancel_flag` is only read at the top of the loop, and the
-            // `stream.next()` branch below has no timeout: a provider or tool
-            // that stops yielding — the `ERR_NETWORK_CHANGED` case — parked
-            // this loop indefinitely with the UI still showing "working"
-            // (AGE-188). This tick gives both a chance to run.
-            _ = tokio::time::sleep(STALL_TICK) => {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    debug!(conv_id = %conv_id, "Stream cancelled while idle");
-                    break;
-                }
-                if last_activity.elapsed() >= STALL_TIMEOUT {
-                    warn!(
-                        conv_id = %conv_id,
-                        idle_secs = last_activity.elapsed().as_secs(),
-                        "Stream produced nothing for too long; ending the turn as stalled"
-                    );
-                    let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
-                    stream_errored = true;
-                    if let Some(ref sm) = stream_manager {
-                        sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                            sm.set_trace(&conv_id, trace_json);
-                            sm.handle_chunk(
-                                &conv_id,
-                                StreamChunk::Error(STALLED_STREAM_MESSAGE.to_string()),
-                                cx,
-                            );
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to report a stalled stream"))
-                        .ok();
-                    }
-                    break;
-                }
-                continue;
-            }
-            // Process LLM stream chunks
-            chunk_result = stream.next() => {
-                last_activity = std::time::Instant::now();
-                let chunk_result = match chunk_result {
-                    Some(r) => r,
-                    None => break,
-                };
-
-                match chunk_result {
-                    Ok(StreamChunk::Text(ref text)) => {
-                        // Update the Conversation model (source of truth for background streams)
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                conv.append_streaming_content(text);
-                            }
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to update conversation streaming content"))
-                        .ok();
-                        // Verbosity guard: flag if the model is writing a wall of text with no tools.
-                        if !text_overflow_stop_requested
-                            && loop_guard.on_text_chunk(text.len())
-                        {
-                            text_overflow_stop_requested = true;
-                            debug!(conv_id = %conv_id,
-                                "Text-only response exceeded verbosity limit; will inject brevity prompt after response completes.");
-                        }
-                    }
-                    Ok(StreamChunk::TokenUsage { .. }) => {
-                        // Token usage tracked by StreamManager
-                    }
-                    Ok(StreamChunk::Done) => {
-                        debug!(conv_id = %conv_id, "Received Done chunk");
-                        // If the model produced too much text without a tool call, queue a brevity prompt.
-                        if text_overflow_stop_requested && pending_follow_up.is_none() {
-                            pending_follow_up = Some(
-                                "You produced a long response without any tool call. \
-                                 If you have enough information, give your final answer now. \
-                                 Otherwise, make a single focused tool call to get what you need."
-                                    .to_string(),
-                            );
-                        }
-                        if pending_follow_up.is_none() {
-                            pending_follow_up = agent_task_controller.stream_end_follow_up();
-                        }
-                        // Forward to StreamManager before breaking
-                        if let Some(ref sm) = stream_manager {
-                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.handle_chunk(&conv_id, StreamChunk::Done, cx)
-                            })
-                            .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to forward Done chunk to StreamManager"))
-                            .ok();
-                        }
-                        break;
-                    }
-                    Ok(StreamChunk::Error(ref err)) => {
-                        error!(error = %err, conv_id = %conv_id, "Stream error");
-
-                        // Detect authentication errors (401/Unauthorized)
-                        if should_refresh_azure_auth(&provider_type, err) {
-                            tracing::warn!("Detected Azure auth error - token likely expired");
-                            if let Some(cache) = cx
-                                .update(|cx| {
-                                    cx.try_global::<chatty_core::auth::AzureTokenCache>()
-                                        .cloned()
-                                })
-                                .map_err(|e| warn!(error = ?e, "Failed to read Azure token cache global"))
-                                .ok()
-                                .flatten()
-                            {
-                                if let Err(e) = cache.refresh_token().await {
-                                    error!(error = ?e, "Failed to refresh Azure token after 401 error");
-                                } else {
-                                    tracing::info!("Azure token refreshed successfully.");
-                                }
-                            }
-                        } else if matches!(
-                            provider_type,
-                            chatty_core::settings::models::providers_store::ProviderType::OpenRouter
-                        ) && is_auth_stream_error(err)
-                        {
-                            tracing::warn!(
-                                "Detected OpenRouter authentication error - check the configured API key/header"
-                            );
-                        }
-                    }
-                    Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
-                        pending_tool_name.insert(id.clone(), name.clone());
-                    }
-                    Ok(StreamChunk::ToolCallInput { ref id, ref arguments }) => {
-                        pending_tool_args.insert(id.clone(), arguments.clone());
-                    }
-                    Ok(StreamChunk::ToolCallResult { ref id, .. }) => {
-                        let tool_name = pending_tool_name.remove(id).unwrap_or_default();
-                        let tool_args = pending_tool_args.remove(id).unwrap_or_default();
-                        if is_agent_todo_tool(&tool_name) {
-                            let snapshot = agent_task_controller.snapshot();
-                            cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                    conv.set_agent_task_snapshot(Some(snapshot.clone()));
-                                }
-                            })
-                            .map_err(|e| {
-                                warn!(
-                                    error = ?e,
-                                    "Failed to persist agent todo panel snapshot in conversation state"
-                                )
-                            })
-                            .ok();
-                            chat_view
-                                .update(cx, |view, cx| {
-                                    if view.conversation_id().map(|id| id.as_str())
-                                        == Some(conv_id.as_str())
-                                    {
-                                        view.set_agent_task_snapshot(snapshot.clone(), cx);
-                                    }
-                                })
-                                .map_err(|e| {
-                                    warn!(
-                                        error = ?e,
-                                        "Failed to update agent todo panel after todo tool result"
-                                    )
-                                })
-                                .ok();
-                            weak_ctrl
-                                .update(&mut *cx, |app, cx| {
-                                    app.persist_conversation(&conv_id, cx);
-                                })
-                                .map_err(|e| {
-                                    warn!(
-                                        error = ?e,
-                                        "Failed to persist agent todo panel snapshot to disk"
-                                    )
-                                })
-                                .ok();
-                        }
-                        if pending_follow_up.is_none()
-                            && let Some(prompt) =
-                                agent_task_controller.observe_tool_result(&tool_name)
-                        {
-                            debug!(
-                                conv_id = %conv_id,
-                                "Agent todo protocol: multiple tool results observed before write_todos"
-                            );
-                            if follow_up_requires_cancel(FollowUpReason::TodoProtocol) {
-                                cancel_flag.store(true, Ordering::Relaxed);
-                            }
-                            pending_follow_up = Some(prompt);
-                        }
-                        if let Some(pivot) = loop_guard.on_tool_completed(&tool_name, &tool_args) {
-                            debug!(conv_id = %conv_id, pivot = %pivot,
-                                "AgentLoopGuard loop detected; cancelling stream");
-                            if follow_up_requires_cancel(FollowUpReason::LoopGuard) {
-                                cancel_flag.store(true, Ordering::Relaxed);
-                            }
-                            pending_follow_up = Some(pivot);
-                        }
-                    }
-                    Ok(_) => {
-                        // ApprovalRequested, ApprovalResolved, ClarificationRequested,
-                        // TokenUsage, ToolCallError: no local state
-                    }
-                    Err(ref e) => {
-                        error!(error = %e, conv_id = %conv_id, "Stream error");
-                    }
-                }
-
-                // Forward ALL chunks to StreamManager (emits events for UI subscription)
-                match chunk_result {
-                    Ok(chunk) => {
-                        let is_break = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
-                        if matches!(chunk, StreamChunk::Error(_)) {
-                            // Same terminal path as the Err arm below: the manager
-                            // drops the stream, so keep the trace and skip the
-                            // redundant finalize afterwards.
-                            let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
-                            stream_errored = true;
-                            if let Some(ref sm) = stream_manager {
-                                sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, _cx| {
-                                    sm.set_trace(&conv_id, trace_json);
-                                })
-                                .map_err(|e| warn!(error = ?e, "Failed to set trace before error"))
-                                .ok();
-                            }
-                        }
-                        if let Some(ref sm) = stream_manager {
-                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.handle_chunk(&conv_id, chunk, cx)
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to forward chunk to StreamManager"))
-                            .ok();
-                        }
-                        if is_break {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let message = e.to_string();
-
-                        // A truncated tool call is a model defect, not a dead
-                        // connection: hand the parse error back and let it retry.
-                        //
-                        // The cap has to live in conversation history, not in a
-                        // local: this function is re-entered fresh for every
-                        // injected follow-up, so a local flag would reset each
-                        // time and the retry would never terminate. That is
-                        // AGE-150 Defect 2, and it is easy to rebuild by accident.
-                        if is_malformed_tool_call_error(&message)
-                            && pending_follow_up.is_none()
-                            && !already_asked_to_retry(&conv_id, cx)
-                        {
-                            warn!(conv_id = %conv_id, error = %message,
-                                "Malformed tool-call JSON; asking the model to retry");
-                            pending_follow_up = Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
-                        }
-
-                        // Keep the failed turn's tool calls in the transcript.
-                        let trace_json = extract_trace_json(&chat_view, &conv_id, cx);
-                        stream_errored = true;
-                        if let Some(ref sm) = stream_manager {
-                            sm.update(cx, |sm: &mut crate::chatty::models::StreamManager, cx| {
-                                sm.set_trace(&conv_id, trace_json);
-                                sm.handle_chunk(&conv_id, StreamChunk::Error(message), cx);
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to forward error to StreamManager"))
-                            .ok();
-                        }
-                        break;
-                    }
-                }
-            } // end of stream.next() branch
-        } // end of tokio::select!
-    } // end of loop
-
-    // Drain remaining progress events after stream ends
-    while let Ok(progress) = progress_rx.try_recv() {
-        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
-        match progress {
-            InvokeAgentProgress::Text(text) => {
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.append_sub_agent_progress(&text);
-                    }
-                })
-                .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist drained sub-agent progress"))
-                .ok();
-                chat_view
-                    .update(cx, |view, cx| {
-                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.append_sub_agent_progress(&text, cx);
-                        }
-                    })
-                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with drained sub-agent progress"))
-                    .ok();
-            }
-            InvokeAgentProgress::Finished { success, result } => {
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                        conv.finalize_sub_agent_progress(success, result.clone());
-                    }
-                })
-                .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist drained sub-agent final state"))
-                .ok();
-                chat_view
-                    .update(cx, |view, cx| {
-                        if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.finalize_sub_agent_progress(success, result, cx);
-                        }
-                    })
-                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with drained sub-agent finish"))
-                    .ok();
-            }
-            _ => {}
-        }
-    }
+    // The loop drains any progress the stream outran before it returns, so the
+    // sub-agent row is never left on a stale line.
+    let GpuiStreamHandler {
+        pending_follow_up,
+        stream_errored,
+        ..
+    } = handler;
 
     // Clear the progress slot sender so stale references don't accumulate
     {

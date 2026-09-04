@@ -46,7 +46,7 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
         let _ = self.event_tx.send(AppEvent::StreamStarted);
     }
 
-    fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+    async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
         match chunk? {
             StreamChunk::Text(text) => {
                 let _ = self.event_tx.send(AppEvent::TextChunk(text));
@@ -252,8 +252,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn emits_follow_up_after_repeated_tools_without_todos() {
+    #[tokio::test]
+    async fn emits_follow_up_after_repeated_tools_without_todos() {
         let (mut handler, mut event_rx, _controller) = handler();
 
         handler
@@ -261,24 +261,28 @@ mod tests {
                 id: "a".into(),
                 name: "read_file".into(),
             }))
+            .await
             .unwrap();
         handler
             .on_chunk(Ok(StreamChunk::ToolCallResult {
                 id: "a".into(),
                 result: "ok".into(),
             }))
+            .await
             .unwrap();
         handler
             .on_chunk(Ok(StreamChunk::ToolCallStarted {
                 id: "b".into(),
                 name: "search_code".into(),
             }))
+            .await
             .unwrap();
         let action = handler
             .on_chunk(Ok(StreamChunk::ToolCallResult {
                 id: "b".into(),
                 result: "ok".into(),
             }))
+            .await
             .unwrap();
         assert!(matches!(action, ChunkAction::Break));
 
@@ -292,8 +296,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emits_follow_up_when_stream_ends_before_verification() {
+    #[tokio::test]
+    async fn emits_follow_up_when_stream_ends_before_verification() {
         let (mut handler, mut event_rx, controller) = handler();
         controller
             .write_todos(
