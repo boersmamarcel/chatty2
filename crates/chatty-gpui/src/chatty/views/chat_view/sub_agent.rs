@@ -36,6 +36,7 @@ impl ChatView {
     /// Clear all messages from the chat view
     pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
+        self.reset_transcript_list();
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         self.sub_agent_progress_msg_idx = None;
