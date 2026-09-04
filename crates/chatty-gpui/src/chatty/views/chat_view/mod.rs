@@ -215,6 +215,14 @@ pub enum ChatViewEvent {
     },
     /// User clicked "Regenerate" on an assistant message
     RegenerateMessage { history_index: usize },
+    /// The browser changed hands (AGE-156) and the view already added
+    /// `item` to the parent assistant message's trace. `streaming` says
+    /// which trace that was: the live one (the stream will persist it) or
+    /// the settled one (the controller must persist it now).
+    BrowserControlChanged {
+        item: Box<crate::chatty::views::message_types::ToolCallBlock>,
+        streaming: bool,
+    },
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
@@ -516,6 +524,7 @@ impl ChatView {
                 manager
             });
         self.artifact_dismissed = false;
+        self.ensure_artifact_close_wired(cx);
         self.artifact_view.update(cx, |view, cx| {
             view.open_browser(manager, cx);
         });
@@ -1080,8 +1089,12 @@ impl ChatView {
         cx.subscribe(
             &self.artifact_view,
             |this, _, event: &ArtifactViewEvent, cx| {
-                if matches!(event, ArtifactViewEvent::Closed) {
-                    this.artifact_dismissed = true;
+                match event {
+                    ArtifactViewEvent::Closed => this.artifact_dismissed = true,
+                    ArtifactViewEvent::BrowserControlChanged { taken, url } => {
+                        this.record_browser_control_change(*taken, url, cx);
+                    }
+                    ArtifactViewEvent::PresentationChanged => {}
                 }
                 cx.notify();
             },

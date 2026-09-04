@@ -25,13 +25,13 @@ use std::time::SystemTime;
 use tracing::{debug, trace, warn};
 
 use super::super::message_types::{
-    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, ThinkingBlock,
-    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
+    ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
     classify_initial_execution_engine, detect_execution_engine, friendly_tool_name,
     is_denial_result, predict_execution_engine,
 };
 use super::super::trace_components::SystemTraceView;
-use super::{ChatView, PendingApprovalInfo, PendingClarificationInfo};
+use super::{ChatView, ChatViewEvent, PendingApprovalInfo, PendingClarificationInfo};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::chatty::views::transcript::ChosenOption;
 use crate::chatty::views::transcript::{attachment_image_path, extract_table_preview};
@@ -39,6 +39,93 @@ use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQu
 use std::collections::HashMap;
 
 impl ChatView {
+    /// Record a browser control handoff (AGE-156) in the activity trail of
+    /// the parent assistant message, as a synthetic finished tool row.
+    ///
+    /// Mid-stream the row goes onto `live_trace`, where the stream's own
+    /// finalization persists it. After the stream has settled the row goes
+    /// straight into that message's `SystemTraceView`, and the emitted
+    /// event asks the controller to persist it. With no assistant message
+    /// yet there is nothing to attach it to, so it is dropped.
+    pub(super) fn record_browser_control_change(
+        &mut self,
+        taken: bool,
+        url: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let item = ToolCallBlock::browser_control_handoff(taken, url);
+
+        if let Some(idx) = self.parent_streaming_assistant_index() {
+            let msg = &mut self.messages[idx];
+            let trace = msg.live_trace.get_or_insert_with(SystemTrace::new);
+            trace.add_tool_call(item.clone());
+            let trace_clone = trace.clone();
+            match msg.system_trace_view.as_ref() {
+                Some(view_entity) => view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                    cx.notify();
+                }),
+                None => {
+                    let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+                    self.subscribe_trace_view(&trace_view, cx);
+                    self.messages[idx].system_trace_view = Some(trace_view);
+                }
+            }
+            cx.emit(ChatViewEvent::BrowserControlChanged {
+                item: Box::new(item),
+                streaming: true,
+            });
+        } else if let Some(idx) = self.parent_assistant_index() {
+            let msg = &mut self.messages[idx];
+            match msg.system_trace_view.as_ref() {
+                Some(view_entity) => view_entity.update(cx, |view, cx| {
+                    let mut trace = view.get_trace().clone();
+                    trace.add_tool_call(item.clone());
+                    view.update_trace(trace, cx);
+                    cx.notify();
+                }),
+                None => {
+                    let mut trace = SystemTrace::new();
+                    trace.add_tool_call(item.clone());
+                    let trace_view = cx.new(|_cx| SystemTraceView::new(trace));
+                    self.subscribe_trace_view(&trace_view, cx);
+                    self.messages[idx].system_trace_view = Some(trace_view);
+                }
+            }
+            cx.emit(ChatViewEvent::BrowserControlChanged {
+                item: Box::new(item),
+                streaming: false,
+            });
+        } else {
+            debug!(
+                taken,
+                "browser control changed with no assistant message to record it on"
+            );
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Forward a trace view's events (expand/collapse, approvals) back to
+    /// this chat view, the same way `handle_tool_call_started` wires the
+    /// views it creates.
+    fn subscribe_trace_view(&self, trace_view: &Entity<SystemTraceView>, cx: &mut Context<Self>) {
+        let chat_view_entity = cx.entity();
+        cx.subscribe(
+            trace_view,
+            move |_chat_view, _trace_view, event: &super::super::message_types::TraceEvent, cx| {
+                let event_clone = event.clone();
+                let chat_view = chat_view_entity.clone();
+                cx.defer(move |cx| {
+                    chat_view.update(cx, |chat_view, cx| {
+                        chat_view.handle_trace_event(&event_clone, cx);
+                    });
+                });
+            },
+        )
+        .detach();
+    }
+
     /// Handle tool call started event
     pub fn handle_tool_call_started(
         &mut self,

@@ -17,10 +17,17 @@ pub enum ToolKind {
     Search,
     External,
     Command,
+    /// A browser control handoff between the user and the agent (AGE-156):
+    /// not something the agent did, so it must not be counted as one of
+    /// its edits, searches or explorations.
+    Handoff,
 }
 
 pub fn classify_tool(name: &str) -> ToolKind {
     let n = name.to_ascii_lowercase();
+    if n == "browser_take_control" || n == "browser_release_control" {
+        return ToolKind::Handoff;
+    }
     if n.contains("todo") || n == "verify_completion" {
         // Agent plan tools are Plan blocks, not edits.
         return ToolKind::Explore;
@@ -50,6 +57,7 @@ pub struct RunTally {
     pub searches: usize,
     pub external: usize,
     pub commands: usize,
+    pub handoffs: usize,
     pub added: usize,
     pub removed: usize,
 }
@@ -64,6 +72,7 @@ impl RunTally {
                 ToolKind::Search => tally.searches += 1,
                 ToolKind::External => tally.external += 1,
                 ToolKind::Command => tally.commands += 1,
+                ToolKind::Handoff => tally.handoffs += 1,
             }
             if let Some(output) = tool.output.as_deref() {
                 let (a, r) = count_diff_lines(output);
@@ -113,6 +122,11 @@ impl RunTally {
             0 => {}
             1 => parts.push((Some("ran"), " 1 command".into())),
             n => parts.push((Some("ran"), format!(" {n} commands"))),
+        }
+        match self.handoffs {
+            0 => {}
+            1 => parts.push((None, "1 browser handoff".into())),
+            n => parts.push((None, format!("{n} browser handoffs"))),
         }
         if parts.is_empty() {
             parts.push((Some("Worked"), String::new()));
@@ -323,5 +337,36 @@ impl RenderOnce for ActivityGroup {
                             .collect::<Vec<_>>()
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: that would drag in `gpui::test`, which shadows the
+    // built-in `#[test]` attribute.
+    use super::{RunTally, ToolKind, classify_tool};
+    use chatty_core::models::message_types::ToolCallBlock;
+
+    #[test]
+    fn browser_handoffs_are_their_own_kind() {
+        assert_eq!(classify_tool("browser_take_control"), ToolKind::Handoff);
+        assert_eq!(classify_tool("browser_release_control"), ToolKind::Handoff);
+        // The real browser tools are unaffected.
+        assert_eq!(classify_tool("browser_navigate"), ToolKind::Explore);
+    }
+
+    #[test]
+    fn handoffs_are_counted_instead_of_being_filed_as_explored_files() {
+        let tools = vec![
+            ToolCallBlock::browser_control_handoff(true, "https://example.com"),
+            ToolCallBlock::browser_control_handoff(false, "https://example.com"),
+        ];
+        let tally = RunTally::from_tools(&tools);
+        assert_eq!(tally.handoffs, 2);
+        assert_eq!(tally.explore, 0);
+        assert_eq!(tally.sentence(), "2 browser handoffs");
+
+        let one = RunTally::from_tools(&tools[..1]);
+        assert_eq!(one.sentence(), "1 browser handoff");
     }
 }
