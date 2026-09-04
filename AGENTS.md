@@ -186,9 +186,17 @@ examples.
   `ModelsNotifier`).
 - **Stream lifecycle** — All LLM streams go through `StreamManager` with
   cancellation tokens; the stream loop never updates UI directly, it
-  emits events. See [`docs/stream-manager.md`](docs/stream-manager.md).
+  emits events. Streams carry a monotonic epoch so a stale `StreamEnded`
+  can't tear down a newer turn, and a shared stall watchdog
+  (`chatty-core/src/services/stream_processor.rs`) ends a turn after 180s
+  of silence. See [`docs/stream-manager.md`](docs/stream-manager.md).
 - **Error handling** — Don't `.ok()` away errors silently. Log as
   `warn!()` for non-critical paths; propagate with `?` for critical I/O.
+- **Tool errors** — Every `impl Tool`'s error path must go through
+  `map_tool_error(tool_name, error)` (`chatty-core/src/tools/mod.rs`), not
+  rig's default `Tool::map_error`, or the model/transcript only ever see
+  the redacted string `"the tool failed"`. See "Tool Error Reporting
+  Pattern" in CLAUDE.md.
 - **Sensitive env vars** — When sending MCP config to the LLM, use
   `masked_env()` not `.env`. See "Security Practices" in CLAUDE.md.
 - **Rust edition** — 2024. Use `LazyLock`/`OnceLock` (std) rather than
@@ -199,7 +207,13 @@ examples.
 - **Transcript blocks** — Typed block/turn types in
   `chatty-gpui/src/chatty/views/transcript/` render the transcript;
   persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
-  chatty-core. Don't leak transcript block types into chatty-core.
+  chatty-core. Don't leak transcript block types into chatty-core. The
+  transcript list uses gpui's `list`/`ListState` (measured heights), not
+  `v_virtual_list` (predicted heights) — see CLAUDE.md.
+- **Tool failure signal is text, not a flag** — `map_tool_error()`'s
+  `Error: {tool_name}: {message}` prefix is the only thing that tells
+  `llm_service::tool_result_looks_like_error` a tool call failed. Don't
+  drop or reword that prefix. See CLAUDE.md.
 - **Stale docs** — If a change alters a fact a page claims, update that
   page in the same PR. `update-agent-docs.yml` only safety-nets
   `AGENTS.md` / `CLAUDE.md`. See
