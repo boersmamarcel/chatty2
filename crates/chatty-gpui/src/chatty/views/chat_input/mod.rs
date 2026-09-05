@@ -9,6 +9,8 @@
 //!   (send, model change, attachment added/removed, slash command, …).
 //! - Keyboard handling, drag-and-drop, paste of images/files, autocomplete
 //!   popovers, and the model picker.
+//! - `PrStatusBarView` — the GitHub pull-request bar rendered directly
+//!   above the composer (`pr_status_bar_view.rs`).
 //!
 //! # What does NOT live here
 //!
@@ -21,6 +23,7 @@
 //! Capability Architecture").
 
 mod at_mention;
+mod pr_status_bar_view;
 mod render;
 mod slash;
 
@@ -31,6 +34,7 @@ mod slash;
 pub use at_mention::load_files_for_dir;
 #[cfg(test)]
 pub use at_mention::{apply_at_to_input, at_menu_items_for, at_query_from};
+pub use pr_status_bar_view::PrStatusBarView;
 #[cfg(test)]
 pub use slash::slash_menu_items_for;
 pub use slash::{SkillEntry, slash_menu_items_with_skills};

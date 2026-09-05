@@ -61,6 +61,8 @@ pub enum CustomIcon {
     Ollama,        // ollama.svg - Ollama provider badge
     OpenRouter,    // openrouter.svg - OpenRouter provider badge
     Azure,         // azure.svg - Azure provider badge
+    GitMerge,      // git-merge.svg - PR status bar, merged pull request
+    GitPr,         // git-pull-request.svg - PR status bar, open pull request
 }
 
 impl IconNamed for CustomIcon {
@@ -89,6 +91,8 @@ impl IconNamed for CustomIcon {
             CustomIcon::Ollama => "icons/ollama.svg",
             CustomIcon::OpenRouter => "icons/openrouter.svg",
             CustomIcon::Azure => "icons/azure.svg",
+            CustomIcon::GitMerge => "icons/git-merge.svg",
+            CustomIcon::GitPr => "icons/git-pull-request.svg",
         }
         .into()
     }

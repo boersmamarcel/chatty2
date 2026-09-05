@@ -16,7 +16,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use engine::{ChatEngine, ChatEngineConfig, detect_git_branch};
+use engine::{ChatEngine, ChatEngineConfig};
 use events::AppEvent;
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -416,13 +416,9 @@ async fn main() -> Result<()> {
             )));
         });
 
-        // Detect git branch in a background thread (avoids blocking on subprocess spawn)
-        let git_tx = event_tx;
-        let workspace_dir = engine.execution_settings.workspace_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            let branch = detect_git_branch(workspace_dir.as_deref());
-            let _ = git_tx.send(AppEvent::GitBranchDetected(branch));
-        });
+        // Detect the git branch and its pull request in the background
+        // (avoids blocking on subprocess spawn).
+        engine.refresh_workspace_context();
 
         // Start conversation init immediately (without heavy services).
         // It will be re-initialized once ServicesReady arrives with full context.

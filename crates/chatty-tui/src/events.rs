@@ -1,6 +1,7 @@
 use crossterm::event::Event as CrosstermEvent;
 
 use chatty_core::models::Conversation;
+use chatty_core::services::github_pr_service::PullRequestSummary;
 use chatty_core::services::{EmbeddingService, McpService, MemoryService};
 
 /// Heavy services loaded in the background after the TUI is displayed.
@@ -73,6 +74,8 @@ pub enum AppEvent {
     ServicesReady(Box<DeferredServices>),
     /// Git branch detection completed in background.
     GitBranchDetected(Option<String>),
+    /// GitHub pull request lookup for the workspace branch completed.
+    PullRequestDetected(Option<Box<PullRequestSummary>>),
     TitleGenerated(String),
     SubAgentProgress(String),
     SubAgentFinished(String),
@@ -151,6 +154,9 @@ impl std::fmt::Debug for AppEvent {
             }
             Self::ServicesReady(_) => write!(f, "ServicesReady"),
             Self::GitBranchDetected(b) => f.debug_tuple("GitBranchDetected").field(b).finish(),
+            Self::PullRequestDetected(pr) => {
+                f.debug_tuple("PullRequestDetected").field(pr).finish()
+            }
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
             Self::SubAgentProgress(s) => f.debug_tuple("SubAgentProgress").field(s).finish(),
             Self::SubAgentFinished(s) => f.debug_tuple("SubAgentFinished").field(s).finish(),
