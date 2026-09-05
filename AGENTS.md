@@ -118,7 +118,7 @@ make test-fast        # cargo test -p chatty-core --lib  (quick inner loop)
 make test-tui         # cargo test -p chatty-tui          (TUI changes only)
 make test-gpui        # cargo test -p chatty-gpui         (GPUI changes only)
 make test-gateway     # cargo test -p chatty-protocol-gateway  (gateway changes only)
-make lint             # cargo clippy --all-features -- -D warnings
+make lint             # cargo clippy --all-features -- -D warnings (CI also passes --all-targets, see below)
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
 make wasm-modules     # build the echo-agent WASM module (needed by tests)
@@ -137,7 +137,7 @@ Or use cargo directly:
 cargo build
 cargo test --all-features -- --test-threads=1
 cargo fmt --check
-cargo clippy --all-features -- -D warnings
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 ### Test-thread footgun
@@ -334,6 +334,16 @@ into the VM; the startup/update script only re-runs
   `./target/debug/chatty-tui --ollama http://localhost:11434 --model qwen2.5:0.5b --headless -m "..."`.
   The desktop app auto-detects a running local Ollama and lists its models.
 
-- **Clippy is clean workspace-wide.** `cargo clippy --workspace --all-features -- -D warnings`
-  passes (AGE-174); CI runs the same `--all-features` invocation, matching the
-  `cargo test --all-features` coverage.
+- **Clippy is clean workspace-wide.** `cargo clippy --workspace --all-features --all-targets -- -D warnings`
+  passes (AGE-174). CI added `--all-targets` so tests/benches/examples are
+  linted too — without it, lints inside `tests/` go unreported (a finding sat
+  unnoticed in `chatty-protocol-gateway`'s e2e test until this was added).
+  `make lint`/`make ci` still invoke the pre-`--all-targets` command, so a
+  clean `make lint` no longer guarantees a clean CI clippy; pass
+  `--all-targets` yourself to match CI exactly.
+
+- **Local rustc lints strictly less than CI's.** This VM's default toolchain
+  (1.94.1) can be behind the `stable` CI uses (e.g. 1.98.1) — clippy findings
+  visible only on newer stable (such as redundant glob imports) can pass
+  locally and fail CI. Run `rustup run stable cargo clippy ...` before
+  trusting a green local clippy if CI still fails.

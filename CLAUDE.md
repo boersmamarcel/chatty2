@@ -75,7 +75,7 @@ For multi-step tasks, state a brief plan:
 3. [Step] → verify: [check]
 ```
 
-Always run `cargo test && cargo clippy --all-features -- -D warnings && cargo fmt --check` after changes to verify nothing is broken before declaring the task done.
+Always run `cargo test && cargo clippy --all-features --all-targets -- -D warnings && cargo fmt --check` after changes to verify nothing is broken before declaring the task done.
 
 ---
 
@@ -131,8 +131,8 @@ cargo test
 # Check formatting
 cargo fmt --check
 
-# Run clippy lints
-cargo clippy --all-features -- -D warnings
+# Run clippy lints (CI also lints test/bench/example targets via --all-targets)
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 Dependencies are built with `debug = "line-tables-only"` and DuckDB with no
@@ -200,7 +200,7 @@ sudo apt-get install -y \
   - **macOS**: `~/Library/Application Support/chatty/browsers/<version>/`
   - **Linux**: `~/.local/share/chatty/browsers/<version>/` or `$XDG_DATA_HOME/chatty/browsers/<version>/`
   - **Windows**: `%APPDATA%\chatty\browsers\<version>\`
-- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui. The list itself renders on gpui's `list`/`ListState`, not gpui-component's `v_virtual_list`: `List` measures each item as it lays it out and caches the result, so turn heights are an output, not a hand-estimated input (the old `TranscriptLayout` estimator was deleted along with every height constant it needed). Use `ListAlignment::Top`, not `Bottom` — `Bottom` re-nulls the scroll anchor every frame while pinned, so `bounds_for_item` returns `None` and the plan strip's measured geometry disappears; sticky-to-bottom is instead one line (anchor past the last item, let `layout_items` backfill). `set_scroll_handler`'s callback runs while `ListState`'s internal `RefCell` is mutably borrowed, so it may only set a flag — calling back into the list from inside it panics.
+- **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui. The list itself renders on gpui's `list`/`ListState`, not gpui-component's `v_virtual_list`: `List` measures each item as it lays it out and caches the result, so turn heights are an output, not a hand-estimated input (the old `TranscriptLayout` estimator was deleted along with every height constant it needed). Use `ListAlignment::Top`, not `Bottom` — `Bottom` re-nulls the scroll anchor every frame while pinned, so `bounds_for_item` returns `None` and the plan strip's measured geometry disappears; sticky-to-bottom is instead one line (anchor past the last item, let `layout_items` backfill). `set_scroll_handler`'s callback runs while `ListState`'s internal `RefCell` is mutably borrowed, so it may only set a flag — calling back into the list from inside it panics. `adapt_message()` emits a `Block::Plan` per message that called `write_todos`, but every plan block renders the same live conversation-level snapshot, so a follow-up turn that re-plans would otherwise paint the identical panel twice; `retain_last_plan_block()` (`transcript/adapter.rs`) keeps only the newest plan block per adapted turn list.
 - **Tool failure detection is text-based, not a flag**: the streamed `ToolResult` carries no error flag (rig's `is_error()` lives on `ToolExecutionResult`, which never reaches the stream), so `llm_service::tool_result_looks_like_error` recognizes a failure by sniffing the message text (`Error:` prefix, `"the tool failed"`, `"malformed JSON"`). `tools::mod::map_tool_error()` must keep writing that `Error: {tool_name}: {message}` prefix — dropping it once made every typed tool failure get filed as a success, with the error prose landing in `output` (a failed `compile_typst` minted an artifact card for a PDF that was never written). A test (`failures_are_recognisable_as_errors_downstream`) pins the two together; keep it green when touching either side.
 
 ## CI/CD
