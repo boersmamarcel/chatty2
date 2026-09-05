@@ -225,7 +225,19 @@ impl ChattyApp {
                                 .working_dir()
                                 .cloned()
                                 .or_else(|| settings.workspace_dir.as_ref().map(PathBuf::from));
-                            conv.agent_workspace_dir().cloned() != effective_workspace_dir
+                            let needs_refresh = agent_workspace_needs_refresh(
+                                conv.agent_workspace_dir().map(|p| p.as_path()),
+                                effective_workspace_dir.as_deref(),
+                            );
+                            if needs_refresh {
+                                debug!(
+                                    conv_id = %conv_id,
+                                    agent_workspace_dir = ?conv.agent_workspace_dir(),
+                                    effective_workspace_dir = ?effective_workspace_dir,
+                                    "Workspace directory changed, agent rebuild needed"
+                                );
+                            }
+                            needs_refresh
                         })
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
