@@ -189,6 +189,17 @@ fn normalize_workspace_string(path: &str) -> String {
         .to_string()
 }
 
+/// Whether the conversation's agent needs rebuilding because the effective
+/// workspace directory (per-conversation override, else the global setting)
+/// differs from the one the agent was built with. Both sides are
+/// canonicalised before comparing so a raw setting string and an
+/// already-canonical stored value don't look different when they resolve to
+/// the same directory — e.g. a symlinked directory, or `/tmp` on macOS
+/// (finding F1, AGE-215).
+fn agent_workspace_needs_refresh(agent_dir: Option<&Path>, effective_dir: Option<&Path>) -> bool {
+    agent_dir.map(normalize_workspace_path) != effective_dir.map(normalize_workspace_path)
+}
+
 async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
     let conv_id = conv_id.to_string();
 
@@ -865,4 +876,66 @@ pub(super) fn classify_agent_source(agent_name: &str, cx: &App) -> ToolSource {
     }
 
     ToolSource::Local
+}
+
+#[cfg(test)]
+mod tests {
+    // Re-import standard #[test] to shadow gpui::test from `use gpui::*`
+    use core::prelude::rust_2021::test;
+
+    use super::*;
+
+    #[test]
+    fn workspace_refresh_none_vs_none_is_no_refresh() {
+        assert!(!agent_workspace_needs_refresh(None, None));
+    }
+
+    #[test]
+    fn workspace_refresh_some_vs_none_is_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(agent_workspace_needs_refresh(Some(dir.path()), None));
+        assert!(agent_workspace_needs_refresh(None, Some(dir.path())));
+    }
+
+    #[test]
+    fn workspace_refresh_different_directories_is_refresh() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        assert!(agent_workspace_needs_refresh(
+            Some(dir_a.path()),
+            Some(dir_b.path())
+        ));
+    }
+
+    #[test]
+    fn workspace_refresh_same_canonical_directory_is_no_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        // Same directory, spelled two different ways: the tempdir's raw path
+        // and its already-canonicalised form.
+        assert!(!agent_workspace_needs_refresh(
+            Some(dir.path()),
+            Some(&canonical)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_refresh_raw_symlink_vs_canonical_target_is_no_refresh() {
+        let base = tempfile::tempdir().unwrap();
+        let real_dir = base.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let canonical_real = std::fs::canonicalize(&real_dir).unwrap();
+
+        // `link` (raw, unresolved) and the canonical path of the directory it
+        // points to must compare equal — this is the exact F1 regression: a
+        // symlinked workspace directory looked different on every send.
+        assert!(!agent_workspace_needs_refresh(
+            Some(&link),
+            Some(&canonical_real)
+        ));
+    }
 }

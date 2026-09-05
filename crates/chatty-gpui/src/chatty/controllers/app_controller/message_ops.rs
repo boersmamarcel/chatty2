@@ -30,7 +30,7 @@
 //! See `docs/stream-manager.md` for the full stream architecture.
 
 use super::message_ops_internals::{
-    LlmStreamParams, attachment_to_user_content, run_llm_stream,
+    LlmStreamParams, attachment_to_user_content, is_pdf_path, run_llm_stream,
     select_recent_assistant_attachments,
 };
 use super::*;
@@ -225,7 +225,19 @@ impl ChattyApp {
                                 .working_dir()
                                 .cloned()
                                 .or_else(|| settings.workspace_dir.as_ref().map(PathBuf::from));
-                            conv.agent_workspace_dir().cloned() != effective_workspace_dir
+                            let needs_refresh = agent_workspace_needs_refresh(
+                                conv.agent_workspace_dir().map(|p| p.as_path()),
+                                effective_workspace_dir.as_deref(),
+                            );
+                            if needs_refresh {
+                                debug!(
+                                    conv_id = %conv_id,
+                                    agent_workspace_dir = ?conv.agent_workspace_dir(),
+                                    effective_workspace_dir = ?effective_workspace_dir,
+                                    "Workspace directory changed, agent rebuild needed"
+                                );
+                            }
+                            needs_refresh
                         })
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -239,8 +251,8 @@ impl ChattyApp {
                     rebuild_conversation_agent(&conv_id, cx).await?;
                 }
 
-                // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                // Extract agent, history, and capabilities synchronously
+                let (agent, history, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
@@ -264,7 +276,6 @@ impl ChattyApp {
                             Ok((
                                 conv.agent().clone(),
                                 conv.messages(),
-                                model_id,
                                 provider_type,
                                 supports_pdf,
                                 supports_images,
@@ -287,7 +298,7 @@ impl ChattyApp {
                 // Convert file attachments to UserContent
                 // Filter based on model capabilities to prevent panics in rig-core
                 for path in &attachments {
-                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    let is_pdf = is_pdf_path(path);
                     if is_pdf && !provider_supports_pdf {
                         warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
                         continue;
@@ -302,16 +313,20 @@ impl ChattyApp {
                     }
                 }
 
-                // Include the most recent assistant-generated attachments so the LLM
-                // can reference displayed images/PDFs in follow-up questions.
+                // Include the most recent assistant-generated attachments (from the
+                // immediately preceding turn only) so the LLM can reference displayed
+                // images/PDFs in follow-up questions. These are sent to the LLM but kept
+                // out of the persisted user message — otherwise every later turn would
+                // carry and re-persist another copy of the same artifact (finding F2).
                 let assistant_att_paths = select_recent_assistant_attachments(
                     &conv_entries,
                     provider_supports_images,
                     provider_supports_pdf,
                 );
+                let mut extra_llm_contents = Vec::with_capacity(assistant_att_paths.len());
                 for path in &assistant_att_paths {
                     match attachment_to_user_content(path).await {
-                        Ok(content) => contents.push(content),
+                        Ok(content) => extra_llm_contents.push(content),
                         Err(e) => warn!(
                             ?path,
                             error = ?e,
@@ -327,6 +342,7 @@ impl ChattyApp {
                         agent,
                         history,
                         user_contents: contents,
+                        extra_llm_contents,
                         add_user_message_to_model: true,
                         reset_agent_task: show_in_transcript,
                         attachment_paths: attachments,
@@ -1072,7 +1088,7 @@ impl ChattyApp {
             let conv_id_for_title = conv_id.clone();
             let sidebar_for_title = sidebar.clone();
 
-            cx.spawn(async move |_weak, cx| {
+            cx.spawn(async move |weak, cx| {
                 // Get agent and history for title generation
                 let title_data = cx
                     .update_global::<ConversationsStore, _>(|store, _cx| {
@@ -1105,6 +1121,19 @@ impl ChattyApp {
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
                             .ok();
+
+                            // Persist so the generated title survives a restart — the
+                            // synchronous save later in send_message already ran by the
+                            // time this completes (finding F7, AGE-218).
+                            if let Some(app) = weak.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.persist_conversation(&conv_id_for_title, cx);
+                                })
+                                .map_err(|e| {
+                                    warn!(error = ?e, "Failed to persist conversation after title generation")
+                                })
+                                .ok();
+                            }
 
                             // Update sidebar with new title from metadata
                             sidebar_for_title
@@ -1387,6 +1416,7 @@ impl ChattyApp {
                     agent,
                     history: history_context,
                     user_contents,
+                    extra_llm_contents: vec![],
                     add_user_message_to_model: false,
                     reset_agent_task: true,
                     attachment_paths: vec![],
