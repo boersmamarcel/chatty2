@@ -19,6 +19,7 @@ use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, 
 
 use super::AgentClient;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
+use super::prompt_cache_http::PromptCachingHttpClient;
 use super::tool_collector::NativeTools;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
@@ -46,21 +47,22 @@ pub(super) async fn build_provider_agent(
             let key =
                 api_key.ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
-            let client = if let Some(ref url) = base_url {
-                rig_core::providers::openrouter::Client::builder()
-                    .api_key(&key)
-                    .base_url(url)
-                    .build()?
-            } else {
-                rig_core::providers::openrouter::Client::new(&key)?
-            };
-
             // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
-            // OpenRouter cache nothing unless the request carries a
-            // `cache_control` breakpoint; rig only adds one when asked, and
-            // `client.agent(..)` skips the completion-model step where the
-            // flag lives. OpenAI-family models ignore the marker and keep
-            // caching automatically on the shared prefix.
+            // OpenRouter cache nothing unless the request carries
+            // `cache_control` breakpoints; rig's `with_prompt_caching()` puts
+            // one on the system message (preamble + tools), and the HTTP
+            // layer below adds a moving one on the latest message so the
+            // conversation history caches across turns as well. OpenAI-family
+            // models ignore the markers and keep caching automatically on the
+            // shared prefix.
+            let mut builder = rig_core::providers::openrouter::Client::builder()
+                .api_key(&key)
+                .http_client(PromptCachingHttpClient::new(reqwest::Client::new()));
+            if let Some(ref url) = base_url {
+                builder = builder.base_url(url);
+            }
+            let client = builder.build()?;
+
             let model = client
                 .completion_model(&model_config.model_identifier)
                 .with_prompt_caching();

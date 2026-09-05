@@ -1806,6 +1806,7 @@ dependencies = [
  "azure_identity",
  "base64 0.22.1",
  "bollard",
+ "bytes",
  "calamine 0.36.1",
  "chromiumoxide",
  "chrono",

@@ -38,6 +38,7 @@ rmcp = { version = "=2.1.0", features = ["client", "macros", "transport-streamab
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bytes = "1"
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 dirs = "6.0"

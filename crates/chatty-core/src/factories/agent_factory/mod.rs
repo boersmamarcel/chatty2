@@ -1,5 +1,6 @@
 mod mcp_helpers;
 mod preamble_builder;
+mod prompt_cache_http;
 mod provider_builder;
 mod tool_collector;
 mod tool_registry;
