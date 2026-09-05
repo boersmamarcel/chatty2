@@ -22,6 +22,17 @@
 
 <p align="center"><img src="assets/animations/hero.gif" alt="Chatty in action" width="800"></p>
 
+<table align="center">
+  <tr>
+    <td><img src="assets/animations/artifact_pdf.gif" alt="Typst PDF opened in the artifact panel" width="400"></td>
+    <td><img src="assets/animations/artifact_chart.gif" alt="Chart rendered in the artifact panel" width="400"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/animations/artifact_table.gif" alt="SQL query result shown as a table" width="400"></td>
+    <td><img src="assets/animations/artifact_markdown.gif" alt="Markdown document rendered in the artifact panel" width="400"></td>
+  </tr>
+</table>
+
 ## What is this repo?
 
 **chatty2** is the product source: the GPUI desktop app (`chatty`), the Ratatui

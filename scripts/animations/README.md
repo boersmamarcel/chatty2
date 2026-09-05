@@ -80,6 +80,11 @@ segment after a code block shows the wrong text (see
 `render_cached_markdown_segments` in
 `crates/chatty-gpui/src/chatty/views/message_component.rs`).
 
+Some gpui-component controls (tab bars, popover triggers) ignore the
+synthetic clicks xdotool sends under Xvfb; buttons, cards and the composer
+work. Prefer flows that open a panel by clicking a card or that auto-open
+(PDF, chart and query-table artifacts do).
+
 ## Keeping the docs in sync
 
 `README.md` embeds `hero.gif`; `docs-site/src/user/*.md` embed the smaller
