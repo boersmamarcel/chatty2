@@ -1,0 +1,1 @@
+[{"id":"ollama-llama3.2","name":"llama3.2","provider_type":"ollama","model_identifier":"llama3.2:latest","temperature":0.7,"preamble":"","cost_per_million_input_tokens":0.1,"cost_per_million_output_tokens":0.4,"supports_images":false,"supports_pdf":false,"supports_temperature":true,"max_context_window":128000,"source":"user","is_favorite":true,"is_default":true}]

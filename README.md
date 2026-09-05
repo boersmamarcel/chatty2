@@ -20,7 +20,7 @@
 
 ---
 
-<p align="center"><img src="assets/animations/hero_high_quality.gif" alt="Chatty in action" width="800"></p>
+<p align="center"><img src="assets/animations/hero.gif" alt="Chatty in action" width="800"></p>
 
 ## What is this repo?
 

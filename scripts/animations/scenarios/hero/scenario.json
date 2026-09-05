@@ -1,0 +1,142 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Exploring weather-cli",
+ "turns": [
+  {
+   "match": "explore",
+   "replies": [
+    {
+     "tool_calls": [
+      {
+       "name": "write_todos",
+       "arguments": {
+        "goal": "Explain what weather-cli does",
+        "todos": [
+         {
+          "id": "t1",
+          "title": "Explore the project layout",
+          "description": "List the files and read the core module"
+         },
+         {
+          "id": "t2",
+          "title": "Summarize how it works",
+          "description": "Explain the flow and the key logic"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "update_todo",
+       "arguments": {
+        "id": "t1",
+        "status": "in_progress"
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "list_directory",
+       "arguments": {
+        "path": "."
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "read_file",
+       "arguments": {
+        "path": "src/main.rs"
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "read_file",
+       "arguments": {
+        "path": "src/forecast.rs"
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "update_todo",
+       "arguments": {
+        "id": "t1",
+        "status": "done"
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "update_todo",
+       "arguments": {
+        "id": "t2",
+        "status": "done"
+       }
+      }
+     ]
+    },
+    {
+     "tool_calls": [
+      {
+       "name": "verify_completion",
+       "arguments": {
+        "goal_achieved": true,
+        "reason": "Read the layout and both modules",
+        "evidence": [
+         "t1: listed . and read src/main.rs, src/forecast.rs",
+         "t2: summary written from the code"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "text": "**weather-cli** is a small Rust command-line tool.\n\n- `src/main.rs` reads a temperature such as `21.5C` from the arguments\n- `src/forecast.rs` parses it and turns it into a one-line forecast\n\n| Input | Output |\n|---|---|\n| `-3C` | bring a coat, it's freezing |\n| `12C` | cool and pleasant |\n| `27C` | warm, stay hydrated |\n\nThe whole decision lives in one `match`:\n\n```rust\npub fn describe(&self) -> String {\n    match self.celsius {\n        t if t < 0.0 => format!(\"{t:.1}°C — bring a coat, it's freezing\"),\n        t if t < 18.0 => format!(\"{t:.1}°C — cool and pleasant\"),\n        t => format!(\"{t:.1}°C — warm, stay hydrated\"),\n    }\n}\n```"
+    }
+   ]
+  },
+  {
+   "match": "unit test",
+   "replies": [
+    {
+     "tool_calls": [
+      {
+       "name": "apply_diff",
+       "arguments": {
+        "path": "src/forecast.rs",
+        "old_content": "pub fn parse_temperature(raw: &str) -> Result<f32, String> {\n    let trimmed = raw.trim().trim_end_matches(['c', 'C']);\n    trimmed.parse().map_err(|_| format!(\"not a temperature: {raw}\"))\n}\n",
+        "new_content": "pub fn parse_temperature(raw: &str) -> Result<f32, String> {\n    let trimmed = raw.trim().trim_end_matches(['c', 'C']);\n    trimmed.parse().map_err(|_| format!(\"not a temperature: {raw}\"))\n}\n\n#[cfg(test)]\nmod tests {\n    use super::parse_temperature;\n\n    #[test]\n    fn parses_celsius_suffix() {\n        assert_eq!(parse_temperature(\"21.5C\"), Ok(21.5));\n    }\n\n    #[test]\n    fn rejects_garbage() {\n        assert!(parse_temperature(\"warm\").is_err());\n    }\n}\n"
+       }
+      }
+     ]
+    },
+    {
+     "text": "Added a `tests` module to `src/forecast.rs` with two cases: one for the `21.5C` happy path and one for input that is not a number. Run `cargo test` to try them."
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo — try asking me to explore the project."
+    }
+   ]
+  }
+ ]
+}

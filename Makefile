@@ -14,7 +14,7 @@
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
         run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
-        docs-check-nav docs-check-frontmatter
+        docs-check-nav docs-check-frontmatter animations
 
 help:
 	@echo "Common targets:"
@@ -40,6 +40,7 @@ help:
 	@echo "  make docs-check-links  Verify markdown links (lychee; AGE-117)"
 	@echo "  make docs-check-nav    Verify INDEX.md + SUMMARY.md completeness (AGE-116)"
 	@echo "  make docs-check-frontmatter  Validate optional doc YAML frontmatter (AGE-115)"
+	@echo "  make animations    Re-record the README/docs GIFs (scripts/animations/README.md)"
 	@echo "  make ci            Everything CI runs, in order"
 
 setup:
@@ -128,6 +129,9 @@ docs-serve: docs-gen docs-sync
 
 docs-check-links:
 	bash scripts/check-docs-links.sh
+
+animations:
+	bash scripts/animations/record.sh --all
 
 docs-check-nav:
 	bash scripts/check-docs-nav-drift.sh

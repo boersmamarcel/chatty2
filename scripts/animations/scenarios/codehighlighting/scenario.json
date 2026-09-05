@@ -1,0 +1,22 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Palindrome check in Python",
+ "turns": [
+  {
+   "match": "palindrome",
+   "replies": [
+    {
+     "text": "Here is a small, readable version that ignores case and anything that is not a letter or digit:\n\n```python\nimport re\n\ndef is_palindrome(text: str) -> bool:\n    cleaned = re.sub(r\"[^a-z0-9]\", \"\", text.lower())\n    return cleaned == cleaned[::-1]\n\n\nprint(is_palindrome(\"A man, a plan, a canal: Panama\"))  # True\n```"
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}
