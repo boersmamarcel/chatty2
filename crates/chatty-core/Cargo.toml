@@ -12,6 +12,7 @@ rmcp.workspace = true
 # Persistence layer
 serde.workspace = true
 serde_json.workspace = true
+bytes.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 dirs.workspace = true
