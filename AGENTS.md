@@ -148,6 +148,15 @@ intermittently SIGTRAP under parallel execution on GitHub-hosted runners.
 `--test-threads=1` locally to reproduce.** Root cause is unknown; the
 workaround is documented in `.github/workflows/ci.yml`.
 
+### Disk footgun
+
+A full `cargo test --all-features` needs about 16 GiB of `target/` even with
+the workspace's trimmed dependency debuginfo (`[profile.dev.package.*]` in
+the root `Cargo.toml`); at Cargo's defaults it needs 28+ GiB and can run a
+small disk out of space mid-link. See
+[`docs/build-disk-usage.md`](docs/build-disk-usage.md) before building on a
+constrained sandbox or CI runner.
+
 ### WASM module prebuild
 
 Some integration tests load `modules/echo-agent/echo_agent.wasm`. Build
