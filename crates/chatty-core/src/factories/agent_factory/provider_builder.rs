@@ -14,6 +14,7 @@ use rig_core::client::CompletionClient;
 
 use crate::auth::{AzureTokenCache, azure_auth};
 use crate::services::AgentTaskController;
+use crate::services::http_client::llm_client;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
@@ -57,7 +58,7 @@ pub(super) async fn build_provider_agent(
             // shared prefix.
             let mut builder = rig_core::providers::openrouter::Client::builder()
                 .api_key(&key)
-                .http_client(PromptCachingHttpClient::new(reqwest::Client::new()));
+                .http_client(PromptCachingHttpClient::new(llm_client().clone()));
             if let Some(ref url) = base_url {
                 builder = builder.base_url(url);
             }
@@ -91,6 +92,7 @@ pub(super) async fn build_provider_agent(
             let client = rig_core::providers::ollama::Client::builder()
                 .api_key(rig_core::client::Nothing)
                 .base_url(&url)
+                .http_client(llm_client().clone())
                 .build()?;
 
             let builder = client
@@ -204,6 +206,7 @@ async fn build_azure_agent(
         .api_key(auth)
         .azure_endpoint(endpoint.clone())
         .api_version(api_version)
+        .http_client(llm_client().clone())
         .build()
         .map_err(|e| {
             anyhow!(

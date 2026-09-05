@@ -4,6 +4,7 @@
 //! that user-agent strings, timeouts, and redirect policies are consistent
 //! across the codebase.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Default user-agent for outgoing HTTP requests.
@@ -56,4 +57,33 @@ pub fn browser_client(timeout_secs: u64) -> reqwest::Client {
         .user_agent(BROWSER_USER_AGENT)
         .build()
         .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
+static LLM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+});
+
+/// Shared client for LLM provider traffic (OpenRouter, Ollama, Azure OpenAI).
+///
+/// One connection pool for the app's lifetime instead of a fresh one per
+/// agent build, so conversations reuse TLS/TCP connections. Deliberately
+/// carries **no total request timeout** — completion streams run for
+/// minutes and a timeout here would kill them mid-stream.
+pub fn llm_client() -> &'static reqwest::Client {
+    &LLM_CLIENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_client_returns_same_instance() {
+        let a = llm_client() as *const reqwest::Client;
+        let b = llm_client() as *const reqwest::Client;
+        assert_eq!(a, b);
+    }
 }
