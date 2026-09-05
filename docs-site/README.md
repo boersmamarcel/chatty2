@@ -22,7 +22,8 @@ Optional YAML frontmatter (`audience`, `source_files`, `related`) is documented 
 `make docs-sync` also copies docs-sized GIFs from `assets/animations/` into
 `src/assets/animations/`. Files larger than ~3 MB are linked instead of
 copied (GitHub Pages and browser cost). Do not commit those copies; they are
-build artifacts like other synced pages.
+build artifacts like other synced pages. To re-record the GIFs themselves, see
+[`scripts/animations/README.md`](../scripts/animations/README.md).
 
 ## Commands
 

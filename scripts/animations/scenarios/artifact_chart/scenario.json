@@ -1,0 +1,59 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Monthly downloads chart",
+ "turns": [
+  {
+   "match": "chart",
+   "replies": [
+    {
+     "tool_calls": [
+      {
+       "name": "create_chart",
+       "arguments": {
+        "chart_type": "bar",
+        "title": "Downloads per month",
+        "data": [
+         {
+          "label": "Mar",
+          "value": 1240
+         },
+         {
+          "label": "Apr",
+          "value": 1810
+         },
+         {
+          "label": "May",
+          "value": 2375
+         },
+         {
+          "label": "Jun",
+          "value": 2960
+         },
+         {
+          "label": "Jul",
+          "value": 3420
+         },
+         {
+          "label": "Aug",
+          "value": 4105
+         }
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "text": "Downloads have grown every month since March, roughly tripling over the period. August was the strongest month at 4,105."
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}

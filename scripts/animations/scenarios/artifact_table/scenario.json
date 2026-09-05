@@ -1,0 +1,32 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Q2 revenue by region",
+ "turns": [
+  {
+   "match": "region",
+   "replies": [
+    {
+     "tool_calls": [
+      {
+       "name": "query_data",
+       "arguments": {
+        "query": "SELECT region, SUM(revenue) AS revenue, SUM(orders) AS orders FROM 'data/sales.csv' WHERE quarter = 'Q2' GROUP BY region ORDER BY revenue DESC"
+       }
+      }
+     ]
+    },
+    {
+     "text": "North America led Q2 with 268.7K in revenue across 1,290 orders, followed by Europe at 202.0K. Asia Pacific grew the fastest quarter over quarter (+36%), while Latin America stayed the smallest region at 48.0K."
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,30 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Haiku about autumn",
+ "turns": [
+  {
+   "match": "winter",
+   "replies": [
+    {
+     "text": "Here is a longer one about winter:\n\nSnow settles on the fence posts one flake at a time,\neach landing soundless, each one holding its place\nuntil the yard forgets the shape of grass.\n\nThe kettle ticks. A window fogs and clears.\nSomewhere a plough scrapes the road awake,\nand the dog lifts one ear, then lets it fall.\n\nBy noon the light is thin as paper,\nthe kind you could read the sky through,\nand the birds at the feeder take turns being brave.\n\nEvening comes early and stays late.\nWe stack the wood, count the matches,\nand let the dark be something we can sit beside.\n\nWant me to turn one of these into a haiku as well?"
+    }
+   ]
+  },
+  {
+   "match": "haiku",
+   "replies": [
+    {
+     "text": "Maple leaves let go,\nthe river carries their red —\nmorning fog lifts slow.\n\nWant another one, or a different season?"
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}

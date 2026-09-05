@@ -73,7 +73,11 @@ for name in \
   advanced_math_rendering.gif \
   advanced_token_tracking.gif \
   webfetch.gif \
-  advanced_internet_access_settings.gif
+  advanced_internet_access_settings.gif \
+  artifact_pdf.gif \
+  artifact_chart.gif \
+  artifact_table.gif \
+  artifact_markdown.gif
 do
   if [[ -f "$ANIM_SRC/$name" ]]; then
     copy "$ANIM_SRC/$name" "$ANIM_DEST/$name"

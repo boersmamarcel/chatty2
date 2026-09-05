@@ -27,6 +27,28 @@ temperature flags drive the UI. Table and setup:
 
 - **Image and PDF** previews in chat
 
+## Artifacts
+
+When a tool produces a document, Chatty shows a card in the transcript and
+opens the file in a side panel next to the chat:
+
+- **PDFs** compiled from Typst with `compile_typst`, paged in the panel
+
+  ![Typst PDF artifact](../assets/animations/artifact_pdf.gif)
+
+- **Charts** from `create_chart`, rendered natively and theme-aware
+
+  ![Chart artifact](../assets/animations/artifact_chart.gif)
+
+- **Query results** from `query_data` (DuckDB over CSV/Parquet in the workspace)
+  as a table with the SQL source one tab away
+
+  ![Table artifact](../assets/animations/artifact_table.gif)
+
+- **Markdown documents** written by the agent, rendered or as source
+
+  ![Markdown artifact](../assets/animations/artifact_markdown.gif)
+
 ## Tool-call traces
 
 Each tool call is a collapsible block: name, arguments, output, duration,
@@ -95,7 +117,7 @@ and on the [marketing repo](https://github.com/boersmamarcel/chatty):
 
 | File | Shows |
 |------|-------|
-| `hero_high_quality.gif` | App overview (also on the repo README) |
+| `hero.gif` | App overview (also on the repo README) |
 | `add_provider_and_model.gif` | First-run provider + model setup |
 | `file_add_edit_delete.gif` | File tools |
 | `shell_command.gif` | Sandboxed shell |
