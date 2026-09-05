@@ -56,6 +56,7 @@
 - [Debug UI](./dev/architecture/debug_ui.md)
 - [Refactor follow-ups](./dev/architecture/refactor-followups.md)
 - [Chatty bugs plan](./dev/architecture/chatty-bugs-plan.md)
+- [Message-path debt audit](./dev/architecture/message-path-debt.md)
 
 # Crates
 

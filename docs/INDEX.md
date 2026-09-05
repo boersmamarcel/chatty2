@@ -64,6 +64,7 @@ points here.
 | [`monty-sandbox.md`](monty-sandbox.md) | Code execution | Docker / Monty sandbox |
 | [`debug_ui.md`](debug_ui.md) | Layout/rendering bugs | `CHATTY_DEBUG_UI` overlay |
 | [`refactor-followups.md`](refactor-followups.md) | Large-file splits | Deferred agent-friendliness work |
+| [`message-path-debt.md`](message-path-debt.md) | Touching send → stream → persist | Hot-path audit: per-turn cost, cache hygiene, duplicated orchestration, ranked fixes |
 | [`chatty-bugs-plan.md`](chatty-bugs-plan.md) | Working the Chatty bugs project | Root causes + workstreams for the open AGE bug issues |
 
 ## Research / ADRs
