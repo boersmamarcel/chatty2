@@ -22,17 +22,17 @@ pub enum ChunkAction {
 /// events through their respective UI update mechanisms (GPUI entity updates
 /// vs. channel-based event dispatch).
 ///
-/// `on_chunk` is async because the desktop refreshes an expired Azure token in
-/// place when a 401 arrives mid-stream, and has to await it before deciding
-/// whether the turn is over. No `Send` bound: the desktop's handler holds an
-/// `AsyncApp`, which is deliberately not `Send`.
-#[allow(async_fn_in_trait)]
+/// `on_chunk` is synchronous: nothing a handler does has to wait on I/O. The
+/// Azure Entra token used to be refreshed here after a mid-stream 401, but it
+/// is attached per request now (`AzureAuthHttpClient`, AGE-245). No `Send`
+/// bound: the desktop's handler holds an `AsyncApp`, which is deliberately not
+/// `Send`.
 pub trait StreamChunkHandler {
     /// Called once when the stream loop starts (before the first chunk).
     fn on_stream_started(&mut self);
 
     /// Called for each LLM stream chunk. Return [`ChunkAction::Break`] to stop.
-    async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction>;
+    fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction>;
 
     /// Called for each sub-agent progress event from `invoke_agent`.
     fn on_progress(&mut self, progress: InvokeAgentProgress);
@@ -123,11 +123,9 @@ pub async fn run_stream_loop(
                         idle_secs = last_activity.elapsed().as_secs(),
                         "Stream produced nothing for too long; ending the turn as stalled"
                     );
-                    handler
-                        .on_chunk(Ok(StreamChunk::Error(
-                            STALLED_STREAM_MESSAGE.to_string(),
-                        )))
-                        .await?;
+                    handler.on_chunk(Ok(StreamChunk::Error(
+                        STALLED_STREAM_MESSAGE.to_string(),
+                    )))?;
                     break;
                 }
             }
@@ -136,7 +134,7 @@ pub async fn run_stream_loop(
                 last_activity = std::time::Instant::now();
                 match chunk_result {
                     Some(result) => {
-                        match handler.on_chunk(result).await? {
+                        match handler.on_chunk(result)? {
                             ChunkAction::Continue => {}
                             ChunkAction::Break => break,
                         }
@@ -212,7 +210,7 @@ mod tests {
             self.started = true;
         }
 
-        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+        fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
             let chunk = chunk?;
             let is_done = matches!(chunk, StreamChunk::Done);
             let is_error = matches!(chunk, StreamChunk::Error(_));
@@ -323,7 +321,7 @@ mod tests {
             self.calls.push("on_stream_started".to_string());
         }
 
-        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+        fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
             match chunk {
                 Ok(chunk) => {
                     let name = label(&chunk);
@@ -427,7 +425,6 @@ mod tests {
         // Break on Done before the biased progress branch can run.
         handler
             .on_chunk(Ok(StreamChunk::Done))
-            .await
             .expect("handler does not fail");
         handler.calls.clear();
 

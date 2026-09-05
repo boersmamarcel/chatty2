@@ -154,7 +154,7 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
         debug!(conv_id = %self.conv_id, "Entering stream processing loop");
     }
 
-    async fn on_chunk(
+    fn on_chunk(
         &mut self,
         chunk_result: anyhow::Result<StreamChunk>,
     ) -> anyhow::Result<ChunkAction> {
@@ -205,25 +205,13 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
             Ok(StreamChunk::Error(ref err)) => {
                 error!(error = %err, conv_id = %self.conv_id, "Stream error");
 
-                // Detect authentication errors (401/Unauthorized)
-                if should_refresh_azure_auth(&self.provider_type, err) {
-                    tracing::warn!("Detected Azure auth error - token likely expired");
-                    if let Some(cache) = self
-                        .cx
-                        .update(|cx| {
-                            cx.try_global::<chatty_core::auth::AzureTokenCache>()
-                                .cloned()
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to read Azure token cache global"))
-                        .ok()
-                        .flatten()
-                    {
-                        if let Err(e) = cache.refresh_token().await {
-                            error!(error = ?e, "Failed to refresh Azure token after 401 error");
-                        } else {
-                            tracing::info!("Azure token refreshed successfully.");
-                        }
-                    }
+                // Detect authentication errors (401/Unauthorized). The Azure
+                // Entra token is attached fresh to every request (AGE-245), so
+                // a 401 here is a credential problem, not an expired token.
+                if is_azure_auth_stream_error(&self.provider_type, err) {
+                    tracing::warn!(
+                        "Detected Azure auth error - check the Entra ID credential (az login, managed identity or service principal)"
+                    );
                 } else if matches!(
                     self.provider_type,
                     chatty_core::settings::models::providers_store::ProviderType::OpenRouter
@@ -724,7 +712,7 @@ pub(super) fn is_auth_stream_error(err: &str) -> bool {
     err.contains("401") || err.contains("Unauthorized")
 }
 
-pub(super) fn should_refresh_azure_auth(
+pub(super) fn is_azure_auth_stream_error(
     provider_type: &chatty_core::settings::models::providers_store::ProviderType,
     err: &str,
 ) -> bool {
@@ -872,13 +860,13 @@ mod tests {
     }
 
     #[test]
-    fn azure_refresh_detection_is_provider_specific() {
+    fn azure_auth_error_detection_is_provider_specific() {
         use chatty_core::settings::models::providers_store::ProviderType;
 
         let err = "ProviderError: Invalid status code 401 Unauthorized";
-        assert!(should_refresh_azure_auth(&ProviderType::AzureOpenAI, err));
-        assert!(!should_refresh_azure_auth(&ProviderType::OpenRouter, err));
-        assert!(!should_refresh_azure_auth(&ProviderType::Ollama, err));
+        assert!(is_azure_auth_stream_error(&ProviderType::AzureOpenAI, err));
+        assert!(!is_azure_auth_stream_error(&ProviderType::OpenRouter, err));
+        assert!(!is_azure_auth_stream_error(&ProviderType::Ollama, err));
     }
 
     #[test]

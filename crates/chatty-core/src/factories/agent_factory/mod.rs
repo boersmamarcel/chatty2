@@ -1,3 +1,4 @@
+mod azure_auth_http;
 mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
