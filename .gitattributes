@@ -1,0 +1,2 @@
+# Run under Git Bash on Windows runners; CRLF would break the shebang line.
+scripts/*.sh text eol=lf
