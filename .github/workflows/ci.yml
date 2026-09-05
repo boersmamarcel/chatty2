@@ -167,17 +167,29 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-no-core-reexports.sh
 
-  # Warm the release-profile cache that release.yml restores. Release runs are
-  # restore-only (they must never write default-branch caches), so until this
-  # job existed every release built cold. Runs on pushes to main and is a
-  # no-op when a cache for this Cargo.lock + rustc already exists. The key
-  # ignores workspace version bumps (scripts/release-cache-key.sh), so the
-  # cache built from pre-bump main is an exact hit on the release tag.
-  # Linux only: there are no macOS/Windows CI builds to warm from.
+  # Warm the release-profile caches that release.yml restores. Release runs
+  # are restore-only (they must never write default-branch caches), so until
+  # this job existed every release built cold on all three platforms. Runs on
+  # pushes to main, one runner per release platform, each building exactly
+  # what the matching release.yml job builds, and is a no-op when a cache for
+  # this Cargo.lock + rustc already exists. The key ignores workspace version
+  # bumps (scripts/release-cache-key.sh), so the cache built from pre-bump
+  # main is an exact hit on the release tag.
   warm-release-cache:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            build: cargo build --release
+          - os: macos-latest
+            build: cargo build --release
+          # gpui does not support Windows; release.yml ships the TUI only.
+          - os: windows-latest
+            build: cargo build --release -p chatty-tui
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -187,6 +199,7 @@ jobs:
 
       - name: Compute release cache key
         id: cache_key
+        shell: bash
         run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Check for an existing release cache
@@ -201,7 +214,7 @@ jobs:
           lookup-only: true
 
       - name: Install Linux dependencies
-        if: steps.lookup.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.lookup.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -225,7 +238,7 @@ jobs:
 
       - name: Build release binary
         if: steps.lookup.outputs.cache-hit != 'true'
-        run: cargo build --release
+        run: ${{ matrix.build }}
 
       # A plain step, not a post step: a cancelled job never reaches it, so
       # a half-built target/ can never be saved under this key.

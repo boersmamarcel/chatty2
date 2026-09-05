@@ -157,8 +157,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Key from scripts/release-cache-key.sh; written by ci.yml's
-      # warm-release-cache job on main (Linux only today).
+      # Key from scripts/release-cache-key.sh; written per platform by
+      # ci.yml's warm-release-cache job on main.
       - name: Compute release cache key
         id: cache_key
         shell: bash
@@ -285,8 +285,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Key from scripts/release-cache-key.sh; written by ci.yml's
-      # warm-release-cache job on main (Linux only today).
+      # Key from scripts/release-cache-key.sh; written per platform by
+      # ci.yml's warm-release-cache job on main.
       - name: Compute release cache key
         id: cache_key
         shell: bash
@@ -389,8 +389,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Key from scripts/release-cache-key.sh; written by ci.yml's
-      # warm-release-cache job on main (Linux only today).
+      # Key from scripts/release-cache-key.sh; written per platform by
+      # ci.yml's warm-release-cache job on main.
       - name: Compute release cache key
         id: cache_key
         shell: bash

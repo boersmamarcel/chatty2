@@ -11,7 +11,8 @@
 # member while no dependency artifact changes, so the cache warmed from the
 # pre-bump main commit must still be an exact match on the release tag.
 #
-# Needs cargo, jq, awk and sha256sum (all present on GitHub-hosted runners).
+# Needs cargo, jq, awk and sha256sum (all present on GitHub-hosted runners,
+# Git Bash included on Windows).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -21,6 +22,7 @@ hash="$(
     rustc -V
     awk -v members="$members" '
       BEGIN { n = split(members, m, "\n"); for (i = 1; i <= n; i++) ws[m[i]] = 1 }
+      { sub(/\r$/, "") }  # Cargo.lock may be CRLF on a Windows checkout
       /^name = "/ { name = $0; sub(/^name = "/, "", name); sub(/"$/, "", name); in_ws = (name in ws) }
       in_ws && /^version = / { print "version = \"0.0.0\""; next }
       { print }
