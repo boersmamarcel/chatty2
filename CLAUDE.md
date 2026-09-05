@@ -908,16 +908,39 @@ Model capabilities (image/PDF/temperature support) are stored in two complementa
 
 **Purpose**: Provides default capability values when creating new models.
 
+`ProviderType` has three variants today — `OpenRouter`, `Ollama`, and
+`AzureOpenAI`. The former per-provider variants (`OpenAI`, `Anthropic`,
+`Gemini`, `Mistral`) were removed because OpenRouter now fronts all of those
+providers as a single gateway client; each removed variant carries a serde
+`alias` onto `OpenRouter` so existing stored JSON with the old variant names
+keeps deserializing without a migration step.
+
 **Implementation**:
 ```rust
+#[serde(rename_all = "snake_case")]
+pub enum ProviderType {
+    /// OpenRouter — gateway to 200+ models (Anthropic, Google, Mistral, Meta, etc.)
+    /// Accepts legacy JSON values from removed provider variants for backward compatibility.
+    #[serde(
+        alias = "open_ai",
+        alias = "open_a_i",
+        alias = "anthropic",
+        alias = "gemini",
+        alias = "mistral"
+    )]
+    OpenRouter,
+    Ollama,
+    #[serde(rename = "azure_openai")]
+    AzureOpenAI,
+}
+
 impl ProviderType {
     pub fn default_capabilities(&self) -> (bool, bool) {
         match self {
-            ProviderType::Anthropic => (true, true),   // Images + PDFs
-            ProviderType::Gemini => (true, true),      // Images + PDFs
-            ProviderType::OpenAI => (true, false),     // Images only (PDF lossy)
+            // OpenRouter is a gateway to multimodal models (Anthropic, Google, etc.)
+            ProviderType::OpenRouter => (true, true),
+            ProviderType::AzureOpenAI => (true, false),
             ProviderType::Ollama => (false, false),    // Per-model detection
-            ProviderType::Mistral => (false, false),   // No multimodal support
         }
     }
 }

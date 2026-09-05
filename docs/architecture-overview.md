@@ -159,8 +159,8 @@ Application-wide state uses GPUI's `Global` trait + `cx.set_global()`/`cx.global
 
 ### 5. Provider Abstraction
 
-LLM providers (Anthropic, OpenAI, Gemini, Ollama, Mistral, Azure) are abstracted through:
-- `ProviderType` enum with `default_capabilities()` for initialization defaults
+LLM providers are abstracted through:
+- `ProviderType` enum (`OpenRouter`, `Ollama`, `AzureOpenAI`) with `default_capabilities()` for initialization defaults. OpenRouter is a gateway client fronting the providers it used to have dedicated variants for (Anthropic, Google/Gemini, Mistral, OpenAI, etc.); those removed variants deserialize as `OpenRouter` via serde aliases so existing stored configs keep loading.
 - `AgentFactory` that builds provider-specific clients
 - `ModelConfig` for per-model persisted capabilities
 
