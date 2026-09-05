@@ -1,0 +1,25 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Branch summary",
+ "turns": [
+  {
+   "match": "branch",
+   "replies": [
+    {
+     "tool_calls": [
+      {"name": "git_status", "arguments": {}}
+     ]
+    },
+    {
+     "text": "The working tree is clean, so everything on this branch is already committed. The branch adds the pull-request status bar: a `github_pr_service` in `chatty-core` that resolves the PR for the checked-out branch, and a `PrStatusBarView` above the composer that renders it."
+    }
+   ]
+  },
+  {
+   "replies": [
+    {"text": "I only have scripted answers in this demo."}
+   ]
+  }
+ ]
+}

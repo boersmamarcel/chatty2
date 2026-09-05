@@ -19,6 +19,7 @@ use chatty_core::models::message_types::{
     detect_execution_engine, predict_execution_engine,
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
+use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
 use chatty_core::services::{ContextShaperSettings, McpService, MemoryService, shape_context};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
@@ -294,6 +295,8 @@ pub struct ChatEngine {
     /// before `ServicesReady` is received.
     pub services_loaded: bool,
     pub git_branch: Option<String>,
+    /// GitHub pull request for the workspace branch, when one exists.
+    pub pull_request: Option<PullRequestSummary>,
     pub model_picker: Option<ModelPicker>,
     pub tool_picker: Option<ToolPicker>,
     /// Lines scrolled up from the bottom of the chat transcript.
@@ -377,6 +380,7 @@ impl ChatEngine {
             is_ready: false,
             services_loaded: config.services_loaded,
             git_branch: None,
+            pull_request: None,
             model_picker: None,
             tool_picker: None,
             scroll_offset: 0,
@@ -393,9 +397,31 @@ impl ChatEngine {
     pub fn refresh_workspace_context(&mut self) {
         let workspace_dir = self.execution_settings.workspace_dir.clone();
         let event_tx = self.event_tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let branch = detect_git_branch(workspace_dir.as_deref());
-            let _ = event_tx.send(AppEvent::GitBranchDetected(branch));
+        tokio::task::spawn_blocking({
+            let workspace_dir = workspace_dir.clone();
+            let event_tx = event_tx.clone();
+            move || {
+                let branch = detect_git_branch(workspace_dir.as_deref());
+                let _ = event_tx.send(AppEvent::GitBranchDetected(branch));
+            }
+        });
+
+        // The pull-request lookup shells out to `gh` / the GitHub API, so it
+        // runs on its own and reports separately; the branch must never wait
+        // on it.
+        if !self.execution_settings.git_enabled {
+            let _ = event_tx.send(AppEvent::PullRequestDetected(None));
+            return;
+        }
+        tokio::spawn(async move {
+            let Some(workspace) = workspace_dir
+                .map(PathBuf::from)
+                .or_else(|| std::env::current_dir().ok())
+            else {
+                return;
+            };
+            let summary = resolve_pull_request(&workspace).await;
+            let _ = event_tx.send(AppEvent::PullRequestDetected(summary.map(Box::new)));
         });
     }
 
@@ -902,6 +928,10 @@ impl ChatEngine {
             }
             AppEvent::GitBranchDetected(branch) => {
                 self.git_branch = branch;
+                EngineAction::Redraw
+            }
+            AppEvent::PullRequestDetected(pull_request) => {
+                self.pull_request = pull_request.map(|pr| *pr);
                 EngineAction::Redraw
             }
             AppEvent::SubAgentProgress(line) => {

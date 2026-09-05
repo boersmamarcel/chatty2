@@ -56,6 +56,23 @@ status (success / error / cancelled). `apply_diff` gets a visual diff
 (additions green, deletions red, collapsed unchanged runs, “Show N more lines”
 on large patches).
 
+## Pull request status
+
+When the workspace is a git checkout whose `origin` is on GitHub, a bar above
+the composer shows the pull request for the branch you are on: number, repo,
+branch, `+added −deleted` and a CI pill that lists each check. Clicking the
+number, repo or branch opens the PR in your browser; `×` hides the bar until
+the branch or the PR changes.
+
+![Pull request status bar](../assets/animations/pr_status_bar.gif)
+
+It follows the **Git integration** toggle in Settings → Execution. The lookup
+uses the `gh` CLI when it is installed and signed in — which is what makes
+private repositories work — and otherwise falls back to GitHub's public REST
+API, optionally with a `GITHUB_TOKEN` / `GH_TOKEN` from the environment. No PR,
+no GitHub remote, or no workspace means no bar. The terminal app shows the same
+thing as `#591 open ✓` in its status line.
+
 ## Conversations & cost
 
 - Conversations persist in local SQLite (no Chatty-hosted sync)

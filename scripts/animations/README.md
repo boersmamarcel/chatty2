@@ -52,8 +52,17 @@ scripts/animations/scenarios/<name>/
 ├── steps.sh        the interaction, using the helpers below
 ├── settings.sh     optional: WIDTH, HEIGHT, SCALE, GIF_WIDTH, FPS
 ├── workspace/      optional files copied into the agent workspace
-└── profile/        optional overrides for scripts/animations/profile/*.json
+├── profile/        optional overrides for scripts/animations/profile/*.json
+└── setup.sh        optional: runs before the app starts, with $RUN_DIR set
 ```
+
+`setup.sh` is for anything the app must find already in place. It can prepare
+the workspace — `pr_status_bar` turns it into a git checkout with a GitHub
+`origin` so the PR bar has a branch to resolve — and it can drop a stub command
+in `$RUN_DIR/bin`, which is first on the app's `PATH`. That is how the same
+scenario answers the `gh pr view` call the PR bar makes without a network or a
+GitHub token: the bar's own code path runs, only the reply is scripted, exactly
+as `mock_ollama.py` does for the model.
 
 `steps.sh` runs inside `record.sh`, so it can use:
 
