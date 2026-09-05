@@ -30,7 +30,7 @@
 //! See `docs/stream-manager.md` for the full stream architecture.
 
 use super::message_ops_internals::{
-    LlmStreamParams, attachment_to_user_content, run_llm_stream,
+    LlmStreamParams, attachment_to_user_content, is_pdf_path, run_llm_stream,
     select_recent_assistant_attachments,
 };
 use super::*;
@@ -298,7 +298,7 @@ impl ChattyApp {
                 // Convert file attachments to UserContent
                 // Filter based on model capabilities to prevent panics in rig-core
                 for path in &attachments {
-                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    let is_pdf = is_pdf_path(path);
                     if is_pdf && !provider_supports_pdf {
                         warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
                         continue;
@@ -1088,7 +1088,7 @@ impl ChattyApp {
             let conv_id_for_title = conv_id.clone();
             let sidebar_for_title = sidebar.clone();
 
-            cx.spawn(async move |_weak, cx| {
+            cx.spawn(async move |weak, cx| {
                 // Get agent and history for title generation
                 let title_data = cx
                     .update_global::<ConversationsStore, _>(|store, _cx| {
@@ -1121,6 +1121,19 @@ impl ChattyApp {
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
                             .ok();
+
+                            // Persist so the generated title survives a restart — the
+                            // synchronous save later in send_message already ran by the
+                            // time this completes (finding F7, AGE-218).
+                            if let Some(app) = weak.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.persist_conversation(&conv_id_for_title, cx);
+                                })
+                                .map_err(|e| {
+                                    warn!(error = ?e, "Failed to persist conversation after title generation")
+                                })
+                                .ok();
+                            }
 
                             // Update sidebar with new title from metadata
                             sidebar_for_title

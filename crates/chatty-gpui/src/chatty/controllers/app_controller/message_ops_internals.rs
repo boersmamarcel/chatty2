@@ -750,6 +750,15 @@ fn is_agent_todo_tool(tool_name: &str) -> bool {
     )
 }
 
+/// True when `path`'s extension is `pdf`, checked case-insensitively so
+/// `report.PDF` is recognized the same as `report.pdf` (finding F7, AGE-218).
+pub(super) fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
 /// Select attachment paths from the immediately preceding assistant message
 /// (the previous turn), if any, that the current model can handle. Returns
 /// paths filtered by capability.
@@ -780,12 +789,7 @@ pub(super) fn select_recent_assistant_attachments(
         .attachment_paths
         .iter()
         .filter(|path| {
-            let is_pdf = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("pdf"))
-                .unwrap_or(false);
-            if is_pdf {
+            if is_pdf_path(path) {
                 supports_pdf
             } else {
                 supports_images
@@ -1011,6 +1015,15 @@ mod tests {
         ];
         let result = select_recent_assistant_attachments(&entries, false, true);
         assert_eq!(result, vec![PathBuf::from("/tmp/report.PDF")]);
+    }
+
+    #[test]
+    fn is_pdf_path_is_case_insensitive() {
+        assert!(is_pdf_path(&PathBuf::from("/tmp/report.pdf")));
+        assert!(is_pdf_path(&PathBuf::from("/tmp/report.PDF")));
+        assert!(is_pdf_path(&PathBuf::from("/tmp/report.Pdf")));
+        assert!(!is_pdf_path(&PathBuf::from("/tmp/report")));
+        assert!(!is_pdf_path(&PathBuf::from("/tmp/chart.png")));
     }
 
     #[test]
