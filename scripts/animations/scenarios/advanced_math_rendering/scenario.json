@@ -1,0 +1,22 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "The quadratic formula",
+ "turns": [
+  {
+   "match": "quadratic",
+   "replies": [
+    {
+     "text": "For a quadratic equation $ax^2 + bx + c = 0$ with $a \\neq 0$, the solutions are\n\n$$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$\n\nThe discriminant $\\Delta = b^2 - 4ac$ tells you what kind of roots to expect:\n\n- $\\Delta > 0$: two distinct real roots\n- $\\Delta = 0$: one repeated real root\n- $\\Delta < 0$: a pair of complex conjugate roots"
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}

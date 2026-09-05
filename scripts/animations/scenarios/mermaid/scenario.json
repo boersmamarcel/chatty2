@@ -1,0 +1,22 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "How a tool call flows",
+ "turns": [
+  {
+   "match": "diagram",
+   "replies": [
+    {
+     "text": "Here is the round trip for a single tool call:\n\n```mermaid\nflowchart LR\n    U[You] -->|prompt| C[Chatty]\n    C -->|messages + tools| L[LLM]\n    L -->|tool call| T[Tool runner]\n    T -->|result| L\n    L -->|answer| C\n    C -->|transcript| U\n```"
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}
