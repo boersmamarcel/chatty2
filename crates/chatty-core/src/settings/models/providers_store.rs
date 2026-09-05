@@ -46,6 +46,23 @@ impl ProviderType {
             ProviderType::Ollama => (false, false),
         }
     }
+
+    /// How this provider reports cached prompt tokens relative to its input
+    /// count — see [`crate::services::llm_service::UsageSemantics`] doc for
+    /// the two conventions. The match is exhaustive (no `_` arm) so adding a
+    /// provider forces an explicit decision here rather than silently
+    /// inheriting a default.
+    pub fn usage_semantics(&self) -> crate::services::llm_service::UsageSemantics {
+        use crate::services::llm_service::UsageSemantics;
+        match self {
+            // OpenRouter's completion responses are OpenAI-compatible.
+            ProviderType::OpenRouter => UsageSemantics::InputIncludesCache,
+            // Ollama's /api/chat usage is OpenAI-compatible.
+            ProviderType::Ollama => UsageSemantics::InputIncludesCache,
+            // Azure OpenAI speaks the OpenAI Chat Completions wire format.
+            ProviderType::AzureOpenAI => UsageSemantics::InputIncludesCache,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,6 +183,21 @@ impl ProviderModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::llm_service::UsageSemantics;
+
+    #[test]
+    fn usage_semantics_is_openai_compatible_for_every_provider() {
+        for provider in [
+            ProviderType::OpenRouter,
+            ProviderType::Ollama,
+            ProviderType::AzureOpenAI,
+        ] {
+            assert_eq!(
+                provider.usage_semantics(),
+                UsageSemantics::InputIncludesCache
+            );
+        }
+    }
 
     #[test]
     fn test_azure_auth_method_default() {

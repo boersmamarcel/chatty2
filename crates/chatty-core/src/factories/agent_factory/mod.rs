@@ -1065,6 +1065,12 @@ impl AgentClient {
         Ok((agent, shell_session_out, invoke_agent_progress_slot))
     }
 
+    /// The provider this agent is built against — the seam usage semantics
+    /// (AGE-212) and, later, per-provider auth are derived from.
+    pub fn provider(&self) -> crate::settings::models::providers_store::ProviderType {
+        self.provider.clone()
+    }
+
     /// Returns the provider name for logging/debugging.
     #[allow(dead_code)]
     pub fn provider_name(&self) -> &str {

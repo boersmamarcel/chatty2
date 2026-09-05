@@ -286,8 +286,7 @@ pub async fn stream_prompt(
     max_agent_turns: usize,
 ) -> Result<(ResponseStream, Message)> {
     let user_message = Message::User { content: contents };
-    // OpenRouter, Azure and Ollama all report OpenAI-compatible usage.
-    let semantics = UsageSemantics::InputIncludesCache;
+    let semantics = agent.provider().usage_semantics();
 
     let history_snapshot = history.to_vec();
 
