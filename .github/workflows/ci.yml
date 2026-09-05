@@ -185,9 +185,9 @@ jobs:
             build: cargo build --release
           - os: macos-latest
             build: cargo build --release
-          # gpui does not support Windows; release.yml ships the TUI only.
+          # Desktop app + CLI, exactly what release.yml's build-windows packages.
           - os: windows-latest
-            build: cargo build --release -p chatty-tui
+            build: cargo build --release -p chatty-gpui -p chatty-tui
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -235,6 +235,12 @@ jobs:
             libasound2-dev \
             libssl-dev \
             pkg-config
+
+      # gpui compiles its HLSL shaders with fxc.exe in release builds; see the script.
+      - name: Locate fxc.exe for gpui shader compilation
+        if: runner.os == 'Windows' && steps.lookup.outputs.cache-hit != 'true'
+        run: ./scripts/find-fxc.ps1
+        shell: pwsh
 
       - name: Build release binary
         if: steps.lookup.outputs.cache-hit != 'true'
