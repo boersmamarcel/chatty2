@@ -469,6 +469,54 @@ impl ChatEngine {
         self.models.models().iter().map(|m| m.id.clone()).collect()
     }
 
+    /// Whether any execution-related setting is enabled — gates whether the
+    /// built agent gets `exec_settings` (and thus execution tools) at all.
+    fn any_tool_enabled(es: &ExecutionSettingsModel) -> bool {
+        es.enabled
+            || es.filesystem_read_enabled
+            || es.filesystem_write_enabled
+            || es.fetch_enabled
+            || es.git_enabled
+            || es.execute_code_enabled
+    }
+
+    /// Build the `AgentBuildContext` shared by `init_conversation` and
+    /// `spawn_init_conversation`. `mcp_tools` is left `None`; both callers set
+    /// it themselves after gathering it, since that gathering is async and,
+    /// for the background path, must happen inside the spawned task rather
+    /// than while still borrowing `&self` (AGE-224).
+    fn build_agent_context(&self) -> AgentBuildContext {
+        let exec_settings = if Self::any_tool_enabled(&self.execution_settings) {
+            Some(self.execution_settings.clone())
+        } else {
+            None
+        };
+        AgentBuildContext {
+            mcp_tools: None,
+            exec_settings,
+            pending_approvals: Some(self.execution_approval_store.get_pending_approvals()),
+            pending_clarifications: Some(self.clarification_store.get_pending_clarifications()),
+            pending_write_approvals: Some(self.write_approval_store.get_pending_approvals()),
+            pending_artifacts: None,
+            shell_session: None,
+            user_secrets: self.user_secrets.clone(),
+            theme_colors: None, // no theme colors in TUI
+            memory_service: self.memory_service.clone(),
+            skill_service: Some(self.skill_service.clone()),
+            search_settings: self.search_settings.clone(),
+            embedding_service: self.embedding_service.clone(),
+            allow_sub_agent: !self.is_sub_agent,
+            module_agents: self.module_agents.clone(),
+            gateway_port: self
+                .module_settings
+                .enabled
+                .then_some(self.module_settings.gateway_port),
+            remote_agents: self.remote_agents.clone(),
+            available_model_ids: self.available_model_ids(),
+            conversation_id: None, // browser feature isn't enabled in the TUI
+        }
+    }
+
     /// Initialize the conversation (async — creates agent with tools)
     pub async fn init_conversation(&mut self) -> Result<()> {
         // Bump generation so any in-flight background init is ignored
@@ -482,52 +530,15 @@ impl ChatEngine {
             None => None,
         };
 
-        let es = &self.execution_settings;
-        let any_tool_enabled = es.enabled
-            || es.filesystem_read_enabled
-            || es.filesystem_write_enabled
-            || es.fetch_enabled
-            || es.git_enabled
-            || es.execute_code_enabled;
-        let exec_settings = if any_tool_enabled {
-            Some(self.execution_settings.clone())
-        } else {
-            None
-        };
-
-        let pending_approvals = self.execution_approval_store.get_pending_approvals();
-        let pending_clarifications = self.clarification_store.get_pending_clarifications();
-        let pending_write_approvals = self.write_approval_store.get_pending_approvals();
+        let mut ctx = self.build_agent_context();
+        ctx.mcp_tools = mcp_tools;
 
         let conversation = Conversation::new(
             id,
             "New Chat".to_string(),
             &self.model_config,
             &self.provider_config,
-            AgentBuildContext {
-                mcp_tools,
-                exec_settings,
-                pending_approvals: Some(pending_approvals),
-                pending_clarifications: Some(pending_clarifications),
-                pending_write_approvals: Some(pending_write_approvals),
-                pending_artifacts: None,
-                shell_session: None,
-                user_secrets: self.user_secrets.clone(),
-                theme_colors: None, // no theme colors in TUI
-                memory_service: self.memory_service.clone(),
-                skill_service: Some(self.skill_service.clone()),
-                search_settings: self.search_settings.clone(),
-                embedding_service: self.embedding_service.clone(),
-                allow_sub_agent: !self.is_sub_agent,
-                module_agents: self.module_agents.clone(),
-                gateway_port: self
-                    .module_settings
-                    .enabled
-                    .then_some(self.module_settings.gateway_port),
-                remote_agents: self.remote_agents.clone(),
-                available_model_ids: self.available_model_ids(),
-                conversation_id: None, // browser feature isn't enabled in the TUI
-            },
+            ctx,
         )
         .await
         .context("Failed to create conversation")?;
@@ -552,40 +563,14 @@ impl ChatEngine {
         let model_config = self.model_config.clone();
         let provider_config = self.provider_config.clone();
         let mcp_service = self.mcp_service.clone();
-        let execution_settings = self.execution_settings.clone();
-        let pending_approvals = self.execution_approval_store.get_pending_approvals();
-        let pending_clarifications = self.clarification_store.get_pending_clarifications();
-        let pending_write_approvals = self.write_approval_store.get_pending_approvals();
-        let user_secrets = self.user_secrets.clone();
-        let remote_agents = self.remote_agents.clone();
-        let module_agents = self.module_agents.clone();
-        let available_model_ids = self.available_model_ids();
-        let module_settings = self.module_settings.clone();
-        let memory_service = self.memory_service.clone();
-        let search_settings = self.search_settings.clone();
-        let embedding_service = self.embedding_service.clone();
+        let mut ctx = self.build_agent_context();
         let event_tx = self.event_tx.clone();
-        let is_sub_agent = self.is_sub_agent;
-        let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
             // Gather MCP tools
-            let mcp_tools = match mcp_service {
+            ctx.mcp_tools = match mcp_service {
                 Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
                 None => None,
-            };
-
-            let es = &execution_settings;
-            let any_tool_enabled = es.enabled
-                || es.filesystem_read_enabled
-                || es.filesystem_write_enabled
-                || es.fetch_enabled
-                || es.git_enabled
-                || es.execute_code_enabled;
-            let exec_settings = if any_tool_enabled {
-                Some(execution_settings.clone())
-            } else {
-                None
             };
 
             let result = Conversation::new(
@@ -593,29 +578,7 @@ impl ChatEngine {
                 "New Chat".to_string(),
                 &model_config,
                 &provider_config,
-                AgentBuildContext {
-                    mcp_tools,
-                    exec_settings,
-                    pending_approvals: Some(pending_approvals),
-                    pending_clarifications: Some(pending_clarifications),
-                    pending_write_approvals: Some(pending_write_approvals),
-                    pending_artifacts: None,
-                    shell_session: None,
-                    user_secrets,
-                    theme_colors: None, // no theme colors in TUI
-                    memory_service,
-                    skill_service: Some(skill_service.clone()),
-                    search_settings,
-                    embedding_service,
-                    allow_sub_agent: !is_sub_agent,
-                    module_agents,
-                    gateway_port: module_settings
-                        .enabled
-                        .then_some(module_settings.gateway_port),
-                    remote_agents,
-                    available_model_ids,
-                    conversation_id: None, // browser feature isn't enabled in the TUI
-                },
+                ctx,
             )
             .await;
 
