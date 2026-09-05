@@ -412,10 +412,18 @@ jobs:
         with:
           path: |
             crates/chatty-core/libs
-          key: pdfium-windows-${{ hashFiles('crates/chatty-core/build.rs') }}
+            crates/chatty-gpui/libs
+          key: pdfium-windows-${{ hashFiles('crates/chatty-core/build.rs', 'crates/chatty-gpui/build.rs') }}
 
-      - name: Build release binary (TUI only — gpui does not support Windows)
-        run: cargo build --release -p chatty-tui
+      # gpui compiles its HLSL shaders with fxc.exe in release builds; see the script.
+      - name: Locate fxc.exe for gpui shader compilation
+        run: ./scripts/find-fxc.ps1
+        shell: pwsh
+
+      # Desktop app (chatty.exe) plus the CLI (chatty-tui.exe) the installer
+      # bundles next to it. Must match ci.yml's warm-release-cache Windows entry.
+      - name: Build release binaries
+        run: cargo build --release -p chatty-gpui -p chatty-tui
 
       - name: Copy pdfium.dll to release directory for installer
         run: |
@@ -428,9 +436,24 @@ jobs:
         shell: pwsh
 
 
-      - name: Copy chatty-tui.exe as chatty.exe for installer
-        run: copy target\release\chatty-tui.exe target\release\chatty.exe
-        shell: cmd
+      # Every Windows release from v0.1.85 to v0.3.49 shipped chatty-tui.exe
+      # renamed to chatty.exe, so the Start Menu shortcut opened the CLI.
+      - name: Verify the installer gets the desktop app, not the CLI
+        run: |
+          $app = "target\release\chatty.exe"
+          $cli = "target\release\chatty-tui.exe"
+          foreach ($f in @($app, $cli)) {
+            if (-not (Test-Path $f)) {
+              Write-Error "$f not found after build"
+              exit 1
+            }
+          }
+          if ((Get-FileHash $app).Hash -eq (Get-FileHash $cli).Hash) {
+            Write-Error "chatty.exe is byte-identical to chatty-tui.exe - the installer would ship the CLI as the desktop app"
+            exit 1
+          }
+          Write-Host "chatty.exe (desktop) and chatty-tui.exe (CLI) are distinct binaries"
+        shell: pwsh
 
       - name: Install Inno Setup
         run: choco install innosetup -y
