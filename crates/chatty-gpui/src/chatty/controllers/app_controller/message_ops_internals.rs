@@ -471,32 +471,10 @@ pub(super) async fn run_llm_stream(
     let (clarification_tx, clarification_rx) = tokio::sync::mpsc::unbounded_channel();
     chatty_core::models::clarification_store::set_global_clarification_notifier(clarification_tx);
 
-    // 2. Get max agent turns and workspace dir
+    // 2. Get max agent turns
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
-    // Use per-conversation workspace dir override if set, fall back to global setting
-    let _workspace_dir = cx
-        .update(|cx| {
-            // Check per-conversation override first
-            let per_conv = cx
-                .global::<ConversationsStore>()
-                .get_conversation(&conv_id)
-                .and_then(|c| {
-                    c.working_dir()
-                        .map(|p| normalize_workspace_path(p).to_string_lossy().to_string())
-                });
-            // Fall back to global workspace_dir
-            per_conv.or_else(|| {
-                cx.global::<ExecutionSettingsModel>()
-                    .workspace_dir
-                    .as_deref()
-                    .map(normalize_workspace_string)
-            })
-        })
-        .map_err(|e| warn!(error = ?e, "Failed to resolve workspace directory override"))
-        .ok()
-        .flatten();
 
     // 2b. Compute token budget snapshot in parallel with the LLM call.
     //
@@ -586,8 +564,22 @@ pub(super) async fn run_llm_stream(
     }
     // `extra_llm_contents` (e.g. the previous turn's assistant-generated
     // attachments) rides along to the LLM but must never reach the persisted
-    // user message built below (finding F2, AGE-216).
-    let llm_user_contents = build_llm_contents(&user_contents, extra_llm_contents);
+    // user message (finding F2, AGE-216). Build the user content once: when
+    // the turn will be persisted, `user_contents` must survive on its own for
+    // that, so cloning it before appending the LLM-only extras is
+    // unavoidable; otherwise (e.g. regeneration) there is nothing to keep
+    // separate and the same Vec moves straight into the LLM call (F5).
+    let (llm_user_contents, user_message_to_persist) = if add_user_message_to_model {
+        let llm_contents = build_llm_contents(&user_contents, extra_llm_contents);
+        let message = rig_core::completion::Message::User {
+            content: user_contents,
+        };
+        (llm_contents, Some(message))
+    } else {
+        let mut combined = user_contents;
+        combined.extend(extra_llm_contents);
+        (combined, None)
+    };
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _user_message) = stream_prompt(
         &agent,
@@ -601,10 +593,7 @@ pub(super) async fn run_llm_stream(
     .await?;
 
     // 4. Optionally add user message to conversation model.
-    if add_user_message_to_model {
-        let user_message = rig_core::completion::Message::User {
-            content: user_contents,
-        };
+    if let Some(user_message) = user_message_to_persist {
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 conv.add_user_message_with_attachments(user_message, attachment_paths);

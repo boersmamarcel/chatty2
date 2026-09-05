@@ -251,8 +251,8 @@ impl ChattyApp {
                     rebuild_conversation_agent(&conv_id, cx).await?;
                 }
 
-                // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                // Extract agent, history, and capabilities synchronously
+                let (agent, history, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
@@ -276,7 +276,6 @@ impl ChattyApp {
                             Ok((
                                 conv.agent().clone(),
                                 conv.messages(),
-                                model_id,
                                 provider_type,
                                 supports_pdf,
                                 supports_images,
