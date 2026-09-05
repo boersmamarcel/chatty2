@@ -133,6 +133,10 @@ impl ChattyApp {
         let title = conv.title().to_string();
         let mut markdown = format!("# {title}\n\n");
         for entry in conv.entries() {
+            // Tool round-trips are rendered from the trace (AGE-247).
+            if chatty_core::services::is_tool_message(&entry.message) {
+                continue;
+            }
             let trace_json = entry.system_trace.as_ref();
 
             match &entry.message {

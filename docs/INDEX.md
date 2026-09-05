@@ -40,6 +40,7 @@ points here.
 | [`stream-manager.md`](stream-manager.md) | Stream bugs or cancellation | LLM stream lifecycle, events |
 | [`rendering-system.md`](rendering-system.md) | Markdown/math/mermaid UI | Rendering pipeline |
 | [`token-tracking.md`](token-tracking.md) | Context window / compact | Token budget accounting |
+| [`context-compaction.md`](context-compaction.md) | Long conversations, prompt cache, `/compact` | Generational compaction strategy (D2): trigger, cut point, summary shape, UX; diagrams |
 | [`agent-memory.md`](agent-memory.md) | Memory tools / skills | Persistent agent memory store |
 
 ## Modules / extensions

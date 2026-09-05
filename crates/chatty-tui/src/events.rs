@@ -58,6 +58,9 @@ pub enum AppEvent {
         cache_read_tokens: u32,
         cache_write_tokens: u32,
     },
+    /// rig's record of the turn's messages, persisted behind the final text
+    /// when the stream completes (AGE-247).
+    TurnMessages(Vec<rig_core::completion::Message>),
     StreamCompleted,
     StreamCancelled,
     StreamError(String),
@@ -143,6 +146,10 @@ impl std::fmt::Debug for AppEvent {
                 .field("output_tokens", output_tokens)
                 .field("cache_read_tokens", cache_read_tokens)
                 .field("cache_write_tokens", cache_write_tokens)
+                .finish(),
+            Self::TurnMessages(messages) => f
+                .debug_tuple("TurnMessages")
+                .field(&messages.len())
                 .finish(),
             Self::StreamCompleted => write!(f, "StreamCompleted"),
             Self::StreamCancelled => write!(f, "StreamCancelled"),

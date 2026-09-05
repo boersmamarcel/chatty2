@@ -488,6 +488,10 @@ impl StreamManager {
                     cache_write_tokens,
                 });
             }
+            StreamChunk::TurnMessages(_) => {
+                // Persisted by the conversation model (AGE-247); the UI
+                // renders tool activity from the trace.
+            }
             StreamChunk::Done => {
                 // Don't finalize yet — caller should call finalize_stream()
             }

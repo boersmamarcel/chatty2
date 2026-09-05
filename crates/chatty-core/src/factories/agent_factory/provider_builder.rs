@@ -5,24 +5,30 @@
 //! provider-specific schema sanitization (e.g. OpenAI `"format"` stripping).
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
 use rig_agent::agent::AgentBuilder;
 use rig_agent::client::AgentClientExt;
 use rig_core::client::CompletionClient;
+use rig_core::providers::azure::AzureOpenAIAuth;
 
-use crate::auth::{AzureTokenCache, azure_auth};
+use crate::auth::AzureTokenCache;
 use crate::services::AgentTaskController;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
 use super::AgentClient;
+use super::azure_auth_http::AzureAuthHttpClient;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::prompt_cache_http::PromptCachingHttpClient;
 use super::tool_collector::NativeTools;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
+
+/// What rig is told the Entra credential is. It never reaches Azure:
+/// `AzureAuthHttpClient` overwrites the header on every request (AGE-245).
+const AZURE_ENTRA_PLACEHOLDER_TOKEN: &str = "entra-token-attached-per-request";
 
 type McpToolSet = Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>;
 
@@ -155,43 +161,6 @@ async fn build_azure_agent(
         ));
     }
 
-    let auth = match provider_config.azure_auth_method() {
-        AzureAuthMethod::EntraId => {
-            tracing::info!("Using Entra ID authentication with token cache");
-
-            let cache = AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
-                Ok(cache) => Some(cache),
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "Failed to create Azure token cache, will fetch tokens directly each time"
-                    );
-                    None
-                }
-            });
-
-            let token = if let Some(cache) = cache {
-                cache
-                    .get_token()
-                    .await
-                    .context("Failed to get cached Entra ID token")?
-            } else {
-                tracing::debug!("Using direct token fetch (cache unavailable)");
-                azure_auth::fetch_entra_id_token()
-                    .await
-                    .context("Failed to fetch Entra ID token")?
-            };
-
-            rig_core::providers::azure::AzureOpenAIAuth::Token(token)
-        }
-        AzureAuthMethod::ApiKey => {
-            tracing::info!("Using API Key authentication for Azure OpenAI");
-            let key = api_key
-                .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
-            rig_core::providers::azure::AzureOpenAIAuth::ApiKey(key)
-        }
-    };
-
     tracing::info!(
         endpoint = %endpoint,
         deployment = %model_config.model_identifier,
@@ -200,22 +169,66 @@ async fn build_azure_agent(
         "Building Azure OpenAI client"
     );
 
-    let client = rig_core::providers::azure::Client::builder()
-        .api_key(auth)
-        .azure_endpoint(endpoint.clone())
-        .api_version(api_version)
-        .build()
-        .map_err(|e| {
-            anyhow!(
-                "Failed to build Azure client with endpoint '{}': {}",
-                endpoint,
-                e
-            )
-        })?;
+    let client_error = |e: rig_core::http_client::Error| {
+        anyhow!(
+            "Failed to build Azure client with endpoint '{}': {}",
+            endpoint,
+            e
+        )
+    };
 
-    let mut builder = client
-        .agent(&model_config.model_identifier)
-        .preamble(preamble);
+    // The two auth methods build differently typed clients; both hand back
+    // the same type-erased `AgentBuilder`.
+    let builder = match provider_config.azure_auth_method() {
+        AzureAuthMethod::EntraId => {
+            tracing::info!("Using Entra ID authentication; the token is attached per request");
+
+            let cache = match AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
+                Ok(cache) => Some(cache),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to create the shared Azure token cache");
+                    None
+                }
+            }) {
+                Some(cache) => cache.clone(),
+                // The shared cache stays `None` for the process once creation
+                // failed; a per-agent cache is the same thing without the sharing.
+                None => AzureTokenCache::new().context("Failed to create Azure token cache")?,
+            };
+
+            // rig writes this placeholder into the bearer header at build time;
+            // `AzureAuthHttpClient` replaces it with a current token on every
+            // request, so an expired token is refreshed without a rebuild.
+            let client = rig_core::providers::azure::Client::builder()
+                .api_key(AzureOpenAIAuth::Token(
+                    AZURE_ENTRA_PLACEHOLDER_TOKEN.to_string(),
+                ))
+                .http_client(AzureAuthHttpClient::new(
+                    reqwest::Client::new(),
+                    Arc::new(cache),
+                ))
+                .azure_endpoint(endpoint.clone())
+                .api_version(api_version)
+                .build()
+                .map_err(client_error)?;
+            client.agent(&model_config.model_identifier)
+        }
+        AzureAuthMethod::ApiKey => {
+            tracing::info!("Using API Key authentication for Azure OpenAI");
+            let key = api_key
+                .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
+
+            let client = rig_core::providers::azure::Client::builder()
+                .api_key(AzureOpenAIAuth::ApiKey(key))
+                .azure_endpoint(endpoint.clone())
+                .api_version(api_version)
+                .build()
+                .map_err(client_error)?;
+            client.agent(&model_config.model_identifier)
+        }
+    };
+
+    let mut builder = builder.preamble(preamble);
 
     if model_config.supports_temperature {
         builder = builder.temperature(model_config.temperature as f64);

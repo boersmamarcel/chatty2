@@ -56,6 +56,11 @@ pub enum StreamChunk {
         cache_read_tokens: u32,
         cache_write_tokens: u32,
     },
+    /// rig's own record of the turn, in order: the prompt, each assistant
+    /// tool-call message, each tool-result message, the final text. Arrives
+    /// with the final response, before `Done`, so the frontends can persist
+    /// the tool round-trips behind the final text (AGE-247).
+    TurnMessages(Vec<Message>),
     Done,
     Error(String),
 }
@@ -252,6 +257,9 @@ macro_rules! process_agent_stream {
                             cache_read_tokens: usage.cache_read_tokens,
                             cache_write_tokens: usage.cache_write_tokens,
                         });
+                        if let Some(messages) = final_response.messages {
+                            yield Ok(StreamChunk::TurnMessages(messages));
+                        }
                     }
                     Err(e) => {
                         yield Ok(StreamChunk::Error(e.to_string()));
@@ -365,6 +373,9 @@ macro_rules! process_agent_stream_with_approvals {
                                     cache_read_tokens: usage.cache_read_tokens,
                                     cache_write_tokens: usage.cache_write_tokens,
                                 });
+                                if let Some(messages) = final_response.messages {
+                                    yield Ok(StreamChunk::TurnMessages(messages));
+                                }
                             }
                             Some(Err(e)) => {
                                 yield Ok(StreamChunk::Error(e.to_string()));
