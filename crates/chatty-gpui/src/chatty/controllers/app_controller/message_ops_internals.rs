@@ -180,7 +180,7 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
                         "Text-only response exceeded verbosity limit; will inject brevity prompt after response completes.");
                 }
             }
-            Ok(StreamChunk::TokenUsage { .. }) => {
+            Ok(StreamChunk::TurnUsage(_)) => {
                 // Token usage tracked by StreamManager
             }
             Ok(StreamChunk::Done) => {

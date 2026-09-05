@@ -312,7 +312,7 @@ mod tests {
             StreamChunk::ApprovalResolved { .. } => "ApprovalResolved",
             StreamChunk::ClarificationRequested { .. } => "ClarificationRequested",
             StreamChunk::ApiCallUsage(_) => "ApiCallUsage",
-            StreamChunk::TokenUsage { .. } => "TokenUsage",
+            StreamChunk::TurnUsage(_) => "TokenUsage",
             StreamChunk::Done => "Done",
             StreamChunk::Error(_) => "Error",
         }

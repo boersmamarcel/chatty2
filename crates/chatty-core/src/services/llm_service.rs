@@ -51,13 +51,9 @@ pub enum StreamChunk {
     /// per request, so a turn with two tool calls yields three of these.
     ApiCallUsage(ApiCallUsage),
     /// Usage aggregated over every request in the turn, from the provider's
-    /// final response. Arrives after the per-call chunks.
-    TokenUsage {
-        input_tokens: u32,
-        output_tokens: u32,
-        cache_read_tokens: u32,
-        cache_write_tokens: u32,
-    },
+    /// final response. Arrives after the per-call chunks. `turn` is always 0
+    /// (see [`normalize_usage`]'s aggregate convention).
+    TurnUsage(ApiCallUsage),
     Done,
     Error(String),
 }
@@ -249,12 +245,7 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
         }
         MultiTurnStreamItem::FinalResponse(final_response) => {
             let usage = normalize_usage(semantics, 0, &final_response.usage());
-            vec![StreamChunk::TokenUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-            }]
+            vec![StreamChunk::TurnUsage(usage)]
         }
         _ => Vec::new(),
     }
@@ -604,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn map_item_final_response_yields_token_usage() {
+    fn map_item_final_response_yields_turn_usage() {
         let mut usage = rig_core::completion::Usage::new();
         usage.input_tokens = 100;
         usage.output_tokens = 20;
@@ -613,8 +604,7 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
             &chunks[0],
-            StreamChunk::TokenUsage { input_tokens, output_tokens, .. }
-                if *input_tokens == 100 && *output_tokens == 20
+            StreamChunk::TurnUsage(usage) if usage.input_tokens == 100 && usage.output_tokens == 20
         ));
     }
 

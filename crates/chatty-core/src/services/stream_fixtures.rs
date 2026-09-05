@@ -264,12 +264,13 @@ pub fn scenarios() -> Vec<Scenario> {
                     cache_write_tokens: 0,
                     output_tokens: 56,
                 })),
-                ScriptedItem::Chunk(StreamChunk::TokenUsage {
+                ScriptedItem::Chunk(StreamChunk::TurnUsage(ApiCallUsage {
+                    turn: 0,
                     input_tokens: 234,
-                    output_tokens: 56,
                     cache_read_tokens: 1000,
                     cache_write_tokens: 0,
-                }),
+                    output_tokens: 56,
+                })),
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],
         },
