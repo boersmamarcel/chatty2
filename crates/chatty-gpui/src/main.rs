@@ -84,6 +84,11 @@ actions!(
     ]
 );
 
+/// How long provider auto-discovery waits before reaching the network, so it
+/// lands after boot rather than racing the conversation load that gates
+/// "ready to chat" (AGE-163).
+const BACKGROUND_DISCOVERY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 mod actions;
 mod themes;
 
@@ -112,6 +117,7 @@ fn main() {
         .init();
 
     tracing::info!("Starting Chatty application");
+    boot_timing::checkpoint("logging_ready");
 
     // Initialize Tokio runtime for rig LLM operations
     // rig requires Tokio 1.x runtime for async operations
@@ -120,11 +126,13 @@ fn main() {
     // Enter the runtime context for the entire application
     // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
+    boot_timing::checkpoint("tokio_ready");
 
     // Initialize all settings repositories (providers, models, MCP, etc.).
     // This must happen before anything accesses the repository singletons.
     chatty_core::init_repositories()
         .expect("Failed to initialize settings repositories (is HOME set?)");
+    boot_timing::checkpoint("repositories_ready");
 
     // Initialize the SQLite conversation repository here, where the Tokio runtime is
     // explicitly set up, so the block_on call is clearly safe and in a known context.
@@ -133,6 +141,7 @@ fn main() {
             .block_on(ConversationSqliteRepository::new())
             .expect("Failed to create SQLite conversation repository"),
     );
+    boot_timing::checkpoint("sqlite_ready");
 
     // ChattyAssets falls back to gpui-component's icon bundle internally; a second
     // `with_assets` call would replace the source rather than chain to it.
@@ -207,7 +216,12 @@ fn main() {
         cx.set_global(settings::models::MarketplaceState::default());
         cx.set_global(settings::models::MemoryBrowserState::default());
 
-        settings::controllers::module_settings_controller::refresh_runtime(cx);
+        // No `refresh_runtime()` here. It would run on *default* module settings,
+        // before providers or module settings have loaded, so it scans the default
+        // module dir and builds a gateway on the noop LLM provider — then both get
+        // redone once models load and once module settings land. Boot paid for a
+        // module scan and a `refresh_windows()` before a window even existed
+        // (AGE-163).
 
         // Initialize agent memory service asynchronously.
         // A watch channel is stored as a global so that conversation creation can await
@@ -693,6 +707,13 @@ fn main() {
                             .unwrap_or_else(|| "http://localhost:11434".to_string());
 
                         cx.spawn(async move |cx: &mut AsyncApp| {
+                            // Let boot finish first. This request contends with the
+                            // conversation load that gates "ready to chat", and when
+                            // it wins that race a refused or slow Ollama costs the
+                            // user ~380ms of extra startup for a discovery nobody is
+                            // waiting on (AGE-163). Measured: boots split into a
+                            // ~290ms mode and a ~680ms mode purely on who won.
+                            tokio::time::sleep(BACKGROUND_DISCOVERY_DELAY).await;
                             settings::providers::sync_ollama_models(&ollama_base_url, cx)
                                 .await
                                 .map_err(|e| warn!(error = ?e, "Failed to sync Ollama models"))
@@ -1023,6 +1044,12 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load module settings, using defaults");
+                    // Still scan, on the defaults already in the global: this is
+                    // the one path that would otherwise never call refresh_runtime
+                    // now that the startup call is gone.
+                    cx.update(settings::controllers::module_settings_controller::refresh_runtime)
+                        .map_err(|e| warn!(error = ?e, "Failed to scan modules with default settings"))
+                        .ok();
                 }
             }
         })

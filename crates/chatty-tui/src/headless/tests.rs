@@ -1,9 +1,9 @@
 //! Tests for headless-mode helpers (kept separate so the production code
 //! file is easier to navigate).
 
-use super::answer_file::*;
-use super::recovery::*;
-use super::tool_format::*;
+// `super::*` already covers the helper modules: `headless/mod.rs` glob-imports
+// `answer_file`, `recovery` and `tool_format`, and a child module sees its
+// parent's bindings. Naming them again here was redundant.
 use super::*;
 
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};

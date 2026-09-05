@@ -153,7 +153,11 @@ jobs:
         # --all-features matches the coverage of the test step above; clippy
         # was previously default-features-only, leaving feature-gated code
         # unchecked (AGE-174).
-        run: cargo clippy --all-features -- -D warnings
+        #
+        # --all-targets adds tests, benches and examples. Without it clippy saw
+        # only lib/bin targets, so lints in `tests/` were never reported — one
+        # had been sitting in chatty-protocol-gateway's e2e test unnoticed.
+        run: cargo clippy --all-features --all-targets -- -D warnings
 
       - name: Check reserved symbols (AGE research)
         if: needs.changes.outputs.rust == 'true'

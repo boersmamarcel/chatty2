@@ -51,8 +51,7 @@ impl LlmProvider for MockLlmProvider {
     ) -> Result<CompletionResponse, String> {
         let last = messages
             .iter()
-            .filter(|m| matches!(m.role, Role::User))
-            .last()
+            .rfind(|m| matches!(m.role, Role::User))
             .map(|m| m.content.as_str())
             .unwrap_or("");
         Ok(CompletionResponse {

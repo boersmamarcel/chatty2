@@ -1,0 +1,5 @@
+StreamStarted
+ClarificationRequested(id="clarify-1", ["Deploy to production?"])
+StreamEnded(status=Completed, usage=None, api_turns=1)
+=> loop returned Ok
+=> no follow-up

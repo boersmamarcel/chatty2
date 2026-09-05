@@ -1,0 +1,6 @@
+StreamStarted
+TextChunk("Answer.")
+TokenUsage(in=1234, out=56)
+StreamEnded(status=Completed, usage=Some((1234, 56)), api_turns=1)
+=> loop returned Ok
+=> no follow-up

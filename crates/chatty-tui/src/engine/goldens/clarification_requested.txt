@@ -1,0 +1,4 @@
+StreamStarted
+ClarificationRequested(id="clarify-1", ["Deploy to production?"])
+StreamCompleted
+=> loop returned Ok

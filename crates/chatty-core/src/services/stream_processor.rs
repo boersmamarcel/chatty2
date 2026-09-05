@@ -21,12 +21,18 @@ pub enum ChunkAction {
 /// Both the GPUI and TUI frontends implement this trait to receive stream
 /// events through their respective UI update mechanisms (GPUI entity updates
 /// vs. channel-based event dispatch).
+///
+/// `on_chunk` is async because the desktop refreshes an expired Azure token in
+/// place when a 401 arrives mid-stream, and has to await it before deciding
+/// whether the turn is over. No `Send` bound: the desktop's handler holds an
+/// `AsyncApp`, which is deliberately not `Send`.
+#[allow(async_fn_in_trait)]
 pub trait StreamChunkHandler {
     /// Called once when the stream loop starts (before the first chunk).
     fn on_stream_started(&mut self);
 
     /// Called for each LLM stream chunk. Return [`ChunkAction::Break`] to stop.
-    fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction>;
+    async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction>;
 
     /// Called for each sub-agent progress event from `invoke_agent`.
     fn on_progress(&mut self, progress: InvokeAgentProgress);
@@ -117,9 +123,11 @@ pub async fn run_stream_loop(
                         idle_secs = last_activity.elapsed().as_secs(),
                         "Stream produced nothing for too long; ending the turn as stalled"
                     );
-                    handler.on_chunk(Ok(StreamChunk::Error(
-                        STALLED_STREAM_MESSAGE.to_string(),
-                    )))?;
+                    handler
+                        .on_chunk(Ok(StreamChunk::Error(
+                            STALLED_STREAM_MESSAGE.to_string(),
+                        )))
+                        .await?;
                     break;
                 }
             }
@@ -128,7 +136,7 @@ pub async fn run_stream_loop(
                 last_activity = std::time::Instant::now();
                 match chunk_result {
                     Some(result) => {
-                        match handler.on_chunk(result)? {
+                        match handler.on_chunk(result).await? {
                             ChunkAction::Continue => {}
                             ChunkAction::Break => break,
                         }
@@ -137,6 +145,13 @@ pub async fn run_stream_loop(
                 }
             }
         }
+    }
+
+    // A sub-agent that finished just as the stream ended still has events
+    // queued, and the loop stopped reading. Dropping them left the last line of
+    // its progress row on screen forever, so drain before ending the turn.
+    while let Ok(progress) = progress_rx.try_recv() {
+        handler.on_progress(progress);
     }
 
     handler.on_stream_ended();
@@ -197,7 +212,7 @@ mod tests {
             self.started = true;
         }
 
-        fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
             let chunk = chunk?;
             let is_done = matches!(chunk, StreamChunk::Done);
             let is_error = matches!(chunk, StreamChunk::Error(_));
@@ -272,5 +287,167 @@ mod tests {
 
         let _rx = install_progress_channel(&slot);
         assert!(slot.lock().is_some());
+    }
+    // -------------------------------------------------------------------
+    // Loop contract (AGE-191 / AGE-192)
+    //
+    // Both frontends now drive this loop, so its callback sequence is the
+    // shared half of the behaviour their own goldens pin. Recorded here, in
+    // chatty-core, with no frontend crate in the dependency graph.
+    // -------------------------------------------------------------------
+
+    /// Records the loop's calls, not a frontend's interpretation of them.
+    struct RecordingHandler {
+        calls: Vec<String>,
+    }
+
+    fn label(chunk: &StreamChunk) -> &'static str {
+        match chunk {
+            StreamChunk::Text(_) => "Text",
+            StreamChunk::ToolCallStarted { .. } => "ToolCallStarted",
+            StreamChunk::ToolCallInput { .. } => "ToolCallInput",
+            StreamChunk::ToolCallResult { .. } => "ToolCallResult",
+            StreamChunk::ToolCallError { .. } => "ToolCallError",
+            StreamChunk::ApprovalRequested { .. } => "ApprovalRequested",
+            StreamChunk::ApprovalResolved { .. } => "ApprovalResolved",
+            StreamChunk::ClarificationRequested { .. } => "ClarificationRequested",
+            StreamChunk::TokenUsage { .. } => "TokenUsage",
+            StreamChunk::Done => "Done",
+            StreamChunk::Error(_) => "Error",
+        }
+    }
+
+    impl StreamChunkHandler for RecordingHandler {
+        fn on_stream_started(&mut self) {
+            self.calls.push("on_stream_started".to_string());
+        }
+
+        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+            match chunk {
+                Ok(chunk) => {
+                    let name = label(&chunk);
+                    // Terminate on the same chunks both frontends terminate on,
+                    // so the recorded sequence reflects a real turn.
+                    let action = if matches!(chunk, StreamChunk::Done | StreamChunk::Error(_)) {
+                        ChunkAction::Break
+                    } else {
+                        ChunkAction::Continue
+                    };
+                    self.calls.push(format!(
+                        "on_chunk(Ok({name})) -> {}",
+                        match action {
+                            ChunkAction::Break => "Break",
+                            ChunkAction::Continue => "Continue",
+                        }
+                    ));
+                    Ok(action)
+                }
+                Err(e) => {
+                    self.calls
+                        .push(format!("on_chunk(Err({:?})) -> Break", e.to_string()));
+                    Ok(ChunkAction::Break)
+                }
+            }
+        }
+
+        fn on_progress(&mut self, progress: InvokeAgentProgress) {
+            let name = match progress {
+                InvokeAgentProgress::Started { .. } => "Started",
+                InvokeAgentProgress::Text(_) => "Text",
+                InvokeAgentProgress::Finished { .. } => "Finished",
+            };
+            self.calls.push(format!("on_progress({name})"));
+        }
+
+        fn on_cancelled(&mut self) {
+            self.calls.push("on_cancelled".to_string());
+        }
+
+        fn on_stream_ended(&mut self) {
+            self.calls.push("on_stream_ended".to_string());
+        }
+    }
+
+    async fn record_loop(scenario: crate::services::stream_fixtures::Scenario) -> Vec<String> {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        for progress in scenario.progress {
+            progress_tx.send(progress).expect("receiver is alive");
+        }
+        drop(progress_tx);
+
+        let mut stream =
+            crate::services::stream_fixtures::scripted_stream(scenario.items, cancel_flag.clone());
+        let mut handler = RecordingHandler { calls: Vec::new() };
+
+        let outcome =
+            run_stream_loop(&mut stream, &mut progress_rx, &cancel_flag, &mut handler).await;
+        handler.calls.push(match outcome {
+            Ok(()) => "=> loop returned Ok".to_string(),
+            Err(e) => format!("=> loop returned Err({:?})", e.to_string()),
+        });
+        handler.calls
+    }
+
+    #[tokio::test]
+    async fn loop_callback_sequence_matches_goldens() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/services/goldens/stream_loop");
+        for scenario in crate::services::stream_fixtures::scenarios()
+            .into_iter()
+            .chain([crate::services::stream_fixtures::clarification_scenario()])
+        {
+            let name = scenario.name;
+            let calls = record_loop(scenario).await;
+            crate::services::stream_fixtures::assert_golden(&dir, name, &calls);
+        }
+    }
+
+    /// The loop reads the stream until it is told to stop, so a sub-agent that
+    /// finished as the turn ended still has events queued. They used to be
+    /// dropped, leaving the desktop's progress row on a stale line.
+    #[tokio::test]
+    async fn trailing_progress_is_drained_before_the_stream_ends() {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+
+        let chunks: Vec<Result<StreamChunk>> = vec![Ok(StreamChunk::Done)];
+        let mut stream: ResponseStream = Box::pin(futures::stream::iter(chunks));
+
+        // Queued but never reached by the loop: Done breaks on the first chunk.
+        progress_tx
+            .send(InvokeAgentProgress::Finished {
+                success: true,
+                result: Some("done".into()),
+            })
+            .expect("receiver is alive");
+
+        let mut handler = RecordingHandler { calls: Vec::new() };
+        // Break on Done before the biased progress branch can run.
+        handler
+            .on_chunk(Ok(StreamChunk::Done))
+            .await
+            .expect("handler does not fail");
+        handler.calls.clear();
+
+        run_stream_loop(&mut stream, &mut progress_rx, &cancel_flag, &mut handler)
+            .await
+            .expect("loop completes");
+
+        let ended = handler
+            .calls
+            .iter()
+            .position(|c| c == "on_stream_ended")
+            .expect("the loop ends the stream");
+        let drained = handler
+            .calls
+            .iter()
+            .position(|c| c == "on_progress(Finished)")
+            .expect("the queued progress event is drained, not dropped");
+        assert!(
+            drained < ended,
+            "progress must be drained before the turn ends, got {:?}",
+            handler.calls
+        );
     }
 }
