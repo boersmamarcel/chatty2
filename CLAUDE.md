@@ -243,6 +243,16 @@ Alternative triggers:
 - **Manual release**: GitHub UI → Create Release → Release workflow runs standalone
 - **On `main`**: `/create-release patch` triggers `workflow_dispatch` directly
 
+**A merge only releases if the PR carried a release label.** The label is read
+from the merged pull request, so it must be on the PR *before* the merge —
+adding it afterwards does nothing, and neither does a plain merge of unlabeled
+work. When the gate rejects a merge, Prepare Release still shows a run: its
+conclusion is `skipped`, not `failure`. The gate also declines a PR whose head
+branch starts with `docs/` or that carries the `documentation` label, so
+docs-only work never cuts a version. To ship work that already landed
+unlabeled, merge any labeled follow-up PR — the changelog spans every commit
+since the last tag, so the earlier merge is picked up.
+
 ### Changelog Generation
 
 The Prepare Release workflow auto-generates release notes by parsing commits since the last tag:
