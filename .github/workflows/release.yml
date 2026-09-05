@@ -38,7 +38,8 @@ env:
   APP_NAME: chatty
 
 # Caching policy: restore-only. Release workflows must not write default-branch
-# caches (CodeQL cache-poisoning). Warm caches come from CI on main.
+# caches (CodeQL cache-poisoning). Warm caches come from CI on main
+# (ci.yml `warm-release-cache`, key from scripts/release-cache-key.sh).
 
 jobs:
   # Validate that the tag is immutable, on main, and matches Cargo.toml.
@@ -156,6 +157,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Key from scripts/release-cache-key.sh; written per platform by
+      # ci.yml's warm-release-cache job on main.
+      - name: Compute release cache key
+        id: cache_key
+        shell: bash
+        run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Restore cargo registry and build artifacts
         uses: actions/cache/restore@v4
         with:
@@ -163,7 +171,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ steps.cache_key.outputs.key }}
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
@@ -277,6 +285,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Key from scripts/release-cache-key.sh; written per platform by
+      # ci.yml's warm-release-cache job on main.
+      - name: Compute release cache key
+        id: cache_key
+        shell: bash
+        run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Restore cargo registry and build artifacts
         uses: actions/cache/restore@v4
         with:
@@ -284,7 +299,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ steps.cache_key.outputs.key }}
           restore-keys: |
             cargo-release-${{ runner.os }}-
 
@@ -374,6 +389,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Key from scripts/release-cache-key.sh; written per platform by
+      # ci.yml's warm-release-cache job on main.
+      - name: Compute release cache key
+        id: cache_key
+        shell: bash
+        run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Restore cargo registry and build artifacts
         uses: actions/cache/restore@v4
         with:
@@ -381,7 +403,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ steps.cache_key.outputs.key }}
           restore-keys: |
             cargo-release-${{ runner.os }}-
 

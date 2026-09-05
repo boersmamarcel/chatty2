@@ -50,10 +50,12 @@
 # Operations
 
 - [Release process](./dev/architecture/RELEASE_PROCESS.md)
+- [Build disk usage](./dev/architecture/build-disk-usage.md)
 - [Stale-doc policy](./dev/architecture/stale-doc-policy.md)
 - [Monty sandbox](./dev/architecture/monty-sandbox.md)
 - [Debug UI](./dev/architecture/debug_ui.md)
 - [Refactor follow-ups](./dev/architecture/refactor-followups.md)
+- [Chatty bugs plan](./dev/architecture/chatty-bugs-plan.md)
 
 # Crates
 
