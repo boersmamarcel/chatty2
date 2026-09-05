@@ -862,7 +862,7 @@ impl ChatEngine {
                     last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
                 }
-                self.finalize_partial_response();
+                self.finalize_partial_response(false);
                 self.reset_stream_state();
                 EngineAction::Redraw
             }
@@ -878,7 +878,7 @@ impl ChatEngine {
                     last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
-                self.finalize_partial_response();
+                self.finalize_partial_response(true);
                 self.reset_stream_state();
                 EngineAction::Redraw
             }
@@ -1134,7 +1134,7 @@ impl ChatEngine {
             last.is_streaming = false;
         }
 
-        self.finalize_partial_response();
+        self.finalize_partial_response(false);
         self.reset_stream_state();
 
         // Generate title after first exchange
@@ -1157,10 +1157,24 @@ impl ChatEngine {
         }
     }
 
-    fn finalize_partial_response(&mut self) {
+    /// Commit the streamed response to conversation history, or roll back an
+    /// empty cancelled turn.
+    ///
+    /// A turn that produced no text has nothing to persist: committing it
+    /// would write an empty assistant message that goes back to the provider
+    /// on the next request (AGE-222). On cancellation specifically, the user
+    /// message that triggered the empty turn is removed too, so a stopped
+    /// stream with no output leaves history exactly as it was before the send.
+    fn finalize_partial_response(&mut self, is_cancel: bool) {
         if let Some(conv) = self.conversation.as_mut() {
             let response = conv.streaming_message().cloned().unwrap_or_default();
-            conv.finalize_response(response, vec![], None);
+            if response.is_empty() {
+                if is_cancel {
+                    conv.remove_last_user_message();
+                }
+            } else {
+                conv.finalize_response(response, vec![], None);
+            }
             conv.set_streaming_message(None);
         }
     }
@@ -1352,5 +1366,123 @@ mod tests {
         // The new message is still committed to the conversation itself.
         assert_eq!(conversation.messages().len(), before_len + 1);
         assert_eq!(conversation.messages().last(), Some(&new_user_message));
+    }
+
+    /// A `ChatEngine` wrapping a real (network-free) `Conversation`, for tests
+    /// that exercise conversation-history side effects of engine methods.
+    async fn test_engine() -> ChatEngine {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new(
+                    "Ollama".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                ),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: ModuleSettingsModel::default(),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+            },
+            event_tx,
+        );
+        engine.conversation = Some(test_conversation().await);
+        engine
+    }
+
+    /// AGE-222: a cancelled turn that produced no text must leave history
+    /// exactly as it was before the send — the user message that triggered it
+    /// is rolled back, not left dangling with no reply.
+    #[tokio::test]
+    async fn cancelled_turn_with_no_text_rolls_back_the_user_message() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        let before_send = conv.messages();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some(String::new()));
+
+        engine.finalize_partial_response(true);
+
+        assert_eq!(engine.conversation.unwrap().messages(), before_send);
+    }
+
+    /// AGE-222: an errored turn that produced some text still persists that
+    /// text as the assistant's reply.
+    #[tokio::test]
+    async fn errored_turn_with_text_persists_the_partial_response() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some("partial answer".to_string()));
+
+        engine.finalize_partial_response(false);
+
+        let messages = engine.conversation.unwrap().messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages.last(),
+            Some(&rig_core::completion::Message::Assistant {
+                id: None,
+                content: vec![rig_core::completion::message::AssistantContent::text(
+                    "partial answer"
+                )],
+            })
+        );
+    }
+
+    /// AGE-222: a normal completion with text is unaffected by the empty-turn
+    /// guard — behaviour is unchanged from before the fix.
+    #[tokio::test]
+    async fn normal_completion_with_text_is_unchanged() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some("full answer".to_string()));
+
+        engine.finalize_partial_response(false);
+
+        let messages = engine.conversation.unwrap().messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages.last(),
+            Some(&rig_core::completion::Message::Assistant {
+                id: None,
+                content: vec![rig_core::completion::message::AssistantContent::text(
+                    "full answer"
+                )],
+            })
+        );
     }
 }
