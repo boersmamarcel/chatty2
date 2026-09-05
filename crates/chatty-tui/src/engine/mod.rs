@@ -662,14 +662,7 @@ impl ChatEngine {
             message.clone(),
         ));
 
-        // Build user content
-        let contents = vec![UserContent::text(message.clone())];
-
-        // Add user message to conversation history
-        let user_msg = rig_core::completion::Message::User {
-            content: vec![UserContent::text(message)],
-        };
-        conversation.add_user_message_with_attachments(user_msg, vec![]);
+        let (raw_history, contents) = prepare_user_turn(conversation, message);
 
         // Start assistant placeholder
         self.messages
@@ -696,7 +689,6 @@ impl ChatEngine {
         self.cancel_flag = Some(cancel_flag.clone());
 
         let agent = conversation.agent().clone();
-        let raw_history = conversation.messages();
         let invoke_agent_progress_slot = conversation.invoke_agent_progress_slot();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
@@ -1227,6 +1219,27 @@ fn streaming_assistant_index(messages: &[DisplayMessage], after: Option<usize>) 
     })
 }
 
+/// Snapshot the conversation history for the outgoing request, then commit the
+/// new user message to the conversation.
+///
+/// The returned `history` is captured BEFORE the message is added: rig's
+/// `stream_prompt` appends `contents` after the caller-supplied `history` with
+/// no de-duplication, so sending the same text in both would carry the user's
+/// message twice on every request (AGE-221).
+fn prepare_user_turn(
+    conversation: &mut Conversation,
+    message: String,
+) -> (Vec<rig_core::completion::Message>, Vec<UserContent>) {
+    let user_content = UserContent::text(message);
+    let contents = vec![user_content.clone()];
+    let raw_history = conversation.messages();
+    let user_msg = rig_core::completion::Message::User {
+        content: vec![user_content],
+    };
+    conversation.add_user_message_with_attachments(user_msg, vec![]);
+    (raw_history, contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,5 +1271,86 @@ mod tests {
             "done".to_string(),
         )];
         assert_eq!(streaming_assistant_index(&messages, None), None);
+    }
+
+    /// Builds a real `Conversation` with no tools enabled. Ollama client
+    /// construction is purely local (no network access), so this is safe to
+    /// run in unit tests.
+    async fn test_conversation() -> Conversation {
+        use chatty_core::settings::models::providers_store::ProviderType;
+
+        // Agent construction unconditionally resolves the MCP repository (for
+        // the always-on list_mcp tool), which panics unless the process-global
+        // registry has been set up. `init_repositories()` only resolves the
+        // config directory path here — it does not touch disk — and repeat
+        // calls are a harmless no-op (`OnceLock::set` after the first).
+        let _ = chatty_core::init_repositories();
+
+        let model_config = ModelConfig::new(
+            "m1".to_string(),
+            "Test Model".to_string(),
+            ProviderType::Ollama,
+            "llama3.2".to_string(),
+        );
+        let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        Conversation::new(
+            "c1".to_string(),
+            "Test".to_string(),
+            &model_config,
+            &provider_config,
+            AgentBuildContext {
+                mcp_tools: None,
+                exec_settings: None,
+                pending_approvals: None,
+                pending_clarifications: None,
+                pending_write_approvals: None,
+                pending_artifacts: None,
+                shell_session: None,
+                user_secrets: Vec::new(),
+                theme_colors: None,
+                memory_service: None,
+                skill_service: None,
+                search_settings: None,
+                embedding_service: None,
+                allow_sub_agent: false,
+                module_agents: Vec::new(),
+                gateway_port: None,
+                remote_agents: Vec::new(),
+                available_model_ids: Vec::new(),
+                conversation_id: None,
+            },
+        )
+        .await
+        .expect("conversation should build without network access")
+    }
+
+    #[tokio::test]
+    async fn prepare_user_turn_snapshots_history_before_the_new_message() {
+        let mut conversation = test_conversation().await;
+
+        // Seed one prior exchange so the "before" history is non-trivial.
+        conversation.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conversation.finalize_response("hello!".to_string(), vec![], None);
+        let before_len = conversation.messages().len();
+        assert_eq!(before_len, 2);
+
+        let (history, contents) = prepare_user_turn(&mut conversation, "what's next?".to_string());
+
+        // The history handed to run_stream must have the length the
+        // conversation had BEFORE this send...
+        assert_eq!(history.len(), before_len);
+        // ...and must not already end with the new prompt (AGE-221: rig
+        // appends `contents` after `history` with no de-duplication).
+        let new_user_message = rig_core::completion::Message::User { content: contents };
+        assert_ne!(history.last(), Some(&new_user_message));
+
+        // The new message is still committed to the conversation itself.
+        assert_eq!(conversation.messages().len(), before_len + 1);
+        assert_eq!(conversation.messages().last(), Some(&new_user_message));
     }
 }
