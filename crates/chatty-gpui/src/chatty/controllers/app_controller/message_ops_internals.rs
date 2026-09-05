@@ -18,6 +18,10 @@ pub(super) struct LlmStreamParams {
     pub(super) agent: AgentClient,
     pub(super) history: Vec<rig_core::completion::Message>,
     pub(super) user_contents: Vec<rig_core::message::UserContent>,
+    /// Additional content sent to the LLM alongside `user_contents` but never
+    /// persisted as part of the user message — e.g. the previous turn's
+    /// assistant-generated attachments (finding F2, AGE-216).
+    pub(super) extra_llm_contents: Vec<rig_core::message::UserContent>,
     pub(super) add_user_message_to_model: bool,
     /// True when a human turn starts this stream. Injected protocol follow-ups
     /// pass `false` so they keep the todo state of the turn they belong to.
@@ -406,6 +410,18 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
 #[path = "stream_handler_characterization.rs"]
 mod characterization;
 
+/// Combine the contents that will be persisted as the user message with any
+/// additional content that must reach the LLM but never be persisted — e.g.
+/// the previous turn's assistant-generated attachments (finding F2, AGE-216).
+fn build_llm_contents(
+    user_contents: &[rig_core::message::UserContent],
+    extra_llm_contents: Vec<rig_core::message::UserContent>,
+) -> Vec<rig_core::message::UserContent> {
+    let mut combined = user_contents.to_vec();
+    combined.extend(extra_llm_contents);
+    combined
+}
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:
@@ -426,6 +442,7 @@ pub(super) async fn run_llm_stream(
         agent,
         history,
         user_contents,
+        extra_llm_contents,
         add_user_message_to_model,
         reset_agent_task,
         attachment_paths,
@@ -567,7 +584,10 @@ pub(super) async fn run_llm_stream(
     if reset_agent_task {
         agent_task_controller.reset();
     }
-    let llm_user_contents = user_contents.clone();
+    // `extra_llm_contents` (e.g. the previous turn's assistant-generated
+    // attachments) rides along to the LLM but must never reach the persisted
+    // user message built below (finding F2, AGE-216).
+    let llm_user_contents = build_llm_contents(&user_contents, extra_llm_contents);
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
     let (mut stream, _user_message) = stream_prompt(
         &agent,
@@ -741,8 +761,13 @@ fn is_agent_todo_tool(tool_name: &str) -> bool {
     )
 }
 
-/// Select attachment paths from the most recent assistant message that the
-/// current model can handle. Returns paths filtered by capability.
+/// Select attachment paths from the immediately preceding assistant message
+/// (the previous turn), if any, that the current model can handle. Returns
+/// paths filtered by capability.
+///
+/// Stops at the most recent assistant entry regardless of whether it has
+/// attachments — walking further back would re-attach an artifact from an
+/// older turn on every later send (finding F2, AGE-216).
 ///
 /// Used to include tool-generated images/PDFs in follow-up prompts so the
 /// LLM can reference previously displayed files.
@@ -754,32 +779,31 @@ pub(super) fn select_recent_assistant_attachments(
     if !supports_images && !supports_pdf {
         return Vec::new();
     }
-    for entry in entries.iter().rev() {
-        if matches!(
+    let Some(last_assistant_entry) = entries.iter().rev().find(|entry| {
+        matches!(
             entry.message,
             rig_core::completion::Message::Assistant { .. }
-        ) && !entry.attachment_paths.is_empty()
-        {
-            return entry
-                .attachment_paths
-                .iter()
-                .filter(|path| {
-                    let is_pdf = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.eq_ignore_ascii_case("pdf"))
-                        .unwrap_or(false);
-                    if is_pdf {
-                        supports_pdf
-                    } else {
-                        supports_images
-                    }
-                })
-                .cloned()
-                .collect();
-        }
-    }
-    Vec::new()
+        )
+    }) else {
+        return Vec::new();
+    };
+    last_assistant_entry
+        .attachment_paths
+        .iter()
+        .filter(|path| {
+            let is_pdf = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("pdf"))
+                .unwrap_or(false);
+            if is_pdf {
+                supports_pdf
+            } else {
+                supports_images
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 /// Convert a file attachment to a rig-core UserContent
@@ -956,8 +980,11 @@ mod tests {
     }
 
     #[test]
-    fn select_attachments_skips_assistant_without_attachments() {
-        // Most recent assistant has no attachments, but an earlier one does
+    fn select_attachments_does_not_walk_back_past_the_last_assistant_turn() {
+        // The immediately preceding assistant message has no attachments, so
+        // nothing is attached — even though an earlier turn did produce one.
+        // Walking further back would re-attach a stale artifact on every
+        // later send (finding F2, AGE-216).
         let entries = vec![
             entry(user_msg("first"), vec![]),
             entry(
@@ -968,8 +995,7 @@ mod tests {
             entry(assistant_msg("no chart"), vec![]),
         ];
         let result = select_recent_assistant_attachments(&entries, true, true);
-        // Should skip the empty one and find the older one
-        assert_eq!(result, vec![PathBuf::from("/tmp/old.png")]);
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -996,6 +1022,46 @@ mod tests {
         ];
         let result = select_recent_assistant_attachments(&entries, false, true);
         assert_eq!(result, vec![PathBuf::from("/tmp/report.PDF")]);
+    }
+
+    #[test]
+    fn llm_contents_include_extra_but_leave_persisted_contents_untouched() {
+        // A user-uploaded image, as it would be built for persistence.
+        let user_contents = vec![
+            UserContent::text("look at this"),
+            UserContent::image_base64(
+                "user-image-data".to_string(),
+                Some(rig_core::completion::message::ImageMediaType::PNG),
+                None,
+            ),
+        ];
+        // The previous turn's assistant-generated attachment, LLM-only.
+        let extra_llm_contents = vec![UserContent::image_base64(
+            "assistant-chart-data".to_string(),
+            Some(rig_core::completion::message::ImageMediaType::PNG),
+            None,
+        )];
+
+        let llm_contents = build_llm_contents(&user_contents, extra_llm_contents.clone());
+
+        // The LLM sees both the user's upload and the assistant artifact.
+        assert_eq!(
+            llm_contents.len(),
+            user_contents.len() + extra_llm_contents.len()
+        );
+        assert!(llm_contents.iter().any(|c| matches!(
+            c,
+            UserContent::Image(img) if matches!(&img.data, rig_core::completion::message::DocumentSourceKind::Base64(b) if b == "assistant-chart-data")
+        )));
+
+        // `user_contents` — what gets persisted as the user message — is
+        // untouched: no injected artifact content, and the user's own
+        // upload is still there exactly as before (finding F2, AGE-216).
+        assert_eq!(user_contents.len(), 2);
+        assert!(!user_contents.iter().any(|c| matches!(
+            c,
+            UserContent::Image(img) if matches!(&img.data, rig_core::completion::message::DocumentSourceKind::Base64(b) if b == "assistant-chart-data")
+        )));
     }
 }
 

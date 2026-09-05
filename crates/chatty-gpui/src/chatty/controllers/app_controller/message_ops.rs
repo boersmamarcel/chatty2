@@ -314,16 +314,20 @@ impl ChattyApp {
                     }
                 }
 
-                // Include the most recent assistant-generated attachments so the LLM
-                // can reference displayed images/PDFs in follow-up questions.
+                // Include the most recent assistant-generated attachments (from the
+                // immediately preceding turn only) so the LLM can reference displayed
+                // images/PDFs in follow-up questions. These are sent to the LLM but kept
+                // out of the persisted user message — otherwise every later turn would
+                // carry and re-persist another copy of the same artifact (finding F2).
                 let assistant_att_paths = select_recent_assistant_attachments(
                     &conv_entries,
                     provider_supports_images,
                     provider_supports_pdf,
                 );
+                let mut extra_llm_contents = Vec::with_capacity(assistant_att_paths.len());
                 for path in &assistant_att_paths {
                     match attachment_to_user_content(path).await {
-                        Ok(content) => contents.push(content),
+                        Ok(content) => extra_llm_contents.push(content),
                         Err(e) => warn!(
                             ?path,
                             error = ?e,
@@ -339,6 +343,7 @@ impl ChattyApp {
                         agent,
                         history,
                         user_contents: contents,
+                        extra_llm_contents,
                         add_user_message_to_model: true,
                         reset_agent_task: show_in_transcript,
                         attachment_paths: attachments,
@@ -1399,6 +1404,7 @@ impl ChattyApp {
                     agent,
                     history: history_context,
                     user_contents,
+                    extra_llm_contents: vec![],
                     add_user_message_to_model: false,
                     reset_agent_task: true,
                     attachment_paths: vec![],
