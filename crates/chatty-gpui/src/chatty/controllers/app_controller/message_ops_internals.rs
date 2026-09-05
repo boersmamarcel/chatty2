@@ -569,9 +569,9 @@ pub(super) async fn run_llm_stream(
     }
     let llm_user_contents = user_contents.clone();
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
-    let (mut stream, _user_message) = stream_prompt(
+    let mut stream = stream_prompt(
         &agent,
-        &shaped_history,
+        shaped_history,
         llm_user_contents,
         Some(approval_rx),
         Some(resolution_rx),

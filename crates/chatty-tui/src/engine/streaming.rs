@@ -194,9 +194,9 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
     if reset_agent_task {
         task_controller.reset();
     }
-    let (mut stream, _user_message) = stream_prompt(
+    let mut stream = stream_prompt(
         &agent,
-        &history,
+        history,
         contents,
         Some(approval_rx),
         Some(resolution_rx),

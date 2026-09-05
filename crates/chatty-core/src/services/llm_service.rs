@@ -268,32 +268,32 @@ fn map_stream_result(
 ///
 /// # Arguments
 /// * `agent` - The agent client to use
-/// * `history` - Previous conversation messages
+/// * `history` - Previous conversation messages, moved into rig's `.history(..)`
 /// * `contents` - The user content to send
 /// * `approval_rx` - Optional receiver for approval notifications
 /// * `resolution_rx` - Optional receiver for approval resolution notifications
 /// * `clarification_rx` - Optional receiver for clarifying-question notifications
 ///
 /// # Returns
-/// A tuple of (response_stream, user_message) where the stream contains the agent's response
+/// The response stream. The caller already owns the `Vec<Message>` it built
+/// for `history` and the `UserContent` it built for `contents`, so this no
+/// longer hands back the `Message` it assembled from the latter.
 pub async fn stream_prompt(
     agent: &AgentClient,
-    history: &[Message],
+    history: Vec<Message>,
     contents: Vec<UserContent>,
     approval_rx: Option<mpsc::UnboundedReceiver<ApprovalNotification>>,
     resolution_rx: Option<mpsc::UnboundedReceiver<ApprovalResolution>>,
     clarification_rx: Option<mpsc::UnboundedReceiver<ClarificationNotification>>,
     max_agent_turns: usize,
-) -> Result<(ResponseStream, Message)> {
+) -> Result<ResponseStream> {
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
 
-    let history_snapshot = history.to_vec();
-
     let mut agent_stream = agent
         .agent
-        .stream_prompt(user_message.clone())
-        .history(history_snapshot)
+        .stream_prompt(user_message)
+        .history(history)
         .max_turns(max_agent_turns)
         .await;
 
@@ -369,7 +369,7 @@ pub async fn stream_prompt(
         }
     });
 
-    Ok((stream, user_message))
+    Ok(stream)
 }
 
 #[cfg(test)]
