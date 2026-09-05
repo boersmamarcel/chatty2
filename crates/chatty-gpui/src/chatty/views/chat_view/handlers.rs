@@ -688,8 +688,9 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Handle approval decision from floating bar
-    pub(super) fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
+    /// Handle approval decision from the floating bar, the plan strip, or the
+    /// approve/deny keyboard shortcuts. A no-op when nothing is pending.
+    pub fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
         if let Some(ref pending) = self.pending_approval {
             let id = pending.id.clone();
 
