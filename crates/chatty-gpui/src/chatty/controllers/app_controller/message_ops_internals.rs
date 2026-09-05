@@ -402,6 +402,10 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
     }
 }
 
+#[cfg(test)]
+#[path = "stream_handler_characterization.rs"]
+mod characterization;
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:

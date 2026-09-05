@@ -1,0 +1,6 @@
+StreamStarted
+TextChunk("Hello")
+TextChunk(", world")
+StreamEnded(status=Completed, usage=None, api_turns=1)
+=> loop returned Ok
+=> no follow-up

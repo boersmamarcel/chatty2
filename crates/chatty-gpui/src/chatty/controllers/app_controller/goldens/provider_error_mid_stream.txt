@@ -1,0 +1,5 @@
+StreamStarted
+TextChunk("Partial ")
+StreamEnded(status=Error("connection reset by peer"), usage=None, api_turns=1)
+=> loop returned Ok
+=> no follow-up

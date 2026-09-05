@@ -1,0 +1,8 @@
+StreamStarted
+ToolCallStarted(id="call-1", "run_shell")
+ApprovalRequested(id="approval-1", "rm -rf build", sandboxed=false)
+ApprovalResolved(id="approval-1", approved=false)
+ToolCallError(id="call-1", "Error: run_shell: the user denied this command")
+StreamEnded(status=Completed, usage=None, api_turns=2)
+=> loop returned Ok
+=> no follow-up
