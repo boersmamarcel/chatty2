@@ -451,12 +451,14 @@ impl StreamManager {
                     state.calls.push(call);
                 }
             }
-            StreamChunk::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => {
+            StreamChunk::TurnUsage(aggregate) => {
+                let ApiCallUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    ..
+                } = aggregate;
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     // The per-request records are the source of truth; the
                     // provider's aggregate only stands in when none arrived.

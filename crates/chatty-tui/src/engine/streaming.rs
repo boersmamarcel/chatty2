@@ -110,17 +110,12 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
             // Per-request records are logged where they are produced; the
             // terminal shows the exchange aggregate only.
             StreamChunk::ApiCallUsage(_) => Ok(ChunkAction::Continue),
-            StreamChunk::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => {
+            StreamChunk::TurnUsage(usage) => {
                 let _ = self.event_tx.send(AppEvent::TokenUsage {
-                    input_tokens,
-                    output_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
                 });
                 Ok(ChunkAction::Continue)
             }
@@ -199,9 +194,9 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
     if reset_agent_task {
         task_controller.reset();
     }
-    let (mut stream, _user_message) = stream_prompt(
+    let mut stream = stream_prompt(
         &agent,
-        &history,
+        history,
         contents,
         Some(approval_rx),
         Some(resolution_rx),
