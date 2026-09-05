@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use crate::factories::AgentClient;
 use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
+use crate::models::token_usage::ApiCallUsage;
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
@@ -44,12 +45,78 @@ pub enum StreamChunk {
         id: String,
         questions: Vec<ClarifyingQuestion>,
     },
+    /// Usage for one completed provider request within the turn. Emitted once
+    /// per request, so a turn with two tool calls yields three of these.
+    ApiCallUsage(ApiCallUsage),
+    /// Usage aggregated over every request in the turn, from the provider's
+    /// final response. Arrives after the per-call chunks.
     TokenUsage {
         input_tokens: u32,
         output_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
     },
     Done,
     Error(String),
+}
+
+/// How a provider reports cached prompt tokens relative to its input count.
+///
+/// Anthropic's native API reports `input_tokens` without cache reads and
+/// writes; OpenAI-compatible usage (OpenRouter, Azure, Ollama, …) reports
+/// `cached_tokens` as a subset of `prompt_tokens`. rig forwards each
+/// provider's convention unchanged, so chatty normalises once here to
+/// "input = uncached". Every provider chatty talks to today speaks the
+/// OpenAI-compatible shape; the other variant exists so a native Anthropic
+/// route can't silently double-count when one is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageSemantics {
+    /// `input_tokens` already excludes cached tokens (Anthropic native).
+    InputExcludesCache,
+    /// `input_tokens` includes cached tokens (OpenAI-compatible).
+    InputIncludesCache,
+}
+
+/// Convert rig's per-provider usage into chatty's normalised per-call record.
+///
+/// `turn` is one-based; the aggregate built from a final response passes 0.
+pub fn normalize_usage(
+    semantics: UsageSemantics,
+    turn: u32,
+    usage: &rig_core::completion::Usage,
+) -> ApiCallUsage {
+    let cache_read = usage.cached_input_tokens;
+    let cache_write = usage.cache_creation_input_tokens;
+    let input = match semantics {
+        UsageSemantics::InputExcludesCache => usage.input_tokens,
+        UsageSemantics::InputIncludesCache => usage
+            .input_tokens
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_write),
+    };
+    let clamp = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+    ApiCallUsage {
+        turn,
+        input_tokens: clamp(input),
+        cache_read_tokens: clamp(cache_read),
+        cache_write_tokens: clamp(cache_write),
+        output_tokens: clamp(usage.output_tokens),
+    }
+}
+
+/// Log one completed provider request's usage. This is the diagnostic for
+/// prompt caching: a hit rate that stays low on the second request onwards
+/// means the prompt prefix is changing between requests.
+fn log_call_usage(call: &ApiCallUsage) {
+    tracing::info!(
+        turn = call.turn,
+        input = call.input_tokens,
+        cache_read = call.cache_read_tokens,
+        cache_write = call.cache_write_tokens,
+        output = call.output_tokens,
+        hit_rate = call.cache_hit_rate().map(|r| (r * 100.0).round() as u32),
+        "LLM completion call usage"
+    );
 }
 
 /// Type alias for response streams
@@ -94,7 +161,7 @@ fn streamed_tool_result_to_text(tool_result: &rig_core::completion::message::Too
 
 /// Helper macro to process agent streams
 macro_rules! process_agent_stream {
-    ($stream:expr) => {
+    ($stream:expr, $semantics:expr) => {
         Box::pin(async_stream::stream! {
             while let Some(item) = $stream.next().await {
                 match item {
@@ -171,14 +238,19 @@ macro_rules! process_agent_stream {
                             });
                         }
                     }
+                    Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                        let call_usage = normalize_usage($semantics, call.call_index as u32 + 1, &call.usage);
+                        log_call_usage(&call_usage);
+                        yield Ok(StreamChunk::ApiCallUsage(call_usage));
+                    }
                     Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
                         // Extract token usage from the final response
-                        let usage = final_response.usage();
-                        let input_tokens = usage.input_tokens as u32;
-                        let output_tokens = usage.output_tokens as u32;
+                        let usage = normalize_usage($semantics, 0, &final_response.usage());
                         yield Ok(StreamChunk::TokenUsage {
-                            input_tokens,
-                            output_tokens,
+                            input_tokens: usage.input_tokens,
+                            output_tokens: usage.output_tokens,
+                            cache_read_tokens: usage.cache_read_tokens,
+                            cache_write_tokens: usage.cache_write_tokens,
                         });
                     }
                     Err(e) => {
@@ -195,7 +267,7 @@ macro_rules! process_agent_stream {
 
 /// Helper macro to process agent streams with approval notifications
 macro_rules! process_agent_stream_with_approvals {
-    ($stream:expr, $approval_rx:expr, $resolution_rx:expr, $clarification_rx:expr) => {
+    ($stream:expr, $approval_rx:expr, $resolution_rx:expr, $clarification_rx:expr, $semantics:expr) => {
         Box::pin(async_stream::stream! {
             let mut agent_stream = $stream;
             let mut approval_rx = $approval_rx;
@@ -280,11 +352,18 @@ macro_rules! process_agent_stream_with_approvals {
                                     });
                                 }
                             }
+                            Some(Ok(MultiTurnStreamItem::CompletionCall(call))) => {
+                                let call_usage = normalize_usage($semantics, call.call_index as u32 + 1, &call.usage);
+                                log_call_usage(&call_usage);
+                                yield Ok(StreamChunk::ApiCallUsage(call_usage));
+                            }
                             Some(Ok(MultiTurnStreamItem::FinalResponse(final_response))) => {
-                                let usage = final_response.usage();
+                                let usage = normalize_usage($semantics, 0, &final_response.usage());
                                 yield Ok(StreamChunk::TokenUsage {
-                                    input_tokens: usage.input_tokens as u32,
-                                    output_tokens: usage.output_tokens as u32,
+                                    input_tokens: usage.input_tokens,
+                                    output_tokens: usage.output_tokens,
+                                    cache_read_tokens: usage.cache_read_tokens,
+                                    cache_write_tokens: usage.cache_write_tokens,
                                 });
                             }
                             Some(Err(e)) => {
@@ -370,6 +449,8 @@ pub async fn stream_prompt(
     max_agent_turns: usize,
 ) -> Result<(ResponseStream, Message)> {
     let user_message = Message::User { content: contents };
+    // OpenRouter, Azure and Ollama all report OpenAI-compatible usage.
+    let semantics = UsageSemantics::InputIncludesCache;
 
     let history_snapshot = history.to_vec();
 
@@ -380,17 +461,22 @@ pub async fn stream_prompt(
         .max_turns(max_agent_turns)
         .await;
 
-    let stream: ResponseStream = if let (Some(approval_rx), Some(resolution_rx)) =
-        (approval_rx, resolution_rx)
-    {
-        // A frontend that wires approvals wires clarifications too. If it
-        // did not, the sender is dropped immediately and `recv()` yields
-        // `None`, which disables that `select!` arm.
-        let clarification_rx = clarification_rx.unwrap_or_else(|| mpsc::unbounded_channel().1);
-        process_agent_stream_with_approvals!(stream, approval_rx, resolution_rx, clarification_rx)
-    } else {
-        process_agent_stream!(stream)
-    };
+    let stream: ResponseStream =
+        if let (Some(approval_rx), Some(resolution_rx)) = (approval_rx, resolution_rx) {
+            // A frontend that wires approvals wires clarifications too. If it
+            // did not, the sender is dropped immediately and `recv()` yields
+            // `None`, which disables that `select!` arm.
+            let clarification_rx = clarification_rx.unwrap_or_else(|| mpsc::unbounded_channel().1);
+            process_agent_stream_with_approvals!(
+                stream,
+                approval_rx,
+                resolution_rx,
+                clarification_rx,
+                semantics
+            )
+        } else {
+            process_agent_stream!(stream, semantics)
+        };
 
     Ok((stream, user_message))
 }
@@ -399,7 +485,48 @@ pub async fn stream_prompt(
 mod tests {
     use rig_core::completion::message::{ToolCallId, ToolResult, ToolResultContent};
 
-    use super::{streamed_tool_result_to_text, tool_result_looks_like_error};
+    use super::{
+        UsageSemantics, normalize_usage, streamed_tool_result_to_text, tool_result_looks_like_error,
+    };
+
+    /// Anthropic reports `input_tokens` without the cached share; OpenAI-style
+    /// usage reports it inside `prompt_tokens`. The same activity must yield
+    /// the same normalised record either way, or the hit rate would mean
+    /// something different per provider.
+    #[test]
+    fn usage_normalisation_agrees_across_provider_conventions() {
+        let mut anthropic = rig_core::completion::Usage::new();
+        anthropic.input_tokens = 200;
+        anthropic.cached_input_tokens = 9_000;
+        anthropic.cache_creation_input_tokens = 800;
+        anthropic.output_tokens = 30;
+
+        let mut openai_style = rig_core::completion::Usage::new();
+        openai_style.input_tokens = 200 + 9_000 + 800;
+        openai_style.cached_input_tokens = 9_000;
+        openai_style.cache_creation_input_tokens = 800;
+        openai_style.output_tokens = 30;
+
+        let a = normalize_usage(UsageSemantics::InputExcludesCache, 2, &anthropic);
+        let o = normalize_usage(UsageSemantics::InputIncludesCache, 2, &openai_style);
+        assert_eq!(a, o);
+        assert_eq!(a.input_tokens, 200);
+        assert_eq!(a.cache_read_tokens, 9_000);
+        assert_eq!(a.cache_write_tokens, 800);
+        assert_eq!(a.prompt_tokens(), 10_000);
+        assert_eq!(a.cache_hit_rate(), Some(0.9));
+        assert_eq!(a.turn, 2);
+    }
+
+    #[test]
+    fn usage_normalisation_never_underflows_on_inconsistent_counts() {
+        let mut odd = rig_core::completion::Usage::new();
+        odd.input_tokens = 10;
+        odd.cached_input_tokens = 50;
+        let n = normalize_usage(UsageSemantics::InputIncludesCache, 1, &odd);
+        assert_eq!(n.input_tokens, 0);
+        assert_eq!(n.cache_read_tokens, 50);
+    }
 
     #[test]
     fn tool_result_looks_like_error_detects_rig_redacted_failures() {

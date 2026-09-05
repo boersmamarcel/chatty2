@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::models::clarification_store::ClarifyingQuestion;
 use crate::models::message_types::ToolSource;
+use crate::models::token_usage::ApiCallUsage;
 use crate::services::llm_service::{ResponseStream, StreamChunk};
 use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
@@ -249,15 +250,25 @@ pub fn scenarios() -> Vec<Scenario> {
             ],
         },
         // 8. Usage arriving before Done, which is where the cost figures and the
-        //    trace attached to the finished turn come from.
+        //    trace attached to the finished turn come from. One per-call record
+        //    precedes the aggregate, as rig emits them.
         Scenario {
             name: "token_usage_on_done",
             progress: Vec::new(),
             items: vec![
                 ScriptedItem::Chunk(StreamChunk::Text("Answer.".into())),
-                ScriptedItem::Chunk(StreamChunk::TokenUsage {
-                    input_tokens: 1234,
+                ScriptedItem::Chunk(StreamChunk::ApiCallUsage(ApiCallUsage {
+                    turn: 1,
+                    input_tokens: 234,
+                    cache_read_tokens: 1000,
+                    cache_write_tokens: 0,
                     output_tokens: 56,
+                })),
+                ScriptedItem::Chunk(StreamChunk::TokenUsage {
+                    input_tokens: 234,
+                    output_tokens: 56,
+                    cache_read_tokens: 1000,
+                    cache_write_tokens: 0,
                 }),
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],

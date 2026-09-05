@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rmcp::service::ServiceExt;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -646,15 +646,21 @@ impl McpConnection {
 /// Global service for managing MCP server connections
 #[derive(Clone)]
 pub struct McpService {
-    /// Active connections keyed by server name
-    connections: Arc<RwLock<HashMap<String, McpConnection>>>,
+    /// Active connections keyed by server name.
+    ///
+    /// A `BTreeMap` so every enumeration (tool gathering, disconnect) is in
+    /// server-name order. With a `HashMap` the tool-definition block sent to
+    /// the model was ordered by the process's random hasher seed, so it
+    /// differed across restarts and invalidated the provider's prompt cache
+    /// on every launch (AGE-206).
+    connections: Arc<RwLock<BTreeMap<String, McpConnection>>>,
 }
 
 impl McpService {
     /// Create a new MCP service
     pub fn new() -> Self {
         Self {
-            connections: Arc::new(RwLock::new(HashMap::new())),
+            connections: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 

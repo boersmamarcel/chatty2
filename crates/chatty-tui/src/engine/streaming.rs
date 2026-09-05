@@ -107,13 +107,20 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                     .send(AppEvent::ClarificationRequested { id, questions });
                 Ok(ChunkAction::Continue)
             }
+            // Per-request records are logged where they are produced; the
+            // terminal shows the exchange aggregate only.
+            StreamChunk::ApiCallUsage(_) => Ok(ChunkAction::Continue),
             StreamChunk::TokenUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
                 let _ = self.event_tx.send(AppEvent::TokenUsage {
                     input_tokens,
                     output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
                 });
                 Ok(ChunkAction::Continue)
             }

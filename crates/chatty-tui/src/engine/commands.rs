@@ -77,6 +77,8 @@ impl ChatEngine {
         self.title = "New Chat".to_string();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
+        self.total_cache_read_tokens = 0;
+        self.total_cache_write_tokens = 0;
         self.pin_to_bottom();
         self.pending_approval = None;
         self.pending_clarification = None;
@@ -94,6 +96,14 @@ impl ChatEngine {
             .total_input_tokens
             .saturating_add(self.total_output_tokens);
         let workspace = self.current_working_directory();
+        let cache_line = if self.total_cache_read_tokens > 0 || self.total_cache_write_tokens > 0 {
+            format!(
+                "\nCached: {} tokens read, {} tokens written",
+                self.total_cache_read_tokens, self.total_cache_write_tokens
+            )
+        } else {
+            String::new()
+        };
         if let Some(max_context) = self.model_config.max_context_window
             && max_context > 0
         {
@@ -106,19 +116,24 @@ impl ChatEngine {
                 "░".repeat(20usize.saturating_sub(filled.min(20)))
             );
             format!(
-                "Context usage: {} / {} tokens ({:.1}%) {}\nInput: {} tokens, Output: {} tokens\nWorking directory: {}",
+                "Context usage: {} / {} tokens ({:.1}%) {}\nInput: {} tokens, Output: {} tokens{}\nWorking directory: {}",
                 used_tokens,
                 max_context_u32,
                 pct,
                 bar,
                 self.total_input_tokens,
                 self.total_output_tokens,
+                cache_line,
                 workspace,
             )
         } else {
             format!(
-                "Context usage: {} tokens (model max context window unknown)\nInput: {} tokens, Output: {} tokens\nWorking directory: {}",
-                used_tokens, self.total_input_tokens, self.total_output_tokens, workspace
+                "Context usage: {} tokens (model max context window unknown)\nInput: {} tokens, Output: {} tokens{}\nWorking directory: {}",
+                used_tokens,
+                self.total_input_tokens,
+                self.total_output_tokens,
+                cache_line,
+                workspace
             )
         }
     }

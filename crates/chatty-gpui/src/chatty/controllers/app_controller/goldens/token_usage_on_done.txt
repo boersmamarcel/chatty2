@@ -1,6 +1,6 @@
 StreamStarted
 TextChunk("Answer.")
-TokenUsage(in=1234, out=56)
-StreamEnded(status=Completed, usage=Some((1234, 56)), api_turns=1)
+TokenUsage(in=234, out=56, cache_read=1000, cache_write=0)
+StreamEnded(status=Completed, usage=Some("in=234, out=56, cache_read=1000, cache_write=0, api_turns=1, calls=1"))
 => loop returned Ok
 => no follow-up

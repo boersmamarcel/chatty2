@@ -288,6 +288,8 @@ pub struct ChatEngine {
     pub pending_clarification: Option<PendingClarification>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+    pub total_cache_read_tokens: u32,
+    pub total_cache_write_tokens: u32,
     pub title: String,
     pub is_ready: bool,
     /// Whether deferred background services (MCP, memory, embedding, etc.) have
@@ -376,6 +378,8 @@ impl ChatEngine {
             pending_approval: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
             title: "New Chat".to_string(),
             is_ready: false,
             services_loaded: config.services_loaded,
@@ -846,9 +850,13 @@ impl ChatEngine {
             AppEvent::TokenUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
                 self.total_input_tokens += input_tokens;
                 self.total_output_tokens += output_tokens;
+                self.total_cache_read_tokens += cache_read_tokens;
+                self.total_cache_write_tokens += cache_write_tokens;
                 EngineAction::Redraw
             }
             AppEvent::StreamCompleted => {

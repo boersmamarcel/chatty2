@@ -3,6 +3,6 @@ ToolCallStarted(id="call-1", "run_shell")
 ToolCallInput(id="call-1", "{\"command\":\"false\"}")
 ToolCallError(id="call-1", "Error: run_shell: exited with status 1")
 TextChunk("That command failed.")
-StreamEnded(status=Completed, usage=None, api_turns=2)
+StreamEnded(status=Completed, usage=None)
 => loop returned Ok
 => no follow-up

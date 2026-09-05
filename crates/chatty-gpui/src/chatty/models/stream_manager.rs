@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 
 use crate::chatty::services::StreamChunk;
+use chatty_core::models::token_usage::{ApiCallUsage, TokenUsage};
 use chatty_core::tools::PendingArtifacts;
 
 /// Status of a stream lifecycle
@@ -42,7 +43,13 @@ pub struct StreamState {
     /// event lands on turn N+1 and tears it down (AGE-151).
     epoch: u64,
     pub status: StreamStatus,
-    pub token_usage: Option<(u32, u32)>,
+    /// Usage for the turn, built from the per-request records below once the
+    /// provider's aggregate arrives. `None` until then.
+    pub token_usage: Option<TokenUsage>,
+    /// One record per completed provider request, in order. Cache hit rate is
+    /// a per-request property, so these are the source of truth and the
+    /// aggregate is derived from them.
+    calls: Vec<ApiCallUsage>,
     pub trace_json: Option<serde_json::Value>,
     task: Option<Task<anyhow::Result<()>>>,
     cancel_flag: Arc<AtomicBool>,
@@ -56,10 +63,6 @@ pub struct StreamState {
     pending_text: String,
     /// When the last TextChunk event was emitted (used for flush interval check).
     last_flush: Instant,
-    /// Number of LLM API turns in this exchange. Starts at 1 (the initial request),
-    /// incremented for each tool call result (which triggers another API call).
-    /// Used to normalize rig-core's accumulated token usage back to per-turn values.
-    api_turn_count: u32,
 }
 
 /// Events emitted by StreamManager for decoupled UI updates.
@@ -114,6 +117,8 @@ pub enum StreamManagerEvent {
         conversation_id: String,
         input_tokens: u32,
         output_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
     },
     StreamEnded {
         conversation_id: String,
@@ -121,14 +126,11 @@ pub enum StreamManagerEvent {
         /// whose epoch is not the conversation's current one (AGE-151).
         epoch: u64,
         status: StreamStatus,
-        token_usage: Option<(u32, u32)>,
+        token_usage: Option<TokenUsage>,
         trace_json: Option<serde_json::Value>,
         /// Artifact paths queued by AddAttachmentTool during this stream.
         /// Non-empty only when status is Completed.
         pending_artifacts: Option<Vec<PathBuf>>,
-        /// Number of LLM API turns in this exchange (1 = no tool calls).
-        /// Used to normalize rig-core's accumulated token usage.
-        api_turn_count: u32,
     },
 }
 
@@ -203,9 +205,8 @@ impl StreamManager {
 
             existing.cancel_flag.store(true, Ordering::Relaxed);
 
-            let token_usage = existing.token_usage;
+            let token_usage = existing.token_usage.take();
             let trace_json = existing.trace_json.clone();
-            let turn_count = existing.api_turn_count;
             let ended_epoch = existing.epoch;
 
             debug!(conv_id = %conv_id, "Cancelled existing stream before registering new one");
@@ -220,7 +221,6 @@ impl StreamManager {
                 token_usage,
                 trace_json,
                 pending_artifacts: None,
-                api_turn_count: turn_count,
             });
         }
 
@@ -231,6 +231,7 @@ impl StreamManager {
                 epoch,
                 status: StreamStatus::Active,
                 token_usage: None,
+                calls: Vec::new(),
                 trace_json: None,
                 task: Some(task),
                 cancel_flag,
@@ -238,7 +239,6 @@ impl StreamManager {
                 has_emitted_first_chunk: false,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
-                api_turn_count: 1,
             },
         );
 
@@ -264,9 +264,8 @@ impl StreamManager {
 
             existing.cancel_flag.store(true, Ordering::Relaxed);
 
-            let token_usage = existing.token_usage;
+            let token_usage = existing.token_usage.take();
             let trace_json = existing.trace_json.clone();
-            let turn_count = existing.api_turn_count;
 
             debug!("Cancelled existing pending stream");
 
@@ -280,7 +279,6 @@ impl StreamManager {
                 token_usage,
                 trace_json,
                 pending_artifacts: None,
-                api_turn_count: turn_count,
             });
         }
 
@@ -291,6 +289,7 @@ impl StreamManager {
                 epoch,
                 status: StreamStatus::Active,
                 token_usage: None,
+                calls: Vec::new(),
                 trace_json: None,
                 task: Some(task),
                 cancel_flag,
@@ -298,7 +297,6 @@ impl StreamManager {
                 has_emitted_first_chunk: false,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
-                api_turn_count: 1,
             },
         );
 
@@ -409,11 +407,6 @@ impl StreamManager {
                 });
             }
             StreamChunk::ToolCallResult { id, result } => {
-                // Each tool result triggers another API call, so increment the turn count.
-                // This is used to normalize rig-core's accumulated token usage.
-                if let Some(state) = self.streams.get_mut(conv_id) {
-                    state.api_turn_count += 1;
-                }
                 cx.emit(StreamManagerEvent::ToolCallResult {
                     conversation_id: conv_id.to_string(),
                     id,
@@ -421,12 +414,6 @@ impl StreamManager {
                 });
             }
             StreamChunk::ToolCallError { id, error } => {
-                // A tool error still triggers an API round-trip (the error is
-                // sent back to the model as a tool result), so increment the
-                // turn count here just as we do for a successful ToolCallResult.
-                if let Some(state) = self.streams.get_mut(conv_id) {
-                    state.api_turn_count += 1;
-                }
                 cx.emit(StreamManagerEvent::ToolCallError {
                     conversation_id: conv_id.to_string(),
                     id,
@@ -459,17 +446,46 @@ impl StreamManager {
                     questions,
                 });
             }
+            StreamChunk::ApiCallUsage(call) => {
+                if let Some(state) = self.streams.get_mut(conv_id) {
+                    state.calls.push(call);
+                }
+            }
             StreamChunk::TokenUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
-                    state.token_usage = Some((input_tokens, output_tokens));
+                    // The per-request records are the source of truth; the
+                    // provider's aggregate only stands in when none arrived.
+                    let usage = if state.calls.is_empty() {
+                        let mut usage = TokenUsage::new(input_tokens, output_tokens);
+                        usage.cache_read_tokens = cache_read_tokens;
+                        usage.cache_write_tokens = cache_write_tokens;
+                        usage
+                    } else {
+                        TokenUsage::from_calls(std::mem::take(&mut state.calls))
+                    };
+                    if usage.input_tokens != input_tokens || usage.output_tokens != output_tokens {
+                        warn!(
+                            conv_id = %conv_id,
+                            summed_input = usage.input_tokens,
+                            reported_input = input_tokens,
+                            summed_output = usage.output_tokens,
+                            reported_output = output_tokens,
+                            "Per-call usage does not sum to the provider's aggregate"
+                        );
+                    }
+                    state.token_usage = Some(usage);
                 }
                 cx.emit(StreamManagerEvent::TokenUsage {
                     conversation_id: conv_id.to_string(),
                     input_tokens,
                     output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
                 });
             }
             StreamChunk::Done => {
@@ -478,17 +494,16 @@ impl StreamManager {
             StreamChunk::Error(error) => {
                 // Flush any buffered text before emitting StreamEnded
                 self.flush_pending_text(conv_id, cx);
-                let (token_usage, trace_json, turn_count, epoch) =
+                let (token_usage, trace_json, epoch) =
                     if let Some(state) = self.streams.get_mut(conv_id) {
                         state.status = StreamStatus::Error(error.clone());
                         (
-                            state.token_usage,
+                            state.token_usage.take(),
                             state.trace_json.clone(),
-                            state.api_turn_count,
                             state.epoch,
                         )
                     } else {
-                        (None, None, 1, 0)
+                        (None, None, 0)
                     };
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: conv_id.to_string(),
@@ -497,7 +512,6 @@ impl StreamManager {
                     token_usage,
                     trace_json,
                     pending_artifacts: None,
-                    api_turn_count: turn_count,
                 });
                 self.streams.remove(conv_id);
             }
@@ -511,7 +525,7 @@ impl StreamManager {
         // Flush any remaining buffered text before emitting StreamEnded
         self.flush_pending_text(conv_id, cx);
 
-        let (token_usage, trace_json, artifacts, turn_count, epoch) =
+        let (token_usage, trace_json, artifacts, epoch) =
             if let Some(state) = self.streams.get(conv_id) {
                 let drained = state
                     .pending_artifacts
@@ -520,10 +534,9 @@ impl StreamManager {
                     .map(|mut v| v.drain(..).collect::<Vec<_>>())
                     .filter(|v| !v.is_empty());
                 (
-                    state.token_usage,
+                    state.token_usage.clone(),
                     state.trace_json.clone(),
                     drained,
-                    state.api_turn_count,
                     state.epoch,
                 )
             } else {
@@ -538,7 +551,6 @@ impl StreamManager {
             token_usage,
             trace_json,
             pending_artifacts: artifacts,
-            api_turn_count: turn_count,
         });
 
         self.streams.remove(conv_id);
@@ -583,9 +595,8 @@ impl StreamManager {
             state.cancel_flag.store(true, Ordering::Relaxed);
             state.status = StreamStatus::Cancelled;
 
-            let token_usage = state.token_usage;
+            let token_usage = state.token_usage.take();
             let trace_json = state.trace_json.clone();
-            let turn_count = state.api_turn_count;
             let epoch = state.epoch;
 
             debug!(conv_id = %conv_id, "Stream stopped gracefully");
@@ -600,7 +611,6 @@ impl StreamManager {
                 token_usage,
                 trace_json,
                 pending_artifacts: None,
-                api_turn_count: turn_count,
             });
 
             // Clean up pending resolved IDs if we used the pending key
@@ -631,7 +641,6 @@ impl StreamManager {
                 token_usage: state.token_usage,
                 trace_json: state.trace_json,
                 pending_artifacts: None,
-                api_turn_count: state.api_turn_count,
             });
         }
         self.pending_resolved_ids.remove("__pending__");
@@ -688,7 +697,6 @@ impl StreamManager {
                     token_usage: state.token_usage,
                     trace_json: state.trace_json,
                     pending_artifacts: None,
-                    api_turn_count: state.api_turn_count,
                 });
             }
         }
@@ -720,6 +728,7 @@ mod tests {
             epoch,
             status: StreamStatus::Active,
             token_usage: None,
+            calls: Vec::new(),
             trace_json: None,
             task: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -727,7 +736,6 @@ mod tests {
             has_emitted_first_chunk: false,
             pending_text: String::new(),
             last_flush: Instant::now(),
-            api_turn_count: 1,
         }
     }
 
@@ -821,6 +829,7 @@ mod tests {
                 epoch: 1,
                 status: StreamStatus::Active,
                 token_usage: None,
+                calls: Vec::new(),
                 trace_json: None,
                 task: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -828,7 +837,6 @@ mod tests {
                 has_emitted_first_chunk: false,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
-                api_turn_count: 1,
             },
         );
         assert!(mgr.is_streaming("conv-123"));

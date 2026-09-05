@@ -1,5 +1,6 @@
 on_stream_started
 on_chunk(Ok(Text)) -> Continue
+on_chunk(Ok(ApiCallUsage)) -> Continue
 on_chunk(Ok(TokenUsage)) -> Continue
 on_chunk(Ok(Done)) -> Break
 on_stream_ended

@@ -49,6 +49,14 @@ pub struct ModelConfig {
     /// Cost per million output tokens in USD (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_million_output_tokens: Option<f64>,
+    /// Cost per million prompt tokens served from the provider's cache (optional).
+    /// When unset, cache reads are priced at the input rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_million_cache_read_tokens: Option<f64>,
+    /// Cost per million prompt tokens written to the provider's cache (optional).
+    /// When unset, cache writes are priced at the input rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_million_cache_write_tokens: Option<f64>,
     /// Whether this model supports image inputs
     #[serde(default)]
     pub supports_images: bool,
@@ -101,6 +109,8 @@ impl ModelConfig {
             extra_params: HashMap::new(),
             cost_per_million_input_tokens: None,
             cost_per_million_output_tokens: None,
+            cost_per_million_cache_read_tokens: None,
+            cost_per_million_cache_write_tokens: None,
             supports_images: false,
             supports_pdf: false,
             supports_temperature: true,

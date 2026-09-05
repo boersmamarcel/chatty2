@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::models::token_usage::TokenUsage;
+use crate::chatty::models::token_usage::{TokenPricing, TokenUsage};
 use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
     StreamStatus,
