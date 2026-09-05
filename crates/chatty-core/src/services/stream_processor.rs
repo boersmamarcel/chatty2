@@ -311,6 +311,7 @@ mod tests {
             StreamChunk::ClarificationRequested { .. } => "ClarificationRequested",
             StreamChunk::ApiCallUsage(_) => "ApiCallUsage",
             StreamChunk::TokenUsage { .. } => "TokenUsage",
+            StreamChunk::TurnMessages(_) => "TurnMessages",
             StreamChunk::Done => "Done",
             StreamChunk::Error(_) => "Error",
         }

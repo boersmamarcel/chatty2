@@ -859,6 +859,12 @@ impl ChatEngine {
                 self.total_cache_write_tokens += cache_write_tokens;
                 EngineAction::Redraw
             }
+            AppEvent::TurnMessages(messages) => {
+                if let Some(conv) = self.conversation.as_mut() {
+                    conv.set_streaming_turn_messages(Some(messages));
+                }
+                EngineAction::None
+            }
             AppEvent::StreamCompleted => {
                 self.finalize_stream();
                 EngineAction::Redraw
@@ -1145,23 +1151,26 @@ impl ChatEngine {
         self.finalize_partial_response();
         self.reset_stream_state();
 
-        // Generate title after first exchange
-        if self.messages.len() == 2 && self.title == "New Chat" {
+        // Generate title after the first exchange. Counted on the persisted
+        // history, not on display rows: a turn with tool calls persists its
+        // tool round-trips too (AGE-247).
+        if self.title == "New Chat"
+            && let Some(conv) = &self.conversation
+            && chatty_core::services::exchange_count(conv.entries().iter().map(|e| &e.message)) == 1
+        {
             let event_tx = self.event_tx.clone();
-            if let Some(conv) = &self.conversation {
-                let agent = conv.agent().clone();
-                let history = conv.messages();
-                tokio::spawn(async move {
-                    match chatty_core::services::generate_title(&agent, &history).await {
-                        Ok(title) => {
-                            let _ = event_tx.send(AppEvent::TitleGenerated(title));
-                        }
-                        Err(e) => {
-                            warn!(error = ?e, "Failed to generate title");
-                        }
+            let agent = conv.agent().clone();
+            let history = conv.messages();
+            tokio::spawn(async move {
+                match chatty_core::services::generate_title(&agent, &history).await {
+                    Ok(title) => {
+                        let _ = event_tx.send(AppEvent::TitleGenerated(title));
                     }
-                });
-            }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to generate title");
+                    }
+                }
+            });
         }
     }
 

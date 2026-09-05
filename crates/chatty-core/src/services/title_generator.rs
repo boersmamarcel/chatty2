@@ -5,6 +5,9 @@ use rig_core::message::UserContent;
 use tracing::{debug, error};
 
 use crate::factories::AgentClient;
+use crate::services::message_helpers::{
+    exchange_count, is_tool_call_message, is_tool_result_message,
+};
 
 /// Extract text from UserContent
 fn extract_text_from_user_content(content: &UserContent) -> Option<String> {
@@ -51,46 +54,53 @@ fn clean_title(raw_title: &str) -> String {
 ///
 /// # Arguments
 /// * `agent` - The agent client to use for title generation
-/// * `history` - The conversation history (must have exactly 2 messages)
+/// * `history` - The conversation history (must hold exactly one exchange)
 ///
 /// # Returns
 /// A generated title string
 ///
 /// # Errors
 /// Returns an error if:
-/// - History doesn't have exactly 2 messages
+/// - History doesn't hold exactly one exchange
 /// - LLM call fails
 pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<String> {
     debug!("generate_title called");
 
-    // Guard: Only generate title if we have exactly 2 messages
-    if history.len() != 2 {
+    // Guard: only the first exchange gets a title. Exchanges, not messages:
+    // a turn with tool calls persists its tool round-trips too (AGE-247).
+    let exchanges = exchange_count(history);
+    if exchanges != 1 {
         let err_msg = format!(
-            "Title generation requires exactly 2 messages, found {}",
+            "Title generation requires exactly one exchange, found {} in {} messages",
+            exchanges,
             history.len()
         );
         error!("{}", err_msg);
         return Err(anyhow!(err_msg));
     }
 
-    debug!("Message count is 2, proceeding");
+    debug!("Exchange count is 1, proceeding");
 
-    // Extract first exchange
-    let user_text = match history.first() {
-        Some(Message::User { content, .. }) => content
-            .iter()
-            .find_map(extract_text_from_user_content)
-            .unwrap_or_default(),
-        _ => String::new(),
-    };
+    // Extract first exchange: the first user text and the first assistant text.
+    let user_text = history
+        .iter()
+        .find_map(|message| match message {
+            Message::User { content } if !is_tool_result_message(message) => {
+                content.iter().find_map(extract_text_from_user_content)
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
 
-    let assistant_text = match history.get(1) {
-        Some(Message::Assistant { content, .. }) => content
-            .iter()
-            .find_map(extract_text_from_assistant_content)
-            .unwrap_or_default(),
-        _ => String::new(),
-    };
+    let assistant_text = history
+        .iter()
+        .find_map(|message| match message {
+            Message::Assistant { content, .. } if !is_tool_call_message(message) => {
+                content.iter().find_map(extract_text_from_assistant_content)
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
 
     debug!(
         user_len = user_text.len(),

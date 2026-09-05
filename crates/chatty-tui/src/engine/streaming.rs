@@ -124,6 +124,10 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                 });
                 Ok(ChunkAction::Continue)
             }
+            StreamChunk::TurnMessages(messages) => {
+                let _ = self.event_tx.send(AppEvent::TurnMessages(messages));
+                Ok(ChunkAction::Continue)
+            }
             StreamChunk::Done => Ok(ChunkAction::Break),
             StreamChunk::Error(e) => {
                 let _ = self.event_tx.send(AppEvent::StreamError(e));

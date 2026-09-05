@@ -783,6 +783,7 @@ impl ChattyApp {
                         conv.set_streaming_message(None);
                         conv.set_streaming_trace(None);
                         conv.set_streaming_sub_agent_trace(None);
+                        conv.set_streaming_turn_messages(None);
                     }
                 });
             }
@@ -906,7 +907,12 @@ impl ChattyApp {
                     let traces_len = conv.entries().len();
                     // The assistant message was just pushed; its index is msg_count - 1
                     let assistant_idx = msg_count.saturating_sub(1);
-                    let should_gen = msg_count == 2 && conv.title() == "New Chat";
+                    // Exchanges, not messages: a turn with tool calls persists
+                    // its tool round-trips as well (AGE-247).
+                    let should_gen = chatty_core::services::exchange_count(
+                        conv.entries().iter().map(|e| &e.message),
+                    ) == 1
+                        && conv.title() == "New Chat";
                     debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
                     (should_gen, Some(assistant_idx), Some(model_id))
                 } else {

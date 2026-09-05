@@ -269,6 +269,22 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
 
         // PHASE 2: forward every chunk, so the UI's subscription sees it.
         match chunk_result {
+            Ok(StreamChunk::TurnMessages(messages)) => {
+                // rig's record of the turn. Kept on the conversation for
+                // `finalize_response` to persist behind the final text
+                // (AGE-247); not forwarded, the UI renders tool activity from
+                // the trace, and the payloads can be large.
+                let conv_id = self.conv_id.clone();
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.set_streaming_turn_messages(Some(messages));
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to store the turn's messages"))
+                    .ok();
+                Ok(ChunkAction::Continue)
+            }
             Ok(chunk) => {
                 let is_break = matches!(chunk, StreamChunk::Error(_));
                 if is_break {

@@ -67,6 +67,12 @@ pub fn conversation_to_atif(
     let mut assistant_turn_idx: usize = 0;
 
     for (idx, message) in history.iter().enumerate() {
+        // Tool round-trips are persisted in history (AGE-247); the steps
+        // derive tool calls and observations from the trace on the final
+        // text message, so the raw messages would only duplicate them.
+        if crate::services::is_persisted_tool_round_trip(&history, idx) {
+            continue;
+        }
         let timestamp = timestamps.get(idx).copied().flatten();
         let msg_attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
         let trace_json = traces.get(idx).cloned().flatten();

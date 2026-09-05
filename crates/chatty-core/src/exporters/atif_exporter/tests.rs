@@ -449,6 +449,46 @@ fn token_usage_per_step() {
     assert_eq!(result["steps"][1]["metrics"]["completion_tokens"], 200);
 }
 
+/// Tool round-trips persisted with the turn (AGE-247) produce no steps of
+/// their own: the agent step derives calls and observations from the trace,
+/// and the per-turn token usage still lines up with the text answers.
+#[test]
+fn persisted_tool_round_trips_do_not_become_steps() {
+    let mut usage = ConversationTokenUsage::default();
+    usage.add_usage(TokenUsage::new(100, 200));
+
+    let history = vec![
+        user_message("Read it"),
+        Message::Assistant {
+            id: None,
+            content: vec![
+                AssistantContent::text("Let me look."),
+                AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
+            ],
+        },
+        Message::tool_result("call-1", "read_file", "contents"),
+        assistant_message("Let me look.\n\nDone"),
+    ];
+    let conv = make_conversation_data(
+        "id",
+        "m",
+        history,
+        vec![None, None, None, None],
+        usage,
+        vec![vec![], vec![], vec![], vec![]],
+        vec![None, None, None, None],
+        vec![None, None, None, None],
+        vec![],
+    );
+    let result = conversation_to_atif(&conv, None).unwrap();
+    let steps = result["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["source"], "user");
+    assert_eq!(steps[1]["source"], "agent");
+    assert_eq!(steps[1]["message"], "Let me look.\n\nDone");
+    assert_eq!(steps[1]["metrics"]["prompt_tokens"], 100);
+}
+
 #[test]
 fn final_metrics_totals() {
     let mut usage = ConversationTokenUsage::default();
