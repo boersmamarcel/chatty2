@@ -18,8 +18,10 @@ resolver = "2"
 [workspace.package]
 version = "0.3.50"
 edition = "2024"
-# AGE-26: declared MSRV for shipping research crates (also per-crate rust-version).
-rust-version = "1.95"
+# Declared MSRV for the shipping research crates (also per-crate rust-version).
+# 1.94, not 1.95: nothing in the tree needs 1.95, and cloud build agents run a
+# toolchain a release behind stable. See AGENTS.md > Toolchain (AGE-26).
+rust-version = "1.94"
 
 [workspace.dependencies]
 # Core agent dependencies (rig 0.42 crate family — AGE-32 / AGE-26 exact-minor pins)

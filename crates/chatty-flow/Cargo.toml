@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "AFlow WorkflowRepr + IrRepr interpreter (AGE-13) — ships in the app"
 publish = false
-rust-version = "1.95"
+rust-version = "1.94"
 
 [lib]
 name = "chatty_flow"

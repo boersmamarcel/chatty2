@@ -281,12 +281,31 @@ packages, the Rust toolchain, and the `cc`/`c++` alternatives below are baked
 into the VM; the startup/update script only re-runs
 `rustup target add wasm32-wasip2` + `make wasm-modules`.
 
-- **Toolchain must be ≥ 1.95 (edition 2024).** Workspace `rust-version` is 1.95
-  (AGE-123 / bollard 0.21). The base VM image historically pinned
-  `rustup default` to an older toolchain (1.83), which cannot compile this
-  workspace (`feature edition2024 is required`). The default is set to
-  `stable`. If a build suddenly fails with an edition-2024 error, run
-  `rustup default stable`.
+- **Toolchain must be ≥ 1.85 (edition 2024); declared MSRV is 1.94.** The base
+  VM image historically pinned `rustup default` to an older toolchain (1.83),
+  which cannot compile this workspace (`feature edition2024 is required`). The
+  default is set to `stable`. If a build suddenly fails with an edition-2024
+  error, run `rustup default stable`.
+
+  The declared `rust-version` was 1.95 until 2026-09, attributed to
+  AGE-123 / bollard 0.21. That rationale no longer holds: the locked
+  bollard 0.21.1 declares no `rust-version` at all, and no dependency in the
+  tree declares ≥ 1.95. The declaration was doing nothing but breaking cloud
+  build agents, which run a toolchain a release behind stable — on 1.94.1 the
+  four research crates (`chatty-flow`, `chatty-optimize`, `chatty-playbook`,
+  `chatty-trace`) are the *only* workspace members declaring an MSRV, so
+  `cargo test --workspace` failed outright while every other crate built fine.
+
+  Lowered to 1.94 after verifying the whole workspace compiles and passes on
+  1.94.1 (1281 tests, `--test-threads=1`). 1.94 rather than the true
+  edition-2024 floor of 1.85 because 1.94 is what has actually been tested;
+  a declared MSRV should be a version someone has run, not a guess. CI is
+  unaffected either way — `ci.yml` uses `dtolnay/rust-toolchain@stable`, so
+  it has always run ahead of the declaration.
+
+  If a dependency does raise the floor again, bump this back and say which
+  dependency and which version, so the next person can re-check it the same
+  way.
 
 - **Use GNU `cc`/`c++`, not clang.** `/usr/bin/cc` and `/usr/bin/c++` are
   pointed at `gcc`/`g++` via `update-alternatives`. The system clang cannot
