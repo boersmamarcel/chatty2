@@ -38,6 +38,7 @@
 - [Stream manager](./dev/architecture/stream-manager.md)
 - [Rendering system](./dev/architecture/rendering-system.md)
 - [Token tracking](./dev/architecture/token-tracking.md)
+- [Context compaction](./dev/architecture/context-compaction.md)
 - [Agent memory](./dev/architecture/agent-memory.md)
 
 # Modules & extensions
