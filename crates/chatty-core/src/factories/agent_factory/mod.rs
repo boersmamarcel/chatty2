@@ -94,16 +94,20 @@ pub struct AgentClient {
     pub agent: Agent,
     pub task_controller: crate::services::AgentTaskController,
     provider: crate::settings::models::providers_store::ProviderType,
+    /// Tool-less agent built from the same client/model as `agent`, for
+    /// non-streaming calls (title generation, summarization) that need a
+    /// short reply and must not risk a tool call (AGE-227).
+    utility: Agent,
 }
 
 impl AgentClient {
-    /// Dispatch a non-streaming prompt through the wrapped provider agent.
+    /// Dispatch a non-streaming prompt through the tool-less utility agent.
     ///
     /// This is the central hook point for future shared prompt middleware
     /// (tracing, policy, retries, Rig hooks) that should apply consistently
     /// across title generation, summarization, and other non-streaming calls.
     pub async fn prompt(&self, prompt: &str) -> Result<String> {
-        Ok(self.agent.prompt(prompt).await?)
+        Ok(self.utility.prompt(prompt).await?)
     }
 
     pub fn task_controller(&self) -> crate::services::AgentTaskController {
