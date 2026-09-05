@@ -25,7 +25,7 @@ send_message() / handle_regeneration()
 |:-----|:--------|
 | `crates/chatty-core/src/token_budget/snapshot.rs` | `TokenBudgetSnapshot`, `ComponentFractions`, `ContextStatus`, `ContextPressureEvent` |
 | `crates/chatty-core/src/token_budget/counter.rs` | `TokenCounter` — tiktoken-rs BPE wrapper, provider-aware |
-| `crates/chatty-core/src/token_budget/cache.rs` | `CachedTokenCounts` — hash-keyed cache for preamble + tool tokens |
+| `crates/chatty-core/src/token_budget/cache.rs` | `CachedTokenCounts` — hash-keyed cache for preamble + tool tokens; `HistoryTokenCache` — per-entry hash-keyed cache for history tokens (not yet wired into the desktop manager) |
 | `crates/chatty-gpui/src/chatty/token_budget/manager.rs` | `GlobalTokenBudget`, `gather_snapshot_inputs()`, `compute_snapshot_background()`, `check_pressure()` |
 | `crates/chatty-core/src/token_budget/summarizer.rs` | Stub — future conversation summarization |
 | `crates/chatty-core/src/settings/models/token_tracking_settings.rs` | `TokenTrackingSettings` GPUI global |
@@ -50,7 +50,7 @@ Runs BPE token counting off the UI thread:
 
 - **Preamble** — counted via BPE if cache cold; reused if hash matches
 - **Tool definitions** — estimated as `tool_count × tokens_per_sample_schema` (BPE-counted once on a representative schema)
-- **Conversation history** — full BPE count of all `rig_core::completion::Message` entries serialised to JSON; counted fresh every turn
+- **Conversation history** — BPE count of the text content of every `rig_core::completion::Message` entry (non-text parts use a fixed per-item estimate, see "Known limitations"); counted fresh every turn
 - **Latest user message** — plain text extracted from `UserContent::Text` variants; images/PDFs skipped
 
 Publishes the completed `TokenBudgetSnapshot` to `GlobalTokenBudget::sender`.
@@ -117,9 +117,10 @@ Accuracy by provider:
 - **Mistral / Ollama** — ±5–10%
 
 **Known limitations:**
-- Images and PDFs are not counted — `extract_user_message_text()` skips non-text `UserContent` variants. Conversations with many large images will be significantly under-estimated (Gemini in particular counts image tiles separately and can add hundreds of thousands of tokens).
+- The *latest user message* component skips images/PDFs entirely — `extract_user_message_text()` only concatenates `UserContent::Text` variants. *History* counting is different: `TokenCounter::count_message()` walks each message's content parts and counts text via BPE (plain text, tool-result text, tool-call name/arguments), but substitutes a fixed `NON_TEXT_CONTENT_TOKENS` estimate (1000) for each image/document/audio/video part and non-text tool-result item, rather than tokenizing (or, prior to AGE-229, JSON-serialising and fully BPE-tokenizing) the base64 payload — which was slow and produced a number unrelated to what a provider actually bills (images are priced per pixel/tile). Either way, a conversation with many large images is only ever a rough estimate, in either direction.
 - History is counted *before* the new user message is added to the conversation model, so the snapshot reflects the state at send time, not after the user message has been appended.
-- Tool call results (e.g. web fetch responses) that appear in history *are* counted via `count_history()` (serialised to JSON).
+- Tool call results (e.g. web fetch responses) that appear in history *are* counted, via `count_message()`'s per-content-part walk rather than a full-message JSON serialization.
+- `count_history()` itself still re-tokenizes every entry on every call. `chatty_core::token_budget::cache::HistoryTokenCache` caches each entry's count keyed by its index and a content hash, so a caller that keeps one instance across turns only recounts entries that changed (O(new entries) per turn) — as of AGE-229 it exists and is unit-tested in chatty-core, but the desktop manager (`compute_snapshot_background` in `chatty-gpui/src/chatty/token_budget/manager.rs`) does not yet hold one, so `GlobalTokenBudget` still does a full recount every send.
 
 ## `CachedTokenCounts`
 
