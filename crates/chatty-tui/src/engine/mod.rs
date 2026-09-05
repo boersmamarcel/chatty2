@@ -290,6 +290,13 @@ pub struct ChatEngine {
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
     pub total_cache_write_tokens: u32,
+    /// Per-request usage records for the turn currently streaming, folded
+    /// into `last_turn_usage` once the turn's aggregate arrives.
+    current_turn_calls: Vec<chatty_core::models::token_usage::ApiCallUsage>,
+    /// The most recently completed turn's per-request usage. Its last call's
+    /// prompt size is the model's actual current context fill — summing every
+    /// request in the turn over-states it by the tool-call count (AGE-223).
+    pub last_turn_usage: Option<chatty_core::models::token_usage::TokenUsage>,
     pub title: String,
     pub is_ready: bool,
     /// Whether deferred background services (MCP, memory, embedding, etc.) have
@@ -380,6 +387,8 @@ impl ChatEngine {
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            current_turn_calls: Vec::new(),
+            last_turn_usage: None,
             title: "New Chat".to_string(),
             is_ready: false,
             services_loaded: config.services_loaded,
@@ -839,16 +848,40 @@ impl ChatEngine {
                 });
                 EngineAction::Redraw
             }
+            AppEvent::ApiCallUsage(call) => {
+                self.current_turn_calls.push(call);
+                EngineAction::None
+            }
             AppEvent::TokenUsage {
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
             } => {
-                self.total_input_tokens += input_tokens;
-                self.total_output_tokens += output_tokens;
-                self.total_cache_read_tokens += cache_read_tokens;
-                self.total_cache_write_tokens += cache_write_tokens;
+                self.total_input_tokens = self.total_input_tokens.saturating_add(input_tokens);
+                self.total_output_tokens = self.total_output_tokens.saturating_add(output_tokens);
+                self.total_cache_read_tokens = self
+                    .total_cache_read_tokens
+                    .saturating_add(cache_read_tokens);
+                self.total_cache_write_tokens = self
+                    .total_cache_write_tokens
+                    .saturating_add(cache_write_tokens);
+                // The per-request records are the source of truth; the
+                // provider's aggregate only stands in when none arrived
+                // (mirrors StreamManager on the desktop).
+                self.last_turn_usage = Some(if self.current_turn_calls.is_empty() {
+                    let mut usage = chatty_core::models::token_usage::TokenUsage::new(
+                        input_tokens,
+                        output_tokens,
+                    );
+                    usage.cache_read_tokens = cache_read_tokens;
+                    usage.cache_write_tokens = cache_write_tokens;
+                    usage
+                } else {
+                    chatty_core::models::token_usage::TokenUsage::from_calls(std::mem::take(
+                        &mut self.current_turn_calls,
+                    ))
+                });
                 EngineAction::Redraw
             }
             AppEvent::StreamCompleted => {
@@ -1128,6 +1161,19 @@ impl ChatEngine {
         }
     }
 
+    /// Whether the first exchange just completed and a title should be
+    /// generated. Counts conversation history, not display messages: a
+    /// system line (slash-command notice, protocol follow-up) inflates
+    /// `self.messages.len()` without adding a real exchange, which used to
+    /// defeat this check (AGE-223).
+    fn should_generate_title(&self) -> bool {
+        self.title == "New Chat"
+            && self
+                .conversation
+                .as_ref()
+                .is_some_and(|conv| conv.message_count() == 2)
+    }
+
     fn finalize_stream(&mut self) {
         // Mark display message as done
         if let Some(last) = self.streaming_assistant_mut() {
@@ -1137,23 +1183,23 @@ impl ChatEngine {
         self.finalize_partial_response(false);
         self.reset_stream_state();
 
-        // Generate title after first exchange
-        if self.messages.len() == 2 && self.title == "New Chat" {
+        // Generate title after first exchange.
+        if self.should_generate_title()
+            && let Some(conv) = &self.conversation
+        {
             let event_tx = self.event_tx.clone();
-            if let Some(conv) = &self.conversation {
-                let agent = conv.agent().clone();
-                let history = conv.messages();
-                tokio::spawn(async move {
-                    match chatty_core::services::generate_title(&agent, &history).await {
-                        Ok(title) => {
-                            let _ = event_tx.send(AppEvent::TitleGenerated(title));
-                        }
-                        Err(e) => {
-                            warn!(error = ?e, "Failed to generate title");
-                        }
+            let agent = conv.agent().clone();
+            let history = conv.messages();
+            tokio::spawn(async move {
+                match chatty_core::services::generate_title(&agent, &history).await {
+                    Ok(title) => {
+                        let _ = event_tx.send(AppEvent::TitleGenerated(title));
                     }
-                });
-            }
+                    Err(e) => {
+                        warn!(error = ?e, "Failed to generate title");
+                    }
+                }
+            });
         }
     }
 
@@ -1484,5 +1530,186 @@ mod tests {
                 )],
             })
         );
+    }
+
+    /// A `ChatEngine` with no conversation, for tests that only exercise
+    /// event-handling state (token counters, usage folding) with no need for
+    /// a real agent.
+    fn bare_engine() -> ChatEngine {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new(
+                    "Ollama".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                ),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: ModuleSettingsModel::default(),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+            },
+            event_tx,
+        )
+    }
+
+    /// AGE-223: per-call usage chunks fold into `last_turn_usage` via
+    /// `TokenUsage::from_calls` once the turn's aggregate arrives, mirroring
+    /// `StreamManager` on the desktop.
+    #[test]
+    fn api_call_usage_chunks_fold_into_last_turn_usage() {
+        let mut engine = bare_engine();
+
+        let call1 = chatty_core::models::token_usage::ApiCallUsage {
+            turn: 1,
+            input_tokens: 100,
+            cache_read_tokens: 0,
+            cache_write_tokens: 900,
+            output_tokens: 20,
+        };
+        let call2 = chatty_core::models::token_usage::ApiCallUsage {
+            turn: 2,
+            input_tokens: 50,
+            cache_read_tokens: 900,
+            cache_write_tokens: 0,
+            output_tokens: 10,
+        };
+
+        engine.handle_event(AppEvent::ApiCallUsage(call1));
+        engine.handle_event(AppEvent::ApiCallUsage(call2));
+        engine.handle_event(AppEvent::TokenUsage {
+            input_tokens: 150,
+            output_tokens: 30,
+            cache_read_tokens: 900,
+            cache_write_tokens: 900,
+        });
+
+        let usage = engine.last_turn_usage.as_ref().expect("usage recorded");
+        assert_eq!(usage.calls, vec![call1, call2]);
+        // The last call's prompt, not the turn total, is the real context
+        // size — used by `/context` instead of summing every request.
+        assert_eq!(usage.last_call(), Some(&call2));
+        assert_eq!(usage.last_call().unwrap().prompt_tokens(), 950);
+
+        // Session totals still accumulate as before.
+        assert_eq!(engine.total_input_tokens, 150);
+        assert_eq!(engine.total_output_tokens, 30);
+        assert_eq!(engine.total_cache_read_tokens, 900);
+        assert_eq!(engine.total_cache_write_tokens, 900);
+    }
+
+    /// AGE-223: with no per-call records (e.g. a provider that doesn't stream
+    /// them), `TokenUsage` falls back to the turn's reported aggregate.
+    #[test]
+    fn token_usage_without_prior_calls_falls_back_to_the_aggregate() {
+        let mut engine = bare_engine();
+
+        engine.handle_event(AppEvent::TokenUsage {
+            input_tokens: 40,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+
+        let usage = engine.last_turn_usage.as_ref().expect("usage recorded");
+        assert!(usage.calls.is_empty());
+        assert_eq!(usage.input_tokens, 40);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    /// AGE-223: the running totals saturate instead of wrapping on overflow.
+    #[test]
+    fn token_usage_counters_saturate_instead_of_overflowing() {
+        let mut engine = bare_engine();
+        engine.total_input_tokens = u32::MAX;
+
+        engine.handle_event(AppEvent::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+
+        assert_eq!(engine.total_input_tokens, u32::MAX);
+    }
+
+    /// AGE-223: the title-generation trigger counts conversation history, not
+    /// display messages — a system line padding `self.messages` must not
+    /// defeat it.
+    #[tokio::test]
+    async fn should_generate_title_counts_conversation_history_not_display_messages() {
+        let mut engine = test_engine().await;
+        engine.add_system_message("Agent protocol follow-up: ...".to_string());
+        engine
+            .messages
+            .push(DisplayMessage::with_text(MessageRole::User, "hi".into()));
+        engine.messages.push(DisplayMessage::with_text(
+            MessageRole::Assistant,
+            "hello".into(),
+        ));
+        assert_eq!(engine.messages.len(), 3);
+
+        let conv = engine.conversation.as_mut().unwrap();
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.finalize_response("hello".to_string(), vec![], None);
+        assert_eq!(conv.message_count(), 2);
+
+        assert!(engine.should_generate_title());
+    }
+
+    /// AGE-223: once the conversation has grown past the first exchange, the
+    /// trigger no longer fires.
+    #[tokio::test]
+    async fn should_generate_title_is_false_past_the_first_exchange() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        for _ in 0..2 {
+            conv.add_user_message_with_attachments(
+                rig_core::completion::Message::User {
+                    content: vec![UserContent::text("hi".to_string())],
+                },
+                vec![],
+            );
+            conv.finalize_response("hello".to_string(), vec![], None);
+        }
+        assert_eq!(conv.message_count(), 4);
+
+        assert!(!engine.should_generate_title());
+    }
+
+    /// AGE-223: once a title has already been set, the trigger no longer fires.
+    #[tokio::test]
+    async fn should_generate_title_is_false_once_a_title_is_set() {
+        let mut engine = test_engine().await;
+        engine.title = "Custom Title".to_string();
+        let conv = engine.conversation.as_mut().unwrap();
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.finalize_response("hello".to_string(), vec![], None);
+
+        assert!(!engine.should_generate_title());
     }
 }
