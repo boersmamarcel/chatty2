@@ -252,49 +252,50 @@ impl ChattyApp {
                             .unwrap_or_default();
 
                         // Factory creates shell session on-demand if not provided
-                        let (new_agent, new_shell_session, new_progress_slot) =
-                            AgentClient::from_model_config_with_tools(
-                                &model_config,
-                                &provider_config,
-                                AgentBuildContext {
-                                    mcp_tools,
-                                    exec_settings,
-                                    pending_approvals,
-                                    pending_clarifications,
-                                    pending_write_approvals,
-                                    pending_artifacts,
-                                    shell_session,
-                                    user_secrets,
-                                    theme_colors,
-                                    memory_service,
-                            skill_service: Some(skill_service),
-                                    search_settings,
-                                    embedding_service,
-                                    allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
-                                    module_agents,
-                                    gateway_port,
-                                    remote_agents,
-                                    available_model_ids,
-                                    conversation_id: Some(conv_id.clone()),
-                                },
-                            )
-                            .await?;
+                        let built_agent = AgentClient::from_model_config_with_tools(
+                            &model_config,
+                            &provider_config,
+                            AgentBuildContext {
+                                mcp_tools,
+                                exec_settings,
+                                pending_approvals,
+                                pending_clarifications,
+                                pending_write_approvals,
+                                pending_artifacts,
+                                shell_session,
+                                user_secrets,
+                                theme_colors,
+                                memory_service,
+                                skill_service: Some(skill_service),
+                                search_settings,
+                                embedding_service,
+                                allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
+                                module_agents,
+                                gateway_port,
+                                remote_agents,
+                                available_model_ids,
+                                conversation_id: Some(conv_id.clone()),
+                            },
+                        )
+                        .await?;
 
                         // Update the conversation's agent synchronously
                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(
-                                    new_agent,
+                                    built_agent.client,
                                     model_config.id.clone(),
                                     built_workspace_dir.clone(),
                                 );
                                 // Always store the new shell session — the factory either reused
                                 // the existing one or created a fresh one.
-                                if new_shell_session.is_some() {
-                                    conv.set_shell_session(new_shell_session);
+                                if built_agent.shell_session.is_some() {
+                                    conv.set_shell_session(built_agent.shell_session);
                                 }
-                                conv.set_invoke_agent_progress_slot(new_progress_slot);
+                                conv.set_invoke_agent_progress_slot(
+                                    built_agent.invoke_agent_progress_slot,
+                                );
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))

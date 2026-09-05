@@ -108,10 +108,17 @@ pub(super) async fn build_provider_agent(
                 .http_client(llm_client().clone())
                 .build()?;
 
-            let builder = client
+            let mut builder = client
                 .agent(&model_config.model_identifier)
-                .preamble(preamble)
-                .temperature(model_config.temperature as f64);
+                .preamble(preamble);
+
+            if model_config.supports_temperature {
+                builder = builder.temperature(model_config.temperature as f64);
+            }
+
+            if let Some(max_tokens) = model_config.max_tokens {
+                builder = builder.max_tokens(max_tokens as u64);
+            }
 
             let builder = native_tools.apply_to_builder(builder);
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);

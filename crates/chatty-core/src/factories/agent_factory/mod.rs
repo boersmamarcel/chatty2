@@ -65,9 +65,15 @@ pub struct AgentBuildContext {
     pub pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
     pub pending_clarifications: Option<crate::models::clarification_store::PendingClarifications>,
     pub pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
+    /// Sink for artifacts (e.g. attachments) queued mid-stream by tools like
+    /// `AddAttachmentTool`, so the desktop transcript can mint a card for
+    /// them. Always `None` from chatty-tui, which has no artifact viewport.
     pub pending_artifacts: Option<PendingArtifacts>,
     pub shell_session: Option<std::sync::Arc<ShellSession>>,
     pub user_secrets: Vec<(String, String)>,
+    /// Theme palette handed to `CreateChartTool` so generated charts match
+    /// the desktop app's theme. Always `None` from chatty-tui, which has no
+    /// themed chart rendering.
     pub theme_colors: Option<[String; 5]>,
     pub memory_service: Option<MemoryService>,
     pub skill_service: Option<SkillService>,
@@ -83,6 +89,14 @@ pub struct AgentBuildContext {
     /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
     /// else (e.g. chatty-tui, which doesn't enable that feature).
     pub conversation_id: Option<String>,
+}
+
+/// Result of `AgentClient::from_model_config_with_tools()`: the built client
+/// plus the two pieces of state the caller stores back on `Conversation`.
+pub struct BuiltAgent {
+    pub client: AgentClient,
+    pub shell_session: Option<std::sync::Arc<ShellSession>>,
+    pub invoke_agent_progress_slot: crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
 /// Provider-agnostic agent wrapper.
@@ -119,11 +133,7 @@ impl AgentClient {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         ctx: AgentBuildContext,
-    ) -> Result<(
-        Self,
-        Option<std::sync::Arc<ShellSession>>,
-        crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
-    )> {
+    ) -> Result<BuiltAgent> {
         // Destructure context for local use
         let AgentBuildContext {
             mcp_tools,
@@ -1066,19 +1076,17 @@ impl AgentClient {
         )
         .await?;
 
-        Ok((agent, shell_session_out, invoke_agent_progress_slot))
+        Ok(BuiltAgent {
+            client: agent,
+            shell_session: shell_session_out,
+            invoke_agent_progress_slot,
+        })
     }
 
     /// The provider this agent is built against — the seam usage semantics
     /// (AGE-212) and, later, per-provider auth are derived from.
     pub fn provider(&self) -> crate::settings::models::providers_store::ProviderType {
         self.provider.clone()
-    }
-
-    /// Returns the provider name for logging/debugging.
-    #[allow(dead_code)]
-    pub fn provider_name(&self) -> &str {
-        self.provider.display_name()
     }
 }
 

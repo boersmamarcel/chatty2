@@ -134,7 +134,6 @@ Several methods in the token budget subsystem are pre-built for planned features
 | `CodeBlockComponent::new()` | `code_block_component.rs:34` | Constructor |
 | `DisplayMessage::from_assistant_message()` | `message_component.rs:55` | Build display from model |
 | `ChattyApp::chat_input_state()` | `app_controller/mod.rs:722` | Access input state entity |
-| `AgentClient::provider_name()` | `agent_factory/mod.rs:1031` | Provider name for logging |
 | `StreamManager::has_active_streams()` | `stream_manager.rs:588` | Check for active streams |
 
 ## Other
