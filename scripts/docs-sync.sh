@@ -77,7 +77,8 @@ for name in \
   artifact_pdf.gif \
   artifact_chart.gif \
   artifact_table.gif \
-  artifact_markdown.gif
+  artifact_markdown.gif \
+  pr_status_bar.gif
 do
   if [[ -f "$ANIM_SRC/$name" ]]; then
     copy "$ANIM_SRC/$name" "$ANIM_DEST/$name"

@@ -3,18 +3,44 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use chatty_core::services::github_pr_service::{CheckState, PrState};
+
 use crate::APP_VERSION;
 use crate::engine::ChatEngine;
 use crate::ui::theme;
 
+fn pr_state_label(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open",
+        PrState::Draft => "draft",
+        PrState::Merged => "merged",
+        PrState::Closed => "closed",
+    }
+}
+
+fn check_symbol(state: CheckState) -> &'static str {
+    match state {
+        CheckState::Pending => "•",
+        CheckState::Passing => "✓",
+        CheckState::Failing => "✗",
+    }
+}
+
+fn check_style(state: CheckState) -> ratatui::style::Style {
+    match state {
+        CheckState::Pending => theme::muted(),
+        CheckState::Passing => theme::success(),
+        CheckState::Failing => theme::warning(),
+    }
+}
+
 pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
     let model_name = &engine.model_config.name;
-    let cwd_max_len =
-        usize::from(
-            area.width
-                .saturating_sub(if engine.git_branch.is_some() { 40 } else { 24 }),
-        )
-        .clamp(12, 48);
+    let mut reserved: u16 = if engine.git_branch.is_some() { 40 } else { 24 };
+    if engine.pull_request.is_some() {
+        reserved += 14;
+    }
+    let cwd_max_len = usize::from(area.width.saturating_sub(reserved)).clamp(12, 48);
     let working_dir = truncate_middle(&engine.current_working_directory(), cwd_max_len);
 
     let mut spans = vec![
@@ -33,6 +59,22 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
             truncate_middle(branch, 18),
             theme::tool_bold(),
         ));
+    }
+
+    // One-line equivalent of the desktop PR status bar: number, state, CI.
+    if let Some(pr) = engine.pull_request.as_ref() {
+        spans.push(Span::styled(" │ ", theme::muted()));
+        spans.push(Span::styled(format!("#{}", pr.number), theme::tool_bold()));
+        spans.push(Span::styled(
+            format!(" {}", pr_state_label(pr.state)),
+            theme::text_subtle(),
+        ));
+        if let Some(state) = pr.checks_state() {
+            spans.push(Span::styled(
+                format!(" {}", check_symbol(state)),
+                check_style(state),
+            ));
+        }
     }
 
     spans.push(Span::styled(" │ ", theme::muted()));

@@ -62,7 +62,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
+use super::chat_input::{
+    ChatInput, ChatInputState, ModelOption, PrStatusBarView, slash_menu_items_with_skills,
+};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::SystemTrace;
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
@@ -202,6 +204,9 @@ pub struct ChatView {
     /// Session files-changed bar is unfolded to the per-file list.
     session_bar_expanded: bool,
     elapsed_tick_started: bool,
+    /// GitHub pull request bar above the composer. Owns its own poller;
+    /// `sync_pr_status` only tells it which workspace to watch.
+    pr_status: Entity<PrStatusBarView>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -469,6 +474,7 @@ impl ChatView {
             session_review_dismissed: false,
             session_bar_expanded: false,
             elapsed_tick_started: false,
+            pr_status: cx.new(|_cx| PrStatusBarView::new()),
         }
     }
 
@@ -1489,6 +1495,25 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Tell the PR bar which conversation and workspace it is showing.
+    ///
+    /// Gated on `git_enabled`: with git integration off the bar never
+    /// resolves anything, and turning it off clears an existing bar.
+    fn sync_pr_status(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.try_global::<ExecutionSettingsModel>();
+        let workspace = settings.filter(|s| s.git_enabled).and_then(|settings| {
+            self.chat_input_state
+                .read(cx)
+                .working_dir()
+                .cloned()
+                .or_else(|| settings.workspace_dir.clone().map(PathBuf::from))
+        });
+        let conversation_id = self.conversation_id.clone();
+        self.pr_status.update(cx, |bar, cx| {
+            bar.set_context(conversation_id, workspace, cx);
+        });
+    }
+
     fn ensure_elapsed_tick(&mut self, cx: &mut Context<Self>) {
         if self.elapsed_tick_started || !self.is_thinking_indicator_visible(cx) {
             return;
@@ -1519,6 +1544,7 @@ impl ChatView {
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_clarification_inputs(window, cx);
+        self.sync_pr_status(cx);
         self.ensure_scroll_handler(cx);
         self.turns = Rc::new(self.typed_turns(cx));
         self.last_settled_assistant_idx = self
@@ -2484,6 +2510,9 @@ impl Render for ChatView {
                     .px_4()
                     .pt_2()
                     .pb_4()
+                    .flex()
+                    .flex_col()
+                    .child(self.pr_status.clone())
                     .child({
                         ChatInput::new(self.chat_input_state.clone()).into_any_element()
                     }),

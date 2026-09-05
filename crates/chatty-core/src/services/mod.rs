@@ -32,6 +32,7 @@ pub mod embedding_service;
 pub mod error_collector_layer;
 pub mod filesystem_service;
 pub mod git_service;
+pub mod github_pr_service;
 pub mod http_client;
 pub mod llm_service;
 #[cfg(feature = "math-render")]
