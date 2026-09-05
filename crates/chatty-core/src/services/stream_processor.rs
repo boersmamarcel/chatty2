@@ -41,6 +41,10 @@ pub trait StreamChunkHandler {
     fn on_cancelled(&mut self);
 
     /// Called after the stream loop finishes (whether normally or via error/cancel).
+    ///
+    /// Called exactly once per loop, on every exit path — including a
+    /// handler error returned from `on_chunk`, which the loop still reports
+    /// through its own `Result` after draining progress and calling this.
     fn on_stream_ended(&mut self);
 }
 
@@ -92,6 +96,7 @@ pub async fn run_stream_loop(
     handler.on_stream_started();
 
     let mut last_activity = std::time::Instant::now();
+    let mut loop_result: Result<()> = Ok(());
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -123,11 +128,14 @@ pub async fn run_stream_loop(
                         idle_secs = last_activity.elapsed().as_secs(),
                         "Stream produced nothing for too long; ending the turn as stalled"
                     );
-                    handler
+                    if let Err(e) = handler
                         .on_chunk(Ok(StreamChunk::Error(
                             STALLED_STREAM_MESSAGE.to_string(),
                         )))
-                        .await?;
+                        .await
+                    {
+                        loop_result = Err(e);
+                    }
                     break;
                 }
             }
@@ -136,9 +144,13 @@ pub async fn run_stream_loop(
                 last_activity = std::time::Instant::now();
                 match chunk_result {
                     Some(result) => {
-                        match handler.on_chunk(result).await? {
-                            ChunkAction::Continue => {}
-                            ChunkAction::Break => break,
+                        match handler.on_chunk(result).await {
+                            Ok(ChunkAction::Continue) => {}
+                            Ok(ChunkAction::Break) => break,
+                            Err(e) => {
+                                loop_result = Err(e);
+                                break;
+                            }
                         }
                     }
                     None => break,
@@ -155,7 +167,7 @@ pub async fn run_stream_loop(
     }
 
     handler.on_stream_ended();
-    Ok(())
+    loop_result
 }
 
 #[cfg(test)]
@@ -287,6 +299,68 @@ mod tests {
 
         let _rx = install_progress_channel(&slot);
         assert!(slot.lock().is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // on_stream_ended runs on every exit path, including a handler error
+    // (AGE-213 / finding A5)
+    // -------------------------------------------------------------------
+
+    struct ErroringHandler {
+        started: bool,
+        ended: bool,
+        chunk_count: usize,
+    }
+
+    impl StreamChunkHandler for ErroringHandler {
+        fn on_stream_started(&mut self) {
+            self.started = true;
+        }
+
+        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+            chunk?;
+            self.chunk_count += 1;
+            if self.chunk_count == 2 {
+                anyhow::bail!("handler exploded on the second chunk");
+            }
+            Ok(ChunkAction::Continue)
+        }
+
+        fn on_progress(&mut self, _progress: InvokeAgentProgress) {}
+
+        fn on_cancelled(&mut self) {}
+
+        fn on_stream_ended(&mut self) {
+            self.ended = true;
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_error_still_runs_on_stream_ended() {
+        let chunks: Vec<Result<StreamChunk>> = vec![
+            Ok(StreamChunk::Text("first".into())),
+            Ok(StreamChunk::Text("second".into())),
+            // Never reached: the handler errors on the second chunk above.
+            Ok(StreamChunk::Text("third".into())),
+        ];
+        let mut stream: ResponseStream = Box::pin(futures::stream::iter(chunks));
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = ErroringHandler {
+            started: false,
+            ended: false,
+            chunk_count: 0,
+        };
+        let outcome =
+            run_stream_loop(&mut stream, &mut progress_rx, &cancel_flag, &mut handler).await;
+
+        assert!(handler.started);
+        assert!(
+            handler.ended,
+            "on_stream_ended must run even when the handler errors"
+        );
+        assert!(outcome.is_err(), "the handler's error must propagate");
     }
     // -------------------------------------------------------------------
     // Loop contract (AGE-191 / AGE-192)
