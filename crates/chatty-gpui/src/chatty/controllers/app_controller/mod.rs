@@ -406,6 +406,7 @@ impl ChattyApp {
         cx: &mut Context<Self>,
         conversation_repo: Arc<dyn ConversationRepository>,
     ) -> Self {
+        crate::boot_timing::checkpoint("chattyapp_new_start");
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
             cx.set_global(ConversationsStore::new());
@@ -445,6 +446,7 @@ impl ChattyApp {
 
         // Initialize chat input with available models
         app.initialize_models(cx);
+        crate::boot_timing::checkpoint("chattyapp_new_done");
 
         // is_ready is set by load_conversations_after_models_ready() once disk load completes.
         // Do NOT create an initial conversation here — ConversationsStore is always empty at
@@ -641,7 +643,9 @@ impl ChattyApp {
             .try_global::<ExecutionSettingsModel>()
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
+        crate::boot_timing::checkpoint("skills_scan_start");
         self.refresh_chat_input_skills(workspace_dir.as_deref(), cx);
+        crate::boot_timing::checkpoint("skills_scan_done");
     }
 
     /// Push the current `ModelsModel` into the chat-input model picker.
