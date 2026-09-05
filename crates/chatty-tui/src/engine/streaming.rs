@@ -107,9 +107,13 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                     .send(AppEvent::ClarificationRequested { id, questions });
                 Ok(ChunkAction::Continue)
             }
-            // Per-request records are logged where they are produced; the
-            // terminal shows the exchange aggregate only.
-            StreamChunk::ApiCallUsage(_) => Ok(ChunkAction::Continue),
+            // Per-request records are also logged where they are produced;
+            // forwarded here so the engine can fold them into the turn's
+            // per-call usage for an accurate `/context` size (AGE-223).
+            StreamChunk::ApiCallUsage(call) => {
+                let _ = self.event_tx.send(AppEvent::ApiCallUsage(call));
+                Ok(ChunkAction::Continue)
+            }
             StreamChunk::TurnUsage(usage) => {
                 let _ = self.event_tx.send(AppEvent::TokenUsage {
                     input_tokens: usage.input_tokens,
@@ -216,13 +220,22 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         cancelled: false,
     };
 
-    chatty_core::services::run_stream_loop(
+    let result = chatty_core::services::run_stream_loop(
         &mut stream,
         &mut progress_rx,
         &cancel_flag,
         &mut handler,
     )
-    .await
+    .await;
+
+    // Clear the progress slot sender so stale references don't accumulate,
+    // mirroring the desktop's cleanup in message_ops_internals.rs (AGE-223).
+    {
+        let mut slot = invoke_agent_progress_slot.lock();
+        *slot = None;
+    }
+
+    result
 }
 
 #[cfg(test)]
