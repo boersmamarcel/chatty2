@@ -80,7 +80,9 @@ actions!(
         PreviousConversation,
         NextConversation,
         DeleteActiveConversation,
-        InstallCli
+        InstallCli,
+        ApprovePendingCommand,
+        DenyPendingCommand
     ]
 );
 

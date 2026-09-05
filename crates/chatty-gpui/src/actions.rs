@@ -20,6 +20,21 @@ pub(crate) fn register_actions(cx: &mut App) {
         KeyBinding::new("cmd-down", NextConversation, None),
         KeyBinding::new("alt-backspace", DeleteActiveConversation, None),
         KeyBinding::new("cmd-backspace", DeleteActiveConversation, None),
+        // The chords the approval card and plan strip advertise (AGE-139).
+        KeyBinding::new("cmd-y", ApprovePendingCommand, None),
+        KeyBinding::new("cmd-shift-n", DenyPendingCommand, None),
+    ]);
+    #[cfg(target_os = "linux")]
+    cx.bind_keys([
+        KeyBinding::new("alt-y", ApprovePendingCommand, None),
+        KeyBinding::new("alt-shift-n", DenyPendingCommand, None),
+    ]);
+    // ctrl-y is also the composer's redo; the composer's own binding wins while
+    // it has focus, matching the label the card shows on Windows.
+    #[cfg(target_os = "windows")]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-y", ApprovePendingCommand, None),
+        KeyBinding::new("ctrl-shift-n", DenyPendingCommand, None),
     ]);
 
     #[cfg(not(target_os = "macos"))]
@@ -105,6 +120,22 @@ pub(crate) fn register_actions(cx: &mut App) {
         debug!("Delete active conversation action triggered");
         with_chatty_app(cx, |app, cx| {
             app.delete_active_conversation(cx);
+        });
+    });
+    cx.on_action(|_: &ApprovePendingCommand, cx: &mut App| {
+        debug!("Approve pending command action triggered");
+        with_chatty_app(cx, |app, cx| {
+            app.chat_view.update(cx, |view, cx| {
+                view.handle_floating_approval(true, cx);
+            });
+        });
+    });
+    cx.on_action(|_: &DenyPendingCommand, cx: &mut App| {
+        debug!("Deny pending command action triggered");
+        with_chatty_app(cx, |app, cx| {
+            app.chat_view.update(cx, |view, cx| {
+                view.handle_floating_approval(false, cx);
+            });
         });
     });
     cx.on_action(|_: &InstallCli, cx: &mut App| {

@@ -5,7 +5,8 @@ name: Ship-auto merge
 # ship-auto guard) still gate the actual merge.
 #
 # After the PR lands, if github-actions[bot] was the merger (GITHUB_TOKEN does
-# not emit pull_request.closed), dispatch prepare-release.yml with bump=patch.
+# not emit pull_request.closed), dispatch prepare-release.yml with bump=patch,
+# waiting out any prepare-release run that predates this merge (AGE-208).
 #
 # Closed-system: same-repo head only; only repository_owner (sender) or
 # github-actions[bot] (actor) may newly arm auto-merge. Fail closed otherwise.
@@ -113,11 +114,36 @@ jobs:
           fi
           case "$merged_by" in
             github-actions[bot]|app/github-actions)
-              already="$(gh run list --repo "$REPO" --workflow prepare-release.yml \
-                --json status,databaseId --jq '[.[] | select(.status=="queued" or .status=="in_progress") | .databaseId] | first // empty')"
-              if [ -n "$already" ]; then
-                echo "prepare-release already running ($already) — not dispatching again"
-                exit 0
+              merge_sha="$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid')"
+              # An active prepare-release run only makes this dispatch
+              # redundant if it already builds from a commit that contains
+              # this merge. One from an earlier release that is still
+              # building its binaries does not: skipping on it left #598
+              # (v0.3.53) without a release until dispatched by hand
+              # (AGE-208). Wait for such a run to finish, then dispatch.
+              for _ in $(seq 1 60); do
+                active="$(gh run list --repo "$REPO" --workflow prepare-release.yml \
+                  --json status,databaseId,headSha \
+                  --jq '[.[] | select(.status=="queued" or .status=="in_progress")] | first // empty')"
+                if [ -z "$active" ]; then
+                  break
+                fi
+                active_id="$(jq -r '.databaseId' <<<"$active")"
+                active_sha="$(jq -r '.headSha' <<<"$active")"
+                # "identical" or "ahead": the active run's head contains this merge.
+                relation="$(gh api "repos/$REPO/compare/${merge_sha}...${active_sha}" --jq '.status' 2>/dev/null || echo unknown)"
+                case "$relation" in
+                  identical|ahead)
+                    echo "prepare-release $active_id already covers $merge_sha ($relation) — not dispatching again"
+                    exit 0
+                    ;;
+                esac
+                echo "prepare-release $active_id is still running from $active_sha ($relation); waiting"
+                sleep 60
+              done
+              if [ -n "$active" ]; then
+                echo "::error::prepare-release $active_id still running after an hour; dispatch manually: gh workflow run prepare-release.yml --ref main -f bump=patch"
+                exit 1
               fi
               echo "Actions merger — dispatching prepare-release (patch) on main"
               gh workflow run prepare-release.yml --repo "$REPO" --ref main -f bump=patch
