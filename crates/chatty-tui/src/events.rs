@@ -55,6 +55,8 @@ pub enum AppEvent {
     TokenUsage {
         input_tokens: u32,
         output_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
     },
     StreamCompleted,
     StreamCancelled,
@@ -133,10 +135,14 @@ impl std::fmt::Debug for AppEvent {
             Self::TokenUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             } => f
                 .debug_struct("TokenUsage")
                 .field("input_tokens", input_tokens)
                 .field("output_tokens", output_tokens)
+                .field("cache_read_tokens", cache_read_tokens)
+                .field("cache_write_tokens", cache_write_tokens)
                 .finish(),
             Self::StreamCompleted => write!(f, "StreamCompleted"),
             Self::StreamCancelled => write!(f, "StreamCancelled"),

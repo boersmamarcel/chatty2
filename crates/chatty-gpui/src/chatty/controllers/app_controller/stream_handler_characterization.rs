@@ -103,19 +103,31 @@ fn describe(event: &StreamManagerEvent) -> String {
         StreamManagerEvent::TokenUsage {
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             ..
-        } => format!("TokenUsage(in={input_tokens}, out={output_tokens})"),
+        } => format!(
+            "TokenUsage(in={input_tokens}, out={output_tokens}, cache_read={cache_read_tokens}, cache_write={cache_write_tokens})"
+        ),
         StreamManagerEvent::StreamEnded {
             status,
             token_usage,
-            api_turn_count,
             ..
         } => {
             // The epoch is a monotonic counter shared across the process, so it
             // is not stable across a run of several scenarios and is left out.
-            format!(
-                "StreamEnded(status={status:?}, usage={token_usage:?}, api_turns={api_turn_count})"
-            )
+            let usage = token_usage.as_ref().map(|u| {
+                format!(
+                    "in={}, out={}, cache_read={}, cache_write={}, api_turns={}, calls={}",
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_read_tokens,
+                    u.cache_write_tokens,
+                    u.api_turn_count,
+                    u.calls.len()
+                )
+            });
+            format!("StreamEnded(status={status:?}, usage={usage:?})")
         }
     }
 }

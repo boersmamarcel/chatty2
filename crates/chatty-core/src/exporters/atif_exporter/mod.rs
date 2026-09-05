@@ -80,7 +80,7 @@ pub fn conversation_to_atif(
                 Message::Assistant { content, .. } => {
                     let metrics = token_usage.message_usages.get(assistant_turn_idx).map(|u| {
                         AtifStepMetrics {
-                            prompt_tokens: Some(u.input_tokens),
+                            prompt_tokens: Some(u.prompt_tokens()),
                             completion_tokens: Some(u.output_tokens),
                             cost_usd: u.estimated_cost_usd,
                         }
@@ -95,7 +95,11 @@ pub fn conversation_to_atif(
 
     // PHASE 4: Build final_metrics
     let final_metrics = AtifFinalMetrics {
-        total_prompt_tokens: Some(token_usage.total_input_tokens),
+        total_prompt_tokens: Some(
+            token_usage.total_input_tokens
+                + token_usage.total_cache_read_tokens
+                + token_usage.total_cache_write_tokens,
+        ),
         total_completion_tokens: Some(token_usage.total_output_tokens),
         total_cost_usd: Some(token_usage.total_estimated_cost_usd),
         total_steps: Some(steps.len() as u32),

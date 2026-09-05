@@ -1,5 +1,5 @@
 use crate::chatty::models::conversations_store::ConversationsStore;
-use crate::chatty::models::token_usage::{format_cost, format_tokens};
+use crate::chatty::models::token_usage::{format_cost, format_hit_rate, format_tokens};
 use crate::chatty::token_budget::{ContextStatus, GlobalTokenBudget, TokenBudgetSnapshot};
 use crate::settings::models::token_tracking_settings::TokenTrackingSettings;
 use gpui::prelude::FluentBuilder;
@@ -253,7 +253,7 @@ impl RenderOnce for TokenContextBarView {
 
         // Session totals from ConversationTokenUsage (unchanged from v1)
         let store = cx.global::<ConversationsStore>();
-        let session_totals: Option<(u32, u32, f64)> = store
+        let session_totals: Option<(u32, u32, u32, u32, f64)> = store
             .active_id()
             .and_then(|id| store.get_conversation(id))
             .map(|c| {
@@ -261,15 +261,43 @@ impl RenderOnce for TokenContextBarView {
                 (
                     u.total_input_tokens,
                     u.total_output_tokens,
+                    u.total_cache_read_tokens,
+                    u.total_cache_write_tokens,
                     u.total_estimated_cost_usd,
                 )
             });
 
-        let (session_input, session_output, session_cost) = session_totals.unwrap_or((0, 0, 0.0));
+        // Cache activity of the last exchange: how much of the prompt the
+        // provider served from cache. Only shown once the provider reported
+        // any cache activity for the conversation, since a provider or route
+        // without caching would otherwise show a permanent 0%.
+        let last_turn_cache_text: Option<String> = store
+            .active_id()
+            .and_then(|id| store.get_conversation(id))
+            .and_then(|c| c.token_usage().last_usage().cloned())
+            .filter(|u| u.cache_read_tokens > 0 || u.cache_write_tokens > 0)
+            .map(|u| {
+                let rate = u.cache_hit_rate().map(format_hit_rate).unwrap_or_default();
+                format!(
+                    "Cached: {} read ({}), {} written",
+                    format_tokens(u.cache_read_tokens),
+                    rate,
+                    format_tokens(u.cache_write_tokens),
+                )
+            });
+
+        let (session_input, session_output, session_cache_read, session_cache_write, session_cost) =
+            session_totals.unwrap_or((0, 0, 0, 0, 0.0));
         let has_session = session_input > 0 || session_output > 0;
         let has_cost = session_cost > 0.0;
+        let has_session_cache = session_cache_read > 0 || session_cache_write > 0;
         let session_input_text = format_tokens(session_input);
         let session_output_text = format_tokens(session_output);
+        let session_cache_text = format!(
+            "Cached: {} read, {} written",
+            format_tokens(session_cache_read),
+            format_tokens(session_cache_write)
+        );
         let cost_text = format_cost(session_cost);
 
         // Clone snap fractions for the popover closure (must be 'static)
@@ -439,6 +467,10 @@ impl RenderOnce for TokenContextBarView {
                                     )
                                     .child(format!("Input: {}", actual_input_text.clone()))
                                     .child(format!("Output: {}", actual_output_text.clone()))
+                                    .when(last_turn_cache_text.is_some(), |popover_div| {
+                                        popover_div
+                                            .child(last_turn_cache_text.clone().unwrap_or_default())
+                                    })
                                     .when(delta_text.is_some(), |popover_div| {
                                         popover_div.child(format!(
                                             "Estimation: {}",
@@ -482,6 +514,9 @@ impl RenderOnce for TokenContextBarView {
                                     )
                                     .child(format!("Input: {}", session_input_text))
                                     .child(format!("Output: {}", session_output_text))
+                                    .when(has_session_cache, |popover_div| {
+                                        popover_div.child(session_cache_text.clone())
+                                    })
                                     .when(has_cost, |popover_div| {
                                         popover_div.child(format!("Cost: {}", cost_text))
                                     }),

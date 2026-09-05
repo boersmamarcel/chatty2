@@ -426,6 +426,8 @@ mod tests {
             extra_params: HashMap::new(),
             cost_per_million_input_tokens: None,
             cost_per_million_output_tokens: None,
+            cost_per_million_cache_read_tokens: None,
+            cost_per_million_cache_write_tokens: None,
             supports_images: true,
             supports_pdf: true,
             supports_temperature: true,

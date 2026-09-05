@@ -1,6 +1,6 @@
 StreamStarted
 ToolCallStarted(id="call-1", "invoke_agent")
 ToolCallResult(id="call-1", "Three releases since 0.3.45.")
-StreamEnded(status=Completed, usage=None, api_turns=2)
+StreamEnded(status=Completed, usage=None)
 => loop returned Ok
 => no follow-up

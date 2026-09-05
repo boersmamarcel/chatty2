@@ -1,5 +1,5 @@
 StreamStarted
 TextChunk("Answer.")
-TokenUsage(in=1234, out=56)
+TokenUsage(in=234, out=56, cache_read=1000, cache_write=0)
 StreamCompleted
 => loop returned Ok

@@ -670,11 +670,7 @@ impl ChattyApp {
                     }
                 });
             }
-            StreamManagerEvent::TokenUsage {
-                conversation_id: _,
-                input_tokens: _,
-                output_tokens: _,
-            } => {
+            StreamManagerEvent::TokenUsage { .. } => {
                 // Token usage is handled during stream finalization, not per-chunk
             }
             StreamManagerEvent::StreamEnded {
@@ -684,7 +680,6 @@ impl ChattyApp {
                 token_usage,
                 trace_json,
                 pending_artifacts,
-                api_turn_count,
             } => {
                 debug!(conv_id = %conversation_id, epoch = *epoch, status = ?status, "StreamManager: stream ended");
 
@@ -758,10 +753,9 @@ impl ChattyApp {
 
                         self.finalize_completed_stream(
                             conversation_id,
-                            *token_usage,
+                            token_usage.clone(),
                             trace_json.clone(),
                             inline_attachments.clone(),
-                            *api_turn_count,
                             cx,
                         );
 
@@ -864,10 +858,9 @@ impl ChattyApp {
     fn finalize_completed_stream(
         &mut self,
         conversation_id: &str,
-        token_usage: Option<(u32, u32)>,
+        token_usage: Option<TokenUsage>,
         trace_json: Option<serde_json::Value>,
         artifact_paths: Vec<PathBuf>,
-        api_turn_count: u32,
         cx: &mut Context<Self>,
     ) {
         let chat_view = self.chat_view.clone();
@@ -933,14 +926,15 @@ impl ChattyApp {
         }
 
         // 3. Process token usage — always record tokens, optionally calculate cost
-        if let Some((input_tokens, output_tokens)) = token_usage {
+        if let Some(mut usage) = token_usage {
             debug!(
-                input_tokens,
-                output_tokens, api_turn_count, "Processing token usage"
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cache_read_tokens = usage.cache_read_tokens,
+                cache_write_tokens = usage.cache_write_tokens,
+                api_turn_count = usage.api_turn_count,
+                "Processing token usage"
             );
-
-            let mut usage =
-                TokenUsage::with_turn_count(input_tokens, output_tokens, api_turn_count);
 
             // Calculate cost if pricing is configured for this model
             if let Some(ref model_id) = model_id_opt {
@@ -950,18 +944,33 @@ impl ChattyApp {
                             model.cost_per_million_input_tokens,
                             model.cost_per_million_output_tokens,
                         ) {
-                            (Some(input_cost), Some(output_cost)) => {
-                                Some((input_cost, output_cost))
+                            (Some(input_per_million), Some(output_per_million)) => {
+                                Some(TokenPricing {
+                                    input_per_million,
+                                    output_per_million,
+                                    cache_read_per_million: model
+                                        .cost_per_million_cache_read_tokens,
+                                    cache_write_per_million: model
+                                        .cost_per_million_cache_write_tokens,
+                                })
                             }
                             _ => None,
                         }
                     })
                 });
 
-                if let Some((cost_per_million_input, cost_per_million_output)) = pricing {
-                    usage.calculate_cost(cost_per_million_input, cost_per_million_output);
+                if let Some(pricing) = pricing {
+                    usage.calculate_cost(&pricing);
                 }
             }
+
+            // The last request's prompt is the actual context size; the
+            // exchange total sums every request in the turn and over-states
+            // it by a factor of the tool-call count.
+            let (actual_input, actual_output) = match usage.last_call() {
+                Some(call) => (call.prompt_tokens(), usage.output_tokens),
+                None => (usage.prompt_tokens(), usage.output_tokens),
+            };
 
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
@@ -989,7 +998,7 @@ impl ChattyApp {
             // real numbers from the provider in the same snapshot.
             if cx.has_global::<GlobalTokenBudget>() {
                 cx.global::<GlobalTokenBudget>()
-                    .update_with_actuals(input_tokens, output_tokens);
+                    .update_with_actuals(actual_input, actual_output);
             }
 
             // 3c. Auto-summarize when context is critically full and the setting is enabled.

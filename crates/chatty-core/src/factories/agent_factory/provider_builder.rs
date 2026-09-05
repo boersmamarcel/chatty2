@@ -8,7 +8,9 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow};
+use rig_agent::agent::AgentBuilder;
 use rig_agent::client::AgentClientExt;
+use rig_core::client::CompletionClient;
 
 use crate::auth::{AzureTokenCache, azure_auth};
 use crate::services::AgentTaskController;
@@ -53,9 +55,16 @@ pub(super) async fn build_provider_agent(
                 rig_core::providers::openrouter::Client::new(&key)?
             };
 
-            let mut builder = client
-                .agent(&model_config.model_identifier)
-                .preamble(preamble);
+            // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
+            // OpenRouter cache nothing unless the request carries a
+            // `cache_control` breakpoint; rig only adds one when asked, and
+            // `client.agent(..)` skips the completion-model step where the
+            // flag lives. OpenAI-family models ignore the marker and keep
+            // caching automatically on the shared prefix.
+            let model = client
+                .completion_model(&model_config.model_identifier)
+                .with_prompt_caching();
+            let mut builder = AgentBuilder::new(model).preamble(preamble);
 
             if model_config.supports_temperature {
                 builder = builder.temperature(model_config.temperature as f64);

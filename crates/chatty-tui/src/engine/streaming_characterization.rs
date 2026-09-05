@@ -60,7 +60,11 @@ fn describe(event: &AppEvent) -> String {
         AppEvent::TokenUsage {
             input_tokens,
             output_tokens,
-        } => format!("TokenUsage(in={input_tokens}, out={output_tokens})"),
+            cache_read_tokens,
+            cache_write_tokens,
+        } => format!(
+            "TokenUsage(in={input_tokens}, out={output_tokens}, cache_read={cache_read_tokens}, cache_write={cache_write_tokens})"
+        ),
         AppEvent::StreamCompleted => "StreamCompleted".to_string(),
         AppEvent::StreamCancelled => "StreamCancelled".to_string(),
         AppEvent::StreamError(message) => format!("StreamError({message:?})"),
