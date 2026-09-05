@@ -76,8 +76,8 @@ use super::transcript::{
     extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
     format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
     merge_file_changes, new_artifact_view, plan_turn_index, produced_path_is_openable,
-    read_artifact_source, render_typed_block, resolve_artifact_path, tool_file_path,
-    turn_has_work_fold,
+    read_artifact_source, render_typed_block, resolve_artifact_path, retain_last_plan_block,
+    tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -577,6 +577,9 @@ impl ChatView {
             .collect();
         let traces = self.history_traces(cx);
         let mut turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
+        // A re-plan in a follow-up turn would otherwise paint the same live
+        // snapshot twice; keep only the newest block before filling one in.
+        retain_last_plan_block(&mut turns);
         attach_plan_block(&mut turns, self.plan_snapshot_active());
         turns
     }
