@@ -1,75 +1,592 @@
-/* Modern Chatty docs theme — extends mdBook defaults */
+/* Chatty docs theme (AGE-255).
+ *
+ * Layered over mdBook 0.5's stock stylesheets. Two themes are exposed in the
+ * header toggle: `light` and `ayu` (labelled "Dark"). Everything below is
+ * expressed through the same custom properties mdBook's own CSS reads, plus a
+ * handful of Chatty tokens, so the stock chrome (sidebar, search, menu bar)
+ * picks the palette up without further overrides.
+ */
 
 :root {
-    --chatty-accent: #6366f1;
-    --chatty-accent-soft: #eef2ff;
-    --content-max-width: 920px;
+    --sidebar-target-width: 272px;
+    --page-padding: 24px;
+    --content-max-width: 760px;
+    --menu-bar-height: 56px;
+    --mono-font: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --code-font-size: 0.875em;
+
+    --chatty-accent: #5357d2;
+    --chatty-accent-soft: #e9eafb;
+    --chatty-muted: #5b6472;
+    --chatty-rule: #d8dce4;
+    --chatty-surface: #ffffff;
+    --chatty-code-bg: #eef0f5;
+    --chatty-shadow: 0 1px 2px rgba(22, 26, 34, 0.06), 0 8px 24px rgba(22, 26, 34, 0.08);
+    --chatty-note: #2f6fdb;
+    --chatty-tip: #1f7a3a;
+    --chatty-warning: #9a6108;
+    --chatty-caution: #b3400f;
+}
+
+/* ---- Palettes ---------------------------------------------------------- */
+
+.light, html:not(.js) {
+    --bg: #f7f8fa;
+    --fg: #161a22;
+
+    --sidebar-bg: #f7f8fa;
+    --sidebar-fg: #3d4553;
+    --sidebar-non-existant: #a0a7b4;
+    --sidebar-active: var(--chatty-accent);
+    --sidebar-spacer: var(--chatty-rule);
+
+    --scrollbar: #b8bec9;
+
+    --icons: #6b7382;
+    --icons-hover: #161a22;
+
+    --links: #4548c4;
+
+    --inline-code-color: #2f3340;
+
+    --theme-popup-bg: #ffffff;
+    --theme-popup-border: var(--chatty-rule);
+    --theme-hover: #eef0f5;
+
+    --quote-bg: #ffffff;
+    --quote-border: var(--chatty-rule);
+
+    --table-border-color: var(--chatty-rule);
+    --table-header-bg: #f1f2f6;
+    --table-alternate-bg: #fafbfc;
+
+    --searchbar-border-color: var(--chatty-rule);
+    --searchbar-bg: #ffffff;
+    --searchbar-fg: #161a22;
+    --searchbar-shadow-color: rgba(83, 87, 210, 0.25);
+    --searchresults-header-fg: var(--chatty-muted);
+    --searchresults-border-color: var(--chatty-rule);
+    --searchresults-li-bg: #ffffff;
+    --search-mark-bg: #dcdefa;
+
+    --color-scheme: light;
+    --copy-button-filter: invert(45%);
+    --copy-button-filter-hover: invert(30%) sepia(60%) saturate(2000%) hue-rotate(220deg);
+    --footnote-highlight: var(--chatty-accent-soft);
+    --overlay-bg: rgba(22, 26, 34, 0.35);
+
+    --blockquote-note-color: var(--chatty-note);
+    --blockquote-tip-color: var(--chatty-tip);
+    --blockquote-important-color: var(--chatty-accent);
+    --blockquote-warning-color: var(--chatty-warning);
+    --blockquote-caution-color: var(--chatty-caution);
+    --sidebar-header-border-color: var(--chatty-accent);
+}
+
+.ayu, .coal, .navy {
+    --chatty-accent: #8f92f2;
+    --chatty-accent-soft: #262a4d;
+    --chatty-muted: #9aa3b2;
+    --chatty-rule: #2a3040;
+    --chatty-surface: #1a1e26;
+    --chatty-code-bg: #20242e;
+    --chatty-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+    --chatty-note: #7fb0ff;
+    --chatty-tip: #7dd39a;
+    --chatty-warning: #e6bb62;
+    --chatty-caution: #f0a27c;
+
+    --bg: #12151b;
+    --fg: #e6e9ef;
+
+    --sidebar-bg: #12151b;
+    --sidebar-fg: #b6bdc9;
+    --sidebar-non-existant: #5c6473;
+    --sidebar-active: var(--chatty-accent);
+    --sidebar-spacer: var(--chatty-rule);
+
+    --scrollbar: #3a4152;
+
+    --icons: #8c94a3;
+    --icons-hover: #e6e9ef;
+
+    --links: #9b9ef5;
+
+    --inline-code-color: #dfe3ea;
+
+    --theme-popup-bg: #1a1e26;
+    --theme-popup-border: var(--chatty-rule);
+    --theme-hover: #242935;
+
+    --quote-bg: #1a1e26;
+    --quote-border: var(--chatty-rule);
+
+    --table-border-color: var(--chatty-rule);
+    --table-header-bg: #1e2330;
+    --table-alternate-bg: #171b22;
+
+    --searchbar-border-color: var(--chatty-rule);
+    --searchbar-bg: #1a1e26;
+    --searchbar-fg: #e6e9ef;
+    --searchbar-shadow-color: rgba(143, 146, 242, 0.3);
+    --searchresults-header-fg: var(--chatty-muted);
+    --searchresults-border-color: var(--chatty-rule);
+    --searchresults-li-bg: #1a1e26;
+    --search-mark-bg: #3b3f7a;
+
+    --color-scheme: dark;
+    --copy-button-filter: invert(60%);
+    --copy-button-filter-hover: invert(80%);
+    --footnote-highlight: var(--chatty-accent-soft);
+    --overlay-bg: rgba(0, 0, 0, 0.5);
+
+    --blockquote-note-color: var(--chatty-note);
+    --blockquote-tip-color: var(--chatty-tip);
+    --blockquote-important-color: var(--chatty-accent);
+    --blockquote-warning-color: var(--chatty-warning);
+    --blockquote-caution-color: var(--chatty-caution);
+    --sidebar-header-border-color: var(--chatty-accent);
+}
+
+/* ---- Base type --------------------------------------------------------- */
+
+html {
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+}
+
+body {
+    line-height: 1.65;
 }
 
 .content main {
     max-width: var(--content-max-width);
 }
 
-.chapter li.part-title {
-    font-weight: 700;
-    text-transform: uppercase;
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+    text-wrap: balance;
+}
+
+.content h1 { font-size: 2.1rem; margin-top: 0.5em; }
+.content h2 { font-size: 1.5rem; margin-top: 2.2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--chatty-rule); }
+.content h3 { font-size: 1.15rem; margin-top: 1.8em; }
+.content h4 { font-size: 1rem; margin-top: 1.5em; }
+
+.content p,
+.content ul,
+.content ol {
+    margin-bottom: 1em;
+}
+
+/* The one-line "When to read this" dek every page opens with. */
+.content h1 + p > strong:first-child {
+    color: var(--chatty-muted);
+    font-weight: 500;
+}
+
+.content a {
+    color: var(--links);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.12s ease;
+}
+
+.content a:hover {
+    border-bottom-color: currentColor;
+    text-decoration: none;
+}
+
+/* Inline code */
+:not(pre) > code {
+    background: var(--chatty-code-bg);
+    color: var(--inline-code-color);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.88em;
+}
+
+/* Code blocks */
+pre {
+    border: 1px solid var(--chatty-rule);
+    border-radius: 8px;
+}
+
+pre > .buttons {
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+pre:hover > .buttons,
+pre:focus-within > .buttons {
+    opacity: 1;
+}
+
+/* ---- Tables ------------------------------------------------------------ */
+
+.content table {
+    display: table;
+    width: 100%;
+    margin: 1.25rem 0 1.5rem;
+    font-size: 0.9rem;
+    border: 1px solid var(--chatty-rule);
+    border-radius: 8px;
+    border-spacing: 0;
+    overflow: hidden;
+}
+
+.content table thead th {
+    text-align: left;
     font-size: 0.75rem;
-    letter-spacing: 0.06em;
-    color: var(--chatty-accent);
-    margin-top: 1.5rem;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--chatty-muted);
+    background: var(--table-header-bg);
+    padding: 0.6rem 0.75rem;
+    border: 0;
+    border-bottom: 1px solid var(--chatty-rule);
 }
 
-/* Role tables in architecture pages */
-table {
-    font-size: 0.92rem;
+.content table td {
+    padding: 0.55rem 0.75rem;
+    border: 0;
+    border-bottom: 1px solid var(--chatty-rule);
+    vertical-align: top;
 }
 
-table th {
-    background: var(--chatty-accent-soft);
+.content table tbody tr:last-child td {
+    border-bottom: 0;
 }
 
-.navy .table thead th,
-.ayu .table thead th,
-.coal .table thead th,
-.rust .table thead th {
-    background: rgba(99, 102, 241, 0.12);
+.content table tbody tr:nth-child(2n) {
+    background: var(--table-alternate-bg);
 }
 
-/* Callout-style blockquotes used in synced docs */
+/* Wide tables scroll inside their own box, never the page. */
+.content .table-wrapper {
+    overflow-x: auto;
+}
+
+/* ---- Images and figures ----------------------------------------------- */
+
+.content img {
+    max-width: 100%;
+    height: auto;
+    border: 1px solid var(--chatty-rule);
+    border-radius: 8px;
+    box-shadow: var(--chatty-shadow);
+    margin: 0.5rem 0 1.25rem;
+}
+
+/* Inline icons or badges should not get the frame. */
+.content img[width][height],
+.content h1 img,
+.content a > img {
+    border: 0;
+    box-shadow: none;
+    margin: 0;
+}
+
+/* ---- Callouts ---------------------------------------------------------- */
+/* mdBook 0.5 renders `> [!NOTE]` blockquotes as
+ * blockquote.blockquote-tag.blockquote-tag-<kind> with a .blockquote-tag-title;
+ * plain blockquotes are quotations and stay quiet. */
+
 blockquote {
-    border-left: 4px solid var(--chatty-accent);
-    background: rgba(99, 102, 241, 0.06);
-    padding: 0.5rem 1rem;
-    margin: 1rem 0;
+    margin: 1.25rem 0;
+    padding: 0.75rem 1rem;
+    background: var(--quote-bg);
+    border: 1px solid var(--quote-border);
+    border-left: 3px solid var(--chatty-muted);
+    border-radius: 6px;
+    color: var(--fg);
 }
 
-/* Mermaid diagrams */
+blockquote p:last-child {
+    margin-bottom: 0;
+}
+
+blockquote.blockquote-tag { border-left-width: 3px; }
+blockquote.blockquote-tag-note { border-left-color: var(--blockquote-note-color); }
+blockquote.blockquote-tag-tip { border-left-color: var(--blockquote-tip-color); }
+blockquote.blockquote-tag-important { border-left-color: var(--blockquote-important-color); }
+blockquote.blockquote-tag-warning { border-left-color: var(--blockquote-warning-color); }
+blockquote.blockquote-tag-caution { border-left-color: var(--blockquote-caution-color); }
+
+blockquote.blockquote-tag .blockquote-tag-title {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 0.35rem;
+}
+blockquote.blockquote-tag .blockquote-tag-title svg { fill: currentColor; }
+blockquote.blockquote-tag-note .blockquote-tag-title { color: var(--blockquote-note-color); }
+blockquote.blockquote-tag-tip .blockquote-tag-title { color: var(--blockquote-tip-color); }
+blockquote.blockquote-tag-important .blockquote-tag-title { color: var(--blockquote-important-color); }
+blockquote.blockquote-tag-warning .blockquote-tag-title { color: var(--blockquote-warning-color); }
+blockquote.blockquote-tag-caution .blockquote-tag-title { color: var(--blockquote-caution-color); }
+
+/* ---- Mermaid ----------------------------------------------------------- */
+
 .mermaid {
     text-align: center;
     margin: 1.5rem 0;
     overflow-x: auto;
 }
 
-/* Home hero links */
+.mermaid svg {
+    max-width: 100%;
+    height: auto;
+}
+
+/* ---- Sidebar ----------------------------------------------------------- */
+
+.sidebar {
+    font-size: 0.9rem;
+    border-right: 1px solid var(--chatty-rule);
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 0.75rem 0.5rem 2rem 1rem;
+}
+
+.chapter li.part-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--chatty-muted);
+    margin: 1.5rem 0 0.4rem;
+}
+
+.chapter li.part-title:first-child {
+    margin-top: 0.25rem;
+}
+
+.chapter li.chapter-item {
+    margin-top: 0.15rem;
+    line-height: 1.5;
+}
+
+.chapter li a,
+.chapter li > div {
+    padding: 0.2rem 0.5rem;
+    border-radius: 6px;
+    display: block;
+    color: var(--sidebar-fg);
+}
+
+.chapter li a:hover {
+    background: var(--theme-hover);
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.chapter li a.active {
+    background: var(--chatty-accent-soft);
+    color: var(--sidebar-active);
+    font-weight: 500;
+}
+
+.chapter li > ol {
+    margin-left: 0.75rem;
+    border-left: 1px solid var(--chatty-rule);
+    padding-left: 0.5rem;
+}
+
+.chapter .section li a {
+    font-size: 0.86rem;
+}
+
+.sidebar .sidebar-resize-handle {
+    background: transparent;
+}
+
+.sidebar hr,
+.chapter .spacer {
+    border-color: var(--chatty-rule);
+}
+
+/* ---- Menu bar / header ------------------------------------------------ */
+
+#mdbook-menu-bar,
+.menu-bar {
+    border-bottom: 1px solid var(--chatty-rule);
+    background: var(--bg);
+}
+
+.menu-bar .menu-title {
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.menu-bar .menu-title a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.menu-bar .menu-title img {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+}
+
+.menu-bar .icon-button {
+    color: var(--icons);
+    border-radius: 6px;
+}
+
+.menu-bar .icon-button:hover {
+    color: var(--icons-hover);
+    background: var(--theme-hover);
+}
+
+.theme-popup {
+    border-radius: 8px;
+    box-shadow: var(--chatty-shadow);
+}
+
+/* ---- Search ------------------------------------------------------------ */
+
+#mdbook-searchbar,
+#searchbar {
+    border-radius: 8px;
+    padding: 0.6rem 0.9rem;
+    font-family: inherit;
+}
+
+#mdbook-searchbar:focus,
+#searchbar:focus {
+    outline: 2px solid var(--chatty-accent);
+    outline-offset: 1px;
+    box-shadow: none;
+}
+
+.searchresults-outer li {
+    border-radius: 6px;
+}
+
+/* ---- Page navigation --------------------------------------------------- */
+
+.nav-chapters {
+    color: var(--icons);
+}
+
+.nav-chapters:hover {
+    background: transparent;
+    color: var(--chatty-accent);
+}
+
+/* ---- Home page --------------------------------------------------------- */
+
+.home-hero {
+    margin: 1rem 0 1.5rem;
+}
+
+.home-hero p.lede {
+    font-size: 1.2rem;
+    color: var(--chatty-muted);
+    max-width: 44ch;
+    text-wrap: balance;
+}
+
 .hero-links {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.75rem;
-    margin: 1.5rem 0;
+    gap: 0.6rem;
+    margin: 1.25rem 0 2rem;
 }
 
 .hero-links a {
     display: inline-block;
     padding: 0.5rem 1rem;
-    border-radius: 6px;
+    border-radius: 8px;
     background: var(--chatty-accent);
     color: #fff !important;
     text-decoration: none;
-    font-weight: 600;
+    font-weight: 500;
+    border: 1px solid var(--chatty-accent);
 }
 
 .hero-links a.secondary {
-    background: transparent;
-    color: var(--chatty-accent) !important;
-    border: 2px solid var(--chatty-accent);
+    background: var(--chatty-surface);
+    color: var(--fg) !important;
+    border-color: var(--chatty-rule);
+}
+
+.hero-links a:hover {
+    filter: brightness(1.05);
+    border-bottom-color: var(--chatty-accent);
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.9rem;
+    margin: 1.25rem 0 2rem;
+}
+
+.cards a.card {
+    display: block;
+    padding: 1rem 1.1rem;
+    background: var(--chatty-surface);
+    border: 1px solid var(--chatty-rule);
+    border-radius: 10px;
+    color: var(--fg);
+    text-decoration: none;
+    transition: border-color 0.12s ease, transform 0.12s ease;
+}
+
+.cards a.card:hover {
+    border-color: var(--chatty-accent);
+    transform: translateY(-1px);
+}
+
+.cards .card .eyebrow {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--chatty-accent);
+    margin-bottom: 0.35rem;
+}
+
+.cards .card strong {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.cards .card span {
+    font-size: 0.9rem;
+    color: var(--chatty-muted);
+}
+
+/* ---- Responsive -------------------------------------------------------- */
+
+@media (max-width: 720px) {
+    :root { --page-padding: 16px; }
+    .content h1 { font-size: 1.7rem; }
+    .content h2 { font-size: 1.3rem; }
+    .content table { font-size: 0.85rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .content a, .cards a.card, pre > .buttons { transition: none; }
 }

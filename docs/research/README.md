@@ -1,34 +1,59 @@
-# ADRs & research decisions
+# Research notes
 
-**When to read this:** You need context on research architecture, crate boundaries, or Stage B eval placement.
+**When to read this:** You want to know what the research crates in this workspace are
+for, how they relate to the product, and where the decisions behind them are recorded.
 
-> **Pair review pending (DOC-13 / AGE-95):** These pages were migrated from `docs/research/` into the mdBook site. Marcel reviews tone and accuracy before treating them as final ADRs. Do not close this issue until review is complete.
+Chatty ships a working agent: a ReAct-shaped tool loop, memory and skills, a token
+budget with compaction, ATIF trace export. The research track takes a handful of
+agentic-self-improvement papers and asks, per mechanism, whether it earns a place in that
+product — as a default, as an opt-in setting, or not at all. Papers inform the design;
+experiments decide what ships. The full frame is
+[Paper → experiment → product](./paper-to-product-pipeline.md).
 
-## Linear project
+Work is tracked in the Linear project
+**[Self-improving chatty2](https://linear.app/agents-research/project/self-improving-chatty2)**.
+A small set of symbols in the research crates is reserved for the human to write; see
+[`RESERVED.md`](../../RESERVED.md) before touching those crates.
 
-All research crates and experiment protocol live under the **[Self-improving chatty2](https://linear.app/agents-research/project/self-improving-chatty2)** Linear project.
+## The modules
 
-Stage B sandboxes (HumanEval, Polyglot, AppWorld, …) are in the sibling repo [`harbor-chatty`](https://github.com/boersmamarcel/harbor-chatty) — see [Harbor pivot](./harbor-pivot.md).
+| Module | Paper | Lands in | What it adds |
+|--------|-------|----------|--------------|
+| [M0 Trace](./modules/m0-trace.md) | — (contract layer) | [`chatty-trace`](../../crates/chatty-trace/README.md) | The `Trajectory` every optimizer reflects on; per-step attribution; ATIF round-trip; `FeedbackFn` |
+| [M1 ReAct](./modules/m1-react.md) | Yao et al., ICLR 2023 | `chatty-core` (loop already ships) + `chatty-trace` | Fidelity to the paper's action space; strategy variants for eval |
+| [M2 AFlow](./modules/m2-aflow.md) | Zhang et al., ICLR 2025 | [`chatty-flow`](../../crates/chatty-flow/README.md) (IR + interpreter), [`chatty-optimize`](../../crates/chatty-optimize/README.md) (MCTS) | Workflow topology search offline; saved workflows run in-app |
+| [M3 GEPA](./modules/m3-gepa.md) | Agrawal et al., ICLR 2026 | [`chatty-optimize`](../../crates/chatty-optimize/README.md) | Reflective prompt optimization of `ModelConfig.preamble` |
+| [M4 ACE](./modules/m4-ace.md) | Zhang et al., ICLR 2026 | [`chatty-playbook`](../../crates/chatty-playbook/README.md) | Evolving playbook over the memory/skills store with deterministic merge |
 
-## Decision records
+Per-module pages, dependency graph and status: [modules/index.md](./modules/index.md).
+The fifth paper (DGM) self-modifies its target repo and therefore lives in a separate
+repo, never against chatty2.
 
-| Doc | Topic |
-|-----|-------|
-| [harbor-pivot.md](./harbor-pivot.md) | Stage B eval lives in Harbor, not chatty2 |
-| [crate-promises-chatty-trace.md](./crate-promises-chatty-trace.md) | chatty-trace scope and boundaries |
-| [crate-promises-chatty-playbook.md](./crate-promises-chatty-playbook.md) | chatty-playbook scope and boundaries |
-| [crate-promises-chatty-flow.md](./crate-promises-chatty-flow.md) | chatty-flow scope and boundaries |
-| [cost-model.md](./cost-model.md) | Optimizer economics |
-| [appworld-decision.md](./appworld-decision.md) | AppWorld eval sandbox choice |
+## How research meets the product
 
-## Pipeline & integration
+- **Stage A** (fidelity) runs inside this workspace's research crates. **Stage B** (task
+  value) runs in the sibling repo
+  [`harbor-chatty`](https://github.com/boersmamarcel/harbor-chatty) — see
+  [Harbor pivot](./harbor-pivot.md) for why. Neither stage promotes anything by itself;
+  the bar is in [Experiment protocol](./experiment-protocol.md).
+- **Shipping crates** (`chatty-trace`, `chatty-playbook`, `chatty-flow`) sit on the
+  request path and are held to the same production bar as `chatty-core`; `chatty-optimize`
+  is build-time tooling and never blocks a chat.
+- **Where mechanisms land**: [App ↔ research bridge](./app-research-bridge.md) maps
+  production components (agent loop, memory, context window, traces, sub-agents) to the
+  modules that touch them; [Settings integration map](./settings-integration-map.md)
+  lists the settings each promoted mechanism would surface through.
 
-| Doc | Topic |
-|-----|-------|
-| [app-research-bridge.md](./app-research-bridge.md) | Production app ↔ M0–M4 module map |
-| [paper-to-product-pipeline.md](./paper-to-product-pipeline.md) | SOTA → experiment → product spine |
-| [experiment-protocol.md](./experiment-protocol.md) | Stage A/B checklist, cost accounting |
-| [promotion-log.md](./promotion-log.md) | Marcel-only promotion verdicts |
-| [settings-integration-map.md](./settings-integration-map.md) | Settings ↔ research mechanisms |
+## Decision records (ADRs)
 
-Module work breakdown: [modules/index.md](./modules/index.md) (M0–M4).
+| Doc | Decision |
+|-----|----------|
+| [harbor-pivot.md](./harbor-pivot.md) | Stage B evaluation lives in Harbor, not in chatty2 |
+| [appworld-decision.md](./appworld-decision.md) | Which AppWorld sandbox to evaluate against |
+| [cost-model.md](./cost-model.md) | How optimizer runs are costed from live `ModelConfig` prices |
+
+Each research crate's scope is stated in its own `README.md` (linked in the table above).
+
+**Archived:** the empty promotion-log template and the pre-Stage-A crate-promise pages
+are kept under [`docs/archive/research/`](../archive/research/promotion-log.md) for their
+reasoning only; they are not maintained.

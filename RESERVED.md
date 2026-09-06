@@ -138,3 +138,39 @@ One push-back, then defer.
 - Working Agreement (full version) and the Master Research Plan: Linear project
   **Self-improving chatty2** → documents
 - `RESERVED.md` in the `agenticloop` repo is the authoritative list for the DGM side
+
+## Governance: projects, labels and auto-ship
+
+The Linear project **Self-improving chatty2** lands five agentic-self-improvement papers
+in this workspace as `chatty-trace`, `chatty-playbook`, `chatty-flow`, and
+`chatty-optimize` (search + paired stats + optimizer QA loaders). **Stage B sandboxes**
+(HumanEval, Polyglot, AppWorld, …) live in the sibling repo `harbor-chatty` (Harbor;
+Linear AGE-34), not in this workspace. There is **no `chatty-eval` crate**. The reserved
+symbols in the table above are enforced by `scripts/check-reserved.sh` in CI.
+
+Take only `owner:ai` issues unless told otherwise. Never answer or close a
+`gate:reflection` issue. Ordinary chatty2 work is unaffected by any of this.
+
+### Auto-ship (zero-human patch releases)
+
+Low-risk work may merge and **patch-release** without the human when — and only when —
+all of the following hold:
+
+1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** or **[Chatty tech debt](https://linear.app/agents-research/project/chatty-tech-debt-16da7cdefe96)** (not Self-improving chatty2).
+   **Chatty auto-ship** — CVEs and safe infra patch/minor only.
+   **Chatty tech debt** — grouped dependency/crate bumps agents may implement (`ship:auto`).
+   Project members = the human owner (closed-system allowlist).
+   Weekly `dependency-check.yml` files work in Linear only (no GitHub tech-debt issues).
+2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
+   `ship:auto` + `release:patch` (never minor/major). Privileged labels are
+   owner / `github-actions[bot]` only; outsiders are stripped.
+3. CI + `ship-auto-guard` are green; then auto-merge (same-repo head; owner sender
+   or Actions actor) → `prepare-release` lands the version bump via a `cut-release`
+   PR (main is protected), tags, and builds.
+
+**Project membership is the allowlist.** Do not auto-merge solely because an issue has
+`owner:ai` on another project. Never auto-ship reserved symbols, research crates,
+auth/billing, or core UX. Slack `#chatty-auto-ship` is notify-only. Failures notify
+Linear, Slack, and GitHub. Emergency rebuild (owner only; run against the tag):
+`gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z`.
+Authz regression: `bash scripts/check-release-authz.sh`.

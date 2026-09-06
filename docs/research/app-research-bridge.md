@@ -55,7 +55,7 @@ flowchart TB
 | **Sub-agents** | `sub_agent_tool`, `invoke_agent_tool`, `list_agents_tool` | Agent delegation | [M2 AFlow](./modules/m2-aflow.md) | Winning IR → `FlowSettingsModel` (planned) |
 | **Memory store** | `services/memory_service.rs`, `memory.mv2` | `remember` / `search_memory` | [M4 ACE](./modules/m4-ace.md) | Playbook on same store; scope TBD ([AGE-47](https://linear.app/agents-research/issue/AGE-47)) |
 | **Skills** | `save_skill_tool`, `SKILL.md` files, `[SKILL]` prefix | Procedures in context | M4 ACE (facts vs procedures split) | Self-improving playbook vs manual skills |
-| **Context window** | `token_budget/` + GPUI footer bar | Token fill indicator | M3 cost, M4 prefix-cache | Estimation ships; summarizer stub |
+| **Context window** | `token_budget/` + GPUI footer bar | Token fill indicator | M3 cost, M4 prefix-cache | Estimation and compaction ship |
 | **Model preamble** | `ModelConfig.preamble` | Settings → model system prompt | M1 few-shot block, [M3 GEPA](./modules/m3-gepa.md) | User-editable; GEPA optimizes offline |
 | **Trace / ATIF** | `exporters/types.rs`, `StreamManager` | Training export toggle | [M0 Trace](./modules/m0-trace.md) | Export **setting**; full recorder TBD |
 | **Token pricing** | `ModelConfig.cost_per_million_*` | Cost display (sidebar) | M3 GEPA, [cost model](./cost-model.md) | Ships; optimizer accounting uses it |
@@ -79,7 +79,7 @@ The ReAct-shaped loop runs in `chatty-core`: `AgentFactory` builds a `rig-agent`
 |---------|-----|-----------|
 | Stream lifecycle | [stream-manager.md](../stream-manager.md) | `chatty-gpui/.../stream_manager.rs` |
 | Entity wiring | [entity-communication.md](../entity-communication.md) | `app_controller/` |
-| Provider agents | [architecture-overview.md](../architecture-overview.md) | `factories/agent_factory/` |
+| Provider agents | [system-overview.md](../system-overview.md) | `factories/agent_factory/` |
 
 **Research touchpoints**
 
@@ -133,7 +133,7 @@ patch in after the stream completes.
 |---------|-----|-----------|
 | Token tracking | [token-tracking.md](../token-tracking.md) | `token_budget/`, `GlobalTokenBudget` |
 | Response reserve | — | `TokenTrackingSettings.response_reserve` (default 4096) |
-| Summarization | — | `summarizer.rs` — **stub** |
+| Summarization | [context-compaction.md](../context-compaction.md) | `summarizer.rs` — `summarize_oldest_half` ships (context shaper stages 4–5, `/compact`); only the secondary-model variant `summarize_with_model` is still a stub |
 
 **Research touchpoints**
 
@@ -143,9 +143,10 @@ patch in after the stream completes.
 | [M4 ACE](./modules/m4-ace.md) | Playbook growth competes for context; paper assumes prompt-cache prefix reuse |
 | [M0](./modules/m0-trace.md) | `RolloutBudget` extends token accounting for train vs validation rollouts |
 
-**Future product link:** conversation compaction (summarizer) is the natural place to
-apply ACE grow-and-refine eviction when playbook + history exceed pressure thresholds —
-not built yet.
+**Future product link:** conversation compaction (`services/context_shaper.rs`, a
+graduated pipeline that ends in `summarize_oldest_half`) is the natural place to apply ACE
+grow-and-refine eviction when playbook + history exceed pressure thresholds — the
+compaction ships; the playbook hook into it does not exist yet.
 
 ---
 
@@ -202,7 +203,7 @@ assistant response.
 | No `FeedbackFn` | M0 | GEPA `µ_f`, ACE reflector input |
 | Full vs no retention | M0 | `Recorder` trait; no-op in release builds |
 
-Deep dive: [M0 Trace module page](./modules/m0-trace.md), [crate-promises-chatty-trace](./crate-promises-chatty-trace.md).
+Deep dive: [M0 Trace module page](./modules/m0-trace.md), [`chatty-trace` README](../../crates/chatty-trace/README.md).
 
 ---
 
@@ -228,8 +229,12 @@ registry. Execution settings control workspace path, approval mode, and sandbox.
 | `sub_agent_tool` | Ensemble branches |
 | `IrRepr` interpreter (planned) | Executes saved topology |
 
-Monty **code mode** (`sandbox/monty_bridge.rs`) could become `PythonRepr` for AFlow —
-interface exists, VM not wired. See [monty-sandbox.md](../monty-sandbox.md).
+Monty **code mode** (`sandbox/monty_bridge.rs`) could become `PythonRepr` for AFlow.
+Today `MontySandbox` (`sandbox/monty.rs`) runs stdlib-only Python through a `python3`
+subprocess under time/memory limits, and `SandboxManager` tries it before Docker; the
+bridge's `ToolBridge` interface exists but the pause/resume loop that would let scripts
+call Chatty tools is not wired. Source:
+[`crates/chatty-core/src/sandbox/`](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-core/src/sandbox).
 
 ---
 
@@ -244,7 +249,7 @@ interface exists, VM not wired. See [monty-sandbox.md](../monty-sandbox.md).
 | AFlow (M2) | Traces, sub-agent registry | Workflow IR JSON |
 | ACE offline (M4) | Traces, memory store | Playbook delta ops |
 
-Stage B evals run in [`harbor-chatty`](../../../harbor-chatty), not inside the app binary.
+Stage B evals run in [`harbor-chatty`](https://github.com/boersmamarcel/harbor-chatty), not inside the app binary.
 
 ---
 
@@ -253,7 +258,7 @@ Stage B evals run in [`harbor-chatty`](../../../harbor-chatty), not inside the a
 | Module | Lands in app at… | Architecture doc |
 |--------|------------------|-------------------|
 | [M0 Trace](./modules/m0-trace.md) | `exporters/`, `StreamManager`, future `Recorder` | [stream-manager.md](../stream-manager.md) |
-| [M1 ReAct](./modules/m1-react.md) | `llm_service.rs`, `agent_factory/` | [architecture-overview.md](../architecture-overview.md) |
+| [M1 ReAct](./modules/m1-react.md) | `llm_service.rs`, `agent_factory/` | [system-overview.md](../system-overview.md) |
 | [M2 AFlow](./modules/m2-aflow.md) | Sub-agent tools + future `FlowSettingsModel` | [component-map.md](../component-map.md) |
 | [M3 GEPA](./modules/m3-gepa.md) | `ModelConfig.preamble` | [settings-integration-map](./settings-integration-map.md) |
 | [M4 ACE](./modules/m4-ace.md) | `memory_service`, skill tools | [agent-memory.md](../agent-memory.md) |
@@ -263,5 +268,4 @@ Stage B evals run in [`harbor-chatty`](../../../harbor-chatty), not inside the a
 - [Component map](../component-map.md) — crate/module/entity diagrams
 - [System overview](../system-overview.md) — three-layer mental model
 - [Module pages](./modules/index.md) — per-paper fidelity and eval protocol
-- [Promotion log](./promotion-log.md) — Marcel's ship decisions
-- [Experiment protocol](./experiment-protocol.md) — Stage A/B bar
+- [Experiment protocol](./experiment-protocol.md) — Stage A/B bar and promotion inputs

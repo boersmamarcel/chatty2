@@ -266,6 +266,8 @@ The changelog becomes the GitHub Release body automatically.
 
 ## Idiomatic Patterns
 
+A curated human-readable version of these patterns is on the docs site: docs-site/src/dev/contributing-patterns.md.
+
 This section documents the common Rust and GPUI patterns used throughout the Chatty codebase.
 
 ### 1. Global Entity Patterns
@@ -812,12 +814,16 @@ send_message() ──► StreamManager ──► StreamManagerEvent ──► ha
 pub enum StreamStatus { Active, Completed, Cancelled, Error(String) }
 
 pub struct StreamState {
-    response_text: String,
-    status: StreamStatus,
-    token_usage: Option<TokenUsage>,   // built from per-request ApiCallUsage records
-    trace_json: Option<serde_json::Value>,
+    epoch: u64,                            // registration epoch; a stale StreamEnded is ignored
+    pub status: StreamStatus,
+    pub token_usage: Option<TokenUsage>,   // built from `calls` once the aggregate arrives
+    calls: Vec<ApiCallUsage>,              // one record per provider request, in order
+    pub trace_json: Option<serde_json::Value>,
     task: Option<Task<anyhow::Result<()>>>,
     cancel_flag: Arc<AtomicBool>,
+    pending_artifacts: Option<PendingArtifacts>, // queued by AddAttachmentTool, drained on finalize
+    has_emitted_first_chunk: bool,         // first text chunk goes out immediately, later ones batched
+    // ... plus the text-batching buffer and its flush timer
 }
 
 pub enum StreamManagerEvent {
@@ -939,13 +945,15 @@ impl ProviderType {
     pub fn default_capabilities(&self) -> (bool, bool) {
         match self {
             // OpenRouter is a gateway to multimodal models (Anthropic, Google, etc.)
-            ProviderType::OpenRouter => (true, true),
-            ProviderType::AzureOpenAI => (true, false),
-            ProviderType::Ollama => (false, false),    // Per-model detection
+            ProviderType::OpenRouter => (true, true),   // Images + PDFs
+            ProviderType::AzureOpenAI => (true, false), // Images only (PDF lossy)
+            ProviderType::Ollama => (false, false),     // Per-model detection
         }
     }
 }
 ```
+
+`ProviderType` has exactly these three variants (`crates/chatty-core/src/settings/models/providers_store.rs`). The removed direct providers (`anthropic`, `gemini`, `mistral`, `open_ai`) survive only as serde aliases that deserialize to `OpenRouter`, so old settings files still load.
 
 **Used in**:
 - `models_controller.rs`: When creating new models
@@ -1011,9 +1019,9 @@ Ollama models have **per-model** capabilities that are dynamically detected:
 
 ### Adding New Providers
 
-When adding a new provider (e.g., "Cohere"):
+Most new models need no new provider: OpenRouter already fronts Anthropic, Google, Mistral, Meta and others, so prefer adding the model under `ProviderType::OpenRouter`. A genuinely new backend (its own API shape, like Azure) needs:
 
-1. Add variant to `ProviderType` enum
+1. Add variant to `ProviderType` enum (with `display_name()` and a stable serde name)
 2. Update `ProviderType::default_capabilities()` with provider defaults
 3. ModelConfig automatically inherits these defaults via `create_model()` controller
 
@@ -1109,24 +1117,22 @@ To enable filesystem tools:
 
 ## Security Practices
 
-### Sensitive Env Var Masking
+### MCP API Key Masking
 
-MCP server env vars may contain API keys, tokens, and other secrets. The LLM must never see real values.
+`McpServerConfig` (`crates/chatty-core/src/settings/models/mcp_store.rs`) describes an already-running MCP endpoint: `name`, `url`, `api_key: Option<String>` (sent as `Authorization: Bearer …`), `enabled`, `is_module`. There is no env-var map; the API key is the only secret. The LLM must never see its value.
 
-**Rule**: Any path that sends `McpServerConfig` data to the LLM **must** call `masked_env()` instead of accessing `.env` directly.
+**Rule**: Any path that sends `McpServerConfig` data to the LLM reports `has_api_key()` (a `bool`), never the `api_key` field.
 
 ```rust
-// WRONG — sends real secrets to the LLM
-let env = server.env.clone();
+// WRONG — sends the real secret to the LLM
+let key = server.api_key.clone();
 
-// CORRECT — masks sensitive values before LLM sees them
-let env = server.masked_env(); // KEY/TOKEN/SECRET/etc. → "****"
+// CORRECT — only whether a key is configured
+let has_api_key = server.has_api_key();
 ```
 
-**Sensitive key detection** (`is_sensitive_env_key` in `mcp_store.rs`): matches keys containing KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL, AUTH, or API (case-insensitive).
-
 **Where masking is applied today:**
-- `list_mcp_services` tool output (`McpServerSummary.env`)
+- `list_mcp_services` tool output (`McpServerSummary.has_api_key`, `tools/list_mcp_tool.rs`; `test_list_masks_api_key` pins it)
 
 **Where masking must be added if new LLM-facing surfaces are added:**
 - Any future tool that returns `McpServerConfig` data
@@ -1135,41 +1141,40 @@ let env = server.masked_env(); // KEY/TOKEN/SECRET/etc. → "****"
 
 ### Masked Sentinel Preservation
 
-`MASKED_VALUE_SENTINEL = "****"` means "preserve the existing stored value". This is implemented in `edit_mcp_service`:
+`MASKED_API_KEY_SENTINEL = "****"` (`mcp_store.rs`) means "preserve the existing stored value". Any write path that accepts an API key from the LLM must resolve it:
 
 ```rust
 // If LLM sends back "****", keep the real stored value — don't overwrite
-if v == MASKED_VALUE_SENTINEL {
-    let existing = server.env.get(&k).cloned().unwrap_or_default();
-    (k, existing)
+let api_key = if incoming.as_deref() == Some(MASKED_API_KEY_SENTINEL) {
+    existing.api_key.clone()
 } else {
-    (k, v)  // LLM sent a new real value — store it
-}
+    incoming // LLM sent a new real value — store it
+};
 ```
 
-**If a new tool accepts env vars as input** (e.g., a future `patch_mcp_service`), apply the same sentinel resolution pattern.
+**If a new tool accepts an API key as input**, apply the same sentinel resolution pattern, and hold `MCP_WRITE_LOCK` (same file) around load → modify → save so concurrent tool calls cannot race.
 
-**If adding a new server** (`add_mcp_service`): reject `****` values with a clear error — there is no existing value to preserve.
+**If adding a new server**: reject `****` with a clear error — there is no existing value to preserve.
 
 ### Logging Rules
 
-Never log sensitive values. Log key *names* only.
+Never log sensitive values. Log presence, not the key.
 
 ```rust
 // WRONG
-tracing::info!(env = ?server.env, "Server configured");
+tracing::info!(api_key = ?server.api_key, "Server configured");
 
 // CORRECT
-tracing::info!(env_keys = ?server.env.keys().collect::<Vec<_>>(), "Server configured");
+tracing::info!(has_api_key = server.has_api_key(), "Server configured");
 ```
 
 ### New LLM-Facing Output Structs
 
 When adding a new `#[derive(Serialize)]` struct that will be returned as tool output:
 
-1. If it wraps `McpServerConfig`, use `masked_env()` — never `.env`
+1. If it wraps `McpServerConfig`, expose `has_api_key` — never `api_key`
 2. If it includes any `ProviderConfig` fields, exclude `api_key` (it is never exposed to the LLM)
-3. Add a test that the output contains `"****"` for a server with a real API key
+3. Add a test that the output for a server with a real API key does not contain the key
 
 ### Where Real Values Are Safe
 
@@ -1177,6 +1182,6 @@ These paths use raw (unmasked) values intentionally:
 
 | Location | Why raw values are safe |
 |:---------|:------------------------|
-| `McpService::start_server` | Sets env vars on child process, never sent to LLM |
-| `mcp_json_repository` | Disk persistence, private config directory |
+| `McpService::connect` (`services/mcp_service.rs`) | Sets the bearer auth header on the HTTP transport, never sent to LLM |
+| `McpRepository` (`settings/repositories/`) | Disk persistence, private config directory |
 | `providers_store.rs` → disk | API keys for LLM API auth, private storage only |

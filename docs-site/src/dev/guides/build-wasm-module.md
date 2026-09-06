@@ -1,94 +1,55 @@
 # Build a WASM plugin
 
-**When to read this:** You want to ship a local agent module that Chatty loads
-as a WASM plugin and exposes via the protocol gateway (OpenAI / MCP / A2A).
+**When to read this:** You want to ship a local agent module that Chatty loads as a WASM plugin and exposes through the protocol gateway (OpenAI / MCP / A2A).
 
-## What you get
+## Goal
 
-A WASM module is a sandboxed guest that implements the [`ModuleExports`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs)
-trait. The host (Chatty) provides three imports only:
+A `wasm32-wasip2` component, built from the repo template, installed in the modules directory, answering on the gateway and callable from a conversation with `/agent <name> …`.
 
-| Import | Purpose |
-|--------|---------|
-| `llm::complete` | Call the host-managed LLM (API keys, routing, rate limits stay on the host) |
-| `config::get` | Read per-module key/value config from the manifest / settings |
-| `logging::log` | Emit structured logs (shown in host traces and A2A progress streams) |
+A module is a sandboxed guest implementing the [`ModuleExports`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs) trait: `chat`, `invoke_tool`, `list_tools`, `get_agent_card`. The host provides exactly three imports — `llm::complete` (the host-managed LLM; API keys stay on the host), `config::get` (per-module key/value config from the manifest) and `logging::log`. Everything else — tools, business logic, multi-turn loops — runs inside your guest. The contract is in the [WIT reference](../architecture/wit-reference.md); how a call travels from `invoke_agent` through the gateway and the runtime to your `chat` export (your module is never linked into `chatty-core`) is in [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md).
 
-Everything else — tools, business logic, multi-turn loops — runs **inside your
-WASM guest**. See the [WIT reference](../architecture/wit-reference.md) for
-the full contract.
+## Prerequisites
 
-## Five-minute quick start
+- The `wasm32-wasip2` target: `make setup`, or `rustup target add wasm32-wasip2`.
+- [`cargo-generate`](https://github.com/cargo-generate/cargo-generate) if you want to scaffold from the template (`cargo install cargo-generate`).
+- Chatty running with **Settings → Modules** enabled; the gateway then serves modules on `http://localhost:8420` (the default port).
+
+## Steps
+
+### 1. Scaffold
 
 ```sh
-# One-time: WASM target
-rustup target add wasm32-wasip2
-
-# Scaffold from the repo template (from a clone)
+# From a clone of the repo
 cargo generate --path templates/module --name my-agent
 
-# Or from GitHub without cloning
+# Or straight from GitHub
 # cargo generate --git https://github.com/boersmamarcel/chatty2 --name my-agent templates/module
 cd my-agent
-
-# Build
-cargo build --target wasm32-wasip2 --release
-cp target/wasm32-wasip2/release/my_agent.wasm .
-
-# Install (Linux example)
-mkdir -p ~/.local/share/chatty/modules/my-agent
-cp -r . ~/.local/share/chatty/modules/my-agent/
 ```
 
-In Chatty: **Settings → Modules** → enable modules, set the module directory
-if needed, restart or reload. The gateway serves the module on
-`http://localhost:8420` (default port).
+### 2. Know the project layout
 
-Reference layout and manifest fields:
-[`templates/module/`](https://github.com/boersmamarcel/chatty2/tree/main/templates/module)
-and [`docs/a2a-and-wasm-modules.md`](../architecture/a2a-and-wasm-modules.md).
-
-## How Chatty reaches your module
-
-When the main Chatty agent calls `invoke_agent("my-agent", …)`, local modules
-use the **same A2A client path** as remote agents — via the protocol gateway:
-
-```mermaid
-sequenceDiagram
-  participant User
-  participant Chatty as Chatty LLM + tools
-  participant GW as protocol-gateway<br/>localhost:8420
-  participant RT as wasm-runtime
-  participant Guest as Your WASM module
-  participant LLM as Host LLM provider
-
-  User->>Chatty: Message
-  Chatty->>Chatty: invoke_agent("my-agent", prompt)
-  Chatty->>GW: POST /a2a/my-agent message/stream
-  GW->>RT: WasmModule::chat(request)
-  RT->>Guest: agent.chat(messages)
-
-  opt Guest calls host LLM
-    Guest->>RT: llm.complete(model, messages, tools)
-    RT->>LLM: API call (host API keys)
-    LLM-->>RT: completion + optional tool_calls
-    RT-->>Guest: CompletionResponse
-  end
-
-  Guest-->>RT: ChatResponse
-  RT-->>GW: content + usage
-  GW-->>Chatty: A2A SSE artifact
-  Chatty-->>User: Tool result in conversation
+```text
+my-agent/
+├── Cargo.toml              # cdylib; standalone [workspace]
+├── .cargo/config.toml      # default target = wasm32-wasip2
+├── module.toml             # registry manifest
+├── src/lib.rs              # impl ModuleExports + export_module!
+└── my_agent.wasm           # built artifact (next to module.toml)
 ```
 
-Design consequence: your module is **not** linked into `chatty-core` directly.
-External HTTP clients can also call `localhost:8420` without going through the
-desktop UI.
+The SDK is a path dependency when the module lives under `modules/` in the repo:
 
-## Calling the host LLM from WASM
+```toml
+[dependencies]
+chatty-module-sdk = { path = "../../crates/chatty-module-sdk" }
+```
 
-Pass an empty model string (`""`) to use the host default, or a model id that
-matches a model configured in Chatty settings:
+The template's `module.toml` declares `name`, `version`, `description` and `wasm` under `[module]`, `[capabilities]` (`tools`, `chat`, `agent`), `[protocols]` (`openai_compat`, `mcp`, `a2a`) and `[resources]` (`max_memory_mb`, `max_execution_ms`). Keep `[protocols].a2a = true`: it is what makes the module appear in `list_agents` and invocable with `invoke_agent`. Field-by-field meaning and the resource defaults are in the manifest section of [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md).
+
+### 3. Implement `ModuleExports`
+
+Fill in `src/lib.rs`. To call the host LLM, pass an empty model string for the host default (or a model id configured in Chatty), your message history, and optionally a JSON array of tool definitions:
 
 ```rust
 use chatty_module_sdk::{llm, Message, Role};
@@ -98,119 +59,83 @@ let messages = vec![
     Message { role: Role::User, content: user_prompt.into() },
 ];
 
-// Simple completion — no tools
-let resp = llm::complete("", &messages, None)?;
-let text = resp.content;
-
-// With tool definitions (JSON array string) — see benford tutorial
-let resp = llm::complete("", &messages, Some(TOOLS_JSON))?;
+let resp = llm::complete("", &messages, None)?;          // plain completion
+let resp = llm::complete("", &messages, Some(TOOLS_JSON))?; // with tools
 for tc in resp.tool_calls {
-    // Execute tc.name / tc.arguments locally, append results, call complete again
+    // run tc.name / tc.arguments locally, append the result, call complete again
 }
 ```
 
-The host translates tool JSON to provider-specific formats (Anthropic, OpenAI,
-Gemini, etc.). Your guest never sees API keys.
+The host translates the tool JSON into the provider's format; the guest never sees API keys. A module that drives its own loop (LLM → local tools → LLM, bounded by a turn limit, with one tool-less fallback call at the end) is worked through step by step in [Tutorial: benford-agent](../start/tutorial-benford-agent.md); the SDK basics (echo, tools, logging, agent card) are in [Tutorial: echo-agent](../start/tutorial-echo-agent.md).
 
-### Agentic loop pattern
-
-For modules that drive their own ReAct loop (LLM → local tools → LLM), follow
-the benford-agent pattern:
-
-```mermaid
-flowchart TD
-  Start[chat request] --> Init[Build messages: system + user]
-  Init --> Loop{turn < MAX_TURNS?}
-  Loop -->|yes| Complete["llm::complete(messages, tools=Some(TOOLS_JSON))"]
-  Complete --> HasTools{tool_calls empty?}
-  HasTools -->|yes| Done[Return ChatResponse with final content]
-  HasTools -->|no| Exec[invoke_tool locally for each call]
-  Exec --> Append[Append assistant + tool-result messages]
-  Append --> Loop
-  Loop -->|no| Fallback[One final llm::complete without tools]
-  Fallback --> Done
-```
-
-Tutorial walkthrough:
-[Tutorial: benford-agent](./tutorial-benford-agent.md).
-
-## Module manifest (`module.toml`)
-
-Minimum fields for conversational agents invocable from Chatty:
-
-```toml
-[module]
-name = "my-agent"
-version = "0.1.0"
-description = "What it does"
-wasm = "my_agent.wasm"
-
-[capabilities]
-tools = ["my_tool"]   # optional tool names
-chat = true
-agent = true
-
-[protocols]
-openai_compat = true
-mcp = true
-a2a = true            # required for invoke_agent / list_agents
-
-[resources]
-max_memory_mb = 64
-max_execution_ms = 300000
-```
-
-Set `[protocols].a2a = true` so the module appears in `list_agents` and can be
-invoked with `invoke_agent`.
-
-## Project structure
-
-```
-my-agent/
-├── Cargo.toml              # cdylib; standalone [workspace]
-├── .cargo/config.toml      # default target = wasm32-wasip2
-├── module.toml             # registry manifest
-├── src/lib.rs              # impl ModuleExports + export_module!
-└── my_agent.wasm           # built artifact (next to module.toml)
-```
-
-SDK dependency (path from `modules/`):
-
-```toml
-[dependencies]
-chatty-module-sdk = { path = "../../crates/chatty-module-sdk" }
-```
-
-## Tutorials
-
-| Tutorial | What you learn | Source |
-|----------|----------------|--------|
-| [echo-agent](./tutorial-echo-agent.md) | SDK basics: chat echo, tools, optional host LLM, logging | [`modules/echo-agent/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/echo-agent) |
-| [benford-agent](./tutorial-benford-agent.md) | Full agentic loop: `llm::complete` + local tools | [`modules/benford-agent/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/benford-agent) |
-
-## Test your module
+### 4. Build and install
 
 ```sh
-# From repo root — builds echo-agent WASM if needed
+cargo build --target wasm32-wasip2 --release
+cp target/wasm32-wasip2/release/my_agent.wasm .
+
+# Linux example; macOS is ~/Library/Application Support/chatty/modules/, Windows %APPDATA%\chatty\modules\
+mkdir -p ~/.local/share/chatty/modules/my-agent
+cp -r . ~/.local/share/chatty/modules/my-agent/
+```
+
+In Chatty: **Settings → Modules** → enable modules, set the module directory if you used another path, then restart or reload.
+
+### 5. Test your module
+
+Unit tests for pure-Rust logic run on the host target with a plain `cargo test` inside the module directory. For the gateway round trip, the repo's echo-agent suite is the model to copy:
+
+```sh
+# From the repo root — builds echo-agent WASM if needed
 make wasm-modules
 cargo test -p chatty-protocol-gateway echo_agent
 ```
 
-Manual smoke test (gateway must be running via Settings → Modules):
+Manual smoke test with the gateway running:
 
 ```sh
-curl -s http://localhost:8420/a2a/echo-agent \
+curl -s http://localhost:8420/a2a/my-agent \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"message/send",
        "params":{"message":{"parts":[{"type":"text","text":"hello"}]}}}'
 ```
 
-## Further reading
+Then from a conversation: `/agent my-agent hello`.
+
+## Verify
+
+- `GET http://localhost:8420/` lists your module and its endpoints.
+- The curl above returns your `chat` output in `result.message.parts`.
+- `POST /mcp/my-agent` with `tools/list` shows the tools you advertised.
+- `/agent my-agent …` in Chatty returns the same answer.
+
+## Checklist
+
+- [ ] `wasm32-wasip2` target installed
+- [ ] `module.toml` `[module].name` matches the agent card `name` and the directory name
+- [ ] `[protocols].a2a = true`
+- [ ] `.wasm` copied next to `module.toml`
+- [ ] Modules enabled in Settings, gateway reachable on `:8420`
+- [ ] Host-target unit tests for your tool logic
+
+## Common mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Module missing from `list_agents` | `[protocols].a2a = true` |
+| Built for the host target | Use the `.cargo/config.toml` from the template, or pass `--target wasm32-wasip2` |
+| `.wasm` name does not match `[module].wasm` | The manifest path is relative to `module.toml` |
+| Calling `llm::complete` with a model id Chatty does not have | Pass `""` for the host default |
+| Expecting the host to run your tool calls | The host only services `llm::complete`; execute tools in the guest and call again |
+
+## Reference
 
 | Topic | Doc |
 |-------|-----|
-| Gateway routes, invoke_agent flow | [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md) |
-| WIT types and versioning | [WIT reference](../architecture/wit-reference.md) |
+| Gateway routes, `invoke_agent` flow, manifest fields, resource limits, module directory per platform | [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md) |
+| WIT types, host imports, guest exports, versioning | [WIT reference](../architecture/wit-reference.md) |
 | Crate stack diagram | [Component map](../architecture/component-map.md) |
-| End-user: enabling modules | [Agentic tools — Extensions](../../user/agentic-tools.md) |
-| SDK rustdoc | [`chatty-module-sdk`](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-module-sdk) |
+| Template source | [`templates/module/`](https://github.com/boersmamarcel/chatty2/tree/main/templates/module) |
+| Reference modules | [`modules/echo-agent/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/echo-agent), [`modules/benford-agent/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/benford-agent) |
+| End-user: enabling modules | [Extensions & MCP](../../user/extensions.md) |
+| SDK rustdoc | [`chatty-module-sdk`](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-module-sdk) (`cargo doc -p chatty-module-sdk --open`) |

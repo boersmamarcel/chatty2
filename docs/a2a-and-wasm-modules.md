@@ -1,15 +1,12 @@
-# A2A and WASM Module Architecture
+# A2A and WASM module architecture
 
-> How Chatty communicates with agents — both remote A2A services and locally installed WASM modules.
+**When to read this:** You need to know how a conversation reaches an agent — a remote
+A2A service or a locally installed WASM module — and where the module runtime,
+registry and gateway fit.
 
-**Authoring WASM plugins?** Start with
-[Build a WASM plugin](../docs-site/src/dev/guides/build-wasm-module.md)
-(quick start + host LLM diagrams), then the
-[echo-agent](../docs-site/src/dev/guides/tutorial-echo-agent.md) and
-[benford-agent](../docs-site/src/dev/guides/tutorial-benford-agent.md)
-tutorials.
-
----
+Authoring a module? Start with
+[Build a WASM plugin](../docs-site/src/dev/guides/build-wasm-module.md) (quick start
+and host-LLM sequence diagrams); the WIT types are in [wit-reference.md](wit-reference.md).
 
 ## Overview
 
@@ -18,9 +15,11 @@ Chatty supports two kinds of agents that can be invoked during a conversation:
 | Agent type | Where it runs | How it's called | Configured in |
 |:-----------|:--------------|:----------------|:--------------|
 | **Remote A2A** | External HTTP service | Direct HTTP to the remote URL | Settings → A2A Agents |
-| **Local WASM module** | In-process via Wasmtime | Via the local Protocol Gateway (`localhost:8420`) | Settings → Modules |
+| **Local WASM module** | In-process via Wasmtime | Via the local Protocol Gateway (`localhost:8420` by default) | Settings → Modules |
 
-Both agent types are **unified behind the same tools** (`list_agents`, `invoke_agent`) and the same **A2A JSON-RPC protocol**, so the LLM doesn't need to know which kind it's talking to.
+Both are **unified behind the same tools** (`list_agents`, `invoke_agent`) and the
+same **A2A JSON-RPC protocol**, so the LLM does not need to know which kind it is
+talking to.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -39,13 +38,18 @@ Both agent types are **unified behind the same tools** (`list_agents`, `invoke_a
 └─────────────────────┴──────────────────────────────────────────────┘
 ```
 
----
+Local modules are never called directly from the tool layer; they are always reached
+through the gateway's A2A endpoint. That keeps one code path in `InvokeAgentTool`,
+makes local modules speak the same protocol as remote services, and leaves the same
+module reachable from other processes on the machine via OpenAI-compatible, MCP and
+A2A routes.
 
-## Remote A2A Agents
+## Remote A2A agents
 
 ### Configuration
 
-Remote agents are configured in **Settings → A2A Agents** and persisted to JSON via `A2aJsonRepository`.
+Remote agents are configured in **Settings → A2A Agents** and persisted to
+`a2a_agents.json` via `A2aJsonRepository`.
 
 **Data model** (`A2aAgentConfig` in `crates/chatty-core/src/settings/models/a2a_store.rs`):
 
@@ -59,29 +63,18 @@ pub struct A2aAgentConfig {
 }
 ```
 
-Runtime connection status is tracked in `A2aAgentsModel` (a GPUI global) but **not persisted** — it's refreshed at startup by fetching agent cards.
+Runtime connection status is tracked in `A2aAgentsModel` (a GPUI global) but **not
+persisted** — it is refreshed at startup by fetching agent cards.
 
 ### Protocol
 
-Remote A2A agents implement the [A2A protocol](https://google.github.io/A2A/). Chatty acts as an **A2A client** (`crates/chatty-core/src/services/a2a_client.rs`).
+Remote agents implement the [A2A protocol](https://google.github.io/A2A/). Chatty is
+an **A2A client** (`crates/chatty-core/src/services/a2a_client.rs`).
 
-#### Agent Card Discovery
-
-```
-GET <base_url>/.well-known/agent.json
-Authorization: Bearer <api_key>   (if configured)
-```
-
-Response fields parsed by Chatty:
-
-| Field | Usage |
-|:------|:------|
-| `name` / `displayName` | Agent name |
-| `description` | Shown in agent list |
-| `skills[].name` | Cached in `A2aAgentConfig.skills` |
-| `capabilities.streaming` | Whether `message/stream` is supported |
-
-#### Sending Messages
+**Agent card discovery** — `GET <base_url>/.well-known/agent.json`, with
+`Authorization: Bearer <api_key>` when configured. Chatty reads `name` /
+`displayName`, `description`, `skills[].name` (cached into `A2aAgentConfig.skills`)
+and `capabilities.streaming`.
 
 **Non-streaming** (`message/send`):
 
@@ -100,9 +93,9 @@ POST <base_url>
 
 Response text is extracted from `result.artifacts[0].parts[0].text`.
 
-**Streaming** (`message/stream`):
-
-Same request body but with `"method": "message/stream"`. The response is an SSE (`text/event-stream`) byte stream. Each SSE event contains a JSON-RPC result:
+**Streaming** (`message/stream`): same body with `"method": "message/stream"`. The
+response is an SSE (`text/event-stream`) stream where each event carries a JSON-RPC
+result:
 
 ```
 data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-123","status":{"state":"working"},"final":false}}
@@ -121,13 +114,12 @@ Events are parsed into `A2aStreamEvent`:
 | `StatusUpdate { state: "completed", is_final: true }` | Terminal — stream ends |
 | `StatusUpdate { state: "failed", message }` | Terminal — error |
 
-If the server responds with `Content-Type` other than `text/event-stream`, the client **falls back** to treating it as a non-streaming `message/send` response.
+If the server answers with a `Content-Type` other than `text/event-stream`, the client
+**falls back** to treating the body as a non-streaming `message/send` response.
 
----
+## Local WASM module agents
 
-## Local WASM Module Agents
-
-### Architecture Stack
+### Architecture stack
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -150,9 +142,20 @@ If the server responds with `Content-Type` other than `text/event-stream`, the c
 └──────────────────────────────────────────────────────────┘
 ```
 
-### WIT Contract
+| Crate | Role |
+|:------|:-----|
+| `chatty-module-sdk` | Guest-side SDK for module authors (types, host import wrappers, `export_module!` macro) |
+| `chatty-wasm-runtime` | Wasmtime host: loads `.wasm` components, implements host imports (`llm`, `config`, `logging`), enforces resource limits |
+| `chatty-module-registry` | Discovery (`scan_directory`), lifecycle (`load`/`unload`/`reload`/`watch`), manifest parsing |
+| `chatty-protocol-gateway` | HTTP server (axum) exposing modules via OpenAI, MCP, and A2A protocols |
+| `chatty-core` | A2A client (`A2aClient`), agent tools (`list_agents`, `invoke_agent`), settings models and repositories |
 
-The host–guest interface is defined in [`wit/chatty-module.wit`](../wit/chatty-module.wit) (package `chatty:module@0.1.0`). See [`docs/wit-reference.md`](wit-reference.md) for the full type reference.
+### WIT contract
+
+The host–guest interface is
+[`wit/chatty-module.wit`](https://github.com/boersmamarcel/chatty2/blob/main/wit/chatty-module.wit)
+(package `chatty:module@0.1.0`); [wit-reference.md](wit-reference.md) has the full
+type reference.
 
 **Host imports** (what the host provides to the module):
 
@@ -160,7 +163,7 @@ The host–guest interface is defined in [`wit/chatty-module.wit`](../wit/chatty
 |:----------|:---------|:--------|
 | `llm` | `complete(model, messages, tools)` | Run an LLM completion via host-managed API keys |
 | `config` | `get(key)` | Read key-value config from the module's manifest |
-| `logging` | `log(level, message)` | Emit structured logs to the host's log output |
+| `logging` | `log(level, message)` | Emit structured logs; forwarded as A2A progress events by the gateway |
 
 **Guest exports** (what the module provides to the host):
 
@@ -171,10 +174,10 @@ The host–guest interface is defined in [`wit/chatty-module.wit`](../wit/chatty
 | `agent` | `list-tools() → definitions` | Enumerate available tools |
 | `agent` | `get-agent-card() → card` | Return metadata (name, description, skills) |
 
-### Module Directory Layout
+### Module directory layout
 
 ```
-~/Library/Application Support/chatty/modules/   # macOS default
+<module dir>/
 ├── echo-agent/
 │   ├── module.toml          # Manifest (required)
 │   └── echo_agent.wasm      # WASM component binary
@@ -191,7 +194,7 @@ The directory is configurable in **Settings → Modules**. Platform defaults:
 | Linux | `~/.local/share/chatty/modules/` (or `$XDG_DATA_HOME/chatty/modules/`) |
 | Windows | `%APPDATA%\chatty\modules\` |
 
-### Module Manifest (`module.toml`)
+### Module manifest (`module.toml`)
 
 ```toml
 [module]
@@ -199,6 +202,7 @@ name = "echo-agent"
 version = "0.1.0"
 description = "A simple echo agent for testing"
 wasm = "echo_agent.wasm"        # Relative to this file's directory
+# execution_mode = "local"      # "remote" modules run on the hive-runner; no local .wasm
 
 [capabilities]
 tools = ["echo", "reverse"]     # Tool names the module exposes
@@ -215,11 +219,17 @@ max_memory_mb = 64              # Memory cap (0 = use default: 64 MiB)
 max_execution_ms = 30000        # Timeout (0 = use default: 300s)
 ```
 
-The `[protocols].a2a = true` flag is what makes a module invocable as an agent from conversations. Without it, the module can still serve tools via MCP or completions via OpenAI-compat, but won't appear in `list_agents` output.
+`[protocols].a2a = true` is what makes a module invocable as an agent from
+conversations. Without it the module can still serve tools via MCP or completions via
+OpenAI-compat, but it does not appear in `list_agents` output. The registry skips
+`execution_mode = "remote"` modules during its WASM scan; the gateway routes those to
+the hive-runner instead.
 
-### Resource Limits
+### Resource limits
 
-Every WASM module runs inside a sandboxed Wasmtime instance with three enforcement mechanisms:
+Every module runs inside a sandboxed Wasmtime instance with three enforcement
+mechanisms (`crates/chatty-wasm-runtime/src/limits.rs`), overridable per module via
+`[resources]`:
 
 | Limit | Default | Purpose |
 |:------|:--------|:--------|
@@ -227,61 +237,11 @@ Every WASM module runs inside a sandboxed Wasmtime instance with three enforceme
 | **Memory** | 64 MiB | Linear memory cap |
 | **Timeout** | 300,000 ms (5 min) | Wall-clock execution limit |
 
-These can be overridden per-module via `module.toml [resources]`.
+## Protocol gateway
 
-### Module SDK
-
-Module authors use `chatty-module-sdk` (targets `wasm32-wasip2`):
-
-```rust
-use chatty_module_sdk::*;
-
-#[derive(Default)]
-struct MyAgent;
-
-impl ModuleExports for MyAgent {
-    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
-        let resp = llm::complete("claude-sonnet-4-20250514", &req.messages, None)?;
-        Ok(ChatResponse {
-            content: resp.content,
-            tool_calls: vec![],
-            usage: resp.usage,
-        })
-    }
-
-    fn invoke_tool(&self, _name: String, _args: String) -> Result<String, String> {
-        Err("no tools".into())
-    }
-
-    fn list_tools(&self) -> Vec<ToolDefinition> { vec![] }
-
-    fn get_agent_card(&self) -> AgentCard {
-        AgentCard {
-            name: "my-agent".into(),
-            display_name: "My Agent".into(),
-            description: "Does something useful".into(),
-            version: "0.1.0".into(),
-            skills: vec![], tools: vec![],
-        }
-    }
-}
-
-export_module!(MyAgent);
-```
-
-Build with: `cd crates/chatty-module-sdk && cargo build` (uses `.cargo/config.toml` to target `wasm32-wasip2`).
-
----
-
-## Protocol Gateway
-
-The **Protocol Gateway** (`chatty-protocol-gateway`) is a local HTTP server that exposes all loaded WASM modules through three protocols simultaneously:
-
-```
-http://localhost:8420/
-```
-
-### Routes
+The gateway (`chatty-protocol-gateway`) is a local HTTP server on
+`http://localhost:<gateway_port>/` (default `8420`, **Settings → Modules**) that
+exposes every loaded module through three protocols at once:
 
 | Method | Path | Protocol | Description |
 |:-------|:-----|:---------|:------------|
@@ -294,62 +254,31 @@ http://localhost:8420/
 | `POST` | `/mcp/{module}` | MCP | JSON-RPC: `tools/list`, `tools/call`, `initialize` |
 | `GET` | `/mcp/{module}/sse` | MCP | SSE transport |
 
-### A2A via the Gateway
+### A2A via the gateway
 
-When a local WASM module agent is invoked, the `invoke_agent` tool constructs an `A2aAgentConfig` pointing at the gateway:
-
-```rust
-// invoke_agent_tool.rs — local module path
-let config = A2aAgentConfig {
-    name: agent_name,
-    url: format!("http://localhost:8420/a2a/{}", agent_name),
-    api_key: None,
-    enabled: true,
-    skills: module.tools.clone(),
-};
-// Then calls self.call_streaming(&config, &prompt)
-```
-
-This means **the exact same `A2aClient` code path handles both remote and local agents**. The only difference is the URL.
-
-### Gateway A2A Streaming
+For a local module, `invoke_agent` constructs an `A2aAgentConfig` whose `url` is
+`http://localhost:<port>/a2a/{module}` (no API key, `skills` = the module's tools) and
+calls the same `A2aClient::send_message_stream()` used for remote agents.
 
 The gateway's `message/stream` handler (`handlers/a2a.rs`):
 
 1. Emits `{"status": {"state": "working"}, "final": false}` immediately
-2. Spawns the module's `chat()` call in a background task
-3. Forwards module `logging::log()` calls as real-time progress events via an `mpsc` channel
-4. On completion, emits the artifact (`parts[0].text`) and a final `{"status": {"state": "completed"}, "final": true}`
+2. Runs the module's `chat()` on a blocking task
+3. Forwards the module's `logging::log()` calls as `working` status events through an
+   `mpsc` channel, so `log::info("Processing step 3…")` shows up live in the UI
+4. On completion, emits the artifact (`parts[0].text`) and a final
+   `{"status": {"state": "completed"}, "final": true}`
 5. On error, emits `{"status": {"state": "failed"}, "final": true}`
 
-This means module authors can emit progress by calling `log::info("Processing step 3...")` — these messages appear in real-time in the SSE stream.
+`GET /.well-known/agent.json` returns a gateway-level card
+(`{"schema_version": "0.1", "gateway": true, "agents": [...]}`) listing every loaded
+module agent with its name, `displayName`, description, version, skills and
+`capabilities.streaming`.
 
-### Aggregated Agent Card
+## LLM-facing tools
 
-`GET /.well-known/agent.json` returns a gateway-level card listing all loaded module agents:
-
-```json
-{
-  "schema_version": "0.1",
-  "gateway": true,
-  "agents": [
-    {
-      "name": "echo-agent",
-      "displayName": "Echo Agent",
-      "description": "...",
-      "version": "0.1.0",
-      "skills": [...],
-      "capabilities": { "streaming": true }
-    }
-  ]
-}
-```
-
----
-
-## LLM-Facing Tools
-
-The LLM interacts with agents through two tools that are **always available** in every conversation:
+`list_agents` and `invoke_agent` are registered by `AgentFactory` in **every**
+conversation.
 
 ### `list_agents`
 
@@ -368,97 +297,41 @@ Returns a combined view of both agent types:
 }
 ```
 
-Key details:
-- API key values are **never exposed** to the LLM — only `has_api_key: true/false`
-- `supports_a2a` indicates whether a local module has `[protocols].a2a = true`
-- Remote agents take precedence if a remote and local agent share the same name
+API key values are **never exposed** to the LLM — only `has_api_key: true/false`.
+`supports_a2a` reflects `[protocols].a2a` in the manifest.
 
 ### `invoke_agent`
-
-Invokes an agent by name with a prompt. Handles both remote and local agents transparently:
 
 ```json
 { "agent": "echo-agent", "prompt": "Hello, agent!" }
 ```
 
-Resolution order:
-1. **Remote A2A agents** — checked first (precedence)
-2. **Local WASM module agents** — checked second, requires `supports_a2a = true` and the gateway to be running
+Resolution order: remote A2A agents first (a remote agent shadows a local module with
+the same name), then local module agents, which require `supports_a2a = true` and a
+running gateway (otherwise the tool reports that the gateway is off and points to
+Settings → Modules). Both paths stream through `A2aClient::send_message_stream()`;
+progress (`InvokeAgentProgress`) is forwarded to the UI so the user sees intermediate
+output while the tool call is in flight.
 
-Both paths use `A2aClient::send_message_stream()` for real-time progress. Progress events (`InvokeAgentProgress`) are emitted to the UI stream loop so the user sees intermediate output.
+## Sub-agent tool (separate mechanism)
 
----
-
-## End-to-End Communication Flow
-
-### Remote A2A Agent Invocation
-
-```
-User message → LLM decides to call invoke_agent("remote-agent", "task")
-  → InvokeAgentTool.call()
-    → finds A2aAgentConfig by name (remote_agents list)
-    → A2aClient::send_message_stream(config, prompt)
-      → POST https://remote-service.com/
-        { "jsonrpc":"2.0", "method":"message/stream", "params":{...} }
-      → SSE stream of A2aStreamEvents
-        → StatusUpdate(working) → progress to UI
-        → ArtifactUpdate(text)  → progress to UI, accumulate response
-        → StatusUpdate(completed, final=true) → stream ends
-    → InvokeAgentOutput { response, success: true }
-  → LLM receives tool result, continues conversation
-```
-
-### Local WASM Module Agent Invocation
-
-```
-User message → LLM decides to call invoke_agent("echo-agent", "task")
-  → InvokeAgentTool.call()
-    → not found in remote_agents
-    → found in module_agents, supports_a2a = true
-    → constructs A2aAgentConfig { url: "http://localhost:8420/a2a/echo-agent" }
-    → A2aClient::send_message_stream(config, prompt)
-      → POST http://localhost:8420/a2a/echo-agent
-        { "jsonrpc":"2.0", "method":"message/stream", "params":{...} }
-      → Gateway receives request
-        → Looks up "echo-agent" in ModuleRegistry
-        → Emits SSE "working" event
-        → Calls WasmModule::chat(ChatRequest { messages, conversation_id })
-          → Wasmtime executes guest WASM
-            → Guest may call llm::complete() → host LlmProvider → real LLM API
-            → Guest may call config::get() → reads from ModuleManifest
-            → Guest may call logging::log() → forwarded as SSE progress events
-          → Guest returns ChatResponse { content, tool_calls, usage }
-        → Gateway emits SSE artifact event with response content
-        → Gateway emits SSE "completed" + final=true
-      → A2aClient parses SSE → A2aStreamEvents → progress to UI
-    → InvokeAgentOutput { response, success: true }
-  → LLM receives tool result, continues conversation
-```
-
-### Key Design Principle
-
-Local WASM modules are **not called directly** from the LLM tool layer. Instead, they are always accessed through the Protocol Gateway's A2A endpoint. This means:
-
-1. **Single code path** — `InvokeAgentTool` uses `A2aClient` for both remote and local agents
-2. **Protocol compliance** — local modules speak the same A2A protocol as remote services
-3. **Multi-protocol exposure** — the same module is simultaneously available via OpenAI-compat, MCP, and A2A
-4. **External access** — other tools and services on the machine can also call local modules via `localhost:8420`
-
----
-
-## Sub-Agent Tool (Separate Mechanism)
-
-The `sub_agent` tool is a **different mechanism** from A2A agent invocation. It spawns `chatty-tui` in headless mode as a subprocess:
+The `sub_agent` tool is a **different mechanism** from A2A invocation. It spawns
+`chatty-tui` in headless mode as a subprocess:
 
 ```
 sub_agent(task, model?) → chatty-tui --headless --model <model> --message <task>
 ```
 
-This gives the sub-agent access to the **full Chatty tool set** (shell, file operations, MCP tools, etc.) but runs in a separate process with its own conversation context. It does not use the A2A protocol.
+The child has the **full Chatty tool set** (shell, files, MCP tools, …) but runs in
+its own process with its own conversation context; no A2A protocol is involved.
 
-While the child runs, headless emits structured `CHATTY_PROGRESS` lines on stderr (`tool_started` / `tool_finished`). `SubAgentTool` live-drains those into the shared `InvokeAgentProgressSlot`, so the parent UI shows compact tool activity in a collapsible `sub_agent` row. Assistant tokens are **not** forwarded. The parent model still only receives the child's final stdout as the tool result.
-
-This is **foreground-only**: the parent turn waits on `Tool::call`. Background spawn, Agents Window / drill-in into the full child transcript, and a multi-agent status strip are out of scope. Slash `/agent` still shows human stderr (minus `CHATTY_PROGRESS` protocol lines). Replacing `sub_agent` with A2A SSE is later product work — `invoke_agent` is already the A2A path.
+While the child runs, headless mode emits structured `CHATTY_PROGRESS` lines on
+stderr (`tool_started` / `tool_finished`). `SubAgentTool` drains those into the shared
+`InvokeAgentProgressSlot`, so the parent UI shows compact tool activity in a
+collapsible `sub_agent` row. Assistant tokens are **not** forwarded; the parent model
+receives only the child's final stdout as the tool result, and the parent turn waits
+on `Tool::call` until the child exits. `/agent` shows the child's human-readable
+stderr minus the protocol lines.
 
 | Feature | `invoke_agent` | `sub_agent` |
 |:--------|:---------------|:------------|
@@ -466,37 +339,4 @@ This is **foreground-only**: the parent turn waits on `Tool::call`. Background s
 | Target | Named remote/local agents | Another Chatty instance |
 | Tool access | Agent's own tools only | Full Chatty tool set |
 | Model | Agent's own model | Can override parent model |
-| Streaming | SSE with progress events | Compact live tool activity (`CHATTY_PROGRESS` → progress slot); stdout on completion for the parent model |
-
----
-
-## Crate Responsibilities
-
-| Crate | Role |
-|:------|:-----|
-| `chatty-module-sdk` | Guest-side SDK for module authors (types, host import wrappers, `export_module!` macro) |
-| `chatty-wasm-runtime` | Wasmtime host: loads `.wasm` components, implements host imports (`llm`, `config`, `logging`), enforces resource limits |
-| `chatty-module-registry` | Discovery (`scan_directory`), lifecycle (`load`/`unload`/`reload`/`watch`), manifest parsing |
-| `chatty-protocol-gateway` | HTTP server (axum) exposing modules via OpenAI, MCP, and A2A protocols |
-| `chatty-core` | A2A client (`A2aClient`), agent tools (`list_agents`, `invoke_agent`), settings models and repositories |
-
----
-
-## Settings Summary
-
-### A2A Agents (Settings → A2A Agents)
-
-| Field | Description |
-|:------|:------------|
-| Name | Invocation key and display name |
-| URL | Base URL of the remote A2A service |
-| API Key | Optional Bearer token (stored but never exposed to LLM) |
-| Enabled | Toggle agent on/off |
-
-### Modules (Settings → Modules)
-
-| Field | Default | Description |
-|:------|:--------|:------------|
-| Enabled | `false` | Master toggle for the module runtime and gateway |
-| Module Directory | Platform-specific (see above) | Where to scan for module subdirectories |
-| Gateway Port | `8420` | TCP port for the local protocol gateway |
+| Streaming | SSE with progress events | Live tool activity via the progress slot; stdout on completion |

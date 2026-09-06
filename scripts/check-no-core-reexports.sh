@@ -3,7 +3,7 @@
 # modules (auth, exporters, factories, repositories, tools).
 #
 # Those wildcard re-exports were removed from crates/chatty-gpui/src/chatty/mod.rs
-# because they hid which crate a definition lived in (see docs/refactor-followups.md
+# because they hid which crate a definition lived in (see docs/archive/refactor-followups.md
 # §2d). Call sites must import from `chatty_core::…` directly instead.
 set -uo pipefail
 cd "$(dirname "$0")/.."

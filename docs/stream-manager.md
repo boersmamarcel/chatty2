@@ -1,44 +1,53 @@
-# StreamManager Architecture
+# StreamManager
 
-The StreamManager is a centralized GPUI entity that manages stream lifecycle (status, cancellation, token usage, trace), emits typed events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. It enables concurrent multi-conversation streaming where background streams continue accumulating data even when the UI is showing a different conversation.
+**When to read this:** You are changing how a desktop LLM turn starts, streams, stops
+or finalises, and need to know which entity owns which piece of that lifecycle.
 
-**Key design principle:** StreamManager does NOT accumulate response text. Text accumulation is the sole responsibility of `ConversationsStore.streaming_message`, ensuring a single source of truth and avoiding dual-write divergence.
+`StreamManager` (`crates/chatty-gpui/src/chatty/models/stream_manager.rs`) is a GPUI
+entity that owns the lifecycle of every in-flight LLM stream — status, cancellation,
+per-request token usage, trace — emits typed events for decoupled UI updates, and uses
+cancellation tokens for graceful shutdown. Because it is conversation-keyed, several
+conversations can stream at once: a background stream keeps accumulating while the UI
+shows a different conversation.
 
-## Entity Ownership
+**Key design principle:** StreamManager does not accumulate response text. Streaming
+text lives only in `Conversation.streaming_message` inside `ConversationsStore`, so
+there is a single source of truth and no dual-write divergence.
+
+## Entity ownership
 
 ```
-GlobalStreamManager (GPUI Global)
+GlobalStreamManager (GPUI global, strong reference)
   └── Entity<StreamManager>
-        └── HashMap<String, StreamState>   (one entry per active stream)
-              ├── status: StreamStatus
-              ├── token_usage: Option<(u32, u32)>
-              ├── trace_json: Option<Value>
-              ├── task: Option<Task>
-              └── cancel_flag: Arc<AtomicBool>
+        ├── streams: HashMap<String, StreamState>   (one entry per active stream)
+        │     ├── epoch: u64                       ← distinguishes re-registrations
+        │     ├── status: StreamStatus
+        │     ├── token_usage: Option<TokenUsage>  ← built from the per-request records
+        │     ├── calls: Vec<ApiCallUsage>         ← one per provider request
+        │     ├── trace_json: Option<Value>
+        │     ├── task: Option<Task>
+        │     ├── cancel_flag: Arc<AtomicBool>
+        │     ├── pending_artifacts: Option<PendingArtifacts>
+        │     └── text batching buffer (pending_text, last_flush)
+        ├── pending_resolved_ids: HashMap<String, Arc<Mutex<Option<String>>>>
+        └── current_epoch: HashMap<String, u64>
 
-ConversationsStore (GPUI Global)
+ConversationsStore (GPUI global)
   └── HashMap<String, Conversation>
-        ├── history: Vec<Message>
+        ├── history, agent, model_id, title, token_usage, …
         ├── streaming_message: Option<String>   ← single source of truth for streaming text
-        ├── agent: AgentClient
-        ├── model_id, title, token_usage, ...
         └── system_traces: Vec<Option<Value>>
 
-ChattyApp (GPUI Entity, window root)
+ChattyApp (GPUI entity, window root)
   ├── Entity<ChatView>
   │     ├── messages: Vec<DisplayMessage>
   │     ├── conversation_id: Option<String>   ← which conversation the UI is showing
   │     ├── pending_approval: Option<PendingApprovalInfo>
-  │     └── Entity<ChatInputState>
-  │           ├── is_streaming: bool
-  │           ├── selected_model_id, attachments
-  │           └── emits: ChatInputEvent (Send, ModelChanged, Stop)
-  └── Entity<SidebarView>
-        ├── conversations list
-        └── emits: SidebarEvent (NewChat, OpenSettings, SelectConversation, ...)
+  │     └── Entity<ChatInputState>            ← is_streaming; emits ChatInputEvent
+  └── Entity<SidebarView>                     ← emits SidebarEvent
 ```
 
-## Event Subscription Chain
+## Event subscription chain
 
 ```mermaid
 graph TD
@@ -49,10 +58,13 @@ graph TD
 
     CIS[ChatInputState] -->|cx.emit ChatInputEvent| CA
     SB[SidebarView] -->|cx.emit SidebarEvent| CA
-    MN[McpNotifier] -->|cx.emit McpNotifierEvent| CA
+    CV -->|cx.emit ChatViewEvent| CA
+    ACN[AgentConfigNotifier] -->|cx.emit AgentConfigEvent| CA
+    MN[ModelsNotifier] -->|cx.emit ModelsNotifierEvent| CA
 ```
 
-All entity-to-entity communication uses `EventEmitter`/`cx.subscribe()`. The 4 subscriptions are set up in `ChattyApp::setup_callbacks()`:
+All entity-to-entity communication uses `EventEmitter`/`cx.subscribe()`; the
+subscriptions are wired in `ChattyApp::setup_callbacks()`:
 
 ```rust
 cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
@@ -60,47 +72,47 @@ cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
 }).detach();
 ```
 
-## StreamManagerEvent Variants
+## `StreamManagerEvent` variants
 
 | Event | Emitted by | Handler action |
 |-------|-----------|----------------|
-| `StreamStarted` | `register_stream`, `register_pending_stream` | Sets `ChatInputState.is_streaming = true` (deferred) |
-| `TextChunk` | `handle_chunk` | `ChatView.append_assistant_text()` |
-| `ToolCallStarted` | `handle_chunk` | `ChatView.handle_tool_call_started()` |
-| `ToolCallInput` | `handle_chunk` | `ChatView.handle_tool_call_input()` |
-| `ToolCallResult` | `handle_chunk` | `ChatView.handle_tool_call_result()` |
-| `ToolCallError` | `handle_chunk` | `ChatView.handle_tool_call_error()` |
-| `ApprovalRequested` | `handle_chunk` | `ChatView.handle_approval_requested()` |
-| `ApprovalResolved` | `handle_chunk` | `ChatView.handle_approval_resolved()` |
-| `TokenUsage` | `handle_chunk` | No-op (processed during finalization) |
+| `StreamStarted` | `register_stream`, `register_pending_stream` | Marks the conversation as streaming; sets `ChatInputState.is_streaming = true` (deferred) |
+| `TextChunk` | `handle_chunk` (batched; first chunk immediate, then every 5 ms) | `ChatView.append_assistant_text()` |
+| `ToolCallStarted` / `ToolCallInput` / `ToolCallResult` / `ToolCallError` | `handle_chunk` | `ChatView.handle_tool_call_*()` |
+| `ApprovalRequested` / `ApprovalResolved` | `handle_chunk` | `ChatView.handle_approval_*()` |
+| `ClarificationRequested` | `handle_chunk` | Records the block on the conversation's streaming trace (so it survives a switch), then `ChatView.handle_clarification_requested()` |
+| `TokenUsage` | `handle_chunk` | No-op (usage is processed at finalisation) |
 | `StreamEnded` | `finalize_stream`, `stop_stream`, `cancel_pending`, `stop_all` | Resets streaming state; dispatches to `finalize_completed_stream` or `finalize_stopped_stream`; clears `Conversation.streaming_message` |
 
-All events carry a `conversation_id`. The handler checks `view.conversation_id() == Some(conversation_id)` before forwarding to ChatView -- events for non-displayed conversations are silently skipped at the UI level, while data-level operations (finalize, persist) always execute.
+Every event carries a `conversation_id`. The handler checks
+`view.conversation_id() == Some(conversation_id)` before forwarding to `ChatView`, so
+events for a conversation that is not on screen are skipped at the UI level while the
+data-level work (finalise, persist) always runs.
 
-## Text Accumulation: Single Source of Truth
+`StreamEnded` also carries the stream's `epoch`. A protocol follow-up registers the
+next stream synchronously right after `finalize_stream` returns, but the event is
+delivered on the next effect flush; the handler ignores a `StreamEnded` whose epoch is
+not the conversation's current one, so turn N's end cannot tear down turn N+1.
 
-During streaming, text is accumulated in **one** location only:
+## Text accumulation: single source of truth
 
 ```
 StreamChunk::Text("hello")
     │
     ├──► ConversationsStore: conv.append_streaming_content("hello")
-    │    Single source of truth for streaming text.
-    │    - Used for background stream restoration when switching conversations
-    │    - Read at finalization to save the complete response to history
+    │    Read when switching back to a background conversation,
+    │    and at finalisation to move the full response into history.
     │
-    └──► StreamManager: handle_chunk() emits TextChunk event (pass-through only)
-         StreamManager does NOT store the text. It only forwards the event
-         to the UI subscription for real-time display.
+    └──► StreamManager: handle_chunk() emits TextChunk (pass-through only)
 ```
 
-At finalization, `finalize_completed_stream` / `finalize_stopped_stream` reads the accumulated text from `Conversation.streaming_message`, calls `conv.finalize_response()` to move it into history, then clears `streaming_message`.
+At finalisation, `finalize_completed_stream` / `finalize_stopped_stream` read the
+accumulated text from `Conversation.streaming_message`, call
+`conv.finalize_response()` to move it into history, then clear `streaming_message`.
 
-This design avoids dual-write divergence where two copies of the same text could fall out of sync due to independent error handling paths.
+## Sequence diagrams
 
-## Sequence Diagrams
-
-### Send message (new conversation)
+### Send message
 
 ```mermaid
 sequenceDiagram
@@ -114,57 +126,7 @@ sequenceDiagram
 
     U->>CIS: Press Enter
     CIS->>CA: cx.emit(ChatInputEvent::Send)
-    CA->>CS: active_id() → None
-
-    Note over CA: Create cancel_flag, resolved_id=Arc<Mutex<None>>
-
-    CA->>CA: cx.spawn(async task)
-    CA->>SM: register_pending_stream(task, resolved_id, cancel_flag)
-    SM-->>CA: StreamStarted { "__pending__" }
-    CA->>CIS: set_streaming(true)
-
-    Note over CA: Inside async task:
-    CA->>CA: create_new_conversation()
-    CA->>CS: Add new Conversation
-    CA->>CA: Update resolved_id → real conv_id
-    CA->>SM: promote_pending(conv_id)
-    CA->>CV: add_user_message()
-    CA->>CV: start_assistant_message()
-    CA->>LLM: stream_prompt()
-
-    loop Each chunk from LLM
-        LLM-->>CA: StreamChunk::Text
-        CA->>CS: conv.append_streaming_content(text)
-        CA->>SM: handle_chunk(conv_id, chunk)
-        SM-->>CA: TextChunk { conv_id, text }
-        CA->>CV: append_assistant_text(text)
-    end
-
-    LLM-->>CA: StreamChunk::Done
-    CA->>CV: extract_current_trace()
-    CA->>SM: set_trace() + finalize_stream()
-    SM-->>CA: StreamEnded { Completed }
-    CA->>CIS: set_streaming(false)
-    CA->>CV: finalize_assistant_message()
-    CA->>CS: Read streaming_message, finalize_response()
-    CA->>CA: Generate title, calculate cost, persist
-```
-
-### Send message (existing conversation)
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant CIS as ChatInputState
-    participant CA as ChattyApp
-    participant SM as StreamManager
-    participant CS as ConversationsStore
-    participant CV as ChatView
-    participant LLM as LLM API
-
-    U->>CIS: Press Enter
-    CIS->>CA: cx.emit(ChatInputEvent::Send)
-    CA->>CS: active_id() → Some(conv_id)
+    CA->>CS: active_id()
 
     Note over CA: Create cancel_flag
 
@@ -188,13 +150,24 @@ sequenceDiagram
     end
 
     LLM-->>CA: StreamChunk::Done
-    CA->>SM: finalize_stream()
+    CA->>CV: extract_current_trace()
+    CA->>SM: set_trace() + finalize_stream()
     SM-->>CA: StreamEnded { Completed }
     CA->>CIS: set_streaming(false)
-    CA->>CA: finalize_completed_stream()
+    CA->>CV: finalize_assistant_message()
+    CA->>CS: Read streaming_message, finalize_response()
+    CA->>CA: Generate title, calculate cost, persist
 ```
 
-### Switch conversation during active stream
+> [!NOTE]
+> When no conversation is active yet, the same flow runs with three differences:
+> the stream is registered with `register_pending_stream(task, resolved_id, cancel_flag)`
+> under the key `"__pending__"`, `StreamStarted` is emitted for `"__pending__"`, and
+> the async task first calls `create_new_conversation()`, writes the real id into
+> `resolved_id`, and calls `promote_pending(conv_id)` before adding the user message.
+> See [Pending stream promotion](#pending-stream-promotion).
+
+### Switch conversation during an active stream
 
 ```mermaid
 sequenceDiagram
@@ -204,7 +177,7 @@ sequenceDiagram
     participant SM as StreamManager
     participant CS as ConversationsStore
     participant CV as ChatView
-    participant BG as Background Stream (conv A)
+    participant BG as Background stream (conv A)
 
     Note over CV: Currently showing conv A (streaming)
 
@@ -223,7 +196,7 @@ sequenceDiagram
         BG->>SM: handle_chunk("A", TextChunk)
         SM-->>CA: TextChunk { conv_id: "A" }
         CA->>CV: view.conversation_id() == "B" ≠ "A"
-        Note over CA: Event silently skipped (UI filter)
+        Note over CA: Event skipped (UI filter)
     end
 
     Note over U: User switches back to A
@@ -239,7 +212,7 @@ sequenceDiagram
     CA->>CV: start_assistant_message()
     CA->>CV: append_assistant_text(accumulated_content)
 
-    Note over CV: Restored! New chunks now match conv_id and continue
+    Note over CV: Restored; new chunks match conv_id again
 ```
 
 ### Stop stream
@@ -271,7 +244,7 @@ sequenceDiagram
     CA->>CA: persist_conversation()
 ```
 
-### Cancel pending (New Chat while stream starting)
+### Cancel pending (New Chat while a stream is starting)
 
 ```mermaid
 sequenceDiagram
@@ -297,44 +270,52 @@ sequenceDiagram
     CA->>CA: create_new_conversation()
 ```
 
-## Cancellation Mechanism
+## Cancellation mechanism
 
 StreamManager uses `Arc<AtomicBool>` cancellation tokens rather than dropping tasks:
 
 ```
 cancel_flag = Arc<AtomicBool::new(false)>
     │
-    ├── Shared with stream loop (cancel_flag_for_loop)
-    │   Checked at top of each iteration:
-    │     if cancel_flag_for_loop.load(Relaxed) { break; }
+    ├── Shared with the stream loop, checked at the top of each iteration:
+    │     if cancel_flag.load(Relaxed) { break; }
     │
-    └── Owned by StreamState
-        Set by stop_stream / cancel_pending:
+    └── Owned by StreamState; set by stop_stream / cancel_pending / stop_all:
           state.cancel_flag.store(true, Relaxed);
 ```
 
-The stream exits cleanly on the next iteration rather than being abruptly terminated mid-chunk. The task `drop()` in `stop_stream` is a backstop in case the loop doesn't check the flag in time.
+The stream exits cleanly on its next iteration instead of being cut off mid-chunk.
+The `task` drop in `stop_stream` is a backstop for a loop that does not observe the
+flag in time.
 
-## Pending Stream Promotion
+## Pending stream promotion
 
-When sending a message creates a new conversation, there's a window where the stream starts before the conversation ID is known:
+When sending a message creates a new conversation, the stream starts before the
+conversation id is known:
 
 ```
-1. register_pending_stream()     → stored under "__pending__" key
-2. Async: create_new_conversation() → returns real conv_id
-3. promote_pending(conv_id)      → moves entry from "__pending__" to conv_id
+1. register_pending_stream()        → stored under the "__pending__" key
+2. Async: create_new_conversation() → returns the real conv_id
+3. promote_pending(conv_id)         → moves the entry from "__pending__" to conv_id
 ```
 
-The `pending_resolved_ids` map tracks the `Arc<Mutex<Option<String>>>` so that `stop_stream` and `is_streaming` can match a pending stream to its resolved conversation ID even before `promote_pending` is called.
+`pending_resolved_ids` keeps the `Arc<Mutex<Option<String>>>` so that `stop_stream`
+and `is_streaming` can match a pending stream to its resolved conversation id even
+before `promote_pending` runs.
 
-## Lifecycle: Init and Shutdown
+## Lifecycle: init and shutdown
 
-**Init** (`main.rs`): StreamManager is created as a GPUI entity and stored as a **strong** `Entity<StreamManager>` reference in `GlobalStreamManager`. Using a strong reference (not `WeakEntity`) prevents garbage collection after the initialization closure returns.
+**Init** (`main.rs`): StreamManager is created as a GPUI entity and stored as a
+**strong** `Entity<StreamManager>` in `GlobalStreamManager` (a `GlobalStrongEntity`);
+a weak reference would let the entity be dropped once the initialisation closure
+returns.
 
-**Shutdown** (Quit action): Calls `StreamManager.stop_all()` which iterates all active streams, sets their cancel flags, emits `StreamEnded` for each, and clears the HashMap.
+**Shutdown** (the Quit action): `StreamManager.stop_all()` sets every cancel flag,
+emits `StreamEnded` for each active stream, and clears the map.
 
 ## Research connection (M0 Trace)
 
-`StreamState.trace_json` and ATIF export (`exporters/types.rs`) are the production trace
-surface. M0 adds per-module attribution, round-trip `Deserialize`, and an opt-in
-`Recorder` — see [app ↔ research bridge](research/app-research-bridge.md#traces-atif--training-export-m0).
+`StreamState.trace_json` and ATIF export (`exporters/types.rs`) are the production
+trace surface. M0 adds per-module attribution, round-trip `Deserialize`, and an
+opt-in `Recorder` — see
+[app ↔ research bridge](research/app-research-bridge.md#traces-atif--training-export-m0).

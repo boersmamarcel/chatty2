@@ -12,7 +12,9 @@ cat > "$OUT/tools-catalog.md" << 'HEADER'
 
 **When to read this:** Look up an LLM tool name, its category, or which source file implements it.
 
-Auto-generated from `tool_registry.rs` and `tools/mod.rs`. Re-run `make docs-gen`.
+Hand-maintained in `scripts/gen-docs-reference.sh`; CI diffs it against every
+`const NAME` under `crates/chatty-core/src/tools/` (`make docs-check-reference`),
+so a tool cannot be added without a row here. Re-run `make docs-gen`.
 
 | Tool name | Category | Source module | Notes |
 |-----------|----------|---------------|-------|
@@ -80,6 +82,13 @@ tools = [
     ("daytona_run", "sandbox", "daytona_tool/", "Daytona cloud sandbox"),
     ("publish_wasm_module", "modules", "publish_module_tool.rs", ""),
     ("create_chart", "viz", "chart_tool.rs", "Registered via tool_collector"),
+    ("ask_user", "agent", "ask_user_tool.rs", "Clarifying questions; answered in the UI"),
+    ("browser_navigate", "web", "browser_tools.rs", "feature: browser; localhost/file:// by default"),
+    ("browser_snapshot", "web", "browser_tools.rs", "feature: browser"),
+    ("browser_screenshot", "web", "browser_tools.rs", "feature: browser; PNG via add_attachment path"),
+    ("browser_console", "web", "browser_tools.rs", "feature: browser"),
+    ("browser_network", "web", "browser_tools.rs", "feature: browser"),
+    ("browser_resize", "web", "browser_tools.rs", "feature: browser"),
 ]
 for name, cat, src, notes in tools:
     print(f"| `{name}` | {cat} | `{src}` | {notes} |")
@@ -115,7 +124,7 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 Skills from `.claude/skills/` appear in both pickers with a skill badge.
 EOF
 
-# ── Settings schema (AGE-101, pair review) ──────────────────────────────────
+# ── Settings schema ──────────────────────────────────
 cat > "$OUT/settings-schema.md" << 'EOF'
 ---
 audience: [contributor, agent]
@@ -139,11 +148,9 @@ related:
 for a persisted setting. Source of truth:
 `crates/chatty-core/src/settings/repositories/` + `settings/models/`.
 
-> **Pair review pending (DOC-23 / AGE-101):** Field tables below are transcribed
-> from the settings models as of this commit. Marcel confirms file names,
-> defaults, serde enum spellings, and that secret examples stay redacted
-> before this page is treated as complete. Do not close AGE-101 until that
-> review lands.
+Field tables are hand-maintained in `scripts/gen-docs-reference.sh`; CI checks
+the repository file names and the `ExecutionSettingsModel` / `ModelConfig`
+field lists against the source (`make docs-check-reference`).
 
 ## Config vs data directories
 
@@ -221,6 +228,7 @@ opt-in (`false`) for security.
 | `filesystem_write_enabled` | `bool` | `true` | Requires `workspace_dir` + approval |
 | `fetch_enabled` | `bool` | `true` | Built-in read-only HTTP GET |
 | `git_enabled` | `bool` | `false` | Opt-in; workspace must be a git repo |
+| `browser_enabled` | `bool` | `false` | Opt-in built-in browser tools; may download a pinned Chrome on first use |
 | `execute_code_enabled` | `bool` | `false` | Exposes `execute_code` to the model |
 | `docker_code_execution_enabled` | `bool` | `false` | Docker fallback for non-Monty code |
 | `docker_host` | `Option<String>` | `null` | Socket / URI; `null` = auto-detect |
@@ -381,10 +389,15 @@ Source: `settings/models/models_store.rs`.
 | `extra_params` | `Map<String, String>` | `{}` (omitted if empty) | Azure: `api_version` (default `2025-03-01-preview`) |
 | `cost_per_million_input_tokens` | `Option<f64>` | omitted if `null` | USD |
 | `cost_per_million_output_tokens` | `Option<f64>` | omitted if `null` | USD |
+| `cost_per_million_cache_read_tokens` | `Option<f64>` | omitted if `null` | USD; falls back to the input rate when unset |
+| `cost_per_million_cache_write_tokens` | `Option<f64>` | omitted if `null` | USD; falls back to the input rate when unset |
 | `supports_images` | `bool` | `false` | New models inherit `ProviderType::default_capabilities()` |
 | `supports_pdf` | `bool` | `false` | |
 | `supports_temperature` | `bool` | `true` | Off for some reasoning models |
 | `max_context_window` | `Option<i32>` | omitted if `null` | Token-bar budget |
+| `source` | `ModelSource` | `"User"` | `User` (added by hand or from a catalogue pick) or `Sync` (owned by a provider sync) |
+| `is_favorite` | `bool` | `false` | Starred rows sort to the top of the roster |
+| `is_default` | `bool` | `false` | Model new conversations start with |
 
 ---
 
@@ -637,7 +650,8 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | | `ToolCallError` | `conversation_id`, `id`, `error` | `StreamManager` | `ChattyApp` → `ChatView` |
 | | `ApprovalRequested` | `conversation_id`, `id`, `command`, `is_sandboxed` | `StreamManager` | `ChattyApp` → `ChatView` |
 | | `ApprovalResolved` | `conversation_id`, `id`, `approved` | `StreamManager` | `ChattyApp` → `ChatView` |
-| | `TokenUsage` | `conversation_id`, `input_tokens`, `output_tokens` | `StreamManager` | `ChattyApp` |
+| | `ClarificationRequested` | `conversation_id`, `id`, `questions` | `StreamManager` | `ChattyApp` → `ChatView` (ask-user card) |
+| | `TokenUsage` | `conversation_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | `StreamManager` | `ChattyApp` |
 | | `StreamEnded` | `conversation_id`, `status`, `token_usage`, `trace_json`, … | `StreamManager` | `ChattyApp` (finalization) |
 | `SidebarEvent` | `NewChat` | — | `SidebarView` | `ChattyApp` |
 | | `OpenSettings` | — | `SidebarView` | `ChattyApp` |
@@ -653,6 +667,9 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | | `WorkingDirChanged` | `Option<PathBuf>` | `ChatInputState` | `ChattyApp` |
 | `ChatViewEvent` | `FeedbackChanged` | `history_index`, `feedback` | `ChatView` | `ChattyApp` |
 | | `RegenerateMessage` | `history_index` | `ChatView` | `ChattyApp` |
+| `ArtifactViewEvent` | `Closed` | — | `ArtifactView` | `ChatView` |
+| | `PresentationChanged` | — | `ArtifactView` | `ChatView` |
+| | `BrowserControlChanged` | `taken`, `url` | `ArtifactView` | `ChatView` (activity trail) |
 | `TraceEvent` | `ToolCallStateChanged` | `tool_id`, `old_state`, `new_state` | `SystemTraceView` | `ChatView` |
 | | `ToolCallInputReceived` | `tool_id` | `SystemTraceView` | `ChatView` |
 | | `ToolCallOutputReceived` | `tool_id`, `has_output` | `SystemTraceView` | `ChatView` |
@@ -661,7 +678,7 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | `AgentConfigEvent` | `RebuildRequired` | — | `AgentConfigNotifier` | Settings controllers, `ChattyApp` |
 | `ErrorNotifierEvent` | `NewError` | — | `ErrorNotifier` | `ChattyApp` (toast/banner) |
 
-**Source files:** `stream_manager.rs`, `sidebar_view.rs`, `chat_input/mod.rs`, `chat_view/mod.rs`, `message_types.rs` (TraceEvent), `models_notifier.rs`, `agent_config_notifier.rs`, `error_notifier.rs`.
+**Source files:** `stream_manager.rs`, `sidebar_view.rs`, `chat_input/mod.rs`, `chat_view/mod.rs`, `transcript/artifact_view.rs`, `message_types.rs` (TraceEvent), `models_notifier.rs`, `agent_config_notifier.rs`, `error_notifier.rs`. This table is hand-maintained; CI checks that every `EventEmitter` enum and every `StreamManagerEvent` variant has a row (`make docs-check-reference`).
 
 **Adding a new event:** define an enum on the emitter entity, `impl EventEmitter<YourEvent>`, subscribe in the parent (usually `ChattyApp` or `ChatView`). Never use `Arc<dyn Fn>` callbacks between entities. Step-by-step: [Add a desktop GPUI view](../guides/add-gpui-view.md).
 EOF
@@ -672,7 +689,7 @@ cat > "$OUT/singleton-inventory.md" << 'EOF'
 
 **When to read this:** Find where shared state lives before adding a new global, repository, or `OnceLock`.
 
-Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This page expands it with accessors and rationale.
+Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This page expands it with accessors and rationale. Hand-maintained; CI checks that every `OnceLock`/`LazyLock` static in chatty-core (regex and font caches excepted) has a row (`make docs-check-reference`).
 
 ## Service singletons (`chatty-core/src/lib.rs`)
 
@@ -705,6 +722,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | Name | Location | Type | Purpose |
 |------|----------|------|---------|
 | `GLOBAL_WRITE_APPROVAL_MODE` | `tools/filesystem_write_tool.rs` | `OnceLock<Mutex<ApprovalMode>>` | Write-tool approval without coupling to UI |
+| `REGISTRY` | `services/browser/registry.rs` | `LazyLock<Mutex<HashMap<String, Arc<BrowserManager>>>>` | `conversation_id → BrowserManager` so the transcript can dock a live browser panel |
 | `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
@@ -731,13 +749,13 @@ cat > "$OUT/llms.txt" << EOF
 
 - [Agent quick-start (AGENTS.md)](${SITE_BASE}/dev/agents.html): build, test, workspace map, conventions
 - [Where do I…? decision tree](${SITE_BASE}/dev/where-to-look.html): task → file/doc routing
-- [Documentation index](${SITE_BASE}/dev/doc-index.html): all docs/ files by purpose
+- [Contributing patterns](${SITE_BASE}/dev/contributing-patterns.html): the rules a PR is reviewed against
 - [System overview](${SITE_BASE}/dev/architecture/system-overview.html): one-page mental model
 - [Component map](${SITE_BASE}/dev/architecture/component-map.html): crate/entity diagrams
 
 ## Architecture
 
-- [Architecture overview](${SITE_BASE}/dev/architecture/architecture-overview.html)
+- [Context compaction](${SITE_BASE}/dev/architecture/context-compaction.html)
 - [Entity communication](${SITE_BASE}/dev/architecture/entity-communication.html)
 - [Stream manager](${SITE_BASE}/dev/architecture/stream-manager.html)
 - [Workspace crate split](${SITE_BASE}/dev/architecture/workspace-crate-split.html)
@@ -759,17 +777,20 @@ cat > "$OUT/llms.txt" << EOF
 ## User guides
 
 - [Getting started](${SITE_BASE}/user/getting-started.html)
-- [Agents](${SITE_BASE}/user/agents.html)
-- [Agentic tools](${SITE_BASE}/user/agentic-tools.html)
+- [Agents & tools](${SITE_BASE}/user/agents-and-tools.html)
+- [Security & approvals](${SITE_BASE}/user/security.html)
 - [Terminal interface](${SITE_BASE}/user/terminal.html)
 
 ## How-to guides
 
 - [Add a provider](${SITE_BASE}/dev/guides/add-provider.html)
-- [Add a tool](${SITE_BASE}/dev/guides/add-tool.html)
+- [Build and run in 10 minutes](${SITE_BASE}/dev/start/build-and-run.html)
+- [Your first change: add a tool](${SITE_BASE}/dev/start/first-change.html)
 - [Add a slash command](${SITE_BASE}/dev/guides/add-slash-command.html)
 - [Add a desktop GPUI view](${SITE_BASE}/dev/guides/add-gpui-view.html)
-- [Debug streams](${SITE_BASE}/dev/guides/debug-streams.html)
+- [Test](${SITE_BASE}/dev/guides/test.html)
+- [Debug](${SITE_BASE}/dev/guides/debug.html)
+- [Glossary](${SITE_BASE}/dev/glossary.html)
 - [Build & package](${SITE_BASE}/dev/guides/build-package.html)
 
 ## Research / reserved symbols
@@ -806,6 +827,7 @@ append_section() {
 
 append_section "AGENTS.md" "$ROOT/AGENTS.md"
 append_section "Documentation index" "$ROOT/docs/INDEX.md"
+append_section "Contributing patterns" "$ROOT/docs-site/src/dev/contributing-patterns.md"
 append_section "System overview" "$ROOT/docs/system-overview.md"
 append_section "Entity communication" "$ROOT/docs/entity-communication.md"
 append_section "Stream manager" "$ROOT/docs/stream-manager.md"
