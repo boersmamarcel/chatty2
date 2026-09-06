@@ -34,7 +34,11 @@ use crate::services::StreamError;
 use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// One observable step of a turn. See the module docs for ordering.
-#[derive(Clone, Debug)]
+///
+/// Serializable so a turn can cross a process boundary: a headless child
+/// writes its events as `CHATTY_EVENT` lines and the parent's `sub_agent`
+/// tool reads them back (AGE-196).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SessionEvent {
     /// The turn's stream loop is running.
     TurnStarted,

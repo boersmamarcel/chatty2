@@ -73,7 +73,7 @@ impl ChatEngine {
 
     /// Clear all display and conversation state so a fresh conversation can be initialized.
     pub fn clear_conversation(&mut self) {
-        self.messages.clear();
+        self.transcript.clear();
         self.title = "New Chat".to_string();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
@@ -251,6 +251,7 @@ impl ChatEngine {
     /// Copy the latest assistant message to the system clipboard.
     pub fn copy_last_response_to_clipboard(&mut self) -> Result<()> {
         let text = self
+            .transcript
             .messages
             .iter()
             .rev()
@@ -324,7 +325,7 @@ impl ChatEngine {
 
         let label = format!("[remote agent: {}] {}", config.name, prompt);
         self.add_system_message(label);
-        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+        self.transcript.mark_last_as_sub_agent_row();
 
         let event_tx = self.event_tx.clone();
 
@@ -406,7 +407,7 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching local sub-agent...".to_string());
-        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+        self.transcript.mark_last_as_sub_agent_row();
 
         tokio::task::spawn_blocking(move || {
             let message = match super::helpers::run_sub_agent_process(

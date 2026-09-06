@@ -11,7 +11,7 @@ use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
 
 /// Progress events emitted by the invoke_agent tool during streaming execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum InvokeAgentProgress {
     /// Agent invocation started.
     Started {

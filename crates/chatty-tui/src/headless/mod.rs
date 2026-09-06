@@ -12,21 +12,26 @@
 //! # What lives here
 //!
 //! - `run_headless`, `run_pipe` — the two entry functions called from `main`.
-//! - Helpers that wire `ChatEngine` events into stdout-only output (tool
+//! - `HeadlessRunner` (`runner.rs`) — the conversation, driven from an
+//!   `AgentSession` directly with no terminal state (AGE-196).
+//! - Helpers that wire the runner's events into stdout-only output (tool
 //!   call summaries, token usage, errors).
 //!
 //! # What does NOT live here
 //!
 //! - The interactive Ratatui UI — `ui/`.
-//! - The shared chat engine — `engine.rs`.
+//! - The interactive engine — `engine/`.
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
 use chatty_core::services::AgentLoopGuard;
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatEngine, ToolCallState};
+use crate::engine::ToolCallState;
 use crate::events::AppEvent;
+
+mod runner;
+pub use runner::HeadlessRunner;
 
 const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
@@ -42,7 +47,7 @@ const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted 
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
 pub async fn run_headless(
-    mut engine: ChatEngine,
+    mut engine: HeadlessRunner,
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
     message: String,
 ) -> Result<()> {
@@ -119,13 +124,7 @@ pub async fn run_headless(
                 let name_str = name.clone();
                 engine.handle_event(event);
                 eprintln!("{}", format_progress_line("tool_started", &name_str, None));
-                if let Some(tc) = engine
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|m| m.tool_calls())
-                    .find(|tc| tc.name == name_str)
-                {
+                if let Some(tc) = engine.transcript.tool_call_named(&name_str) {
                     eprintln!("\n{}", format_tool_call_header(tc));
                 } else {
                     eprintln!("\n  \u{27f3} {}", name_str);
@@ -138,13 +137,7 @@ pub async fn run_headless(
                 let mut pivot_msg: Option<String> = None;
                 let mut tool_failed = false;
                 let mut compact_file_extracted = false;
-                if let Some(tc) = engine
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|m| m.tool_calls())
-                    .find(|tc| tc.id == id_str)
-                {
+                if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
@@ -244,13 +237,7 @@ pub async fn run_headless(
             AppEvent::ToolCallError { ref id, .. } => {
                 let id_str = id.clone();
                 engine.handle_event(event);
-                if let Some(tc) = engine
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|m| m.tool_calls())
-                    .find(|tc| tc.id == id_str)
-                {
+                if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
@@ -291,11 +278,7 @@ pub async fn run_headless(
             AppEvent::StreamCompleted => {
                 engine.handle_event(AppEvent::StreamCompleted);
                 // Update loop guard: resets per-turn counters and checks for late-game deadline.
-                let turns_used = engine
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m.role, crate::engine::MessageRole::Assistant))
-                    .count();
+                let turns_used = engine.transcript.assistant_turns();
                 loop_guard.on_turn_complete(turns_used, answer_file_exists(&engine));
                 let was_text_overflow = text_overflow_stop_requested;
                 text_overflow_stop_requested = false;
@@ -495,7 +478,7 @@ fn prompt_has_strict_answer_format(original_prompt: &str) -> bool {
 
 /// Run in pipe mode: read stdin, send as message, print response to stdout.
 pub async fn run_pipe(
-    engine: ChatEngine,
+    engine: HeadlessRunner,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
     use std::io::Read;

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
@@ -8,14 +7,13 @@ use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
 use chatty_core::models::execution_approval_store::ApprovalDecision;
-use chatty_core::models::message_types::{
-    ExecutionEngine, ToolSource, classify_initial_execution_engine, classify_tool_source,
-    detect_execution_engine, predict_execution_engine,
-};
+use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::models::write_approval_store::WriteApprovalDecision;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
 use chatty_core::services::{McpService, MemoryService, StreamSurface};
-use chatty_core::session::{AgentSession, AgentSessionConfig, TurnInput, TurnKind};
+use chatty_core::session::{
+    AgentSession, AgentSessionConfig, ApprovalHandles, TurnInput, TurnKind,
+};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -32,9 +30,11 @@ use crate::events::AppEvent;
 mod characterization;
 mod commands;
 pub mod helpers;
+mod transcript;
 
 pub use commands::Command;
 pub(crate) use helpers::sanitize_progress_line;
+pub use transcript::Transcript;
 
 /// Tool call status tracked during streaming
 #[derive(Debug, Clone)]
@@ -275,7 +275,7 @@ pub struct ChatEngine {
     pub is_sub_agent: bool,
 
     // Display state
-    pub messages: Vec<DisplayMessage>,
+    pub transcript: Transcript,
     pub is_streaming: bool,
     pub pending_approval: Option<PendingApproval>,
     pub pending_clarification: Option<PendingClarification>,
@@ -319,12 +319,6 @@ pub struct ChatEngine {
     /// Bounding rectangle of the chat transcript as of the last render.
     /// Used to route mouse wheel events only when the pointer is over the chat area.
     pub last_chat_area: ratatui::layout::Rect,
-    /// Index into `messages` of the system message showing sub-agent progress.
-    /// `None` when no sub-agent is running.
-    pub sub_agent_msg_idx: Option<usize>,
-    /// Tracks `invoke_agent` / `sub_agent` tool call IDs to suppress their
-    /// ToolCallBlock rendering (progress goes through the sub-agent channel).
-    active_invoke_agent_ids: HashSet<String>,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Monotonically increasing counter to discard stale background init results.
@@ -384,7 +378,7 @@ impl ChatEngine {
             remote_agents: config.remote_agents,
             module_agents: config.module_agents,
             is_sub_agent: config.is_sub_agent,
-            messages: Vec::new(),
+            transcript: Transcript::new(),
             is_streaming: false,
             pending_approval: None,
             pending_restore_text: None,
@@ -405,8 +399,6 @@ impl ChatEngine {
             pinned_to_bottom: true,
             last_content_height: 0,
             last_chat_area: ratatui::layout::Rect::default(),
-            sub_agent_msg_idx: None,
-            active_invoke_agent_ids: HashSet::new(),
             event_tx,
             init_generation: 0,
         }
@@ -470,57 +462,26 @@ impl ChatEngine {
         }
     }
 
-    fn available_model_ids(&self) -> Vec<String> {
-        self.models.models().iter().map(|m| m.id.clone()).collect()
-    }
-
-    /// Whether any execution-related setting is enabled — gates whether the
-    /// built agent gets `exec_settings` (and thus execution tools) at all.
-    fn any_tool_enabled(es: &ExecutionSettingsModel) -> bool {
-        es.enabled
-            || es.filesystem_read_enabled
-            || es.filesystem_write_enabled
-            || es.fetch_enabled
-            || es.git_enabled
-            || es.execute_code_enabled
-    }
-
     /// Build the `AgentBuildContext` shared by `init_conversation` and
     /// `spawn_init_conversation`. `mcp_tools` is left `None`; both callers set
     /// it themselves after gathering it, since that gathering is async and,
     /// for the background path, must happen inside the spawned task rather
     /// than while still borrowing `&self` (AGE-224).
     fn build_agent_context(&self) -> AgentBuildContext {
-        let exec_settings = if Self::any_tool_enabled(&self.execution_settings) {
-            Some(self.execution_settings.clone())
-        } else {
-            None
-        };
-        let handles = self.session.approval_handles();
-        AgentBuildContext {
-            mcp_tools: None,
-            exec_settings,
-            pending_approvals: Some(handles.pending_approvals),
-            pending_clarifications: Some(handles.pending_clarifications),
-            pending_write_approvals: Some(handles.pending_write_approvals),
-            pending_artifacts: None,
-            shell_session: None,
-            user_secrets: self.user_secrets.clone(),
-            theme_colors: None, // no theme colors in TUI
-            memory_service: self.memory_service.clone(),
-            skill_service: Some(self.skill_service.clone()),
-            search_settings: self.search_settings.clone(),
-            embedding_service: self.embedding_service.clone(),
-            allow_sub_agent: !self.is_sub_agent,
-            module_agents: self.module_agents.clone(),
-            gateway_port: self
-                .module_settings
-                .enabled
-                .then_some(self.module_settings.gateway_port),
-            remote_agents: self.remote_agents.clone(),
-            available_model_ids: self.available_model_ids(),
-            conversation_id: None, // browser feature isn't enabled in the TUI
-        }
+        build_agent_context(AgentContextInputs {
+            execution_settings: &self.execution_settings,
+            module_settings: &self.module_settings,
+            models: &self.models,
+            user_secrets: &self.user_secrets,
+            memory_service: &self.memory_service,
+            skill_service: &self.skill_service,
+            search_settings: &self.search_settings,
+            embedding_service: &self.embedding_service,
+            remote_agents: &self.remote_agents,
+            module_agents: &self.module_agents,
+            is_sub_agent: self.is_sub_agent,
+            handles: self.session.approval_handles(),
+        })
     }
 
     /// Initialize the conversation (async — creates agent with tools)
@@ -664,20 +625,16 @@ impl ChatEngine {
 
         // Reset scroll to bottom when sending
         self.pin_to_bottom();
-        self.sub_agent_msg_idx = None;
+        self.transcript.reset_sub_agent_row();
 
         // Add user message to display, unless this is a protocol follow-up
         // that already rendered its own system line (AGE-242 / D3).
         if show_in_transcript {
-            self.messages.push(DisplayMessage::with_text(
-                MessageRole::User,
-                message.clone(),
-            ));
+            self.transcript.push_user(message.clone());
         }
 
         // Start assistant placeholder
-        self.messages
-            .push(DisplayMessage::new(MessageRole::Assistant, true));
+        self.transcript.start_assistant();
         self.is_streaming = true;
 
         // Settings are the engine's (slash commands and headless recovery
@@ -703,79 +660,26 @@ impl ChatEngine {
             }
             AppEvent::TextChunk(text) => {
                 self.session.append_streaming_text(&text);
-                if let Some(msg) = self.streaming_assistant_mut() {
-                    msg.push_text(&text);
-                } else if self.sub_agent_msg_idx.is_some() {
-                    self.messages
-                        .push(DisplayMessage::new(MessageRole::Assistant, true));
-                    if let Some(msg) = self.messages.last_mut() {
-                        msg.push_text(&text);
-                    }
-                }
+                self.transcript.push_text(&text);
                 EngineAction::Redraw
             }
             AppEvent::ToolCallStarted { id, name } => {
                 self.session.note_tool_started(&id, &name);
-                if name == "invoke_agent" || name == "sub_agent" {
-                    self.active_invoke_agent_ids.insert(id);
-                } else {
-                    let source = classify_tool_source(&name);
-                    let execution_engine = classify_initial_execution_engine(&name);
-                    let info = ToolCallInfo {
-                        id,
-                        name,
-                        input: String::new(),
-                        output: None,
-                        state: ToolCallState::Running,
-                        source,
-                        execution_engine,
-                    };
-                    if let Some(last) = self.streaming_assistant_mut() {
-                        last.push_tool_call(info);
-                    } else if self.sub_agent_msg_idx.is_some() {
-                        self.messages
-                            .push(DisplayMessage::new(MessageRole::Assistant, true));
-                        if let Some(last) = self.messages.last_mut() {
-                            last.push_tool_call(info);
-                        }
-                    }
-                }
+                self.transcript.tool_started(id, name);
                 EngineAction::Redraw
             }
             AppEvent::ToolCallInput { id, arguments } => {
-                if !self.active_invoke_agent_ids.contains(&id)
-                    && let Some(last) = self.streaming_assistant_mut()
-                    && let Some(tc) = last.tool_call_mut(&id)
-                {
-                    tc.execution_engine =
-                        predict_execution_engine(&tc.name, &arguments).or(tc.execution_engine);
-                    tc.input.push_str(&arguments);
-                }
+                self.transcript.tool_input(&id, &arguments);
                 EngineAction::Redraw
             }
             AppEvent::ToolCallResult { id, result } => {
                 self.session.note_tool_finished(&id);
-                if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent / sub_agent result — sub-agent progress already handled
-                } else if let Some(last) = self.streaming_assistant_mut()
-                    && let Some(tc) = last.tool_call_mut(&id)
-                {
-                    tc.execution_engine = detect_execution_engine(&tc.name, &result);
-                    tc.output = Some(result);
-                    tc.state = ToolCallState::Success;
-                }
+                self.transcript.tool_result(&id, result);
                 EngineAction::Redraw
             }
             AppEvent::ToolCallError { id, error } => {
                 self.session.note_tool_finished(&id);
-                if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent / sub_agent error — sub-agent progress already handled
-                } else if let Some(last) = self.streaming_assistant_mut()
-                    && let Some(tc) = last.tool_call_mut(&id)
-                {
-                    tc.output = Some(error.clone());
-                    tc.state = ToolCallState::Error;
-                }
+                self.transcript.tool_error(&id, error);
                 EngineAction::Redraw
             }
             AppEvent::ApprovalRequested {
@@ -832,11 +736,7 @@ impl ChatEngine {
             }
             AppEvent::StreamError(error) => {
                 error!(error = %error, "Stream error");
-                if let Some(last) = self.streaming_assistant_mut() {
-                    let prefix = if last.text().is_empty() { "" } else { "\n\n" };
-                    last.push_text(&format!("{}[Error: {}]", prefix, error));
-                    last.is_streaming = false;
-                }
+                self.transcript.mark_error(&error.to_string());
                 self.finalize_partial_response();
                 self.reset_stream_state();
                 EngineAction::Redraw
@@ -857,10 +757,7 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::StreamCancelled => {
-                if let Some(last) = self.streaming_assistant_mut() {
-                    last.push_text("\n\n[Cancelled]");
-                    last.is_streaming = false;
-                }
+                self.transcript.mark_cancelled();
                 self.finalize_partial_response();
                 self.reset_stream_state();
                 self.send_pending_agent_follow_up();
@@ -908,7 +805,7 @@ impl ChatEngine {
                 self.services_loaded = true;
                 // Re-initialize conversation only if the user hasn't sent any messages yet.
                 // This gives the agent access to MCP tools, memory, etc. without losing context.
-                if self.messages.is_empty() && !self.is_streaming {
+                if self.transcript.messages.is_empty() && !self.is_streaming {
                     self.spawn_init_conversation();
                 }
                 EngineAction::Redraw
@@ -926,28 +823,11 @@ impl ChatEngine {
                 if line.is_empty() {
                     return EngineAction::None;
                 }
-                if self.sub_agent_msg_idx.is_none() {
-                    self.seal_parent_before_sub_agent_progress();
-                    self.add_system_message(line);
-                    self.sub_agent_msg_idx = Some(self.messages.len() - 1);
-                } else if let Some(idx) = self.sub_agent_msg_idx
-                    && let Some(msg) = self.messages.get_mut(idx)
-                {
-                    msg.push_text("\n");
-                    msg.push_text(&line);
-                }
+                self.transcript.sub_agent_progress(line);
                 EngineAction::Redraw
             }
             AppEvent::SubAgentFinished(message) => {
-                if let Some(idx) = self.sub_agent_msg_idx
-                    && let Some(msg) = self.messages.get_mut(idx)
-                {
-                    msg.push_text("\n");
-                    msg.push_text(&message);
-                } else {
-                    self.add_system_message(message);
-                    self.sub_agent_msg_idx = Some(self.messages.len() - 1);
-                }
+                self.transcript.sub_agent_finished(message);
                 EngineAction::Redraw
             }
             AppEvent::TerminalInput(_) | AppEvent::Tick => {
@@ -1092,30 +972,7 @@ impl ChatEngine {
 
     /// Add a system message to the display
     pub fn add_system_message(&mut self, text: String) {
-        self.messages
-            .push(DisplayMessage::with_text(MessageRole::System, text));
-    }
-
-    fn streaming_assistant_index(&self) -> Option<usize> {
-        streaming_assistant_index(&self.messages, self.sub_agent_msg_idx)
-    }
-
-    fn streaming_assistant_mut(&mut self) -> Option<&mut DisplayMessage> {
-        let idx = self.streaming_assistant_index()?;
-        self.messages.get_mut(idx)
-    }
-
-    fn seal_parent_before_sub_agent_progress(&mut self) {
-        let Some(idx) = streaming_assistant_index(&self.messages, None) else {
-            return;
-        };
-        let empty = self.messages[idx].text().is_empty()
-            && self.messages[idx].tool_calls().next().is_none();
-        if empty {
-            self.messages.remove(idx);
-        } else {
-            self.messages[idx].is_streaming = false;
-        }
+        self.transcript.add_system(text);
     }
 
     /// Whether the first exchange just completed and a title should be
@@ -1130,10 +987,7 @@ impl ChatEngine {
     }
 
     fn finalize_stream(&mut self) {
-        // Mark display message as done
-        if let Some(last) = self.streaming_assistant_mut() {
-            last.is_streaming = false;
-        }
+        self.transcript.finish_streaming();
 
         self.finalize_partial_response();
         self.reset_stream_state();
@@ -1232,48 +1086,80 @@ pub fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
         .or_else(|| Some("HEAD (detached)".to_string()))
 }
 
-fn streaming_assistant_index(messages: &[DisplayMessage], after: Option<usize>) -> Option<usize> {
-    messages.iter().enumerate().rev().find_map(|(i, m)| {
-        if after.is_some_and(|a| i <= a) {
-            return None;
-        }
-        (matches!(m.role, MessageRole::Assistant) && m.is_streaming).then_some(i)
-    })
+/// Whether any execution-related setting is enabled — gates whether the
+/// built agent gets `exec_settings` (and thus execution tools) at all.
+fn any_tool_enabled(es: &ExecutionSettingsModel) -> bool {
+    es.enabled
+        || es.filesystem_read_enabled
+        || es.filesystem_write_enabled
+        || es.fetch_enabled
+        || es.git_enabled
+        || es.execute_code_enabled
+}
+
+/// What building an agent needs from the owner, borrowed. The interactive
+/// engine and the headless runner hold the same services (AGE-196), so the
+/// `AgentBuildContext` is assembled in one place from either.
+pub(crate) struct AgentContextInputs<'a> {
+    pub execution_settings: &'a ExecutionSettingsModel,
+    pub module_settings: &'a ModuleSettingsModel,
+    pub models: &'a ModelsModel,
+    pub user_secrets: &'a [(String, String)],
+    pub memory_service: &'a Option<MemoryService>,
+    pub skill_service: &'a chatty_core::services::SkillService,
+    pub search_settings:
+        &'a Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
+    pub embedding_service: &'a Option<chatty_core::services::EmbeddingService>,
+    pub remote_agents: &'a [A2aAgentConfig],
+    pub module_agents: &'a [LocalModuleAgentSummary],
+    pub is_sub_agent: bool,
+    /// The session's store handles, so the agent's tools raise requests on it.
+    pub handles: ApprovalHandles,
+}
+
+/// The `AgentBuildContext` for a TUI-hosted agent. `mcp_tools` is left
+/// `None`; callers gather it themselves, since that is async.
+pub(crate) fn build_agent_context(inputs: AgentContextInputs<'_>) -> AgentBuildContext {
+    let exec_settings = if any_tool_enabled(inputs.execution_settings) {
+        Some(inputs.execution_settings.clone())
+    } else {
+        None
+    };
+    AgentBuildContext {
+        mcp_tools: None,
+        exec_settings,
+        pending_approvals: Some(inputs.handles.pending_approvals),
+        pending_clarifications: Some(inputs.handles.pending_clarifications),
+        pending_write_approvals: Some(inputs.handles.pending_write_approvals),
+        pending_artifacts: None,
+        shell_session: None,
+        user_secrets: inputs.user_secrets.to_vec(),
+        theme_colors: None, // no theme colors in TUI
+        memory_service: inputs.memory_service.clone(),
+        skill_service: Some(inputs.skill_service.clone()),
+        search_settings: inputs.search_settings.clone(),
+        embedding_service: inputs.embedding_service.clone(),
+        allow_sub_agent: !inputs.is_sub_agent,
+        module_agents: inputs.module_agents.to_vec(),
+        gateway_port: inputs
+            .module_settings
+            .enabled
+            .then_some(inputs.module_settings.gateway_port),
+        remote_agents: inputs.remote_agents.to_vec(),
+        available_model_ids: inputs
+            .models
+            .models()
+            .iter()
+            .map(|m| m.id.clone())
+            .collect(),
+        conversation_id: None, // browser feature isn't enabled in the TUI
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rig_core::message::UserContent;
-
-    #[test]
-    fn streaming_assistant_before_progress_is_parent() {
-        let messages = vec![
-            DisplayMessage::new(MessageRole::Assistant, true),
-            DisplayMessage::with_text(MessageRole::System, "⟳ list_directory".to_string()),
-        ];
-        assert_eq!(streaming_assistant_index(&messages, None), Some(0));
-        assert_eq!(streaming_assistant_index(&messages, Some(1)), None);
-    }
-
-    #[test]
-    fn streaming_assistant_after_progress_is_continuation() {
-        let messages = vec![
-            DisplayMessage::with_text(MessageRole::Assistant, "pre-tool".to_string()),
-            DisplayMessage::with_text(MessageRole::System, "done".to_string()),
-            DisplayMessage::new(MessageRole::Assistant, true),
-        ];
-        assert_eq!(streaming_assistant_index(&messages, Some(1)), Some(2));
-    }
-
-    #[test]
-    fn streaming_assistant_none_when_only_system_messages() {
-        let messages = vec![DisplayMessage::with_text(
-            MessageRole::System,
-            "done".to_string(),
-        )];
-        assert_eq!(streaming_assistant_index(&messages, None), None);
-    }
 
     /// Builds a real `Conversation` with no tools enabled. Ollama client
     /// construction is purely local (no network access), so this is safe to
@@ -1419,7 +1305,7 @@ mod tests {
                 )],
             })
         );
-        let last = engine.messages.last().expect("assistant bubble");
+        let last = engine.transcript.messages.last().expect("assistant bubble");
         assert!(matches!(last.role, MessageRole::Assistant));
         assert!(!last.is_streaming);
         assert_eq!(last.text(), "Hello, world");
@@ -1480,7 +1366,15 @@ mod tests {
                 )],
             })
         );
-        assert!(engine.messages.last().unwrap().text().contains("[Error:"));
+        assert!(
+            engine
+                .transcript
+                .messages
+                .last()
+                .unwrap()
+                .text()
+                .contains("[Error:")
+        );
     }
 
     /// A `ChatEngine` with no conversation, for tests that only exercise
@@ -1574,14 +1468,12 @@ mod tests {
     async fn should_generate_title_counts_conversation_history_not_display_messages() {
         let (mut engine, _event_rx) = test_engine().await;
         engine.add_system_message("Agent protocol follow-up: ...".to_string());
-        engine
-            .messages
-            .push(DisplayMessage::with_text(MessageRole::User, "hi".into()));
-        engine.messages.push(DisplayMessage::with_text(
+        engine.transcript.push_user("hi".into());
+        engine.transcript.messages.push(DisplayMessage::with_text(
             MessageRole::Assistant,
             "hello".into(),
         ));
-        assert_eq!(engine.messages.len(), 3);
+        assert_eq!(engine.transcript.messages.len(), 3);
 
         let conv = engine.session.conversation_mut().unwrap();
         conv.add_user_message_with_attachments(

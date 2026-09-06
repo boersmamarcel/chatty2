@@ -251,7 +251,10 @@ pub use search_memory_tool::{
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
-pub use sub_agent_tool::{CHATTY_PROGRESS_PREFIX, SubAgentTool, is_chatty_progress_line};
+pub use sub_agent_tool::{
+    CHATTY_EVENT_PREFIX, CHATTY_PROGRESS_PREFIX, SubAgentTool, format_event_line,
+    is_chatty_event_line, is_chatty_progress_line, parse_event_line,
+};
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
 

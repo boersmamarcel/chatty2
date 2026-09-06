@@ -338,7 +338,9 @@ async fn main() -> Result<()> {
         let embedding_service =
             init_embedding_service(&execution_settings, &providers, &memory_service).await;
 
-        let mut engine = ChatEngine::new(
+        // Headless rides the session directly: no engine, no terminal state
+        // (AGE-196).
+        let mut engine = headless::HeadlessRunner::new(
             ChatEngineConfig {
                 model_config,
                 provider_config,
