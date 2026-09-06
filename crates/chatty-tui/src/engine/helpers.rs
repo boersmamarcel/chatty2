@@ -137,6 +137,35 @@ pub(super) fn run_sub_agent_process(
     }
 }
 
+/// The transcript line for a sub-agent progress event.
+pub(crate) fn sub_agent_line(
+    progress: &chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+) -> String {
+    use chatty_core::models::message_types::ToolSource;
+    use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+    match progress {
+        InvokeAgentProgress::Started {
+            agent_name,
+            prompt,
+            source,
+        } => {
+            let mode = match source {
+                ToolSource::Local => "local",
+                _ => "remote",
+            };
+            format!("[{mode} agent: {agent_name}] {prompt}")
+        }
+        InvokeAgentProgress::Text(text) => text.clone(),
+        InvokeAgentProgress::Finished { success, result } => result.clone().unwrap_or_else(|| {
+            if *success {
+                "Agent completed.".to_string()
+            } else {
+                "Agent failed.".to_string()
+            }
+        }),
+    }
+}
+
 pub(crate) fn sanitize_progress_line(line: &str) -> String {
     let mut cleaned = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();

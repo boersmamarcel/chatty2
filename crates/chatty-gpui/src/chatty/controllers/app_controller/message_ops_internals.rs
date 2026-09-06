@@ -312,16 +312,6 @@ impl DesktopSink {
                 source,
             } => {
                 let label = format!("[Agent: {}] {}", agent_name, prompt);
-                let label_for_store = label.clone();
-                let source_for_store = source.clone();
-                self.cx
-                    .update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                            conv.start_sub_agent_progress(&label_for_store, source_for_store);
-                        }
-                    })
-                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent start"))
-                    .ok();
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
@@ -332,15 +322,6 @@ impl DesktopSink {
                     .ok();
             }
             InvokeAgentProgress::Text(text) => {
-                let text_for_store = text.clone();
-                self.cx
-                    .update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                            conv.append_sub_agent_progress(&text_for_store);
-                        }
-                    })
-                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent progress"))
-                    .ok();
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
@@ -351,15 +332,6 @@ impl DesktopSink {
                     .ok();
             }
             InvokeAgentProgress::Finished { success, result } => {
-                let result_for_store = result.clone();
-                self.cx
-                    .update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                            conv.finalize_sub_agent_progress(success, result_for_store);
-                        }
-                    })
-                    .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to persist sub-agent final state"))
-                    .ok();
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
@@ -473,6 +445,43 @@ pub(super) async fn attachment_to_user_content(
         )),
         _ => Err(anyhow::anyhow!("Unsupported file type: {}", ext)),
     }
+}
+
+/// Serialize the current trace for `conv_id`, preferring the live ChatView and
+/// falling back to the Conversation model when the user has switched away.
+///
+/// Both the normal and the errored stream paths need this: a turn that died
+/// mid-flight still has tool calls worth keeping in the transcript.
+fn extract_trace_json(
+    chat_view: &gpui::Entity<crate::chatty::views::ChatView>,
+    conv_id: &str,
+    cx: &mut AsyncApp,
+) -> Option<serde_json::Value> {
+    let trace_from_view = chat_view
+        .update(cx, |view, _cx| view.extract_current_trace())
+        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to read trace from ChatView"))
+        .ok()
+        .flatten();
+
+    let trace = trace_from_view.or_else(|| {
+        cx.try_read_global::<ConversationsStore, _>(|store, _| {
+            store
+                .get_conversation(conv_id)
+                .and_then(|conv| conv.streaming_trace().cloned())
+        })
+        .flatten()
+    });
+
+    trace.and_then(|trace| match serde_json::to_value(&trace) {
+        Ok(val) => {
+            debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
+            Some(val)
+        }
+        Err(e) => {
+            error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -641,41 +650,4 @@ mod tests {
         assert!(!is_pdf_path(&PathBuf::from("/tmp/report")));
         assert!(!is_pdf_path(&PathBuf::from("/tmp/chart.png")));
     }
-}
-
-/// Serialize the current trace for `conv_id`, preferring the live ChatView and
-/// falling back to the Conversation model when the user has switched away.
-///
-/// Both the normal and the errored stream paths need this: a turn that died
-/// mid-flight still has tool calls worth keeping in the transcript.
-fn extract_trace_json(
-    chat_view: &gpui::Entity<crate::chatty::views::ChatView>,
-    conv_id: &str,
-    cx: &mut AsyncApp,
-) -> Option<serde_json::Value> {
-    let trace_from_view = chat_view
-        .update(cx, |view, _cx| view.extract_current_trace())
-        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to read trace from ChatView"))
-        .ok()
-        .flatten();
-
-    let trace = trace_from_view.or_else(|| {
-        cx.try_read_global::<ConversationsStore, _>(|store, _| {
-            store
-                .get_conversation(conv_id)
-                .and_then(|conv| conv.streaming_trace().cloned())
-        })
-        .flatten()
-    });
-
-    trace.and_then(|trace| match serde_json::to_value(&trace) {
-        Ok(val) => {
-            debug!(conv_id = %conv_id, items = trace.items.len(), "Trace serialized successfully");
-            Some(val)
-        }
-        Err(e) => {
-            error!(conv_id = %conv_id, error = ?e, "Failed to serialize trace in run_llm_stream");
-            None
-        }
-    })
 }

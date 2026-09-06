@@ -48,7 +48,7 @@ pub fn follow_up_requires_cancel(reason: FollowUpReason) -> bool {
 /// The kind of error that ended a stream, classified once from rig's typed
 /// error so frontends react on `kind` instead of sniffing message text
 /// (AGE-244 / D5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StreamErrorKind {
     /// The provider rejected credentials (HTTP 401/403).
     Auth,

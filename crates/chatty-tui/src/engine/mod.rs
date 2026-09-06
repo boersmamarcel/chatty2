@@ -669,16 +669,17 @@ impl ChatEngine {
                 EngineAction::Redraw
             }
             AppEvent::ToolCallInput { id, arguments } => {
+                self.session.note_tool_input(&id, &arguments);
                 self.transcript.tool_input(&id, &arguments);
                 EngineAction::Redraw
             }
             AppEvent::ToolCallResult { id, result } => {
-                self.session.note_tool_finished(&id);
+                self.session.note_tool_result(&id, &result);
                 self.transcript.tool_result(&id, result);
                 EngineAction::Redraw
             }
             AppEvent::ToolCallError { id, error } => {
-                self.session.note_tool_finished(&id);
+                self.session.note_tool_error(&id, &error);
                 self.transcript.tool_error(&id, error);
                 EngineAction::Redraw
             }
@@ -687,6 +688,8 @@ impl ChatEngine {
                 command,
                 is_sandboxed,
             } => {
+                self.session
+                    .note_approval_requested(&id, &command, is_sandboxed);
                 self.pending_approval = Some(PendingApproval {
                     id,
                     command,
@@ -694,11 +697,13 @@ impl ChatEngine {
                 });
                 EngineAction::Redraw
             }
-            AppEvent::ApprovalResolved { id: _, approved: _ } => {
+            AppEvent::ApprovalResolved { id, approved } => {
+                self.session.note_approval_resolved(&id, approved);
                 self.pending_approval = None;
                 EngineAction::Redraw
             }
             AppEvent::ClarificationRequested { id, questions } => {
+                self.session.note_clarification_requested(&id, &questions);
                 self.pending_clarification = Some(PendingClarification {
                     id,
                     questions,
@@ -824,6 +829,23 @@ impl ChatEngine {
                     return EngineAction::None;
                 }
                 self.transcript.sub_agent_progress(line);
+                EngineAction::Redraw
+            }
+            AppEvent::SubAgent(progress) => {
+                self.session.note_sub_agent(&progress);
+                let line = helpers::sub_agent_line(&progress);
+                if matches!(
+                    progress,
+                    chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
+                ) {
+                    self.transcript.sub_agent_finished(line);
+                } else {
+                    let line = sanitize_progress_line(&line);
+                    if line.is_empty() {
+                        return EngineAction::None;
+                    }
+                    self.transcript.sub_agent_progress(line);
+                }
                 EngineAction::Redraw
             }
             AppEvent::SubAgentFinished(message) => {
@@ -1328,10 +1350,11 @@ mod tests {
             Scenario {
                 name: "cancel_before_text",
                 progress: Vec::new(),
-                items: vec![ScriptedItem::CancelThen(StreamChunk::ToolCallStarted {
-                    id: "call-1".into(),
-                    name: "read_file".into(),
-                })],
+                // A tool call would put an item in the trace, which counts
+                // as content under D4; usage does not.
+                items: vec![ScriptedItem::CancelThen(StreamChunk::ApiCallUsage(
+                    chatty_core::models::token_usage::ApiCallUsage::default(),
+                ))],
             },
         )
         .await;

@@ -417,7 +417,6 @@ mod tests {
     use super::*;
     use crate::services::install_progress_channel;
     use parking_lot::Mutex;
-    use rig_agent::tool::{Tool, ToolContext};
     use std::sync::Arc;
 
     fn dummy_slot() -> InvokeAgentProgressSlot {

@@ -15,6 +15,7 @@ use rig_core::message::UserContent;
 
 use super::*;
 use crate::factories::agent_factory::AgentBuildContext;
+use crate::services::RecoveryAction;
 use crate::services::llm_service::StreamChunk;
 use crate::services::{Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios};
 use crate::settings::models::models_store::ModelConfig;
@@ -251,10 +252,11 @@ async fn a_cancelled_turn_with_no_text_rolls_back_the_user_message() {
             name: "cancel_before_text",
             progress: Vec::new(),
             items: vec![
-                ScriptedItem::CancelThen(StreamChunk::ToolCallStarted {
-                    id: "call-1".into(),
-                    name: "read_file".into(),
-                }),
+                // A tool call would put an item in the trace, which counts as
+                // content under D4; usage does not.
+                ScriptedItem::CancelThen(StreamChunk::ApiCallUsage(
+                    crate::models::token_usage::ApiCallUsage::default(),
+                )),
                 ScriptedItem::Chunk(StreamChunk::Text("never".into())),
             ],
         },
@@ -309,6 +311,127 @@ async fn a_regenerate_turn_adds_nothing_to_history() {
     assert_eq!(
         session.conversation().unwrap().messages().len(),
         before.len() + 1
+    );
+}
+
+/// AGE-274: the session records the turn's trace from its own events, and
+/// persists it with the reply when the owner has no trace of its own.
+#[tokio::test]
+async fn a_tool_call_turn_persists_its_trace_without_a_frontend() {
+    let mut session = session_with_conversation().await;
+    let events = run_turn(
+        &mut session,
+        TurnInput::text("what is this?"),
+        scenario("tool_call_then_result"),
+    )
+    .await;
+    for event in &events {
+        session.apply(event);
+    }
+    let trace = session.trace_json().expect("the tool call is in the trace");
+    assert_eq!(trace["items"].as_array().map(Vec::len), Some(1));
+
+    session.finish_turn(None, vec![]);
+    let conversation = session.conversation().unwrap();
+    let entry = conversation.entries().last().expect("the reply");
+    let persisted = entry
+        .system_trace
+        .as_ref()
+        .expect("trace persisted with the reply");
+    let item = &persisted["items"][0];
+    assert_eq!(item["ToolCall"]["tool_name"], "read_file");
+    assert_eq!(item["ToolCall"]["input"], r#"{"path":"README.md"}"#);
+    assert_eq!(item["ToolCall"]["output"], "# Chatty");
+    assert!(
+        conversation.streaming_trace().is_none(),
+        "cleared with the turn"
+    );
+    assert!(session.trace_json().is_none());
+}
+
+/// AGE-274: an approval and a clarification are in the trace too.
+#[tokio::test]
+async fn approvals_and_clarifications_are_in_the_trace() {
+    let mut session = session_with_conversation().await;
+    let events = run_turn(
+        &mut session,
+        TurnInput::text("go"),
+        scenario("approval_denied"),
+    )
+    .await;
+    for event in &events {
+        session.apply(event);
+    }
+    let trace = session.trace_json().unwrap();
+    let items = trace["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "the tool call and its approval");
+    assert_eq!(items[1]["ApprovalPrompt"]["state"], "Denied");
+    session.finish_turn(None, vec![]);
+
+    let events = run_turn(
+        &mut session,
+        TurnInput::text("deploy?"),
+        scenario("clarification_requested"),
+    )
+    .await;
+    for event in &events {
+        session.apply(event);
+    }
+    let trace = session.trace_json().unwrap();
+    assert_eq!(trace["items"][0]["ClarificationPrompt"]["state"], "Pending");
+}
+
+/// AGE-273: the recovery budget is per error kind, from the shared policy
+/// table, and starts over with the next human turn.
+#[tokio::test]
+async fn recovery_budget_runs_out_per_kind_and_resets_on_a_human_turn() {
+    use std::time::Duration;
+
+    let mut session = session_with_conversation().await;
+    session.set_config(AgentSessionConfig {
+        surface: StreamSurface::Headless,
+        ..config()
+    });
+    let transport = StreamError::new(StreamErrorKind::Transport, "reset");
+    let rate_limited = StreamError::new(StreamErrorKind::RateLimited, "429");
+
+    for attempt in 0..crate::services::HEADLESS_TRANSPORT_RETRY_ATTEMPTS {
+        assert_eq!(
+            session.recovery_action(&transport),
+            RecoveryAction::Retry {
+                after: Duration::from_secs(10 * (attempt as u64 + 1))
+            }
+        );
+    }
+    assert_eq!(session.recovery_action(&transport), RecoveryAction::Stop);
+    assert!(
+        matches!(
+            session.recovery_action(&rate_limited),
+            RecoveryAction::Retry { .. }
+        ),
+        "another kind has its own budget"
+    );
+    assert_eq!(
+        session.recovery_action(&StreamError::new(StreamErrorKind::Other, "?")),
+        RecoveryAction::Stop
+    );
+
+    let events = run_turn(
+        &mut session,
+        TurnInput::text("again"),
+        scenario("text_only"),
+    )
+    .await;
+    for event in &events {
+        session.apply(event);
+    }
+    session.finish_turn(None, vec![]);
+    assert!(
+        matches!(
+            session.recovery_action(&transport),
+            RecoveryAction::Retry { .. }
+        ),
+        "a human turn starts a new budget"
     );
 }
 

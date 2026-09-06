@@ -20,9 +20,8 @@ use crate::chatty::token_budget::{
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
-    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
-    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem, friendly_tool_name,
-    is_denial_result,
+    ApprovalState, ClarificationState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
+    ToolSource, TraceItem,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};

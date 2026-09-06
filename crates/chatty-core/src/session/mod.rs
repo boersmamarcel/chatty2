@@ -49,18 +49,29 @@ use rig_core::completion::Message;
 use rig_core::message::UserContent;
 
 use crate::factories::AgentClient;
-use crate::models::clarification_store::{ClarificationStore, PendingClarifications};
+use crate::factories::agent_factory::{AgentBuildContext, BuiltAgent};
+use crate::models::clarification_store::{
+    ClarificationStore, ClarifyingQuestion, PendingClarifications,
+};
 use crate::models::conversation::{Conversation, TurnOutcome};
 use crate::models::execution_approval_store::{ExecutionApprovalStore, PendingApprovals};
+use crate::models::message_types::{
+    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, ToolCallBlock,
+    ToolCallState, classify_initial_execution_engine, classify_tool_source,
+    detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
+};
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
+use crate::repositories::ConversationData;
 use crate::services::{
-    AgentTaskController, AgentTaskSnapshot, ContextShaperSettings, StreamError, StreamErrorKind,
-    StreamSurface, exchange_count, extract_user_text, install_progress_channel, run_stream_loop,
-    shape_context, stream_prompt,
+    AgentTaskController, AgentTaskSnapshot, ContextShaperSettings, RecoveryAction, StreamError,
+    StreamErrorKind, StreamSurface, decide_recovery, exchange_count, extract_user_text,
+    install_progress_channel, run_stream_loop, shape_context, stream_prompt,
 };
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
-use crate::tools::invoke_agent_tool::InvokeAgentProgressSlot;
+use crate::settings::models::models_store::ModelConfig;
+use crate::settings::models::providers_store::ProviderConfig;
+use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
 pub use event::SessionEvent;
 pub use handler::{
@@ -161,6 +172,9 @@ pub struct AgentSession {
     pending_tool_names: HashMap<String, String>,
     /// Usage of the most recent turn that reported any.
     last_turn_usage: Option<TokenUsage>,
+    /// Stream-error recovery attempts per kind across the turns of one task;
+    /// reset by a human turn (AGE-273).
+    recovery_attempts: HashMap<StreamErrorKind, usize>,
 }
 
 impl AgentSession {
@@ -177,6 +191,7 @@ impl AgentSession {
             cancel_flag: None,
             pending_tool_names: HashMap::new(),
             last_turn_usage: None,
+            recovery_attempts: HashMap::new(),
         }
     }
 
@@ -226,6 +241,73 @@ impl AgentSession {
         self.conversation.take()
     }
 
+    /// Complete a build context with what the session provides: its store
+    /// handles, so the agent's tools raise requests on this session, and the
+    /// owned conversation's artifact queue. The caller assembles only the
+    /// services part (AGE-272).
+    pub fn build_context(&self, mut ctx: AgentBuildContext) -> AgentBuildContext {
+        let handles = self.approval_handles();
+        ctx.pending_approvals = Some(handles.pending_approvals);
+        ctx.pending_write_approvals = Some(handles.pending_write_approvals);
+        ctx.pending_clarifications = Some(handles.pending_clarifications);
+        if let Some(conversation) = &self.conversation {
+            ctx.pending_artifacts = Some(conversation.pending_artifacts());
+        }
+        ctx
+    }
+
+    /// Build a new conversation's agent against this session's stores and
+    /// own the conversation.
+    pub async fn create_conversation(
+        &mut self,
+        id: String,
+        title: String,
+        model: &ModelConfig,
+        provider: &ProviderConfig,
+        ctx: AgentBuildContext,
+    ) -> Result<()> {
+        let ctx = self.build_context(ctx);
+        let conversation = Conversation::new(id, title, model, provider, ctx).await?;
+        self.conversation = Some(conversation);
+        Ok(())
+    }
+
+    /// Restore a persisted conversation, building its agent against this
+    /// session's stores, and own it.
+    pub async fn restore_conversation(
+        &mut self,
+        data: ConversationData,
+        model: &ModelConfig,
+        provider: &ProviderConfig,
+        ctx: AgentBuildContext,
+    ) -> Result<()> {
+        let ctx = self.build_context(ctx);
+        let conversation = Conversation::from_data(data, model, provider, ctx).await?;
+        self.conversation = Some(conversation);
+        Ok(())
+    }
+
+    /// Install a rebuilt agent on the owned conversation: the client, the
+    /// shell session the factory reused or created, and the progress slot.
+    /// For owners that cannot hold the session across the build (the desktop
+    /// builds inside a global). Returns false when there is no conversation.
+    pub fn install_agent(
+        &mut self,
+        built: BuiltAgent,
+        model_id: String,
+        workspace_dir: Option<PathBuf>,
+    ) -> bool {
+        let Some(conversation) = self.conversation.as_mut() else {
+            return false;
+        };
+        conversation.set_agent(Arc::new(built.client), model_id, workspace_dir);
+        if built.shell_session.is_some() {
+            conversation.set_shell_session(built.shell_session);
+        }
+        conversation.set_invoke_agent_progress_slot(built.invoke_agent_progress_slot);
+        true
+    }
+
     pub fn is_turn_active(&self) -> bool {
         self.cancel_flag.is_some()
     }
@@ -240,6 +322,20 @@ impl AgentSession {
 
     pub fn last_turn_usage(&self) -> Option<&TokenUsage> {
         self.last_turn_usage.as_ref()
+    }
+
+    /// What to do about a stream-ending error, from the shared policy table
+    /// (AGE-244 / D5) for this session's surface, counting the attempts
+    /// already made for that kind of error since the last human turn. A
+    /// `Retry` carries the delay the surface waits before sending its
+    /// recovery prompt; a `Nudge` was already queued by the turn's handler.
+    pub fn recovery_action(&mut self, error: &StreamError) -> RecoveryAction {
+        let attempt = self.recovery_attempts.entry(error.kind).or_default();
+        let action = decide_recovery(error.kind, self.config.surface, *attempt);
+        if !matches!(action, RecoveryAction::Stop) {
+            *attempt += 1;
+        }
+        action
     }
 
     /// Whether the conversation is ready for its generated title: still
@@ -338,9 +434,11 @@ impl AgentSession {
         let task_controller = agent.task_controller();
         // A human turn starts from a clean todo protocol state: the controller
         // lives on the conversation's agent, so leftover state would otherwise
-        // nudge forever and block a second write_todos (AGE-150).
+        // nudge forever and block a second write_todos (AGE-150). The
+        // recovery budget is per task the same way.
         if kind != TurnKind::ProtocolFollowUp {
             task_controller.reset();
+            self.recovery_attempts.clear();
         }
 
         // Fresh channels per turn, installed on the stores the tools hold
@@ -376,10 +474,11 @@ impl AgentSession {
     }
 
     /// Fold the UI-agnostic part of an event into the session: streaming
-    /// text, the turn's messages, the todo snapshot after a todo tool, and
-    /// usage. Display state is the caller's, after this. An owner whose
-    /// channel already carries its own event type calls the narrower
-    /// methods below instead.
+    /// text, the turn's trace (tool calls, approvals, clarifications,
+    /// sub-agent progress), the turn's messages, the todo snapshot after a
+    /// todo tool, and usage. Display state is the caller's, after this. An
+    /// owner whose channel already carries its own event type calls the
+    /// narrower methods below instead.
     ///
     /// Returns the agent's todo snapshot when this event changed it, for the
     /// owner's plan UI.
@@ -387,9 +486,23 @@ impl AgentSession {
         match event {
             SessionEvent::Text(text) => self.append_streaming_text(text),
             SessionEvent::ToolCallStarted { id, name } => self.note_tool_started(id, name),
-            SessionEvent::ToolCallResult { id, .. } | SessionEvent::ToolCallError { id, .. } => {
-                return self.note_tool_finished(id);
+            SessionEvent::ToolCallInput { id, arguments } => self.note_tool_input(id, arguments),
+            SessionEvent::ToolCallResult { id, result } => {
+                return self.note_tool_result(id, result);
             }
+            SessionEvent::ToolCallError { id, error } => return self.note_tool_error(id, error),
+            SessionEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            } => self.note_approval_requested(id, command, *is_sandboxed),
+            SessionEvent::ApprovalResolved { id, approved } => {
+                self.note_approval_resolved(id, *approved)
+            }
+            SessionEvent::ClarificationRequested { id, questions } => {
+                self.note_clarification_requested(id, questions)
+            }
+            SessionEvent::SubAgent(progress) => self.note_sub_agent(progress),
             SessionEvent::TurnMessages(messages) => self.set_turn_messages(messages.clone()),
             SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
             _ => {}
@@ -404,17 +517,93 @@ impl AgentSession {
         }
     }
 
-    /// `SessionEvent::ToolCallStarted`: remember the tool's name, so its
-    /// result can be told apart from any other's.
+    /// `SessionEvent::ToolCallStarted`: open the tool call in the turn's
+    /// trace and remember its name, so its result can be told apart from any
+    /// other's.
     pub fn note_tool_started(&mut self, id: &str, name: &str) {
         self.pending_tool_names
             .insert(id.to_string(), name.to_string());
+        if let Some(conversation) = self.conversation.as_mut() {
+            let text_before = conversation
+                .streaming_message()
+                .cloned()
+                .unwrap_or_default();
+            let tool_call = ToolCallBlock {
+                id: id.to_string(),
+                tool_name: name.to_string(),
+                display_name: friendly_tool_name(name),
+                input: String::new(),
+                output: None,
+                output_preview: None,
+                state: ToolCallState::Running,
+                duration: None,
+                text_before,
+                source: classify_tool_source(name),
+                execution_engine: classify_initial_execution_engine(name),
+            };
+            let trace = conversation.ensure_streaming_trace();
+            let index = trace.items.len();
+            trace.add_tool_call(tool_call);
+            trace.set_active_tool(index);
+        }
     }
 
-    /// `SessionEvent::ToolCallResult` / `ToolCallError`: after a todo tool,
-    /// take the agent's new todo snapshot onto the conversation and return
-    /// it for the owner's plan UI.
-    pub fn note_tool_finished(&mut self, id: &str) -> Option<AgentTaskSnapshot> {
+    /// `SessionEvent::ToolCallInput`: the call's arguments, in the trace.
+    pub fn note_tool_input(&mut self, id: &str, arguments: &str) {
+        if let Some(trace) = self
+            .conversation
+            .as_mut()
+            .and_then(|c| c.streaming_trace_mut())
+        {
+            trace.update_tool_call(id, |tc| {
+                tc.execution_engine =
+                    predict_execution_engine(&tc.tool_name, arguments).or(tc.execution_engine);
+                tc.input = arguments.to_string();
+            });
+        }
+    }
+
+    /// `SessionEvent::ToolCallResult`: close the call in the trace and, after
+    /// a todo tool, take the agent's new todo snapshot onto the conversation
+    /// and return it for the owner's plan UI.
+    pub fn note_tool_result(&mut self, id: &str, result: &str) -> Option<AgentTaskSnapshot> {
+        if let Some(trace) = self
+            .conversation
+            .as_mut()
+            .and_then(|c| c.streaming_trace_mut())
+        {
+            let denied = is_denial_result(result);
+            trace.update_tool_call(id, |tc| {
+                tc.execution_engine = detect_execution_engine(&tc.tool_name, result);
+                tc.output = Some(result.to_string());
+                tc.state = if denied {
+                    ToolCallState::Error("Denied by user".to_string())
+                } else {
+                    ToolCallState::Success
+                };
+            });
+            trace.clear_active_tool();
+        }
+        self.note_tool_finished(id)
+    }
+
+    /// `SessionEvent::ToolCallError`: close the call as failed in the trace;
+    /// otherwise as [`note_tool_result`](Self::note_tool_result).
+    pub fn note_tool_error(&mut self, id: &str, error: &str) -> Option<AgentTaskSnapshot> {
+        if let Some(trace) = self
+            .conversation
+            .as_mut()
+            .and_then(|c| c.streaming_trace_mut())
+        {
+            trace.update_tool_call(id, |tc| {
+                tc.state = ToolCallState::Error(error.to_string());
+            });
+            trace.clear_active_tool();
+        }
+        self.note_tool_finished(id)
+    }
+
+    fn note_tool_finished(&mut self, id: &str) -> Option<AgentTaskSnapshot> {
         let name = self.pending_tool_names.remove(id)?;
         let conversation = self.conversation.as_mut()?;
         if !is_agent_todo_tool(&name) {
@@ -423,6 +612,81 @@ impl AgentSession {
         let snapshot = conversation.agent().task_controller().snapshot();
         conversation.set_agent_task_snapshot(Some(snapshot.clone()));
         Some(snapshot)
+    }
+
+    /// `SessionEvent::ApprovalRequested`: the pending approval, in the trace.
+    pub fn note_approval_requested(&mut self, id: &str, command: &str, is_sandboxed: bool) {
+        if let Some(conversation) = self.conversation.as_mut() {
+            let trace = conversation.ensure_streaming_trace();
+            let index = trace.items.len();
+            trace.add_approval(ApprovalBlock {
+                id: id.to_string(),
+                command: command.to_string(),
+                is_sandboxed,
+                state: ApprovalState::Pending,
+                created_at: std::time::SystemTime::now(),
+            });
+            trace.set_active_tool(index);
+        }
+    }
+
+    /// `SessionEvent::ApprovalResolved`: the decision, in the trace.
+    pub fn note_approval_resolved(&mut self, id: &str, approved: bool) {
+        if let Some(trace) = self
+            .conversation
+            .as_mut()
+            .and_then(|c| c.streaming_trace_mut())
+        {
+            trace.update_approval_state(
+                id,
+                if approved {
+                    ApprovalState::Approved
+                } else {
+                    ApprovalState::Denied
+                },
+            );
+            trace.clear_active_tool();
+        }
+    }
+
+    /// `SessionEvent::ClarificationRequested`: the questions, in the trace.
+    /// The answers are the owner's to record, since it collects them.
+    pub fn note_clarification_requested(&mut self, id: &str, questions: &[ClarifyingQuestion]) {
+        if let Some(conversation) = self.conversation.as_mut() {
+            let trace = conversation.ensure_streaming_trace();
+            let index = trace.items.len();
+            trace.add_clarification(ClarificationBlock {
+                id: id.to_string(),
+                questions: questions.to_vec(),
+                answers: Vec::new(),
+                state: ClarificationState::Pending,
+                created_at: std::time::SystemTime::now(),
+            });
+            trace.set_active_tool(index);
+        }
+    }
+
+    /// `SessionEvent::SubAgent`: the sub-agent's row on the conversation.
+    pub fn note_sub_agent(&mut self, progress: &InvokeAgentProgress) {
+        let Some(conversation) = self.conversation.as_mut() else {
+            return;
+        };
+        match progress {
+            InvokeAgentProgress::Started {
+                agent_name,
+                prompt,
+                source,
+            } => {
+                conversation.start_sub_agent_progress(
+                    &format!("[Agent: {agent_name}] {prompt}"),
+                    source.clone(),
+                );
+            }
+            InvokeAgentProgress::Text(text) => conversation.append_sub_agent_progress(text),
+            InvokeAgentProgress::Finished { success, result } => {
+                conversation.finalize_sub_agent_progress(*success, result.clone());
+            }
+        }
     }
 
     /// `SessionEvent::TurnMessages`: keep rig's record of the turn until
@@ -439,9 +703,22 @@ impl AgentSession {
         self.last_turn_usage = Some(usage);
     }
 
+    /// The turn's trace as the session recorded it, for an owner that wants
+    /// to render or persist it itself. `None` until something is in it.
+    pub fn trace_json(&self) -> Option<serde_json::Value> {
+        self.conversation
+            .as_ref()
+            .and_then(|c| c.streaming_trace())
+            .filter(|trace| trace.has_items())
+            .and_then(|trace| serde_json::to_value(trace).ok())
+    }
+
     /// Commit the turn under the shared empty-turn rule (AGE-243 / D4) and
-    /// clear per-turn state. `trace` and `artifacts` are the frontend's: the
-    /// tool-call trace it rendered and the files `add_attachment` queued.
+    /// clear per-turn state. `artifacts` are the files `add_attachment`
+    /// queued. `trace` is an owner-rendered trace to persist instead of the
+    /// session's own (the desktop's carries the user's clarification
+    /// answers); `None` persists the trace the session recorded from the
+    /// turn's events, when it has anything in it (AGE-274).
     ///
     /// Returns `None` when there is no conversation or no turn to finish: a
     /// second call for the same turn is a no-op, so an owner that finalizes
@@ -462,6 +739,7 @@ impl AgentSession {
         // leave a tool parked until its timeout.
         self.clarifications.cancel_all();
 
+        let trace = trace.or_else(|| self.trace_json());
         let conversation = self.conversation.as_mut()?;
         let response = conversation
             .streaming_message()
@@ -469,6 +747,8 @@ impl AgentSession {
             .unwrap_or_default();
         let outcome = conversation.finalize_turn(response, artifacts, trace);
         conversation.set_streaming_message(None);
+        conversation.set_streaming_trace(None);
+        conversation.set_streaming_sub_agent_trace(None);
 
         if let Some(usage) = self.last_turn_usage.take() {
             conversation.add_token_usage(usage);

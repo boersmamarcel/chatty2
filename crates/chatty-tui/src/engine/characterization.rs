@@ -93,6 +93,19 @@ fn describe(event: &AppEvent) -> String {
         }
         AppEvent::SubAgentProgress(text) => format!("SubAgentProgress({text:?})"),
         AppEvent::SubAgentFinished(text) => format!("SubAgentFinished({text:?})"),
+        // Rendered as the transcript line it becomes, so the goldens read
+        // the same whether the progress arrived typed or as a line.
+        AppEvent::SubAgent(progress) => {
+            let line = super::helpers::sub_agent_line(progress);
+            if matches!(
+                progress,
+                chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
+            ) {
+                format!("SubAgentFinished({line:?})")
+            } else {
+                format!("SubAgentProgress({line:?})")
+            }
+        }
         // Lifecycle and terminal events, which a turn never produces.
         // Recorded rather than ignored so a turn that starts emitting one is
         // caught instead of quietly passing.

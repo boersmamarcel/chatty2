@@ -432,31 +432,6 @@ impl ChattyApp {
                 let id = id.clone();
                 let name = name.clone();
 
-                // Update Conversation model unconditionally (survives view switches)
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
-                        let text_before = conv.streaming_message().cloned().unwrap_or_default();
-                        let display_name = friendly_tool_name(&name);
-                        let tool_call = ToolCallBlock {
-                            id: id.clone(),
-                            tool_name: name.clone(),
-                            display_name,
-                            input: String::new(),
-                            output: None,
-                            output_preview: None,
-                            state: ToolCallState::Running,
-                            duration: None,
-                            text_before,
-                            source: classify_tool_source(&name),
-                            execution_engine: chatty_core::models::message_types::classify_initial_execution_engine(&name),
-                        };
-                        let trace = conv.ensure_streaming_trace();
-                        let index = trace.items.len();
-                        trace.add_tool_call(tool_call);
-                        trace.set_active_tool(index);
-                    }
-                });
-
                 if name == "invoke_agent" || name == "sub_agent" {
                     // Suppress ToolCallBlock in the UI — the sub-agent progress
                     // system will handle visualisation via the progress channel.
@@ -478,26 +453,6 @@ impl ChattyApp {
                 let id = id.clone();
                 let arguments = arguments.clone();
 
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let args = arguments.clone();
-                        if !trace.update_tool_call(&id, |tc| {
-                            tc.execution_engine =
-                                chatty_core::models::message_types::predict_execution_engine(
-                                    &tc.tool_name,
-                                    &args,
-                                )
-                                .or(tc.execution_engine);
-                            tc.input = args;
-                        }) {
-                            warn!(tool_id = %id, "ToolCallInput: tool call not found in model trace");
-                        }
-                    }
-                });
-
                 if !self.active_invoke_agent_ids.contains(&id) {
                     chat_view.update(cx, |view, cx| {
                         if view.conversation_id() == Some(conversation_id) {
@@ -513,32 +468,6 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let result = result.clone();
-
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let res = result.clone();
-                        let is_denied = is_denial_result(&res);
-                        if !trace.update_tool_call(&id, |tc| {
-                            tc.execution_engine =
-                                chatty_core::models::message_types::detect_execution_engine(
-                                    &tc.tool_name,
-                                    &res,
-                                );
-                            tc.output = Some(res.clone());
-                            tc.state = if is_denied {
-                                ToolCallState::Error("Denied by user".to_string())
-                            } else {
-                                ToolCallState::Success
-                            };
-                        }) {
-                            warn!(tool_id = %id, "ToolCallResult: tool call not found in model trace");
-                        }
-                        trace.clear_active_tool();
-                    }
-                });
 
                 if self.active_invoke_agent_ids.remove(&id) {
                     // invoke_agent / sub_agent result — sub-agent progress already
@@ -558,21 +487,6 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let error = error.clone();
-
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let err = error.clone();
-                        if !trace.update_tool_call(&id, |tc| {
-                            tc.state = ToolCallState::Error(err);
-                        }) {
-                            warn!(tool_id = %id, "ToolCallError: tool call not found in model trace");
-                        }
-                        trace.clear_active_tool();
-                    }
-                });
 
                 if self.active_invoke_agent_ids.remove(&id) {
                     // invoke_agent / sub_agent error — sub-agent progress handles error
@@ -596,23 +510,6 @@ impl ChattyApp {
                 let command = command.clone();
                 let is_sandboxed = *is_sandboxed;
 
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
-                        let approval = ApprovalBlock {
-                            id: id.clone(),
-                            command: command.clone(),
-                            is_sandboxed,
-                            state: ApprovalState::Pending,
-                            created_at: std::time::SystemTime::now(),
-                        };
-                        let trace = conv.ensure_streaming_trace();
-                        let index = trace.items.len();
-                        trace.add_approval(approval);
-                        trace.set_active_tool(index);
-                    }
-                });
-
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_approval_requested(id, command, is_sandboxed, cx);
@@ -628,24 +525,6 @@ impl ChattyApp {
                 let id = id.clone();
                 let questions = questions.clone();
 
-                // Update Conversation model unconditionally so the questions
-                // survive a conversation switch mid-stream.
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
-                        let clarification = ClarificationBlock {
-                            id: id.clone(),
-                            questions: questions.clone(),
-                            answers: Vec::new(),
-                            state: ClarificationState::Pending,
-                            created_at: std::time::SystemTime::now(),
-                        };
-                        let trace = conv.ensure_streaming_trace();
-                        let index = trace.items.len();
-                        trace.add_clarification(clarification);
-                        trace.set_active_tool(index);
-                    }
-                });
-
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_clarification_requested(id, questions, cx);
@@ -660,21 +539,6 @@ impl ChattyApp {
                 debug!(id = %id, approved = approved, "StreamManager: approval resolved");
                 let id = id.clone();
                 let approved = *approved;
-
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let new_state = if approved {
-                            ApprovalState::Approved
-                        } else {
-                            ApprovalState::Denied
-                        };
-                        trace.update_approval_state(&id, new_state);
-                        trace.clear_active_tool();
-                    }
-                });
 
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {

@@ -86,6 +86,9 @@ pub enum AppEvent {
     TitleGenerated(String),
     SubAgentProgress(String),
     SubAgentFinished(String),
+    /// A turn's sub-agent progress, typed: the session records it in the
+    /// trace and the transcript renders it as a line (AGE-274).
+    SubAgent(chatty_core::tools::invoke_agent_tool::InvokeAgentProgress),
 
     // ── Terminal events ──────────────────────────────────────────────────
     TerminalInput(CrosstermEvent),
@@ -165,6 +168,7 @@ impl std::fmt::Debug for AppEvent {
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
             Self::SubAgentProgress(s) => f.debug_tuple("SubAgentProgress").field(s).finish(),
             Self::SubAgentFinished(s) => f.debug_tuple("SubAgentFinished").field(s).finish(),
+            Self::SubAgent(p) => f.debug_tuple("SubAgent").field(p).finish(),
             Self::TerminalInput(e) => f.debug_tuple("TerminalInput").field(e).finish(),
             Self::Tick => write!(f, "Tick"),
         }
@@ -184,7 +188,6 @@ impl std::fmt::Debug for AppEvent {
 impl From<chatty_core::session::SessionEvent> for AppEvent {
     fn from(event: chatty_core::session::SessionEvent) -> Self {
         use chatty_core::session::SessionEvent;
-        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
         match event {
             SessionEvent::TurnStarted => AppEvent::StreamStarted,
@@ -213,29 +216,7 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
             SessionEvent::ApiCallUsage(call) => AppEvent::ApiCallUsage(call),
             SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage(usage),
             SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
-            SessionEvent::SubAgent(progress) => match progress {
-                InvokeAgentProgress::Started {
-                    agent_name,
-                    prompt,
-                    source,
-                } => {
-                    let mode = match source {
-                        chatty_core::models::message_types::ToolSource::Local => "local",
-                        _ => "remote",
-                    };
-                    AppEvent::SubAgentProgress(format!("[{mode} agent: {agent_name}] {prompt}"))
-                }
-                InvokeAgentProgress::Text(text) => AppEvent::SubAgentProgress(text),
-                InvokeAgentProgress::Finished { success, result } => {
-                    AppEvent::SubAgentFinished(result.unwrap_or_else(|| {
-                        if success {
-                            "Agent completed.".to_string()
-                        } else {
-                            "Agent failed.".to_string()
-                        }
-                    }))
-                }
-            },
+            SessionEvent::SubAgent(progress) => AppEvent::SubAgent(progress),
             SessionEvent::Error(error) => AppEvent::StreamError(error),
             SessionEvent::Cancelled => AppEvent::StreamCancelled,
             SessionEvent::TurnEnded => AppEvent::StreamCompleted,

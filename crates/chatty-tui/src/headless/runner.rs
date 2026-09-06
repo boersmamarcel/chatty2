@@ -207,19 +207,31 @@ impl HeadlessRunner {
                 self.transcript.tool_started(id, name);
             }
             AppEvent::ToolCallInput { id, arguments } => {
+                self.session.note_tool_input(&id, &arguments);
                 self.transcript.tool_input(&id, &arguments);
             }
             AppEvent::ToolCallResult { id, result } => {
-                self.session.note_tool_finished(&id);
+                self.session.note_tool_result(&id, &result);
                 self.transcript.tool_result(&id, result);
             }
             AppEvent::ToolCallError { id, error } => {
-                self.session.note_tool_finished(&id);
+                self.session.note_tool_error(&id, &error);
                 self.transcript.tool_error(&id, error);
+            }
+            AppEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            } => self
+                .session
+                .note_approval_requested(&id, &command, is_sandboxed),
+            AppEvent::ApprovalResolved { id, approved } => {
+                self.session.note_approval_resolved(&id, approved)
             }
             // Nobody can answer in headless mode: unblock the tool now rather
             // than letting it wait out its timeout.
-            AppEvent::ClarificationRequested { .. } => {
+            AppEvent::ClarificationRequested { id, questions } => {
+                self.session.note_clarification_requested(&id, &questions);
                 eprintln!(
                     "The agent asked a clarifying question; headless mode has no one to answer."
                 );
@@ -227,13 +239,21 @@ impl HeadlessRunner {
             }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
-            AppEvent::SubAgentProgress(line) => {
-                let line = crate::engine::sanitize_progress_line(&line);
-                if !line.is_empty() {
-                    self.transcript.sub_agent_progress(line);
+            AppEvent::SubAgent(progress) => {
+                self.session.note_sub_agent(&progress);
+                let line = crate::engine::helpers::sub_agent_line(&progress);
+                if matches!(
+                    progress,
+                    chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
+                ) {
+                    self.transcript.sub_agent_finished(line);
+                } else {
+                    let line = crate::engine::sanitize_progress_line(&line);
+                    if !line.is_empty() {
+                        self.transcript.sub_agent_progress(line);
+                    }
                 }
             }
-            AppEvent::SubAgentFinished(message) => self.transcript.sub_agent_finished(message),
             AppEvent::StreamCompleted => {
                 self.transcript.finish_streaming();
                 self.finish_turn();
@@ -261,8 +281,7 @@ impl HeadlessRunner {
                     );
                 }
             }
-            // Approvals need a human; headless runs auto-approved. Lifecycle
-            // and terminal events are the interactive app's.
+            // Lifecycle and terminal events are the interactive app's.
             _ => {}
         }
     }

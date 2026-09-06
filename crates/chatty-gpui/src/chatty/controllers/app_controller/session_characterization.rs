@@ -35,9 +35,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use chatty_core::services::{
-    Scenario, assert_golden, clarification_scenario, run_stream_loop, scenarios, scripted_stream,
-};
+use chatty_core::services::{Scenario, assert_golden, clarification_scenario, scenarios};
 
 // Brings `ChatView`, `ConversationsStore`, `ExecutionSettingsModel` and gpui's
 // `AppContext` into scope, the same way `message_ops_internals` gets them.
