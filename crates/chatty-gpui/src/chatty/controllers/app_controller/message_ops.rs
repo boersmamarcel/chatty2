@@ -895,9 +895,10 @@ impl ChattyApp {
         });
 
         // 2. Read response text from ConversationsStore (single source of truth),
-        //    finalize in conversation model, check if title gen needed, and
-        //    extract model_id for pricing lookup (avoids a second global access later).
-        let (should_generate_title, assistant_history_index, model_id_opt) =
+        //    finalize in conversation model via the one shared empty-turn rule
+        //    (AGE-243 / D4), check if title gen needed, and extract model_id
+        //    for pricing lookup (avoids a second global access later).
+        let (should_generate_title, assistant_history_index, model_id_opt, rolled_back_text) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     let response_text = conv
@@ -907,33 +908,46 @@ impl ChattyApp {
                     let has_trace = trace_json.is_some();
                     let model_id = conv.model_id().to_string();
 
-                    // A turn that produced neither text nor a trace has nothing
-                    // to persist. Committing it wrote an empty assistant
-                    // message into history — the billed-but-empty turn in
-                    // AGE-151 — which is worse than no turn at all: it is
-                    // indistinguishable from a real empty answer and it goes
-                    // back to the provider on the next request.
-                    if response_text.trim().is_empty() && !has_trace {
-                        warn!(
-                            conv_id = %conv_id,
-                            "Stream completed with no text and no trace; dropping the turn rather than persisting an empty message"
-                        );
-                        return (false, None, Some(model_id));
+                    match conv.finalize_turn(response_text, artifact_paths, trace_json) {
+                        TurnOutcome::DroppedAndRolledBack(text) => {
+                            // A turn that produced neither text nor a trace has
+                            // nothing to persist. Committing it wrote an empty
+                            // assistant message into history — the
+                            // billed-but-empty turn in AGE-151 — which is worse
+                            // than no turn at all: it is indistinguishable from
+                            // a real empty answer and it goes back to the
+                            // provider on the next request.
+                            warn!(
+                                conv_id = %conv_id,
+                                "Stream completed with no text and no trace; dropping the turn rather than persisting an empty message"
+                            );
+                            (false, None, Some(model_id), Some(text))
+                        }
+                        TurnOutcome::Persisted => {
+                            let msg_count = conv.message_count();
+                            let traces_len = conv.entries().len();
+                            // The assistant message was just pushed; its index is msg_count - 1
+                            let assistant_idx = msg_count.saturating_sub(1);
+                            let should_gen = msg_count == 2 && conv.title() == "New Chat";
+                            debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
+                            (should_gen, Some(assistant_idx), Some(model_id), None)
+                        }
                     }
-
-                    conv.finalize_response(response_text, artifact_paths, trace_json);
-                    let msg_count = conv.message_count();
-                    let traces_len = conv.entries().len();
-                    // The assistant message was just pushed; its index is msg_count - 1
-                    let assistant_idx = msg_count.saturating_sub(1);
-                    let should_gen = msg_count == 2 && conv.title() == "New Chat";
-                    debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
-                    (should_gen, Some(assistant_idx), Some(model_id))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    (false, None, None)
+                    (false, None, None, None)
                 }
             });
+
+        // On rollback, put the text back into the composer rather than
+        // silently losing what the user typed (AGE-243).
+        if let Some(text) = rolled_back_text {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+        }
 
         // 2b. Set history_index on the last assistant DisplayMessage so feedback
         //     clicks on freshly-streamed messages are properly persisted.
@@ -1201,36 +1215,49 @@ impl ChattyApp {
         });
 
         // Read partial response from ConversationsStore (single source of truth)
-        // and save to conversation history — but ONLY if there's actual content.
-        // An empty assistant message would cause LLM API errors (400 Bad Request)
+        // and finalize via the one shared empty-turn rule (AGE-243 / D4) — an
+        // empty assistant message would cause LLM API errors (400 Bad Request)
         // on the next request.
-        let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                let partial_text = conv.streaming_message().cloned().unwrap_or_default();
+        let (assistant_history_index, rolled_back_text) =
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    let partial_text = conv.streaming_message().cloned().unwrap_or_default();
 
-                if partial_text.is_empty() {
-                    // No content was received before cancellation.
-                    // Roll back the user message that triggered this stream to avoid
-                    // a trailing user message with no assistant response, which would
-                    // break the alternating User/Assistant pattern expected by LLM APIs.
-                    let removed = conv.remove_last_user_message();
-                    debug!(
-                        conv_id = %conv_id,
-                        user_msg_removed = removed,
-                        "Stream cancelled with no content — skipped empty assistant message"
-                    );
-                    None
+                    match conv.finalize_turn(partial_text, Vec::new(), trace_json) {
+                        TurnOutcome::DroppedAndRolledBack(text) => {
+                            // No content was received before cancellation. The
+                            // user message that triggered this stream was
+                            // rolled back to avoid a trailing user message with
+                            // no assistant response, which would break the
+                            // alternating User/Assistant pattern expected by
+                            // LLM APIs.
+                            debug!(
+                                conv_id = %conv_id,
+                                "Stream cancelled with no content — skipped empty assistant message"
+                            );
+                            (None, Some(text))
+                        }
+                        TurnOutcome::Persisted => {
+                            conv.set_streaming_message(None);
+                            let idx = conv.message_count().saturating_sub(1);
+                            debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+                            (Some(idx), None)
+                        }
+                    }
                 } else {
-                    conv.finalize_response(partial_text, Vec::new(), trace_json);
-                    conv.set_streaming_message(None);
-                    let idx = conv.message_count().saturating_sub(1);
-                    debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
-                    Some(idx)
+                    (None, None)
                 }
-            } else {
-                None
-            }
-        });
+            });
+
+        // On rollback, put the text back into the composer rather than
+        // silently losing what the user typed (AGE-243).
+        if let Some(text) = rolled_back_text {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+        }
 
         // Set history_index on the cancelled assistant message for feedback persistence
         if let Some(h_idx) = assistant_history_index {

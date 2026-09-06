@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::models::ClarificationStore;
 use chatty_core::models::Conversation;
+use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{
     ClarificationAnswer, ClarificationNotification, ClarifyingQuestion,
 };
@@ -286,6 +287,10 @@ pub struct ChatEngine {
     pub cancel_flag: Option<Arc<AtomicBool>>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_clarification: Option<PendingClarification>,
+    /// Set when `finalize_turn` rolled back the pending user message
+    /// (`TurnOutcome::DroppedAndRolledBack`); the caller restores this into
+    /// the input so the user doesn't lose what they typed (AGE-243).
+    pub pending_restore_text: Option<String>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
@@ -383,6 +388,7 @@ impl ChatEngine {
             is_streaming: false,
             cancel_flag: None,
             pending_approval: None,
+            pending_restore_text: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
@@ -858,7 +864,7 @@ impl ChatEngine {
                     last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
                 }
-                self.finalize_partial_response(false);
+                self.finalize_partial_response();
                 self.reset_stream_state();
                 EngineAction::Redraw
             }
@@ -874,7 +880,7 @@ impl ChatEngine {
                     last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
-                self.finalize_partial_response(true);
+                self.finalize_partial_response();
                 self.reset_stream_state();
                 EngineAction::Redraw
             }
@@ -1143,7 +1149,7 @@ impl ChatEngine {
             last.is_streaming = false;
         }
 
-        self.finalize_partial_response(false);
+        self.finalize_partial_response();
         self.reset_stream_state();
 
         // Generate title after first exchange.
@@ -1166,23 +1172,21 @@ impl ChatEngine {
         }
     }
 
-    /// Commit the streamed response to conversation history, or roll back an
-    /// empty cancelled turn.
-    ///
-    /// A turn that produced no text has nothing to persist: committing it
-    /// would write an empty assistant message that goes back to the provider
-    /// on the next request (AGE-222). On cancellation specifically, the user
-    /// message that triggered the empty turn is removed too, so a stopped
-    /// stream with no output leaves history exactly as it was before the send.
-    fn finalize_partial_response(&mut self, is_cancel: bool) {
+    /// Commit the streamed response to conversation history using the one
+    /// shared empty-turn rule (AGE-243 / D4): persist when there is response
+    /// text, otherwise the turn is empty — committing it would write an empty
+    /// assistant message that goes back to the provider on the next request
+    /// (AGE-222/AGE-151). The pending user message that triggered it is
+    /// rolled back so history is left exactly as it was before the send, and
+    /// its text is queued in `pending_restore_text` so the caller can put it
+    /// back into the input.
+    fn finalize_partial_response(&mut self) {
         if let Some(conv) = self.conversation.as_mut() {
             let response = conv.streaming_message().cloned().unwrap_or_default();
-            if response.is_empty() {
-                if is_cancel {
-                    conv.remove_last_user_message();
-                }
-            } else {
-                conv.finalize_response(response, vec![], None);
+            if let TurnOutcome::DroppedAndRolledBack(text) =
+                conv.finalize_turn(response, vec![], None)
+            {
+                self.pending_restore_text = Some(text);
             }
             conv.set_streaming_message(None);
         }
@@ -1430,9 +1434,33 @@ mod tests {
         );
         conv.set_streaming_message(Some(String::new()));
 
-        engine.finalize_partial_response(true);
+        engine.finalize_partial_response();
 
         assert_eq!(engine.conversation.unwrap().messages(), before_send);
+    }
+
+    /// AGE-243 / D4: the one shared empty-turn rule applies regardless of why
+    /// the turn ended — a *completed* turn with no text and no trace is
+    /// rolled back too (previously only the cancelled path did this), and the
+    /// dropped user text is queued for restoring into the input.
+    #[tokio::test]
+    async fn completed_turn_with_no_text_rolls_back_the_user_message_too() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        let before_send = conv.messages();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some(String::new()));
+
+        engine.finalize_partial_response();
+
+        assert_eq!(engine.conversation.unwrap().messages(), before_send);
+        assert_eq!(engine.pending_restore_text.as_deref(), Some("hi"));
     }
 
     /// AGE-222: an errored turn that produced some text still persists that
@@ -1450,7 +1478,7 @@ mod tests {
         );
         conv.set_streaming_message(Some("partial answer".to_string()));
 
-        engine.finalize_partial_response(false);
+        engine.finalize_partial_response();
 
         let messages = engine.conversation.unwrap().messages();
         assert_eq!(messages.len(), 2);
@@ -1480,7 +1508,7 @@ mod tests {
         );
         conv.set_streaming_message(Some("full answer".to_string()));
 
-        engine.finalize_partial_response(false);
+        engine.finalize_partial_response();
 
         let messages = engine.conversation.unwrap().messages();
         assert_eq!(messages.len(), 2);

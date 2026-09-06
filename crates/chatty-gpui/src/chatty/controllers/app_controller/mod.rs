@@ -10,7 +10,7 @@ use crate::MemoryInitSignal;
 use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
 use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageEntry, MessageFeedback,
-    RegenerationRecord, StreamManagerEvent, StreamStatus,
+    RegenerationRecord, StreamManagerEvent, StreamStatus, TurnOutcome,
 };
 use crate::chatty::services::StreamChunk;
 use crate::chatty::services::{AgentTaskSnapshot, generate_title, stream_prompt};
