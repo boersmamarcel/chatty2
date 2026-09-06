@@ -2282,7 +2282,7 @@ impl ChatView {
     /// the env var is set at process start. Lists per-message render state so
     /// rendering bugs can be diagnosed live without grepping logs.
     ///
-    /// See [`docs/debug_ui.md`](../../../../../../docs/debug_ui.md) for the
+    /// See the Debug how-to (`docs-site/src/dev/guides/debug.md`) for the
     /// field legend.
     fn render_debug_overlay(&self, cx: &App) -> Option<AnyElement> {
         if !*DEBUG_UI_ENABLED {

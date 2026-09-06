@@ -19,7 +19,7 @@ flowchart TB
   subgraph core [chatty-core — shared brain]
     Models["Models & stores"]
     Services["Services"]
-    Tools["~60 LLM tools"]
+    Tools["LLM tools"]
     Factories["AgentFactory"]
     Repos["Repositories"]
   end
@@ -61,10 +61,29 @@ flowchart TB
 | **chatty-module-registry** | Discovers, validates, and loads WASM module manifests |
 | **chatty-protocol-gateway** | HTTP façade so external clients can call modules via standard APIs |
 | **chatty-module-sdk** | Authoring SDK for third-party WASM agents |
-| **chatty-trace / playbook / flow / optimize** | Research crates (self-improvement papers); see `RESERVED.md` |
+| **chatty-trace / playbook / flow / optimize** | Research crates (self-improvement papers); see [`RESERVED.md`](https://github.com/boersmamarcel/chatty2/blob/main/RESERVED.md) |
 | **hive-client / hive-billing-sdk** | Hive registry and billing integration |
 
 Dependency rule: **frontends → core**. Core never depends on GPUI or Ratatui.
+See [workspace-crate-split.md](workspace-crate-split.md) for the feature flag that
+lets core types act as GPUI globals.
+
+## Startup sequence (desktop)
+
+`chatty-gpui/src/main.rs` runs, in order:
+
+1. Create the Tokio runtime and enter it for the whole process lifetime.
+2. Initialise the settings repositories and open the SQLite conversation repository.
+3. Start the GPUI `Application`; inside `run`, load the theme and register every
+   global with defaults (`GeneralSettingsModel`, `ProviderModel`, `ModelsModel`,
+   `McpServersModel`, `ExecutionSettingsModel`, `TokenTrackingSettings`,
+   `GlobalStreamManager`, approval stores, …).
+4. Spawn async tasks that load settings JSON, conversation metadata, the memory
+   service and enabled MCP servers from disk and overwrite the defaults as they arrive.
+5. Open the window and create the `ChattyApp` entity.
+
+Nothing on the UI thread waits for disk or network; each loader updates its global
+and refreshes the windows when done.
 
 ## End-to-end message path
 
@@ -93,11 +112,35 @@ sequenceDiagram
   App->>App: Persist conversation
 ```
 
+## Key design decisions
+
+1. **Central controller.** `ChattyApp` (`chatty-gpui/src/chatty/controllers/app_controller/`)
+   owns the top-level view entities, subscribes to their events and coordinates
+   services, stores and views. It is deliberately a "fat controller" so the event
+   flow stays traceable in one place; the module is split by concern
+   (`message_ops`, `conversation_ops`, `slash_commands`, `export_ops`).
+2. **Event-driven communication.** Entities talk only through `EventEmitter` /
+   `cx.subscribe()`; there are no `Arc<dyn Fn>` callbacks between entities. See
+   [entity-communication.md](entity-communication.md).
+3. **`StreamManager` owns the stream lifecycle.** The stream loop never touches a
+   view; it updates the `Conversation` and forwards chunks to `StreamManager`, which
+   emits typed events that handlers route to views. Cancellation is a shared
+   `AtomicBool`. See [stream-manager.md](stream-manager.md).
+4. **Global state via GPUI.** App-wide state implements `Global` and is reached with
+   `cx.global()`; entity references inside globals default to `WeakEntity<T>` so
+   globals do not keep entities alive by accident.
+5. **Provider abstraction.** `ProviderType::default_capabilities()` seeds a new
+   model, `ModelConfig` persists per-model capabilities, and `AgentFactory` builds
+   the provider-specific client.
+6. **Tools are rig `Tool` implementations** registered by `AgentFactory`; side-effecting
+   tools (shell, file writes) go through the approval stores first. The full list
+   is the [tools catalog](../docs-site/src/dev/reference/tools-catalog.md).
+
 ## Where to go next
 
 | Question | Document |
 |----------|----------|
-| Crate/module layout | [architecture-overview.md](architecture-overview.md) |
+| Crate boundaries and the `gpui-globals` feature | [workspace-crate-split.md](workspace-crate-split.md) |
 | Component relationships & diagrams | [component-map.md](component-map.md) |
 | **App components ↔ research modules** | [research/app-research-bridge.md](research/app-research-bridge.md) |
 | Entity events between GPUI components | [entity-communication.md](entity-communication.md) |

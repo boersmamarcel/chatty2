@@ -10,6 +10,14 @@ returning a final report.
 [`modules/benford-agent/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford-agent/README.md)
 for curl examples across OpenAI, MCP, and A2A protocols.
 
+## Prerequisites
+
+Complete [Tutorial: echo-agent](./tutorial-echo-agent.md) or
+[Build a WASM plugin](../guides/build-wasm-module.md) first if you are new to
+`ModuleExports` and `module.toml`. You need the `wasm32-wasip2` target
+(`make setup` installs it) and a configured LLM provider, because the agent
+calls the host LLM.
+
 ## What it demonstrates
 
 Given a list of financial numbers, the agent:
@@ -212,15 +220,10 @@ Enable the module in **Settings → Modules**.
 - **Progress visibility** — `log::info` lines appear in A2A `message/stream`
   progress events when invoked through the gateway.
 
-## Prerequisites
-
-Complete [Tutorial: echo-agent](./tutorial-echo-agent.md) or
-[Build a WASM plugin](./build-wasm-module.md) first if you are new to
-`ModuleExports` and `module.toml`.
-
 ## Further reading
 
-- [Build a WASM plugin](./build-wasm-module.md) — sequence diagram for
-  `invoke_agent` → gateway → `llm::complete`
+- [Build a WASM plugin](../guides/build-wasm-module.md) — quick start,
+  project layout, testing your module
+- [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md) — the
+  `invoke_agent` → gateway → `llm::complete` flow
 - [WIT reference — `llm` import](../architecture/wit-reference.md)
-- [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md)

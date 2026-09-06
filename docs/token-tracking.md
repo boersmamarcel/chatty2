@@ -1,10 +1,11 @@
-# Token Tracking & Context Window Display
+# Token tracking & context window display
 
-Chatty estimates token usage before each LLM call and updates with real counts after the response.
+**When to read this:** You need to know how the footer's context-window estimate is
+computed, when it is refreshed, and how the provider's real counts get folded in.
 
-What happens when the estimate crosses the budget, the generational compaction
-that replaces `context_shaper` and `summarize_oldest_half`, is described in
-[`context-compaction.md`](context-compaction.md).
+Chatty estimates token usage before each LLM call and updates the estimate with the
+provider's real counts after the response. What happens when the estimate crosses the
+budget is described in [context-compaction.md](context-compaction.md).
 
 ## Architecture
 
@@ -23,19 +24,12 @@ send_message() / handle_regeneration()
                  └─ GlobalTokenBudget::update_with_actuals()  # patches snapshot with real counts
 ```
 
-## File Layout
+Core types live in `crates/chatty-core/src/token_budget/` (`snapshot.rs`,
+`counter.rs`, `cache.rs`, `summarizer.rs`); the GPUI glue is
+`crates/chatty-gpui/src/chatty/token_budget/manager.rs` and the footer view is
+`crates/chatty-gpui/src/chatty/views/footer/token_context_bar_view.rs`.
 
-| File | Purpose |
-|:-----|:--------|
-| `crates/chatty-core/src/token_budget/snapshot.rs` | `TokenBudgetSnapshot`, `ComponentFractions`, `ContextStatus`, `ContextPressureEvent` |
-| `crates/chatty-core/src/token_budget/counter.rs` | `TokenCounter` — tiktoken-rs BPE wrapper, provider-aware |
-| `crates/chatty-core/src/token_budget/cache.rs` | `CachedTokenCounts` — hash-keyed cache for preamble + tool tokens |
-| `crates/chatty-gpui/src/chatty/token_budget/manager.rs` | `GlobalTokenBudget`, `gather_snapshot_inputs()`, `compute_snapshot_background()`, `check_pressure()` |
-| `crates/chatty-core/src/token_budget/summarizer.rs` | Stub — future conversation summarization |
-| `crates/chatty-core/src/settings/models/token_tracking_settings.rs` | `TokenTrackingSettings` GPUI global |
-| `crates/chatty-gpui/src/chatty/views/footer/token_context_bar_view.rs` | Footer bar and popover UI |
-
-## Data Flow: Estimated Snapshot
+## Data flow: estimated snapshot
 
 ### 1. `gather_snapshot_inputs()` — GPUI thread, synchronous
 
@@ -43,8 +37,9 @@ Reads from globals before handing off to the background thread:
 
 - Active conversation's `model_identifier`, `max_context_window`, `preamble`
 - `response_reserve` from `TokenTrackingSettings` (default 4096)
-- Tool count from `ExecutionSettingsModel` + enabled MCP servers
-- Warms `GlobalTokenBudget::cache` for preamble and tool tokens (hash-checked; BPE only when content changes)
+- Tool count from `ExecutionSettingsModel` + enabled MCP servers (`build_tool_hint()`)
+- Warms `GlobalTokenBudget::cache` for preamble and tool tokens (hash-checked; BPE only
+  when content changes)
 
 Returns `None` (skips counting) if `max_context_window` is not configured for the model.
 
@@ -52,26 +47,36 @@ Returns `None` (skips counting) if `max_context_window` is not configured for th
 
 Runs BPE token counting off the UI thread:
 
-- **Preamble** — counted via BPE if cache cold; reused if hash matches
-- **Tool definitions** — estimated as `tool_count × tokens_per_sample_schema` (BPE-counted once on a representative schema)
-- **Conversation history** — full BPE count of all `rig_core::completion::Message` entries serialised to JSON; counted fresh every turn
-- **Latest user message** — plain text extracted from `UserContent::Text` variants; images/PDFs skipped
+- **Preamble** — counted via BPE if the cache is cold; reused if the hash matches
+- **Tool definitions** — `counter.estimate_tool_tokens(tool_count)`, a per-schema
+  estimate rather than a count of the real schemas
+- **Conversation history** — `count_history()`: full BPE count of every
+  `rig_core::completion::Message` serialised to JSON, counted fresh every turn
+- **Latest user message** — plain text from `UserContent::Text` variants
+  (`extract_user_message_text()`); images and PDFs are skipped
 
 Publishes the completed `TokenBudgetSnapshot` to `GlobalTokenBudget::sender`.
 
 ### 3. Watch channel → window refresh
 
-A background task spawned in `main.rs` loops on `receiver.changed().await` and calls `cx.refresh_windows()` whenever a new snapshot arrives. This bridges the tokio channel into GPUI's render cycle so `TokenContextBarView` (a `RenderOnce` element) re-renders with the fresh data.
+A task spawned in `main.rs` loops on `receiver.changed().await` and calls
+`cx.refresh_windows()` whenever a new snapshot arrives, bridging the tokio channel
+into GPUI's render cycle so `TokenContextBarView` (a `RenderOnce` element) re-renders
+with fresh data.
 
-## Data Flow: Actual Counts
+## Data flow: actual counts
 
-After the LLM stream completes, `finalize_completed_stream()` receives the provider's real token counts from `StreamEnded { token_usage, api_turn_count }` and calls:
+After the stream completes, `finalize_completed_stream()` takes the provider's real
+counts from `StreamEnded { token_usage: Option<TokenUsage>, .. }` and calls:
 
 ```rust
 cx.global::<GlobalTokenBudget>().update_with_actuals(input_tokens, output_tokens);
 ```
 
-`update_with_actuals()` uses `watch::Sender::send_modify` to atomically patch the existing snapshot in-place, setting `actual_input_tokens` and `actual_output_tokens`. The watcher detects this change and triggers another re-render, showing actual counts in the popover alongside the estimates.
+`update_with_actuals()` uses `watch::Sender::send_modify` to patch the existing
+snapshot in place, setting `actual_input_tokens` and `actual_output_tokens`. The
+watcher sees the change and triggers another re-render, so the popover shows actual
+counts next to the estimate.
 
 ## Research connection (GEPA / ACE)
 
@@ -105,13 +110,16 @@ Key derived values:
 | `utilization()` | `estimated_total / effective_budget` (clamped 0–1) |
 | `estimation_delta()` | `actual_input - estimated_total` (signed; `Some` only when actuals present) |
 
-## `TokenCounter` — Accuracy Notes
+`check_pressure(snapshot, settings)` turns a snapshot into a `ContextPressureEvent`
+(`HighPressure` at `high_threshold`, `CriticalPressure` at `critical_threshold`).
+
+## `TokenCounter` — accuracy notes
 
 Uses tiktoken-rs static BPE instances (initialised once globally, ~50 ms first call):
 
 | Encoding | Models |
 |:---------|:-------|
-| `o200k_base` | `gpt-4o*`, `o1-*`, `o3-*`, `o4-*` |
+| `o200k_base` | `gpt-4o*`, `o1*`, `o3*`, `o4*` |
 | `cl100k_base` | Everything else (Claude, Gemini, Mistral, Ollama, GPT-4) |
 
 Accuracy by provider:
@@ -121,64 +129,65 @@ Accuracy by provider:
 - **Mistral / Ollama** — ±5–10%
 
 **Known limitations:**
-- Images and PDFs are not counted — `extract_user_message_text()` skips non-text `UserContent` variants. Conversations with many large images will be significantly under-estimated (Gemini in particular counts image tiles separately and can add hundreds of thousands of tokens).
-- History is counted *before* the new user message is added to the conversation model, so the snapshot reflects the state at send time, not after the user message has been appended.
-- Tool call results (e.g. web fetch responses) that appear in history *are* counted via `count_history()` (serialised to JSON).
+- Images and PDFs are not counted. Conversations with many large images are
+  significantly under-estimated (Gemini in particular counts image tiles separately).
+- History is counted *before* the new user message is appended to the conversation
+  model, so the snapshot reflects the state at send time.
+- Tool results in history (e.g. web fetch responses) *are* counted, via the JSON
+  serialisation in `count_history()`.
 
 ## `CachedTokenCounts`
 
-Preamble and tool tokens rarely change between turns. The cache stores the last BPE count and invalidates on content hash mismatch:
+Preamble and tool tokens rarely change between turns. The cache stores the last BPE
+count and invalidates on content-hash mismatch:
 
 ```
 cache.preamble_tokens(&preamble_str, &counter)
     → hash(preamble) == stored_hash? return cached_count : recount + store
 ```
 
-Tool tokens use a compact hint string encoding the tool configuration (`build_tool_hint()`), hashed the same way.
+Tool tokens use a compact hint string encoding the tool configuration
+(`build_tool_hint()`), hashed the same way.
 
-## `TokenTrackingSettings` Global
+## `TokenTrackingSettings` global
 
 ```rust
 pub struct TokenTrackingSettings {
     pub enabled: bool,                          // show bar (default: true)
     pub response_reserve: usize,                // output headroom (default: 4096)
-    pub high_threshold: f64,                    // amber at 70%
-    pub critical_threshold: f64,                // red at 90%
+    pub high_threshold: f64,                    // amber at 0.70
+    pub critical_threshold: f64,                // red at 0.90
     pub auto_summarize: bool,                   // auto-summarize at critical (default: false)
     pub summarization_model_id: Option<String>, // override model for summarization
 }
 ```
 
-Not yet persisted to disk — defaults applied at startup via `cx.set_global(TokenTrackingSettings::default())`.
+> [!NOTE]
+> `TokenTrackingSettings` is **not persisted**. The struct derives `Serialize` /
+> `Deserialize`, but no repository reads or writes it and no settings page edits it;
+> `main.rs` installs `TokenTrackingSettings::default()` at startup and that is the value
+> the app runs with.
 
 **Read by:**
 - `gather_snapshot_inputs()` — `response_reserve`
 - `check_pressure()` — `high_threshold`, `critical_threshold`
-- `TokenContextBarView::read_budget_snapshot()` — `should_show_bar()` (hides bar if `enabled = false`)
+- `finalize_completed_stream()` — `auto_summarize`
+- `TokenContextBarView` — `should_show_bar()` (hides the bar when `enabled = false`)
 
-## Footer Bar UI
+## Footer bar
 
-### Stacked bar segments
+The bar shows one segment per snapshot component — preamble, tools, history, latest
+message, remaining — each sized as its share of `effective_budget()`. The border
+switches to the warning colour at `high_threshold` and the critical colour at
+`critical_threshold`.
 
-Ordered left-to-right: **Preamble** (blue `#60A5FA`) → **Tools** (violet `#A78BFA`) → **History** (emerald `#34D399`) → **Latest message** (cyan `#22D3EE`) → **Remaining** (grey).
+The popover lists the estimate and utilisation, one row per component, the provider's
+actual counts with the signed estimation delta once the stream has ended, and session
+totals (cumulative input/output/cache tokens and cost from `ConversationTokenUsage`,
+which is separate from the snapshot). Manual summarisation is the `/compact` slash
+command, not a button in the bar.
 
-Each segment width is `fraction × bar_width` where the fraction is the component's share of `effective_budget`.
-
-### Bar border colour
-
-| Colour | Condition |
-|:-------|:----------|
-| Theme border | Normal / Moderate (< 70%) |
-| Amber `#F59E0B` | `utilization >= high_threshold` (70%) |
-| Red `#EF4444` | `utilization >= critical_threshold` (90%) |
-
-### Popover
-
-- **Summary line** — `~estimated_total / model_context_limit tokens · utilization%`
-- **Component breakdown** — one legend row per segment with absolute token count and percentage
-- **Actual (from provider)** — shown after stream ends; includes signed estimation delta
-- **Session totals** — cumulative `input_tokens`, `output_tokens`, cost across all exchanges (sourced from `ConversationTokenUsage`, separate from the snapshot)
-
-### Stale snapshot guard
-
-`read_budget_snapshot()` checks `snap.conversation_id == active_conversation_id`. On conversation switch, `load_conversation()` calls `GlobalTokenBudget::clear()` (publishes `None`), so the bar shows an empty state until a fresh snapshot arrives for the new conversation.
+**Stale snapshot guard:** `read_budget_snapshot()` checks
+`snap.conversation_id == active_conversation_id`. On conversation switch,
+`load_conversation()` calls `GlobalTokenBudget::clear()` (publishes `None`), so the bar
+shows an empty state until a snapshot for the new conversation arrives.

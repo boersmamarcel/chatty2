@@ -32,8 +32,10 @@ flowchart LR
 
   GPUI --> core
   TUI --> core
-  GW --> core
+  GPUI --> Reg
+  GPUI --> GW
   GW --> Reg
+  GW --> RT
   Reg --> RT
   SDK -.-> RT
 
@@ -56,10 +58,10 @@ flowchart TB
     repositories["repositories/<br/>SQLite conversations"]
     factories["factories/<br/>AgentFactory per provider"]
     services["services/<br/>LLM, shell, MCP, math,<br/>browser (CDP), A2A client, sync"]
-    tools["tools/<br/>~60 Tool impls"]
+    tools["tools/<br/>LLM Tool impls"]
     sandbox["sandbox/<br/>Docker + Monty"]
     token_budget["token_budget/<br/>count, summarize, cache"]
-    exporters["exporters/<br/>ATIF, markdown, PDF"]
+    exporters["exporters/<br/>ATIF, JSONL"]
     auth["auth/<br/>Azure OAuth"]
   end
 
@@ -181,16 +183,6 @@ flowchart TB
   Execute --> Result[Tool output to LLM]
 ```
 
-## TUI vs GPUI integration
-
-| Concern | GPUI (`chatty-gpui`) | TUI (`chatty-tui`) |
-|---------|----------------------|---------------------|
-| Event system | `EventEmitter` + `cx.subscribe()` | `tokio::mpsc` + `AppEvent` |
-| Stream owner | `StreamManager` entity | `ChatEngine` inline |
-| Settings UI | Full settings window | CLI flags + JSON config |
-| Headless | N/A | `--headless`, `--pipe` |
-| Shared logic | All in `chatty-core` | All in `chatty-core` |
-
 ## WASM module stack
 
 ```mermaid
@@ -208,51 +200,6 @@ flowchart LR
 
 See [build-wasm-module guide](../docs-site/src/dev/guides/build-wasm-module.md)
 (sequence diagrams) and [a2a-and-wasm-modules.md](a2a-and-wasm-modules.md).
-
-## Persistence map
-
-```mermaid
-flowchart LR
-  subgraph runtime [Runtime globals]
-    GS[GeneralSettingsModel]
-    PM[ProviderModel]
-    MM[ModelsModel]
-    MCP[McpStore]
-    CS[ConversationsStore]
-  end
-
-  subgraph disk [On disk]
-    JSON["JSON files<br/>~/.config or App Support"]
-    DB["conversations.db<br/>SQLite"]
-  end
-
-  GS --> JSON
-  PM --> JSON
-  MM --> JSON
-  MCP --> JSON
-  CS --> DB
-```
-
-Settings use **optimistic update**: mutate global first, save async.
-
-## Decision tree: where do I edit?
-
-```mermaid
-flowchart TD
-  Start[I want to change…] --> Q1{User-visible UI?}
-  Q1 -->|Desktop| GPUI[chatty-gpui/src/chatty/views/]
-  Q1 -->|Terminal| TUI[chatty-tui/src/ui/]
-  Q1 -->|No| Q2{LLM behavior?}
-  Q2 -->|New tool| Tools[chatty-core/src/tools/ + agent_factory]
-  Q2 -->|New provider| Factory[agent_factory/ + ProviderType]
-  Q2 -->|Prompt / stream| LLM[llm_service + StreamManager]
-  Q2 -->|No| Q3{Data / settings?}
-  Q3 -->|New setting| Set[settings/models + repositories + GPUI settings view]
-  Q3 -->|Conversation storage| Repo[repositories/]
-  Q3 -->|No| Q4{Infrastructure?}
-  Q4 --> CI[.github/workflows/]
-  Q4 --> Docs[docs/ + docs-site/]
-```
 
 ## Research touchpoints
 

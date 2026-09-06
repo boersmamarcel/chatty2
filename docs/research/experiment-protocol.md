@@ -3,7 +3,7 @@
 **When to read this:** You are running or reviewing Stage A/B experiments and need the
 shared bar for when results count toward a promotion decision.
 
-Human interpretation: [AGE-21](https://linear.app/agents-research/issue/AGE-21) (Marcel only).
+Human interpretation: [AGE-21](https://linear.app/agents-research/issue/AGE-21) (the human reviewer only).
 Agents: build harnesses and cost sheets; do not write up cross-module conclusions.
 
 ## Two stages
@@ -11,9 +11,9 @@ Agents: build harnesses and cost sheets; do not write up cross-module conclusion
 | Stage | Location | Pass criterion |
 |-------|----------|----------------|
 | **A — Fidelity** | `chatty2` research crates | Mechanism matches paper; acceptance criteria in module page checked |
-| **B — Task value** | [`harbor-chatty`](../../../harbor-chatty) | Gain on representative tasks under paired stats; cost within budget |
+| **B — Task value** | [`harbor-chatty`](https://github.com/boersmamarcel/harbor-chatty) | Gain on representative tasks under paired stats; cost within budget |
 
-Neither stage auto-promotes. See [promotion log](./promotion-log.md).
+Neither stage auto-promotes; see "Promotion decision inputs" below.
 
 ## Stage A checklist (per module)
 
@@ -28,7 +28,7 @@ Neither stage auto-promotes. See [promotion log](./promotion-log.md).
 1. Use Harbor adapter ([AGE-34](https://linear.app/agents-research/issue/AGE-34)) — not in-repo sandboxes.
 2. Report paired differences with confidence, not single-run deltas.
 3. Use [cost model](./cost-model.md) with live `ModelConfig` prices — never hand-typed dollars.
-4. Marcel posts authoritative numbers before they appear in docs or promotion log.
+4. The human reviewer posts authoritative numbers before they appear in docs or a promotion record.
 
 ## Cost accounting
 
@@ -51,17 +51,18 @@ Until pilot means exist, **do not treat Stage B dollar figures as authoritative*
 
 ## Cross-module experiments (AGE-21)
 
-Reserved whole for Marcel. Examples:
+Reserved whole for the human reviewer. Examples:
 
 - ACE vs GEPA rollout counts on same task
 - Combined workflow + playbook + preamble
 - Ordering across modules no single paper reports
 
-Agents may build plumbing; Marcel runs and interprets.
+Agents may build plumbing; the human reviewer runs and interprets.
 
 ## Promotion decision inputs
 
-After Stage A + B, Marcel records in [promotion log](./promotion-log.md):
+After Stage A + B, the human reviewer records (fields per the
+[archived promotion-log template](../archive/research/promotion-log.md)):
 
 1. **Effect size** — paired stats, MDE met?
 2. **Cost / latency** — acceptable on desktop agent?

@@ -1,43 +1,8 @@
 # AGENTS.md
 
 <!-- DO NOT REMOVE: ownership contract pointer. Regenerating this file must preserve it. -->
-> ## Research work: read [`RESERVED.md`](RESERVED.md) first
->
-> The Linear project **Self-improving chatty2** lands five agentic-self-improvement papers
-> in this workspace as `chatty-trace`, `chatty-playbook`, `chatty-flow`, and
-> `chatty-optimize` (search + paired stats + optimizer QA loaders). **Stage B sandboxes**
-> (HumanEval, Polyglot, AppWorld, …) live in the sibling repo `harbor-chatty` (Harbor;
-> Linear AGE-34), not in this workspace. There is **no `chatty-eval` crate**. **A small
-> set of functions in those crates is reserved for the human and must not be implemented
-> by an agent** — the list and the rules are in [`RESERVED.md`](RESERVED.md), enforced by
-> `scripts/check-reserved.sh` in CI.
->
-> Take only `owner:ai` issues unless told otherwise. Never answer or close a
-> `gate:reflection` issue. Ordinary chatty2 work is unaffected by any of this.
->
-> ### Auto-ship (zero-human patch releases)
->
-> Low-risk work may merge and **patch-release** without Marcel when — and only when —
-> all of the following hold:
->
-> 1. The Linear issue lives in project **[Chatty auto-ship](https://linear.app/agents-research/project/chatty-auto-ship-5f83bdaf5c5e)** or **[Chatty tech debt](https://linear.app/agents-research/project/chatty-tech-debt-16da7cdefe96)** (not Self-improving chatty2).
->    **Chatty auto-ship** — CVEs and safe infra patch/minor only.
->    **Chatty tech debt** — grouped dependency/crate bumps agents may implement (`ship:auto`).
->    Project members = Marcel (closed-system allowlist).
->    Weekly `dependency-check.yml` files work in Linear only (no GitHub tech-debt issues).
-> 2. The GitHub PR is on branch `auto/*`, titled `auto: …`, and carries labels
->    `ship:auto` + `release:patch` (never minor/major). Privileged labels are
->    owner / `github-actions[bot]` only; outsiders are stripped.
-> 3. CI + `ship-auto-guard` are green; then auto-merge (same-repo head; owner sender
->    or Actions actor) → `prepare-release` lands the version bump via a `cut-release`
->    PR (main is protected), tags, and builds.
->
-> **Project membership is the allowlist.** Do not auto-merge solely because an issue has
-> `owner:ai` on another project. Never auto-ship reserved symbols, research crates,
-> auth/billing, or core UX. Slack `#chatty-auto-ship` is notify-only. Failures notify
-> Linear, Slack, and GitHub. Emergency rebuild (owner only; run against the tag):
-> `gh workflow run release.yml --ref vX.Y.Z -f tag_name=vX.Y.Z`.
-> Authz regression: `bash scripts/check-release-authz.sh`.
+> Research crates carry reserved symbols; read [`RESERVED.md`](RESERVED.md) before touching
+> them. It also holds the issue-label and auto-ship rules. Ordinary chatty2 work is unaffected.
 
 Quick-start guide for AI coding agents working in this repository.
 Optimized for limited context windows: read this first, then dive deeper
@@ -197,8 +162,10 @@ examples.
   rig's default `Tool::map_error`, or the model/transcript only ever see
   the redacted string `"the tool failed"`. See "Tool Error Reporting
   Pattern" in CLAUDE.md.
-- **Sensitive env vars** — When sending MCP config to the LLM, use
-  `masked_env()` not `.env`. See "Security Practices" in CLAUDE.md.
+- **MCP API keys** — When sending MCP config to the LLM, report
+  `has_api_key()`, never the `api_key` field; a `"****"`
+  (`MASKED_API_KEY_SENTINEL`) sent back by the model means "keep the stored
+  value". See "Security Practices" in CLAUDE.md.
 - **Rust edition** — 2024. Use `LazyLock`/`OnceLock` (std) rather than
   `lazy_static`/`once_cell`.
 - **GPUI / gpui-component skills** — When changing desktop UI, load
@@ -216,8 +183,8 @@ examples.
   drop or reword that prefix. See CLAUDE.md.
 - **Stale docs** — If a change alters a fact a page claims, update that
   page in the same PR. `update-agent-docs.yml` only safety-nets
-  `AGENTS.md` / `CLAUDE.md`. See
-  [`docs/stale-doc-policy.md`](docs/stale-doc-policy.md).
+  `AGENTS.md` / `CLAUDE.md`. See the Documentation section of
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#documentation).
 
 ## Known gotchas
 
@@ -258,7 +225,6 @@ examples.
 
 | Topic | File |
 |---|---|
-| Full architecture | [`docs/architecture-overview.md`](docs/architecture-overview.md) |
 | **System overview (diagrams)** | [`docs/system-overview.md`](docs/system-overview.md) |
 | **Component map (diagrams)** | [`docs/component-map.md`](docs/component-map.md) |
 | Crate split rationale | [`docs/workspace-crate-split.md`](docs/workspace-crate-split.md) |
@@ -269,71 +235,46 @@ examples.
 | Agent memory | [`docs/agent-memory.md`](docs/agent-memory.md) |
 | WASM modules & A2A | [`docs/a2a-and-wasm-modules.md`](docs/a2a-and-wasm-modules.md) |
 | WIT reference | [`docs/wit-reference.md`](docs/wit-reference.md) |
+| Debugging the UI and streams | [`docs-site/src/dev/guides/debug.md`](docs-site/src/dev/guides/debug.md) |
 | Release process | [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md) |
 | Coding patterns & behavior | [`CLAUDE.md`](CLAUDE.md) |
 
-## Cursor Cloud specific instructions
+## Cloud VM notes
 
-Build/test/lint/run commands are unchanged — use the ones documented above
-(the `make` targets / `.github/workflows/ci.yml`). The notes below are only
-the non-obvious environment caveats specific to the Cloud Agent VM. System
-packages, the Rust toolchain, and the `cc`/`c++` alternatives below are baked
-into the VM; the startup/update script only re-runs
-`rustup target add wasm32-wasip2` + `make wasm-modules`.
+Build/test/lint/run commands are unchanged — use the `make` targets above.
+These are only the non-obvious caveats of a headless cloud build VM.
 
-- **Toolchain must be ≥ 1.85 (edition 2024); declared MSRV is 1.94.** The base
-  VM image historically pinned `rustup default` to an older toolchain (1.83),
-  which cannot compile this workspace (`feature edition2024 is required`). The
-  default is set to `stable`. If a build suddenly fails with an edition-2024
-  error, run `rustup default stable`.
+- **Toolchain.** The workspace is edition 2024 and declares
+  `rust-version = "1.94"` in the root `Cargo.toml` (the research crates
+  inherit it). If a build fails with `feature edition2024 is required`, the
+  VM's default toolchain is too old: run `rustup default stable`. CI uses
+  `dtolnay/rust-toolchain@stable`, so it always runs ahead of the declared
+  MSRV; if a dependency raises the floor, bump `rust-version` and name the
+  dependency in the commit.
 
-  The declared `rust-version` was 1.95 until 2026-09, attributed to
-  AGE-123 / bollard 0.21. That rationale no longer holds: the locked
-  bollard 0.21.1 declares no `rust-version` at all, and no dependency in the
-  tree declares ≥ 1.95. The declaration was doing nothing but breaking cloud
-  build agents, which run a toolchain a release behind stable — on 1.94.1 the
-  four research crates (`chatty-flow`, `chatty-optimize`, `chatty-playbook`,
-  `chatty-trace`) are the *only* workspace members declaring an MSRV, so
-  `cargo test --workspace` failed outright while every other crate built fine.
-
-  Lowered to 1.94 after verifying the whole workspace compiles and passes on
-  1.94.1 (1281 tests, `--test-threads=1`). 1.94 rather than the true
-  edition-2024 floor of 1.85 because 1.94 is what has actually been tested;
-  a declared MSRV should be a version someone has run, not a guess. CI is
-  unaffected either way — `ci.yml` uses `dtolnay/rust-toolchain@stable`, so
-  it has always run ahead of the declaration.
-
-  If a dependency does raise the floor again, bump this back and say which
-  dependency and which version, so the next person can re-check it the same
-  way.
-
-- **Use GNU `cc`/`c++`, not clang.** `/usr/bin/cc` and `/usr/bin/c++` are
-  pointed at `gcc`/`g++` via `update-alternatives`. The system clang cannot
-  find libstdc++ headers/lib, which breaks the bundled DuckDB C++ build
-  (`fatal error: 'memory' file not found`) and linking the desktop binary
-  (`rust-lld: error: unable to find library -lstdc++`). If you see either
-  error, run `sudo update-alternatives --set cc /usr/bin/gcc` and
+- **Use GNU `cc`/`c++`, not clang.** The bundled DuckDB C++ build and the
+  desktop binary link fail under the system clang (`fatal error: 'memory'
+  file not found`, `unable to find library -lstdc++`). If you see either,
+  run `sudo update-alternatives --set cc /usr/bin/gcc` and
   `sudo update-alternatives --set c++ /usr/bin/g++`.
 
-- **`modules/echo-agent/echo_agent.wasm` is git-ignored** and required by some
-  integration tests, so it must be regenerated after a fresh checkout. The
-  update script runs `make wasm-modules`; run it yourself if `make test` fails
-  with a missing-`.wasm` error.
+- **`modules/echo-agent/echo_agent.wasm` is git-ignored** and required by
+  some integration tests; run `make wasm-modules` after a fresh checkout.
 
-- **Running the GPUI desktop app (`chatty`) headlessly.** The VM has no GPU,
-  but software Vulkan (Mesa `llvmpipe`/lavapipe) is installed, so the app runs
-  with CPU rendering on the existing X11 display (`DISPLAY=:1`). You MUST export
-  `XDG_RUNTIME_DIR` first, e.g.
+- **Disk.** A full `--all-features` test build needs about 16 GiB of
+  `target/`; see [`docs/build-disk-usage.md`](docs/build-disk-usage.md)
+  before running it on a small VM.
+
+- **Running the desktop app headlessly.** The VM has no GPU but software
+  Vulkan (Mesa `llvmpipe`/lavapipe) works on the existing X11 display
+  (`DISPLAY=:1`). Export `XDG_RUNTIME_DIR` first, e.g.
   `export XDG_RUNTIME_DIR=/tmp/xdg-runtime-$(id -u) && mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"`,
-  otherwise X11 window creation fails with `BadMatch`. `chatty-tui` needs none
-  of this.
+  otherwise X11 window creation fails with `BadMatch`. `chatty-tui` needs
+  none of this.
 
-- **No LLM API key is configured.** To actually chat (either frontend), use a
-  local Ollama: start it with `ollama serve` (systemd is not running, so launch
-  it yourself in a background/tmux session), `ollama pull qwen2.5:0.5b`, then
+- **No LLM API key is configured.** To chat from either frontend, use a
+  local Ollama: `ollama serve` (systemd is not running, so launch it in a
+  background/tmux session), `ollama pull qwen2.5:0.5b`, then
   `./target/debug/chatty-tui --ollama http://localhost:11434 --model qwen2.5:0.5b --headless -m "..."`.
-  The desktop app auto-detects a running local Ollama and lists its models.
-
-- **Clippy is clean workspace-wide.** `cargo clippy --workspace --all-features -- -D warnings`
-  passes (AGE-174); CI runs the same `--all-features` invocation, matching the
-  `cargo test --all-features` coverage.
+  The desktop app auto-detects a running local Ollama and lists its models
+  with no configuration.
