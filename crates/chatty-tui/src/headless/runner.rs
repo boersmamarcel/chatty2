@@ -11,9 +11,8 @@
 //! Every `SessionEvent` the turn produces is also written to stderr as a
 //! `CHATTY_EVENT` line (see `chatty_core::tools::format_event_line`), which
 //! is how a parent `sub_agent` tool follows this process: the session's own
-//! contract crossing the process boundary, instead of a scraped text
-//! protocol. The legacy `CHATTY_PROGRESS` lines are still printed by
-//! `run_headless` for one release.
+//! contract crossing the process boundary. Everything else on stderr is
+//! the human-readable log.
 
 use anyhow::{Context, Result};
 use chatty_core::models::Conversation;

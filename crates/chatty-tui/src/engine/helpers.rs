@@ -109,7 +109,9 @@ pub(super) fn run_sub_agent_process(
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                if chatty_core::tools::is_chatty_progress_line(&line) {
+                // Machine lines are the parent tool's; the row shows the
+                // child's human-readable log.
+                if chatty_core::tools::is_chatty_event_line(&line) {
                     continue;
                 }
                 let _ = event_tx.send(AppEvent::SubAgentProgress(line));

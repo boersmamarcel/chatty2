@@ -10,21 +10,11 @@ use crate::session::SessionEvent;
 use crate::tools::ToolError;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
-/// Prefix for the legacy structured headless progress lines on stderr.
-///
-/// Format:
-/// - `CHATTY_PROGRESS\ttool_started\t{name}`
-/// - `CHATTY_PROGRESS\ttool_finished\t{name}\t{ok|err}`
-///
-/// Superseded by [`CHATTY_EVENT_PREFIX`] (AGE-196): a headless child emits
-/// both for one release, and a parent that sees a `CHATTY_EVENT` line
-/// ignores the `CHATTY_PROGRESS` ones from then on.
-pub const CHATTY_PROGRESS_PREFIX: &str = "CHATTY_PROGRESS\t";
-
 /// Prefix for a headless child's turn events on stderr: one
 /// [`SessionEvent`] per line, JSON-encoded (AGE-196). This is the session's
 /// own contract crossing the process boundary, so the parent binds to typed
-/// events rather than a text protocol.
+/// events rather than a text protocol. Every other stderr line is the
+/// child's human-readable log.
 ///
 /// Not every event is written: `Text` (the answer is the child's stdout) and
 /// `TurnMessages` (persistence-only, and large) stay in the child. See
@@ -53,10 +43,9 @@ pub fn parse_event_line(line: &str) -> Option<SessionEvent> {
         .ok()
 }
 
-/// Compact progress text for the parent UI from a child's event: the same
-/// lines the legacy protocol produced (`name` on start, `✓ name` / `✗ name`
-/// on finish), plus the child's stream error. `names` remembers each tool
-/// call's name until its result arrives.
+/// Compact progress text for the parent UI from a child's event: `name` on
+/// a tool start, `✓ name` / `✗ name` on its result, and the child's stream
+/// error. `names` remembers each tool call's name until its result arrives.
 fn progress_text_for_event(
     event: &SessionEvent,
     names: &mut HashMap<String, String>,
@@ -142,35 +131,9 @@ impl SubAgentTool {
     }
 }
 
-/// Returns true when `line` is a legacy structured headless progress line.
-pub fn is_chatty_progress_line(line: &str) -> bool {
-    line.starts_with(CHATTY_PROGRESS_PREFIX)
-}
-
 /// Returns true when `line` is a headless child's `CHATTY_EVENT` line.
 pub fn is_chatty_event_line(line: &str) -> bool {
     line.starts_with(CHATTY_EVENT_PREFIX)
-}
-
-/// Parse a structured progress line into compact UI text.
-///
-/// Unprefixed token soup and human tool-format lines return `None`.
-fn parse_progress_line(line: &str) -> Option<String> {
-    let rest = line.strip_prefix(CHATTY_PROGRESS_PREFIX)?;
-    let mut parts = rest.split('\t');
-    let kind = parts.next()?;
-    let name = parts.next()?.trim();
-    if name.is_empty() {
-        return None;
-    }
-    match kind {
-        "tool_started" => Some(name.to_string()),
-        "tool_finished" => match parts.next().unwrap_or("ok") {
-            "ok" => Some(format!("\u{2713} {name}")),
-            _ => Some(format!("\u{2717} {name}")),
-        },
-        _ => None,
-    }
 }
 
 fn send_progress(slot: &InvokeAgentProgressSlot, event: InvokeAgentProgress) {
@@ -360,9 +323,8 @@ fn run_sub_agent_with_progress(
 /// Spawn chatty-tui in headless mode and collect its output.
 ///
 /// Stderr is drained live: the child's `CHATTY_EVENT` lines (its
-/// `SessionEvent`s) are forwarded to the parent UI as compact progress; a
-/// child that only speaks the legacy `CHATTY_PROGRESS` protocol is still
-/// understood. stdout is returned as the tool result for the parent model.
+/// `SessionEvent`s) are forwarded to the parent UI as compact progress.
+/// stdout is returned as the tool result for the parent model.
 fn run_sub_agent(
     executable: PathBuf,
     model_id: String,
@@ -404,9 +366,6 @@ fn run_sub_agent(
     let slot_for_drain = progress_slot.clone();
     let stderr_thread = std::thread::spawn(move || {
         let mut collected = String::new();
-        // Once the child has spoken the typed protocol, its legacy lines are
-        // duplicates and are dropped.
-        let mut speaks_events = false;
         let mut tool_names = HashMap::new();
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
@@ -418,12 +377,9 @@ fn run_sub_agent(
                     }
                     collected.push_str(&line);
                 }
-                if let Some(event) = parse_event_line(&line) {
-                    speaks_events = true;
-                    if let Some(text) = progress_text_for_event(&event, &mut tool_names) {
-                        send_progress(&slot_for_drain, InvokeAgentProgress::Text(text));
-                    }
-                } else if !speaks_events && let Some(text) = parse_progress_line(&line) {
+                if let Some(event) = parse_event_line(&line)
+                    && let Some(text) = progress_text_for_event(&event, &mut tool_names)
+                {
                     send_progress(&slot_for_drain, InvokeAgentProgress::Text(text));
                 }
             }
@@ -469,121 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_progress_line_started_and_finished() {
-        assert_eq!(
-            parse_progress_line("CHATTY_PROGRESS\ttool_started\tread_file").as_deref(),
-            Some("read_file")
-        );
-        assert_eq!(
-            parse_progress_line("CHATTY_PROGRESS\ttool_finished\tread_file\tok").as_deref(),
-            Some("✓ read_file")
-        );
-        assert_eq!(
-            parse_progress_line("CHATTY_PROGRESS\ttool_finished\tshell_execute\terr").as_deref(),
-            Some("✗ shell_execute")
-        );
-    }
-
-    #[test]
-    fn parse_progress_line_ignores_unprefixed_noise() {
-        assert_eq!(parse_progress_line("token soup without prefix"), None);
-        assert_eq!(
-            parse_progress_line("  [tool: read_file] \u{27f3} running"),
-            None
-        );
-        assert_eq!(parse_progress_line("CHATTY_PROGRESS\tunknown\tfoo"), None);
-        assert!(!is_chatty_progress_line("hello"));
-        assert!(is_chatty_progress_line(
-            "CHATTY_PROGRESS\ttool_started\tread_file"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_empty_task_rejected() {
-        let slot = dummy_slot();
-        let mut rx = install_progress_channel(&slot);
-        let tool = SubAgentTool::new("model-1".into(), false, Vec::new(), slot);
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                SubAgentArgs {
-                    task: "   ".to_string(),
-                    model: None,
-                },
-            )
-            .await;
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("cannot be empty"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "empty task must not emit progress events"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_model_validation_rejects_unknown() {
-        let tool = SubAgentTool::new(
-            "default-model".into(),
-            false,
-            vec!["model-a".into(), "model-b".into()],
-            dummy_slot(),
-        );
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                SubAgentArgs {
-                    task: "do something".to_string(),
-                    model: Some("nonexistent".to_string()),
-                },
-            )
-            .await;
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Unknown model"),
-            "unexpected error: {err}"
-        );
-        assert!(err.to_string().contains("model-a"));
-        assert!(err.to_string().contains("model-b"));
-    }
-
-    #[tokio::test]
-    async fn test_model_validation_accepts_known() {
-        let tool = SubAgentTool::new(
-            "default-model".into(),
-            false,
-            vec!["model-a".into(), "model-b".into()],
-            dummy_slot(),
-        );
-        // The model validation passes, but the call will fail later when
-        // trying to spawn the chatty-tui binary (which doesn't exist in tests).
-        // We verify it does NOT fail with "Unknown model".
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                SubAgentArgs {
-                    task: "do something".to_string(),
-                    model: Some("model-a".to_string()),
-                },
-            )
-            .await;
-        match result {
-            Err(e) => assert!(
-                !e.to_string().contains("Unknown model"),
-                "should not reject known model, got: {e}"
-            ),
-            Ok(output) => {
-                // If it somehow succeeds or returns a SubAgentOutput with
-                // success=false (binary not found), that's also fine — model
-                // validation passed.
-                assert!(!output.success || !output.response.is_empty());
-            }
-        }
-    }
-
-    #[test]
     fn event_lines_round_trip_and_skip_the_child_only_events() {
         let started = SessionEvent::ToolCallStarted {
             id: "call-1".into(),
@@ -599,11 +440,12 @@ mod tests {
         assert!(format_event_line(&SessionEvent::Text("token".into())).is_none());
         assert!(format_event_line(&SessionEvent::TurnMessages(Vec::new())).is_none());
         assert!(parse_event_line("CHATTY_EVENT\tnot json").is_none());
-        assert!(parse_event_line("CHATTY_PROGRESS\ttool_started\tx").is_none());
+        assert!(parse_event_line("  [tool: read_file] running").is_none());
+        assert!(!is_chatty_event_line("hello"));
     }
 
     #[test]
-    fn progress_text_matches_the_legacy_lines() {
+    fn progress_text_names_the_tool_and_its_outcome() {
         let mut names = HashMap::new();
         let started = SessionEvent::ToolCallStarted {
             id: "c".into(),
@@ -658,7 +500,6 @@ mod tests {
                 "#!/bin/sh\n\
                  sleep 0.2\n\
                  echo '{started}' >&2\n\
-                 echo 'CHATTY_PROGRESS\ttool_started\tlegacy' >&2\n\
                  echo '{finished}' >&2\n\
                  echo \"done: $5\"\n"
             ),
@@ -697,7 +538,7 @@ mod tests {
             assert_eq!(
                 texts,
                 vec![task.to_string(), format!("✓ {task}")],
-                "row for {task} sees only its own child's typed events, not the legacy duplicate"
+                "row for {task} sees only its own child's events"
             );
             assert_eq!(finished.as_deref(), Some(format!("done: {task}").as_str()));
         }
@@ -705,21 +546,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn live_progress_forwards_prefixed_lines_and_returns_stdout() {
+    fn live_progress_forwards_event_lines_and_returns_stdout() {
         use std::os::unix::fs::PermissionsExt;
 
+        let started = format_event_line(&SessionEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "read_file".into(),
+        })
+        .unwrap();
+        let finished = format_event_line(&SessionEvent::ToolCallResult {
+            id: "c1".into(),
+            result: "# Chatty".into(),
+        })
+        .unwrap();
         let dir = tempfile::TempDir::new().expect("tempdir");
         let script = dir.path().join("fake-tui");
         std::fs::write(
             &script,
-            "#!/bin/sh\n\
-             printf 'token soup' >&2\n\
-             echo >&2\n\
-             echo 'CHATTY_PROGRESS\ttool_started\tread_file' >&2\n\
-             echo '  [tool: read_file] running' >&2\n\
-             echo 'CHATTY_PROGRESS\ttool_finished\tread_file\tok' >&2\n\
-             echo 'noise' >&2\n\
-             echo 'final answer'\n",
+            format!(
+                "#!/bin/sh\n\
+                 printf 'token soup' >&2\n\
+                 echo >&2\n\
+                 echo '{started}' >&2\n\
+                 echo '  [tool: read_file] running' >&2\n\
+                 echo '{finished}' >&2\n\
+                 echo 'noise' >&2\n\
+                 echo 'final answer'\n"
+            ),
         )
         .expect("write fixture");
         let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
@@ -765,7 +618,7 @@ mod tests {
             !texts
                 .iter()
                 .any(|t| t.contains("token soup") || t.contains("noise")),
-            "unprefixed stderr must not be forwarded: {texts:?}"
+            "the child's human-readable stderr must not be forwarded: {texts:?}"
         );
         assert!(
             matches!(

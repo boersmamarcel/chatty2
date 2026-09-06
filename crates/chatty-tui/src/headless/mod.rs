@@ -90,8 +90,9 @@ pub async fn run_headless(
         match event {
             AppEvent::TextChunk(text) => {
                 engine.handle_event(AppEvent::TextChunk(text.clone()));
-                // Do not eprint assistant tokens: parent UIs want tool activity
-                // only (`CHATTY_PROGRESS`). The final answer still goes to stdout.
+                // Do not eprint assistant tokens: a parent follows the turn
+                // through the runner's `CHATTY_EVENT` lines, and the final
+                // answer still goes to stdout.
                 response.push_str(&text);
                 text_bytes_this_turn += text.len();
                 if answer_file_required
@@ -123,7 +124,6 @@ pub async fn run_headless(
                 text_bytes_this_turn = 0;
                 let name_str = name.clone();
                 engine.handle_event(event);
-                eprintln!("{}", format_progress_line("tool_started", &name_str, None));
                 if let Some(tc) = engine.transcript.tool_call_named(&name_str) {
                     eprintln!("\n{}", format_tool_call_header(tc));
                 } else {
@@ -147,10 +147,6 @@ pub async fn run_headless(
                     } else {
                         "ok"
                     };
-                    eprintln!(
-                        "{}",
-                        format_progress_line("tool_finished", &tc.name, Some(status))
-                    );
                     if tc.name == "final_answer" && answer_file_exists(&engine) {
                         if let Err(error) =
                             normalize_existing_answer_file_for_prompt(&engine, &message)
@@ -242,10 +238,6 @@ pub async fn run_headless(
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
-                    eprintln!(
-                        "{}",
-                        format_progress_line("tool_finished", &tc.name, Some("err"))
-                    );
                 }
                 tool_results_since_finalization += 1;
                 failed_tool_results_since_finalization += 1;
