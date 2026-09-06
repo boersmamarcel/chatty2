@@ -126,10 +126,9 @@ impl Conversation {
             shell_session: None, // Factory creates session on-demand when execution is enabled
             ..ctx
         };
-        let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
-                .await
-                .context("Failed to create agent from config")?;
+        let built = AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+            .await
+            .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -137,7 +136,7 @@ impl Conversation {
             id,
             title,
             model_id: model_config.id.clone(),
-            agent,
+            agent: built.client,
             entries: Vec::new(),
             regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
@@ -147,11 +146,11 @@ impl Conversation {
             streaming_trace: None,
             streaming_sub_agent_trace: None,
             pending_artifacts,
-            shell_session,
+            shell_session: built.shell_session,
             working_dir: None,
             agent_task_snapshot: None,
             agent_workspace_dir,
-            invoke_agent_progress_slot,
+            invoke_agent_progress_slot: built.invoke_agent_progress_slot,
         })
     }
 
@@ -187,10 +186,9 @@ impl Conversation {
             shell_session: None, // Factory creates session on-demand
             ..ctx
         };
-        let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
-                .await
-                .context("Failed to create agent from config")?;
+        let built = AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+            .await
+            .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)
@@ -250,7 +248,7 @@ impl Conversation {
             id: data.id,
             title: data.title,
             model_id: data.model_id,
-            agent,
+            agent: built.client,
             entries,
             regeneration_records,
             token_usage,
@@ -260,11 +258,11 @@ impl Conversation {
             streaming_trace: None,
             streaming_sub_agent_trace: None,
             pending_artifacts,
-            shell_session,
+            shell_session: built.shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
             agent_task_snapshot,
             agent_workspace_dir,
-            invoke_agent_progress_slot,
+            invoke_agent_progress_slot: built.invoke_agent_progress_slot,
         })
     }
 
