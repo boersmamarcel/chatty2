@@ -1416,6 +1416,66 @@ mod tests {
         assert!(history.iter().any(is_tool_result_message));
     }
 
+    /// Both frontends finalize a streamed turn through `finalize_turn`, not
+    /// `finalize_response` — so the ordering tests above, which drive
+    /// `finalize_response_state` directly, do not by themselves prove the
+    /// shipping path persists anything. This pins that wiring: the record
+    /// parked by `StreamChunk::TurnMessages` must survive `finalize_turn_state`.
+    ///
+    /// Without it, the delegation could be dropped in a later refactor and
+    /// every test here would still pass while tool turns silently stopped
+    /// being persisted — which is exactly how AGE-247 arrived broken in the
+    /// merge that introduced this path.
+    #[test]
+    fn finalize_turn_persists_tool_round_trips_on_the_live_path() {
+        let mut entries = vec![entry(Message::user("read both"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            Some(two_tool_turn()),
+            "Let me look.\n\nBoth read.".to_string(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(outcome, TurnOutcome::Persisted));
+
+        let shape: Vec<&str> = messages(&entries)
+            .iter()
+            .map(|m| match m {
+                Message::User { .. } if is_tool_result_message(m) => "result",
+                Message::User { .. } => "user",
+                Message::Assistant { .. } if crate::services::is_tool_call_message(m) => "call",
+                Message::Assistant { .. } => "text",
+                Message::System { .. } => "system",
+            })
+            .collect();
+        assert_eq!(shape, ["user", "call", "result", "call", "result", "text"]);
+        assert_pairs_intact(&entries);
+    }
+
+    /// A turn that produced neither text nor a trace is rolled back, and its
+    /// tool messages go with it: a dropped turn must not persist half a turn
+    /// (tool calls with no answer behind them).
+    #[test]
+    fn a_dropped_turn_persists_none_of_its_tool_messages() {
+        let mut entries = vec![entry(Message::user("read both"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            Some(two_tool_turn()),
+            String::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(outcome, TurnOutcome::DroppedAndRolledBack(_)));
+        assert!(
+            entries.is_empty(),
+            "the pending user entry is rolled back and no tool message is left behind"
+        );
+    }
+
     #[test]
     fn persisted_tool_turns_round_trip_through_the_history_json() {
         let mut entries = vec![entry(Message::user("read both"), None)];
