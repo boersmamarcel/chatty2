@@ -736,54 +736,50 @@ cx.defer(move |cx| {
 
 **When to use**: Processing LLM response streams or other async iterators.
 
-**Pattern**: Use `async_stream::stream!` macro with pattern matching for clean stream processing.
+**Pattern**: Use `async_stream::stream!` with a single mapping function from rig's per-item stream to this app's `StreamChunk`s, rather than a macro duplicated per provider (AGE-210 replaced the old `process_agent_stream!` macro, which had two near-identical expansions, with `map_item`).
 
 ```rust
 // llm_service.rs
-macro_rules! process_agent_stream {
-    ($stream:expr) => {
-        Box::pin(async_stream::stream! {
-            while let Some(item) = $stream.next().await {
-                match item {
-                    Ok(StreamItem::Text(content)) => {
-                        yield Ok(StreamChunk::Text(content.text));
-                    }
-                    Ok(StreamItem::ToolCall(tool_call)) => {
-                        yield Ok(StreamChunk::ToolCallStarted {
-                            id: tool_call.id.clone(),
-                            name: tool_call.function.name.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        yield Ok(StreamChunk::Error(e.to_string()));
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            yield Ok(StreamChunk::Done);
-        })
-    };
+fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamChunk> {
+    match item {
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
+            vec![StreamChunk::Text(text.text)]
+        }
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+            vec![
+                StreamChunk::ToolCallStarted { id: /* resolve_call_id(..) */, name: tool_call.function.name.clone() },
+                StreamChunk::ToolCallInput { id: /* .. */, arguments: /* serialized args */ },
+            ]
+        }
+        MultiTurnStreamItem::FinalResponse(final_response) => {
+            // turn usage aggregate, plus TurnMessages when rig recorded the turn
+            vec![/* .. */]
+        }
+        // CompletionCall, StreamUserItem (tool result), etc.
+        _ => Vec::new(),
+    }
 }
 
-pub async fn stream_prompt(
-    agent: &AgentClient,
-    history: &[Message],
-    contents: Vec<UserContent>,
-) -> Result<(ResponseStream, Message)> {
-    let stream = match agent {
-        AgentClient::Anthropic(agent) => {
-            let mut stream = agent
-                .stream_prompt(user_message.clone())
-                .with_history(history.to_vec())
-                .multi_turn(10)
-                .await;
-            process_agent_stream!(stream)
+pub async fn stream_prompt(agent: &AgentClient, history: Vec<Message>, /* .. */) -> Result<ResponseStream> {
+    let mut agent_stream = agent.agent.stream_prompt(user_message).history(history).max_turns(max_agent_turns).await;
+
+    Ok(Box::pin(async_stream::stream! {
+        loop {
+            tokio::select! {
+                item = agent_stream.next() => match item {
+                    Some(result) => {
+                        // map_stream_result: Ok(item) -> map_item(item, semantics);
+                        // Err(e) -> classify_streaming_error(e) into a typed StreamErrorKind (AGE-244)
+                        let (chunks, stop) = map_stream_result(result, semantics);
+                        for chunk in chunks { yield Ok(chunk); }
+                        if stop { return; }
+                    }
+                    None => { yield Ok(StreamChunk::Done); return; }
+                },
+                // .. approval / resolution / clarification channels
+            }
         }
-        // ... other providers
-    };
-    
-    Ok((stream, user_message))
+    }))
 }
 ```
 
