@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::models::clarification_store::ClarificationAnswer;
+use crate::models::execution_approval_store::ApprovalDecision;
+use crate::models::write_approval_store::WriteApprovalDecision;
 use crate::repositories::ConversationMetadata;
+use crate::session::AgentSession;
 
 use super::conversation::Conversation;
 
@@ -13,14 +17,19 @@ const MAX_CACHED_CONVERSATIONS: usize = 10;
 ///
 /// Two-layer design:
 /// - `metadata`: always loaded at startup (lightweight — just id/title/cost)
-/// - `conversations`: lazily populated when a conversation is selected, with LRU eviction
+/// - `sessions`: lazily populated when a conversation is selected, with LRU eviction
+///
+/// Each loaded conversation lives inside its own [`AgentSession`] (AGE-195):
+/// the session owns the conversation, the per-agent approval stores its
+/// tools raise requests on, and the turn in flight, so two conversations
+/// streaming at once never share a channel.
 pub struct ConversationsStore {
     /// Lightweight metadata list, sorted by updated_at descending.
     /// This is the source of truth for the sidebar and navigation.
     metadata: Vec<ConversationMetadata>,
     /// Full conversation data, populated on demand when the user selects a conversation.
     /// Bounded to `MAX_CACHED_CONVERSATIONS` entries via LRU eviction.
-    conversations: HashMap<String, Conversation>,
+    sessions: HashMap<String, AgentSession>,
     /// Tracks access order for LRU eviction. Most recently used at the back.
     access_order: VecDeque<String>,
     active_conversation_id: Option<String>,
@@ -33,7 +42,7 @@ impl ConversationsStore {
     pub fn new() -> Self {
         Self {
             metadata: Vec::new(),
-            conversations: HashMap::new(),
+            sessions: HashMap::new(),
             access_order: VecDeque::new(),
             active_conversation_id: None,
             streaming_ids: HashSet::new(),
@@ -94,15 +103,20 @@ impl ConversationsStore {
 
     /// Returns true if the full conversation data is already in memory.
     pub fn is_loaded(&self, id: &str) -> bool {
-        self.conversations.contains_key(id)
+        self.sessions.contains_key(id)
     }
 
-    /// Insert a lazily-loaded conversation into the cache.
-    /// Evicts the least recently used non-active, non-streaming conversations if the cache
-    /// exceeds `MAX_CACHED_CONVERSATIONS`.
-    pub fn insert_loaded(&mut self, conversation: Conversation) {
-        let id = conversation.id().to_string();
-        self.conversations.insert(id.clone(), conversation);
+    /// Insert a lazily-loaded conversation, wrapped in its session, into the
+    /// cache. A session with no conversation is not a loaded conversation
+    /// and is dropped. Evicts the least recently used non-active,
+    /// non-streaming conversations if the cache exceeds
+    /// `MAX_CACHED_CONVERSATIONS`.
+    pub fn insert_loaded(&mut self, session: AgentSession) {
+        let Some(id) = session.conversation().map(|c| c.id().to_string()) else {
+            tracing::warn!("Ignoring a session with no conversation");
+            return;
+        };
+        self.sessions.insert(id.clone(), session);
         self.touch_access_order(&id);
         self.evict_if_needed();
     }
@@ -116,10 +130,10 @@ impl ConversationsStore {
     /// Evict least recently used non-protected conversations when cache exceeds the limit.
     /// Protected conversations: the active one and any with active streams.
     fn evict_if_needed(&mut self) {
-        while self.conversations.len() > MAX_CACHED_CONVERSATIONS {
+        while self.sessions.len() > MAX_CACHED_CONVERSATIONS {
             let evict_id = self.find_lru_evictable();
             if let Some(id) = evict_id {
-                self.conversations.remove(&id);
+                self.sessions.remove(&id);
                 self.access_order.retain(|s| s != &id);
             } else {
                 // All remaining conversations are protected — stop evicting
@@ -154,23 +168,57 @@ impl ConversationsStore {
 
     /// Number of full conversations currently cached in memory.
     pub fn cached_count(&self) -> usize {
-        self.conversations.len()
+        self.sessions.len()
     }
 
     /// Get a conversation by ID (immutable). Returns `None` if not yet loaded.
     pub fn get_conversation(&self, id: &str) -> Option<&Conversation> {
-        self.conversations.get(id)
+        self.sessions.get(id).and_then(|s| s.conversation())
     }
 
     /// Get a mutable reference to a conversation by ID.
     pub fn get_conversation_mut(&mut self, id: &str) -> Option<&mut Conversation> {
-        self.conversations.get_mut(id)
+        self.sessions.get_mut(id).and_then(|s| s.conversation_mut())
+    }
+
+    /// The session owning a loaded conversation.
+    pub fn get_session(&self, id: &str) -> Option<&AgentSession> {
+        self.sessions.get(id)
+    }
+
+    pub fn get_session_mut(&mut self, id: &str) -> Option<&mut AgentSession> {
+        self.sessions.get_mut(id)
+    }
+
+    /// Resolve an execution approval by request id, whichever loaded
+    /// conversation's agent raised it. Ids are unique, so at most one
+    /// session has it; returns whether one did.
+    pub fn resolve_execution_approval(&self, id: &str, decision: ApprovalDecision) -> bool {
+        self.sessions
+            .values()
+            .any(|s| s.execution_approvals().resolve(id, decision.clone()))
+    }
+
+    /// Resolve a filesystem write approval by request id; see
+    /// [`resolve_execution_approval`](Self::resolve_execution_approval).
+    pub fn resolve_write_approval(&self, id: &str, decision: WriteApprovalDecision) -> bool {
+        self.sessions
+            .values()
+            .any(|s| s.write_approvals().resolve(id, decision.clone()))
+    }
+
+    /// Answer an `ask_user` clarification by request id; see
+    /// [`resolve_execution_approval`](Self::resolve_execution_approval).
+    pub fn resolve_clarification(&self, id: &str, answers: Vec<ClarificationAnswer>) -> bool {
+        self.sessions
+            .values()
+            .any(|s| s.clarifications().resolve(id, answers.clone()))
     }
 
     /// Remove a conversation from both the in-memory cache and the metadata list.
     /// Returns true if the conversation existed in either.
     pub fn delete_conversation(&mut self, id: &str) -> bool {
-        let in_cache = self.conversations.remove(id).is_some();
+        let in_cache = self.sessions.remove(id).is_some();
         let in_metadata = self.metadata.iter().any(|m| m.id == id);
         self.remove_metadata(id);
         self.access_order.retain(|s| s != id);
@@ -230,7 +278,11 @@ impl ConversationsStore {
     /// Overall complexity: O(n + K log K) instead of O(n log n).
     #[allow(dead_code)]
     pub fn list_recent(&self, limit: usize) -> Vec<&Conversation> {
-        let mut convs: Vec<&Conversation> = self.conversations.values().collect();
+        let mut convs: Vec<&Conversation> = self
+            .sessions
+            .values()
+            .filter_map(|s| s.conversation())
+            .collect();
         if convs.len() > limit {
             convs.select_nth_unstable_by(limit, |a, b| {
                 b.updated_at().cmp(&a.updated_at()) // descending: largest first

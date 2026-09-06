@@ -174,15 +174,12 @@ impl ChattyApp {
                                 let mut settings = cx
                                     .global::<crate::settings::models::ExecutionSettingsModel>()
                                     .clone();
-                                let approvals = cx
-                                    .global::<crate::chatty::models::ExecutionApprovalStore>()
-                                    .get_pending_approvals();
-                                let clarifications = cx
-                                    .global::<crate::chatty::models::ClarificationStore>()
-                                    .get_pending_clarifications();
-                                let write_approvals = cx
-                                    .global::<crate::chatty::models::WriteApprovalStore>()
-                                    .get_pending_approvals();
+                                // The rebuilt agent keeps raising its requests on
+                                // this conversation's own session stores (AGE-195).
+                                let handles = cx
+                                    .global::<ConversationsStore>()
+                                    .get_session(&conv_id)
+                                    .map(|session| session.approval_handles());
                                 let conv =
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
                                 if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
@@ -207,9 +204,9 @@ impl ChattyApp {
                                     .cloned();
                                 (
                                     Some(settings),
-                                    Some(approvals),
-                                    Some(clarifications),
-                                    Some(write_approvals),
+                                    handles.as_ref().map(|h| h.pending_approvals.clone()),
+                                    handles.as_ref().map(|h| h.pending_clarifications.clone()),
+                                    handles.as_ref().map(|h| h.pending_write_approvals.clone()),
                                     artifacts,
                                     session,
                                     secrets,
@@ -281,7 +278,13 @@ impl ChattyApp {
                         .await?;
 
                         // Update the conversation's agent synchronously
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        cx.update_global::<ConversationsStore, _>(|store, cx| {
+                            // The settings the tools were built with are the
+                            // session's too.
+                            let config = desktop_session_config(cx);
+                            if let Some(session) = store.get_session_mut(&conv_id) {
+                                session.set_config(config);
+                            }
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(

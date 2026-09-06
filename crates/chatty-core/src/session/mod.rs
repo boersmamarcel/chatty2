@@ -55,9 +55,9 @@ use crate::models::execution_approval_store::{ExecutionApprovalStore, PendingApp
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::services::{
-    AgentTaskController, ContextShaperSettings, StreamError, StreamErrorKind, StreamSurface,
-    exchange_count, extract_user_text, install_progress_channel, run_stream_loop, shape_context,
-    stream_prompt,
+    AgentTaskController, AgentTaskSnapshot, ContextShaperSettings, StreamError, StreamErrorKind,
+    StreamSurface, exchange_count, extract_user_text, install_progress_channel, run_stream_loop,
+    shape_context, stream_prompt,
 };
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::tools::invoke_agent_tool::InvokeAgentProgressSlot;
@@ -97,17 +97,17 @@ pub enum TurnKind {
     /// An injected agent-protocol / loop-guard follow-up: persisted so the
     /// model sees it, but the todo state of the turn it belongs to is kept.
     ProtocolFollowUp,
-    /// Re-running the last user message, which is already the tail of the
-    /// conversation's history: nothing is added to it.
+    /// Re-running the user message at the tail of the conversation's
+    /// history: it is sent again, nothing is added, and the todo protocol
+    /// starts clean like a human turn.
     Regenerate,
 }
 
 /// What to send.
 pub struct TurnInput {
-    /// The user message: persisted (unless [`TurnKind::Regenerate`]) and
-    /// sent. For `Regenerate` this is the history's last user message,
-    /// which the caller has split off — `stream_prompt` appends it after
-    /// the history it is given with no de-duplication (AGE-221).
+    /// The user message: persisted and sent. Ignored for
+    /// [`TurnKind::Regenerate`], which takes the history's last user
+    /// message instead.
     pub contents: Vec<UserContent>,
     /// Sent alongside `contents` but never persisted — e.g. the previous
     /// turn's assistant-generated attachments (AGE-216).
@@ -133,6 +133,16 @@ impl TurnInput {
         Self {
             kind: TurnKind::ProtocolFollowUp,
             ..Self::text(prompt)
+        }
+    }
+
+    /// Re-run the last user message (see [`TurnKind::Regenerate`]).
+    pub fn regenerate() -> Self {
+        Self {
+            contents: Vec::new(),
+            llm_only_contents: Vec::new(),
+            attachments: Vec::new(),
+            kind: TurnKind::Regenerate,
         }
     }
 }
@@ -254,13 +264,31 @@ impl AgentSession {
         input: TurnInput,
         emit: F,
     ) -> Result<impl Future<Output = ()> + use<F>> {
-        let turn = self.prepare_turn(input)?;
+        self.begin_turn_with_flag(input, Arc::new(AtomicBool::new(false)), emit)
+    }
+
+    /// [`begin_turn`](Self::begin_turn) with the owner's own cancellation
+    /// token, for an owner that registers the turn with something that
+    /// holds the token before the turn can start (the desktop's
+    /// `StreamManager`). [`cancel`](Self::cancel) and the token are the
+    /// same switch.
+    pub fn begin_turn_with_flag<F: FnMut(SessionEvent)>(
+        &mut self,
+        input: TurnInput,
+        cancel_flag: Arc<AtomicBool>,
+        emit: F,
+    ) -> Result<impl Future<Output = ()> + use<F>> {
+        let turn = self.prepare_turn(input, cancel_flag)?;
         Ok(turn.run(emit))
     }
 
     /// Everything `begin_turn` does before the stream is opened, kept apart
     /// so a test can run the same preparation against a scripted stream.
-    fn prepare_turn(&mut self, input: TurnInput) -> Result<PreparedTurn> {
+    fn prepare_turn(
+        &mut self,
+        input: TurnInput,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<PreparedTurn> {
         if self.is_turn_active() {
             bail!("a turn is already running");
         }
@@ -277,8 +305,17 @@ impl AgentSession {
 
         // Snapshot BEFORE committing the new message: `stream_prompt` appends
         // `contents` after the history it is given, with no de-duplication
-        // (AGE-221).
-        let history = conversation.messages();
+        // (AGE-221). A regenerate sends the tail user message again, so it
+        // comes off the snapshot and becomes the contents.
+        let mut history = conversation.messages();
+        let contents = if kind == TurnKind::Regenerate {
+            match history.pop() {
+                Some(Message::User { content }) => content,
+                _ => bail!("regenerate needs a user message at the tail of history"),
+            }
+        } else {
+            contents
+        };
         let already_asked_to_retry = history
             .iter()
             .rev()
@@ -302,7 +339,7 @@ impl AgentSession {
         // A human turn starts from a clean todo protocol state: the controller
         // lives on the conversation's agent, so leftover state would otherwise
         // nudge forever and block a second write_todos (AGE-150).
-        if kind == TurnKind::Human {
+        if kind != TurnKind::ProtocolFollowUp {
             task_controller.reset();
         }
 
@@ -316,7 +353,6 @@ impl AgentSession {
             .set_notifiers(approval_tx, resolution_tx);
         self.clarifications.set_notifier(clarification_tx);
 
-        let cancel_flag = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(cancel_flag.clone());
         self.pending_tool_names.clear();
 
@@ -344,17 +380,21 @@ impl AgentSession {
     /// usage. Display state is the caller's, after this. An owner whose
     /// channel already carries its own event type calls the narrower
     /// methods below instead.
-    pub fn apply(&mut self, event: &SessionEvent) {
+    ///
+    /// Returns the agent's todo snapshot when this event changed it, for the
+    /// owner's plan UI.
+    pub fn apply(&mut self, event: &SessionEvent) -> Option<AgentTaskSnapshot> {
         match event {
             SessionEvent::Text(text) => self.append_streaming_text(text),
             SessionEvent::ToolCallStarted { id, name } => self.note_tool_started(id, name),
             SessionEvent::ToolCallResult { id, .. } | SessionEvent::ToolCallError { id, .. } => {
-                self.note_tool_finished(id)
+                return self.note_tool_finished(id);
             }
             SessionEvent::TurnMessages(messages) => self.set_turn_messages(messages.clone()),
             SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
             _ => {}
         }
+        None
     }
 
     /// `SessionEvent::Text`: extend the reply in flight.
@@ -372,17 +412,17 @@ impl AgentSession {
     }
 
     /// `SessionEvent::ToolCallResult` / `ToolCallError`: after a todo tool,
-    /// take the agent's new todo snapshot onto the conversation.
-    pub fn note_tool_finished(&mut self, id: &str) {
-        let Some(name) = self.pending_tool_names.remove(id) else {
-            return;
-        };
-        if let Some(conversation) = self.conversation.as_mut()
-            && is_agent_todo_tool(&name)
-        {
-            let snapshot = conversation.agent().task_controller().snapshot();
-            conversation.set_agent_task_snapshot(Some(snapshot));
+    /// take the agent's new todo snapshot onto the conversation and return
+    /// it for the owner's plan UI.
+    pub fn note_tool_finished(&mut self, id: &str) -> Option<AgentTaskSnapshot> {
+        let name = self.pending_tool_names.remove(id)?;
+        let conversation = self.conversation.as_mut()?;
+        if !is_agent_todo_tool(&name) {
+            return None;
         }
+        let snapshot = conversation.agent().task_controller().snapshot();
+        conversation.set_agent_task_snapshot(Some(snapshot.clone()));
+        Some(snapshot)
     }
 
     /// `SessionEvent::TurnMessages`: keep rig's record of the turn until
@@ -566,7 +606,7 @@ impl AgentSession {
         scenario: crate::services::Scenario,
         emit: F,
     ) -> Result<impl Future<Output = ()> + use<F>> {
-        let turn = self.prepare_turn(input)?;
+        let turn = self.prepare_turn(input, Arc::new(AtomicBool::new(false)))?;
         let stream = crate::services::scripted_stream(scenario.items, turn.cancel_flag.clone());
         Ok(drive(
             stream,

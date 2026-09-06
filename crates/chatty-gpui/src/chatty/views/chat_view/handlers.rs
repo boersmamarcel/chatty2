@@ -694,22 +694,22 @@ impl ChatView {
         if let Some(ref pending) = self.pending_approval {
             let id = pending.id.clone();
 
-            // Try execution approval store first (bash commands)
-            let mut resolved = false;
-            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
+            // The request was raised on the stores of the conversation whose
+            // agent is waiting (AGE-195): the execution store first (shell
+            // commands), then the write store (filesystem writes).
+            if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>() {
                 use crate::chatty::models::execution_approval_store::ApprovalDecision;
-                resolved = store.resolve(&id, if approved {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Denied
-                });
-            }
-
-            // If not found in execution store, try write approval store (filesystem writes)
-            if !resolved {
-                if let Some(store) = cx.try_global::<crate::chatty::models::WriteApprovalStore>() {
-                    use crate::chatty::models::write_approval_store::WriteApprovalDecision;
-                    store.resolve(
+                use crate::chatty::models::write_approval_store::WriteApprovalDecision;
+                let resolved = store.resolve_execution_approval(
+                    &id,
+                    if approved {
+                        ApprovalDecision::Approved
+                    } else {
+                        ApprovalDecision::Denied
+                    },
+                );
+                if !resolved {
+                    store.resolve_write_approval(
                         &id,
                         if approved {
                             WriteApprovalDecision::Approved
@@ -869,14 +869,14 @@ impl ChatView {
         // the stream can push its next chunk straight away.
         self.pending_clarification = None;
 
-        match cx.try_global::<chatty_core::models::ClarificationStore>() {
+        match cx.try_global::<crate::chatty::models::ConversationsStore>() {
             Some(store) => {
-                if !store.resolve(&id, answers.clone()) {
+                if !store.resolve_clarification(&id, answers.clone()) {
                     warn!(clarification_id = %id, "No pending clarification to resolve");
                 }
             }
             None => {
-                warn!(clarification_id = %id, "ClarificationStore global missing; answers dropped")
+                warn!(clarification_id = %id, "ConversationsStore global missing; answers dropped")
             }
         }
 

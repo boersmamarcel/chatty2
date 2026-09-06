@@ -299,17 +299,7 @@ async fn a_regenerate_turn_adds_nothing_to_history() {
     );
     let before = conversation.messages();
 
-    let events = run_turn(
-        &mut session,
-        TurnInput {
-            contents: vec![UserContent::text("again?".to_string())],
-            llm_only_contents: Vec::new(),
-            attachments: Vec::new(),
-            kind: TurnKind::Regenerate,
-        },
-        scenario("text_only"),
-    )
-    .await;
+    let events = run_turn(&mut session, TurnInput::regenerate(), scenario("text_only")).await;
     for event in &events {
         session.apply(event);
     }
@@ -413,6 +403,23 @@ async fn a_malformed_tool_call_is_retried_once() {
             .any(|e| matches!(e, SessionEvent::FollowUp(_))),
         "the retry is bounded to one attempt"
     );
+}
+
+/// The retry is bounded by spotting this text in history, and hidden from
+/// the transcript by the same prefix. Both depend on the matcher recognising
+/// it — if the text drifts, the retry silently becomes unbounded and visible
+/// at once.
+#[test]
+fn retry_follow_up_is_recognised_as_a_protocol_nudge() {
+    assert!(crate::services::is_protocol_follow_up_text(
+        MALFORMED_TOOL_CALL_FOLLOW_UP
+    ));
+}
+
+#[test]
+fn retry_follow_up_explains_what_to_do_differently() {
+    assert!(MALFORMED_TOOL_CALL_FOLLOW_UP.contains("malformed or truncated"));
+    assert!(MALFORMED_TOOL_CALL_FOLLOW_UP.contains("smaller steps"));
 }
 
 /// One line per event, in a shape that reads as a diff.

@@ -319,6 +319,7 @@ impl ChattyApp {
                         user_secrets,
                         theme_colors,
                         search_settings,
+                        mut session,
                     ) = cx.update(|cx| {
                         let mut settings = cx
                             .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -330,15 +331,10 @@ impl ChattyApp {
                                     .to_string(),
                             );
                         }
-                        let approvals = cx
-                            .global::<crate::chatty::models::ExecutionApprovalStore>()
-                            .get_pending_approvals();
-                        let clarifications = cx
-                            .global::<crate::chatty::models::ClarificationStore>()
-                            .get_pending_clarifications();
-                        let write_approvals = cx
-                            .global::<crate::chatty::models::WriteApprovalStore>()
-                            .get_pending_approvals();
+                        // The conversation's session owns the stores its
+                        // agent's tools raise requests on (AGE-195).
+                        let session = AgentSession::new(desktop_session_config(cx));
+                        let handles = session.approval_handles();
                         let secrets = cx
                             .global::<crate::settings::models::UserSecretsModel>()
                             .as_env_pairs();
@@ -348,12 +344,13 @@ impl ChattyApp {
                             .cloned();
                         (
                             Some(settings),
-                            Some(approvals),
-                            Some(clarifications),
-                            Some(write_approvals),
+                            Some(handles.pending_approvals),
+                            Some(handles.pending_clarifications),
+                            Some(handles.pending_write_approvals),
                             secrets,
                             Some(colors),
                             search_cfg,
+                            session,
                         )
                     })?;
 
@@ -420,8 +417,9 @@ impl ChattyApp {
                     conversation.set_working_dir(selected_working_dir.clone());
 
                     // PHASE 3: Add to global store and refresh sidebar with real data
+                    session.set_conversation(Some(conversation));
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        store.insert_loaded(conversation);
+                        store.insert_loaded(session);
                         store.set_active_by_id(conv_id.clone());
                     })?;
 
@@ -529,9 +527,13 @@ impl ChattyApp {
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
                 let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|s, _| s.clone())?;
                 let exec_settings = cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|s, _| s.clone())?;
-                let pending_approvals = cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|s, _| s.get_pending_approvals())?;
-                let pending_clarifications = cx.update_global::<crate::chatty::models::ClarificationStore, _>(|s, _| s.get_pending_clarifications())?;
-                let pending_write_approvals = cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|s, _| s.get_pending_approvals())?;
+                // The conversation's session owns the stores its agent's tools
+                // raise requests on (AGE-195).
+                let mut session = cx.update(|cx| AgentSession::new(desktop_session_config(cx)))?;
+                let handles = session.approval_handles();
+                let pending_approvals = handles.pending_approvals;
+                let pending_clarifications = handles.pending_clarifications;
+                let pending_write_approvals = handles.pending_write_approvals;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx
                     .update(|cx| extract_theme_chart_colors(cx))
@@ -581,9 +583,10 @@ impl ChattyApp {
                             Ok(conversation) => {
                                 // Insert and check active state atomically to avoid a TOCTOU
                                 // where the user switches conversations between the insert and check.
+                                session.set_conversation(Some(conversation));
                                 let is_still_active = cx
                                     .update_global::<ConversationsStore, _>(|store, _| {
-                                        store.insert_loaded(conversation);
+                                        store.insert_loaded(session);
                                         store.active_id().map(|id| id == &conv_id).unwrap_or(false)
                                     })
                                     .unwrap_or(false);

@@ -14,7 +14,8 @@
 #![allow(clippy::collapsible_if)]
 
 use crate::assets::CustomIcon;
-use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
+use crate::chatty::models::ConversationsStore;
+use crate::chatty::models::execution_approval_store::ApprovalDecision;
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 use std::time::Duration;
@@ -567,10 +568,11 @@ impl SystemTraceView {
                                 .on_click({
                                     let id = approval_id.clone();
                                     move |_event, _window, cx| {
-                                        if let Some(store) =
-                                            cx.try_global::<ExecutionApprovalStore>()
-                                        {
-                                            store.resolve(&id, ApprovalDecision::Approved);
+                                        if let Some(store) = cx.try_global::<ConversationsStore>() {
+                                            store.resolve_execution_approval(
+                                                &id,
+                                                ApprovalDecision::Approved,
+                                            );
 
                                             // Update UI state
                                             if let Some(entity) = entity_for_approve.upgrade() {
@@ -601,10 +603,11 @@ impl SystemTraceView {
                                 .on_click({
                                     let id = approval_id;
                                     move |_event, _window, cx| {
-                                        if let Some(store) =
-                                            cx.try_global::<ExecutionApprovalStore>()
-                                        {
-                                            store.resolve(&id, ApprovalDecision::Denied);
+                                        if let Some(store) = cx.try_global::<ConversationsStore>() {
+                                            store.resolve_execution_approval(
+                                                &id,
+                                                ApprovalDecision::Denied,
+                                            );
 
                                             // Update UI state
                                             if let Some(entity) = entity_for_deny.upgrade() {

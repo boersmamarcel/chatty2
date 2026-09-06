@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
@@ -12,8 +12,7 @@ use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageEntry, MessageFeedback,
     RegenerationRecord, StreamManagerEvent, StreamStatus, TurnOutcome,
 };
-use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{AgentTaskSnapshot, generate_title, stream_prompt};
+use crate::chatty::services::{AgentTaskSnapshot, generate_title};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
@@ -42,6 +41,7 @@ use chatty_core::exporters::jsonl_exporter::{
 use chatty_core::factories::AgentClient;
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::repositories::{ConversationData, ConversationRepository};
+use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
 use chatty_core::tools::LocalModuleAgentSummary;
 
 mod conversation_ops;
@@ -200,6 +200,16 @@ fn agent_workspace_needs_refresh(agent_dir: Option<&Path>, effective_dir: Option
     agent_dir.map(normalize_workspace_path) != effective_dir.map(normalize_workspace_path)
 }
 
+/// The desktop's session policy: settings by value from the global, the
+/// desktop recovery table, and the loop guard on (AGE-195).
+pub(super) fn desktop_session_config(cx: &App) -> AgentSessionConfig {
+    AgentSessionConfig {
+        execution_settings: cx.global::<ExecutionSettingsModel>().clone(),
+        surface: chatty_core::services::StreamSurface::Desktop,
+        loop_guard: true,
+    }
+}
+
 async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
     let conv_id = conv_id.to_string();
 
@@ -244,15 +254,12 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             let mut settings = cx
                 .global::<crate::settings::models::ExecutionSettingsModel>()
                 .clone();
-            let approvals = cx
-                .global::<crate::chatty::models::ExecutionApprovalStore>()
-                .get_pending_approvals();
-            let clarifications = cx
-                .global::<crate::chatty::models::ClarificationStore>()
-                .get_pending_clarifications();
-            let write_approvals = cx
-                .global::<crate::chatty::models::WriteApprovalStore>()
-                .get_pending_approvals();
+            // The rebuilt agent keeps raising its requests on this
+            // conversation's own session stores (AGE-195).
+            let handles = cx
+                .global::<ConversationsStore>()
+                .get_session(&conv_id)
+                .map(|session| session.approval_handles());
             let conv = cx.global::<ConversationsStore>().get_conversation(&conv_id);
             if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
                 settings.workspace_dir = Some(
@@ -300,9 +307,9 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .cloned();
             (
                 Some(settings),
-                Some(approvals),
-                Some(clarifications),
-                Some(write_approvals),
+                handles.as_ref().map(|h| h.pending_approvals.clone()),
+                handles.as_ref().map(|h| h.pending_clarifications.clone()),
+                handles.as_ref().map(|h| h.pending_write_approvals.clone()),
                 artifacts,
                 session,
                 secrets,
@@ -367,7 +374,12 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     )
     .await?;
 
-    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+    cx.update_global::<ConversationsStore, _>(|store, cx| {
+        // The settings the tools were built with are the session's too.
+        let config = desktop_session_config(cx);
+        if let Some(session) = store.get_session_mut(&conv_id) {
+            session.set_config(config);
+        }
         if let Some(conv) = store.get_conversation_mut(&conv_id) {
             conv.set_agent(
                 std::sync::Arc::new(built_agent.client),
