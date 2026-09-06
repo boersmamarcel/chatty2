@@ -7,13 +7,13 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::models::token_usage::{TokenPricing, TokenUsage};
+use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
 use crate::chatty::models::{
-    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
-    StreamStatus,
+    Conversation, ConversationsStore, GlobalStreamManager, MessageEntry, MessageFeedback,
+    RegenerationRecord, StreamManagerEvent, StreamStatus,
 };
 use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::services::{AgentTaskSnapshot, generate_title, stream_prompt};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
@@ -370,7 +370,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     cx.update_global::<ConversationsStore, _>(|store, _cx| {
         if let Some(conv) = store.get_conversation_mut(&conv_id) {
             conv.set_agent(
-                built_agent.client,
+                std::sync::Arc::new(built_agent.client),
                 model_config.id.clone(),
                 built_workspace_dir.clone(),
             );
@@ -783,21 +783,65 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
     })
 }
 
+/// Cheap, cloneable snapshot of the `Conversation` fields `build_conversation_data`
+/// needs. Cloning this (entries included) is inexpensive relative to
+/// JSON-serializing it, so it can be captured synchronously on the UI thread
+/// and then moved into a spawned task that does the actual
+/// `serde_json::to_string` work off the UI thread (finding F3, AGE-220).
+struct ConversationSnapshot {
+    id: String,
+    title: String,
+    model_id: String,
+    entries: Vec<MessageEntry>,
+    token_usage: ConversationTokenUsage,
+    regeneration_records: Vec<RegenerationRecord>,
+    created_at: SystemTime,
+    working_dir: Option<PathBuf>,
+    agent_task_snapshot: Option<AgentTaskSnapshot>,
+}
+
+impl ConversationSnapshot {
+    fn from_conversation(conv: &Conversation) -> Self {
+        Self {
+            id: conv.id().to_string(),
+            title: conv.title().to_string(),
+            model_id: conv.model_id().to_string(),
+            entries: conv.entries().to_vec(),
+            token_usage: conv.token_usage().clone(),
+            regeneration_records: conv.regeneration_records().to_vec(),
+            created_at: conv.created_at(),
+            working_dir: conv.working_dir().cloned(),
+            agent_task_snapshot: conv.agent_task_snapshot().cloned(),
+        }
+    }
+}
+
 ///
 /// Sets `updated_at` to the current time; all other timestamps are taken from the
 /// conversation itself.
-fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
-    let history = match conv.serialize_history() {
+///
+/// Pure CPU work over an owned snapshot — no globals, no GPUI context — so
+/// it is safe to call from a spawned task, off the UI thread (finding F3,
+/// AGE-220).
+fn build_conversation_data(snapshot: &ConversationSnapshot) -> Option<ConversationData> {
+    let messages: Vec<&rig_core::completion::Message> =
+        snapshot.entries.iter().map(|e| &e.message).collect();
+    let history = match serde_json::to_string(&messages) {
         Ok(h) => h,
         Err(e) => {
-            error!(conv_id = %conv.id(), error = ?e, "Failed to serialize history in build_conversation_data");
+            error!(conv_id = %snapshot.id, error = ?e, "Failed to serialize history in build_conversation_data");
             return None;
         }
     };
-    let traces = match conv.serialize_traces() {
+    let traces: Vec<Option<&serde_json::Value>> = snapshot
+        .entries
+        .iter()
+        .map(|e| e.system_trace.as_ref())
+        .collect();
+    let traces = match serde_json::to_string(&traces) {
         Ok(t) => t,
         Err(e) => {
-            error!(conv_id = %conv.id(), error = ?e, "Failed to serialize traces in build_conversation_data");
+            error!(conv_id = %snapshot.id, error = ?e, "Failed to serialize traces in build_conversation_data");
             return None;
         }
     };
@@ -806,35 +850,51 @@ fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
         .unwrap_or_default()
         .as_secs() as i64;
 
+    let attachment_paths: Vec<&Vec<PathBuf>> = snapshot
+        .entries
+        .iter()
+        .map(|e| &e.attachment_paths)
+        .collect();
+    let message_timestamps: Vec<Option<i64>> =
+        snapshot.entries.iter().map(|e| e.timestamp).collect();
+    let message_feedback: Vec<Option<&MessageFeedback>> = snapshot
+        .entries
+        .iter()
+        .map(|e| e.feedback.as_ref())
+        .collect();
+
     Some(ConversationData {
-        id: conv.id().to_string(),
-        title: conv.title().to_string(),
-        model_id: conv.model_id().to_string(),
+        id: snapshot.id.clone(),
+        title: snapshot.title.clone(),
+        model_id: snapshot.model_id.clone(),
         message_history: history,
         system_traces: traces,
-        token_usage: conv
-            .serialize_token_usage()
+        token_usage: serde_json::to_string(&snapshot.token_usage)
             .unwrap_or_else(|_| "{}".to_string()),
-        attachment_paths: conv
-            .serialize_attachment_paths()
+        attachment_paths: serde_json::to_string(&attachment_paths)
             .unwrap_or_else(|_| "[]".to_string()),
-        message_timestamps: conv
-            .serialize_message_timestamps()
+        message_timestamps: serde_json::to_string(&message_timestamps)
             .unwrap_or_else(|_| "[]".to_string()),
-        message_feedback: conv
-            .serialize_message_feedback()
+        message_feedback: serde_json::to_string(&message_feedback)
             .unwrap_or_else(|_| "[]".to_string()),
-        regeneration_records: conv
-            .serialize_regeneration_records()
+        regeneration_records: serde_json::to_string(&snapshot.regeneration_records)
             .unwrap_or_else(|_| "[]".to_string()),
-        created_at: conv
-            .created_at()
+        created_at: snapshot
+            .created_at
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64,
         updated_at: now,
-        working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),
-        agent_task_snapshot: conv.serialize_agent_task_snapshot().unwrap_or(None),
+        working_dir: snapshot
+            .working_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        agent_task_snapshot: snapshot
+            .agent_task_snapshot
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .unwrap_or(None),
     })
 }
 

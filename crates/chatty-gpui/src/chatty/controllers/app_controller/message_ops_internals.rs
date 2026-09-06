@@ -15,7 +15,7 @@ use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 /// Parameters for the shared LLM stream processing.
 pub(super) struct LlmStreamParams {
     pub(super) conv_id: String,
-    pub(super) agent: AgentClient,
+    pub(super) agent: Arc<AgentClient>,
     pub(super) history: Vec<rig_core::completion::Message>,
     pub(super) user_contents: Vec<rig_core::message::UserContent>,
     /// Additional content sent to the LLM alongside `user_contents` but never
@@ -486,15 +486,18 @@ pub(super) async fn run_llm_stream(
     // whatever repaint follows the count completing (~1–10 ms later).
     {
         let user_message_text_for_budget = extract_user_message_text(&user_contents);
-        let history_for_budget = history.clone();
         let conv_id_for_budget = conv_id.clone();
 
+        // `history` is only borrowed here: `gather_snapshot_inputs` clones it
+        // (once) itself, and only on the success path, so a conversation or
+        // model lookup miss no longer wastes a full history clone (finding
+        // B1, AGE-219).
         let budget_inputs = cx
             .update(|cx| {
                 gather_snapshot_inputs(
                     &conv_id_for_budget,
                     user_message_text_for_budget,
-                    history_for_budget,
+                    &history,
                     cx,
                 )
             })

@@ -17,7 +17,7 @@ use chatty_core::models::clarification_store::ClarificationNotification;
 use crate::events::AppEvent;
 
 pub(super) struct StreamParams {
-    pub agent: AgentClient,
+    pub agent: Arc<AgentClient>,
     pub history: Vec<rig_core::completion::Message>,
     pub contents: Vec<UserContent>,
     pub cancel_flag: Arc<AtomicBool>,

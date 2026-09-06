@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
 
@@ -60,7 +61,7 @@ pub struct Conversation {
     id: String,
     title: String,
     model_id: String,
-    agent: AgentClient,
+    agent: Arc<AgentClient>,
     /// All messages with their metadata, in chronological order.
     entries: Vec<MessageEntry>,
     /// Regeneration records capturing original responses before replacement (DPO preference pairs)
@@ -136,7 +137,7 @@ impl Conversation {
             id,
             title,
             model_id: model_config.id.clone(),
-            agent: built.client,
+            agent: Arc::new(built.client),
             entries: Vec::new(),
             regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
@@ -248,7 +249,7 @@ impl Conversation {
             id: data.id,
             title: data.title,
             model_id: data.model_id,
-            agent: built.client,
+            agent: Arc::new(built.client),
             entries,
             regeneration_records,
             token_usage,
@@ -475,7 +476,6 @@ impl Conversation {
     }
 
     /// Get regeneration records for this conversation
-    #[allow(dead_code)]
     pub fn regeneration_records(&self) -> &[RegenerationRecord] {
         &self.regeneration_records
     }
@@ -586,9 +586,10 @@ impl Conversation {
         self.updated_at = SystemTime::now();
     }
 
-    /// Get the agent
-    pub fn agent(&self) -> &AgentClient {
-        &self.agent
+    /// Get the agent. Returns a cheap `Arc` clone rather than a deep copy of
+    /// rig's `AgentConfig` (finding B1, AGE-219).
+    pub fn agent(&self) -> Arc<AgentClient> {
+        self.agent.clone()
     }
 
     /// Get the pending artifacts handle for this conversation's tools
@@ -652,7 +653,7 @@ impl Conversation {
     /// Set the agent and model ID synchronously (for model switching without blocking)
     pub fn set_agent(
         &mut self,
-        agent: AgentClient,
+        agent: Arc<AgentClient>,
         model_id: String,
         agent_workspace_dir: Option<PathBuf>,
     ) {
