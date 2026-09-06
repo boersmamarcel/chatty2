@@ -2,8 +2,9 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
+use rig_agent::completion::PromptError;
 use rig_agent::streaming::StreamingPrompt;
-use rig_core::completion::Message;
+use rig_core::completion::{CompletionError, Message};
 use rig_core::message::UserContent;
 use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
 use tokio::sync::mpsc;
@@ -13,6 +14,7 @@ use crate::factories::AgentClient;
 use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::ApiCallUsage;
+use crate::services::stream_processor::{StreamError, StreamErrorKind};
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
@@ -55,7 +57,7 @@ pub enum StreamChunk {
     /// (see [`normalize_usage`]'s aggregate convention).
     TurnUsage(ApiCallUsage),
     Done,
-    Error(String),
+    Error(crate::services::stream_processor::StreamError),
 }
 
 /// How a provider reports cached prompt tokens relative to its input count.
@@ -251,6 +253,43 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
     }
 }
 
+/// Classify one of rig's typed completion errors into a [`StreamErrorKind`]
+/// (AGE-244 / D5), using the HTTP status the provider returned when there is
+/// one.
+fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
+    if let Some(status) = err.provider_response_status() {
+        return match status.as_u16() {
+            401 | 403 => StreamErrorKind::Auth,
+            429 => StreamErrorKind::RateLimited,
+            code => StreamErrorKind::ProviderStatus(code),
+        };
+    }
+    match err {
+        // A malformed tool call surfaces from rig as a JSON parse failure on
+        // the provider's response, not an HTTP status.
+        CompletionError::JsonError(_) => StreamErrorKind::MalformedToolCall,
+        _ => StreamErrorKind::Transport,
+    }
+}
+
+/// Classify rig's `StreamingError` (the only typed error `stream_prompt`
+/// ever sees) into a [`StreamErrorKind`] (AGE-244 / D5).
+fn classify_streaming_error(err: &StreamingError) -> StreamErrorKind {
+    match err {
+        StreamingError::Completion(e) => classify_completion_error(e),
+        StreamingError::Prompt(e) => match e.as_ref() {
+            PromptError::CompletionError(e) => classify_completion_error(e),
+            // The model called a tool that doesn't exist / isn't allowed, or
+            // exhausted its turn budget, or was cancelled: none of these are
+            // provider transport failures.
+            PromptError::UnknownToolCall { .. }
+            | PromptError::MaxTurnsError { .. }
+            | PromptError::PromptCancelled { .. }
+            | PromptError::MemoryError(_) => StreamErrorKind::Other,
+        },
+    }
+}
+
 /// Map one line of the agent's stream — an item, or the transport `Err` that
 /// ends it — into the chunks it produces, and whether the caller should stop
 /// reading further items.
@@ -260,7 +299,13 @@ fn map_stream_result(
 ) -> (Vec<StreamChunk>, bool) {
     match item {
         Ok(item) => (map_item(item, semantics), false),
-        Err(e) => (vec![StreamChunk::Error(e.to_string())], true),
+        Err(e) => {
+            let kind = classify_streaming_error(&e);
+            (
+                vec![StreamChunk::Error(StreamError::new(kind, e.to_string()))],
+                true,
+            )
+        }
     }
 }
 
@@ -381,9 +426,10 @@ mod tests {
     };
 
     use super::{
-        MultiTurnStreamItem, StreamChunk, StreamedAssistantContent, StreamedUserContent,
-        StreamingError, UsageSemantics, map_item, map_stream_result, normalize_usage,
-        streamed_tool_result_to_text, tool_result_looks_like_error,
+        Message, MultiTurnStreamItem, PromptError, StreamChunk, StreamErrorKind,
+        StreamedAssistantContent, StreamedUserContent, StreamingError, UsageSemantics,
+        classify_completion_error, classify_streaming_error, map_item, map_stream_result,
+        normalize_usage, streamed_tool_result_to_text, tool_result_looks_like_error,
     };
 
     /// Anthropic reports `input_tokens` without the cached share; OpenAI-style
@@ -612,7 +658,87 @@ mod tests {
         let err = StreamingError::Completion(CompletionError::ResponseError("boom".into()));
         let (chunks, stop) = map_stream_result(Err(err), UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
-        assert!(matches!(&chunks[0], StreamChunk::Error(e) if e.contains("boom")));
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Error(e) if e.message.contains("boom") && e.kind == StreamErrorKind::Transport
+        ));
         assert!(stop, "a transport error must stop the stream");
+    }
+
+    // -------------------------------------------------------------------
+    // Error classification (AGE-244 / D5): one rig error per kind maps
+    // correctly to a StreamErrorKind.
+    // -------------------------------------------------------------------
+
+    fn status_error(code: u16) -> CompletionError {
+        use rig_core::http_client;
+        CompletionError::HttpError(http_client::Error::InvalidStatusCode(
+            reqwest::StatusCode::from_u16(code).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn classifies_401_as_auth() {
+        assert_eq!(
+            classify_completion_error(&status_error(401)),
+            StreamErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn classifies_403_as_auth() {
+        assert_eq!(
+            classify_completion_error(&status_error(403)),
+            StreamErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn classifies_429_as_rate_limited() {
+        assert_eq!(
+            classify_completion_error(&status_error(429)),
+            StreamErrorKind::RateLimited
+        );
+    }
+
+    #[test]
+    fn classifies_5xx_as_provider_status() {
+        assert_eq!(
+            classify_completion_error(&status_error(503)),
+            StreamErrorKind::ProviderStatus(503)
+        );
+    }
+
+    #[test]
+    fn classifies_json_error_as_malformed_tool_call() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{not json").unwrap_err();
+        assert_eq!(
+            classify_completion_error(&CompletionError::JsonError(json_err)),
+            StreamErrorKind::MalformedToolCall
+        );
+    }
+
+    #[test]
+    fn classifies_response_error_with_no_status_as_transport() {
+        assert_eq!(
+            classify_completion_error(&CompletionError::ResponseError("boom".into())),
+            StreamErrorKind::Transport
+        );
+    }
+
+    #[test]
+    fn classifies_max_turns_as_other() {
+        let err = StreamingError::Prompt(Box::new(PromptError::MaxTurnsError {
+            max_turns: 10,
+            chat_history: Box::new(Vec::new()),
+            prompt: Box::new(Message::user("hi")),
+        }));
+        assert_eq!(classify_streaming_error(&err), StreamErrorKind::Other);
+    }
+
+    #[test]
+    fn classifies_prompt_completion_error_by_delegating() {
+        let err = StreamingError::Prompt(Box::new(PromptError::CompletionError(status_error(401))));
+        assert_eq!(classify_streaming_error(&err), StreamErrorKind::Auth);
     }
 }

@@ -202,9 +202,6 @@ async fn record(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String
         chat_view,
         stream_manager: Some(stream_manager.clone()),
         weak_ctrl: gpui::WeakEntity::new_invalid(),
-        // The plainest provider: no Azure refresh branch, no OpenRouter auth branch,
-        // so a `StreamChunk::Error` takes the ordinary path.
-        provider_type: chatty_core::settings::models::providers_store::ProviderType::Ollama,
         agent_task_controller: chatty_core::services::AgentTaskController::new(),
         loop_guard: chatty_core::services::AgentLoopGuard::new(10, false),
         cancel_flag: cancel_flag.clone(),

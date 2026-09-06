@@ -21,7 +21,9 @@ use chatty_core::models::message_types::{
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
-use chatty_core::services::{ContextShaperSettings, McpService, MemoryService, shape_context};
+use chatty_core::services::{
+    ContextShaperSettings, McpService, MemoryService, StreamError, StreamErrorKind, shape_context,
+};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -722,7 +724,10 @@ impl ChatEngine {
             .await;
 
             if let Err(e) = result {
-                let _ = event_tx.send(AppEvent::StreamError(e.to_string()));
+                let _ = event_tx.send(AppEvent::StreamError(StreamError::new(
+                    StreamErrorKind::Other,
+                    e.to_string(),
+                )));
             }
         });
     }

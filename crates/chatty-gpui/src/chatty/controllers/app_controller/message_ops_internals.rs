@@ -11,6 +11,9 @@ use super::*;
 // dispatch below is desktop-specific (AGE-192).
 use chatty_core::services::ChunkAction;
 use chatty_core::services::{FollowUpReason, follow_up_requires_cancel};
+use chatty_core::services::{
+    RecoveryAction, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+};
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Parameters for the shared LLM stream processing.
@@ -28,7 +31,6 @@ pub(super) struct LlmStreamParams {
     /// pass `false` so they keep the todo state of the turn they belong to.
     pub(super) reset_agent_task: bool,
     pub(super) attachment_paths: Vec<PathBuf>,
-    pub(super) provider_type: chatty_core::settings::models::providers_store::ProviderType,
     pub(super) chat_view: Entity<ChatView>,
     pub(super) stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     pub(super) cancel_flag: Arc<AtomicBool>,
@@ -61,7 +63,6 @@ pub(super) struct GpuiStreamHandler {
     chat_view: Entity<ChatView>,
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     weak_ctrl: gpui::WeakEntity<ChattyApp>,
-    provider_type: chatty_core::settings::models::providers_store::ProviderType,
     agent_task_controller: chatty_core::services::AgentTaskController,
     loop_guard: chatty_core::services::AgentLoopGuard,
     cancel_flag: Arc<AtomicBool>,
@@ -208,35 +209,56 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
                 return Ok(ChunkAction::Break);
             }
             Ok(StreamChunk::Error(ref err)) => {
-                error!(error = %err, conv_id = %self.conv_id, "Stream error");
+                error!(error = %err.message, kind = ?err.kind, conv_id = %self.conv_id, "Stream error");
 
-                // Detect authentication errors (401/Unauthorized)
-                if should_refresh_azure_auth(&self.provider_type, err) {
-                    tracing::warn!("Detected Azure auth error - token likely expired");
-                    if let Some(cache) = self
-                        .cx
-                        .update(|cx| {
-                            cx.try_global::<chatty_core::auth::AzureTokenCache>()
-                                .cloned()
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to read Azure token cache global"))
-                        .ok()
-                        .flatten()
-                    {
-                        if let Err(e) = cache.refresh_token().await {
-                            error!(error = ?e, "Failed to refresh Azure token after 401 error");
+                // Retry means "refresh (Azure) and retry the turn once" for
+                // Auth (AGE-244 / D5); this handler only owns the refresh
+                // half, since retrying the turn itself is a higher-level
+                // decision this trait's `on_chunk` contract can't make.
+                match decide_recovery(err.kind, StreamSurface::Desktop, 0) {
+                    RecoveryAction::Retry { .. } => {
+                        if let Some(cache) = self
+                            .cx
+                            .update(|cx| {
+                                cx.try_global::<chatty_core::auth::AzureTokenCache>()
+                                    .cloned()
+                            })
+                            .map_err(
+                                |e| warn!(error = ?e, "Failed to read Azure token cache global"),
+                            )
+                            .ok()
+                            .flatten()
+                        {
+                            tracing::warn!("Detected an auth error - refreshing the Azure token");
+                            if let Err(e) = cache.refresh_token().await {
+                                error!(error = ?e, "Failed to refresh Azure token after auth error");
+                            } else {
+                                tracing::info!("Azure token refreshed successfully.");
+                            }
                         } else {
-                            tracing::info!("Azure token refreshed successfully.");
+                            tracing::warn!(
+                                "Detected an authentication error - check the configured API key/header"
+                            );
                         }
                     }
-                } else if matches!(
-                    self.provider_type,
-                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter
-                ) && is_auth_stream_error(err)
-                {
-                    tracing::warn!(
-                        "Detected OpenRouter authentication error - check the configured API key/header"
-                    );
+                    RecoveryAction::Nudge => {
+                        // A truncated tool call is a model defect, not a dead
+                        // connection: hand the parse error back and let it
+                        // retry. The cap has to live in conversation history,
+                        // not in a field: the handler is rebuilt for every
+                        // injected follow-up, so a flag here would reset each
+                        // time and the retry would never terminate (AGE-150
+                        // Defect 2, easy to rebuild by accident).
+                        if self.pending_follow_up.is_none()
+                            && !already_asked_to_retry(&self.conv_id, &mut self.cx)
+                        {
+                            warn!(conv_id = %self.conv_id, error = %err.message,
+                                "Malformed tool-call JSON; asking the model to retry");
+                            self.pending_follow_up =
+                                Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
+                        }
+                    }
+                    RecoveryAction::Stop => {}
                 }
             }
             Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
@@ -302,28 +324,20 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
                 }
             }
             Err(e) => {
+                // This is the generic `ResponseStream` contract's transport
+                // `Err`, distinct from `Ok(StreamChunk::Error(_))` above: rig
+                // errors always arrive typed via the latter (`map_stream_result`
+                // in llm_service.rs), so in practice this arm is exercised only
+                // by test fixtures (`ScriptedItem::Failure`) that model a raw
+                // stream failure with no typed classification available.
                 let message = e.to_string();
-
-                // A truncated tool call is a model defect, not a dead
-                // connection: hand the parse error back and let it retry.
-                //
-                // The cap has to live in conversation history, not in a field:
-                // the handler is rebuilt for every injected follow-up, so a flag
-                // here would reset each time and the retry would never
-                // terminate. That is AGE-150 Defect 2, and it is easy to rebuild
-                // by accident.
-                if is_malformed_tool_call_error(&message)
-                    && self.pending_follow_up.is_none()
-                    && !already_asked_to_retry(&self.conv_id, &mut self.cx)
-                {
-                    warn!(conv_id = %self.conv_id, error = %message,
-                        "Malformed tool-call JSON; asking the model to retry");
-                    self.pending_follow_up = Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
-                }
 
                 // Keep the failed turn's tool calls in the transcript.
                 self.capture_trace_before_error();
-                self.forward(StreamChunk::Error(message));
+                self.forward(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Other,
+                    message,
+                )));
                 Ok(ChunkAction::Break)
             }
         }
@@ -447,7 +461,6 @@ pub(super) async fn run_llm_stream(
         add_user_message_to_model,
         reset_agent_task,
         attachment_paths,
-        provider_type,
         chat_view,
         stream_manager,
         cancel_flag,
@@ -639,7 +652,6 @@ pub(super) async fn run_llm_stream(
         chat_view: chat_view.clone(),
         stream_manager: stream_manager.clone(),
         weak_ctrl: weak_ctrl.clone(),
-        provider_type,
         agent_task_controller: agent_task_controller.clone(),
         loop_guard: chatty_core::services::AgentLoopGuard::new(max_agent_turns, false),
         cancel_flag: cancel_flag.clone(),
@@ -745,20 +757,6 @@ pub(super) async fn run_llm_stream(
     }
 
     Ok(())
-}
-
-pub(super) fn is_auth_stream_error(err: &str) -> bool {
-    err.contains("401") || err.contains("Unauthorized")
-}
-
-pub(super) fn should_refresh_azure_auth(
-    provider_type: &chatty_core::settings::models::providers_store::ProviderType,
-    err: &str,
-) -> bool {
-    matches!(
-        provider_type,
-        chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
-    ) && is_auth_stream_error(err)
 }
 
 fn is_agent_todo_tool(tool_name: &str) -> bool {
@@ -906,24 +904,12 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn azure_refresh_detection_is_provider_specific() {
-        use chatty_core::settings::models::providers_store::ProviderType;
-
-        let err = "ProviderError: Invalid status code 401 Unauthorized";
-        assert!(should_refresh_azure_auth(&ProviderType::AzureOpenAI, err));
-        assert!(!should_refresh_azure_auth(&ProviderType::OpenRouter, err));
-        assert!(!should_refresh_azure_auth(&ProviderType::Ollama, err));
-    }
-
-    #[test]
-    fn auth_stream_error_detects_common_401_text() {
-        assert!(is_auth_stream_error(
-            "Invalid status code 401 Unauthorized with message: missing auth"
-        ));
-        assert!(is_auth_stream_error("ProviderError: Unauthorized"));
-        assert!(!is_auth_stream_error("ProviderError: rate limited"));
-    }
+    // Auth-kind classification and its retry-once policy are now tested
+    // once in chatty-core (llm_service::tests::classifies_401_as_auth /
+    // classifies_403_as_auth, stream_processor::tests::auth_retries_once_then_stops,
+    // AGE-244 / D5) instead of here per-provider: the desktop no longer knows
+    // or cares which provider produced the error, only whether an
+    // AzureTokenCache global exists to refresh.
 
     #[test]
     fn select_attachments_returns_image_paths() {
@@ -1157,24 +1143,9 @@ fn already_asked_to_retry(conv_id: &str, cx: &mut AsyncApp) -> bool {
     .unwrap_or(false)
 }
 
-/// Whether a stream error is the provider handing us a tool call whose JSON
-/// arguments were truncated or otherwise unparseable.
-///
-/// This is a model output defect, not a transport failure: the right response
-/// is to tell the model what broke and let it retry, rather than ending the
-/// conversation on a dead stream.
-fn is_malformed_tool_call_error(error: &str) -> bool {
-    let error = error.to_lowercase();
-    error.contains("malformed json input")
-        || (error.contains("tool call") && error.contains("malformed"))
-}
-
 #[cfg(test)]
 mod stream_error_tests {
-    use super::{
-        FollowUpReason, MALFORMED_TOOL_CALL_FOLLOW_UP, follow_up_requires_cancel,
-        is_malformed_tool_call_error,
-    };
+    use super::{FollowUpReason, MALFORMED_TOOL_CALL_FOLLOW_UP, follow_up_requires_cancel};
 
     /// The retry is bounded by spotting this text in history, and hidden from
     /// the transcript by the same prefix. Both depend on chatty-core's matcher
@@ -1197,27 +1168,9 @@ mod stream_error_tests {
         assert!(text.contains("smaller steps"), "offers a way out");
     }
 
-    #[test]
-    fn detects_truncated_tool_call_arguments() {
-        assert!(is_malformed_tool_call_error(
-            "CompletionError: ResponseError: tool call `shell_execute` arrived with \
-             malformed JSON input: EOF while parsing a string at line 1 column 308"
-        ));
-    }
-
-    #[test]
-    fn ignores_transport_and_auth_failures() {
-        for other in [
-            "CompletionError: ProviderError: Http client error: error decoding response body",
-            "401 Unauthorized",
-            "SSE error: connection reset",
-        ] {
-            assert!(
-                !is_malformed_tool_call_error(other),
-                "{other} should not be treated as a malformed tool call"
-            );
-        }
-    }
+    // Malformed-tool-call classification now lives once in chatty-core
+    // (llm_service::tests::classifies_json_error_as_malformed_tool_call,
+    // AGE-244 / D5) instead of this string matcher.
 
     // -------------------------------------------------------------------
     // Follow-up cancellation policy (AGE-151)

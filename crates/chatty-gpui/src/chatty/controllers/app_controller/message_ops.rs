@@ -252,21 +252,17 @@ impl ChattyApp {
                 }
 
                 // Extract agent, history, and capabilities synchronously
-                let (agent, history, provider_type, provider_supports_pdf, provider_supports_images, assistant_att_paths, invoke_agent_progress_slot) = cx
+                let (agent, history, provider_supports_pdf, provider_supports_images, assistant_att_paths, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
 
                             // Get capabilities from ModelsModel
-                            let (provider_type, supports_pdf, supports_images) = cx
+                            let (supports_pdf, supports_images) = cx
                                 .global::<ModelsModel>()
                                 .get_model(&model_id)
-                                .map(|m| (m.provider_type.clone(), m.supports_pdf, m.supports_images))
-                                .unwrap_or((
-                                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
-                                    false,
-                                    false,
-                                )); // Safe fallback if model not found
+                                .map(|m| (m.supports_pdf, m.supports_images))
+                                .unwrap_or((false, false)); // Safe fallback if model not found
 
                             // Clear any leftover artifacts from a previous stream
                             if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
@@ -285,7 +281,6 @@ impl ChattyApp {
                             Ok((
                                 conv.agent(),
                                 conv.messages(),
-                                provider_type,
                                 supports_pdf,
                                 supports_images,
                                 assistant_att_paths,
@@ -350,7 +345,6 @@ impl ChattyApp {
                         add_user_message_to_model: true,
                         reset_agent_task: show_in_transcript,
                         attachment_paths: attachments,
-                        provider_type,
                         chat_view,
                         stream_manager,
                         cancel_flag: cancel_flag_for_loop,
@@ -1390,24 +1384,15 @@ impl ChattyApp {
                 .ok();
 
             // Extract agent and history (ends with the user message after removal)
-            let (agent, history, provider_type, invoke_agent_progress_slot) = cx
+            let (agent, history, invoke_agent_progress_slot) = cx
                 .update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation(&conv_id) {
-                        let model_id = conv.model_id().to_string();
-                        let provider_type = _cx
-                            .global::<ModelsModel>()
-                            .get_model(&model_id)
-                            .map(|m| m.provider_type.clone())
-                            .unwrap_or(
-                                chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
-                            );
                         if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                             artifacts.clear();
                         }
                         Ok((
                             conv.agent().clone(),
                             conv.messages(),
-                            provider_type,
                             conv.invoke_agent_progress_slot(),
                         ))
                     } else {
@@ -1423,9 +1408,7 @@ impl ChattyApp {
             }
             let history_context = history[..len - 1].to_vec();
             let user_contents = match &history[len - 1] {
-                rig_core::completion::Message::User { content, .. } => {
-                    content.to_vec()
-                }
+                rig_core::completion::Message::User { content, .. } => content.to_vec(),
                 _ => {
                     return Err(anyhow::anyhow!(
                         "Last message in history is not a user message"
@@ -1444,7 +1427,6 @@ impl ChattyApp {
                     add_user_message_to_model: false,
                     reset_agent_task: true,
                     attachment_paths: vec![],
-                    provider_type,
                     chat_view,
                     stream_manager,
                     cancel_flag: cancel_flag_for_loop,

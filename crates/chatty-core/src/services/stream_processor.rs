@@ -45,6 +45,139 @@ pub fn follow_up_requires_cancel(reason: FollowUpReason) -> bool {
     }
 }
 
+/// The kind of error that ended a stream, classified once from rig's typed
+/// error so frontends react on `kind` instead of sniffing message text
+/// (AGE-244 / D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamErrorKind {
+    /// The provider rejected credentials (HTTP 401/403).
+    Auth,
+    /// The provider rate-limited the request (HTTP 429).
+    RateLimited,
+    /// Any other non-2xx HTTP status the provider returned.
+    ProviderStatus(u16),
+    /// A connection-level failure with no HTTP status (timeout, reset, DNS, ...).
+    Transport,
+    /// The provider returned malformed JSON for a tool call.
+    MalformedToolCall,
+    /// The stall watchdog ended the turn (`STALL_TIMEOUT`).
+    Stalled,
+    /// The turn was cancelled by the user.
+    Cancelled,
+    /// Anything else (unknown tool call, max turns, memory error, ...).
+    Other,
+}
+
+/// A stream-ending error, classified once in core so every surface makes the
+/// same recovery decision from `kind` instead of matching on `message`
+/// (AGE-244 / D5). `message` stays around for display and logging.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamError {
+    pub kind: StreamErrorKind,
+    pub message: String,
+}
+
+impl StreamError {
+    pub fn new(kind: StreamErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Where a stream is running. The same `StreamErrorKind` is handled
+/// differently by surface (AGE-244 / D5's policy table): headless retries
+/// transport failures on a fixed schedule, interactive surfaces show the
+/// error and let the human decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamSurface {
+    Desktop,
+    InteractiveTui,
+    Headless,
+}
+
+/// What a surface should do about a stream-ending error of a given kind,
+/// decided once so the desktop, interactive TUI and headless runner can't
+/// drift (AGE-244 / D5).
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecoveryAction {
+    /// Retry after this delay. Surfaces without their own retry loop (the
+    /// desktop's Auth case today just refreshes the token for the *next*
+    /// request) may treat this as "attempt the local recovery action"
+    /// rather than literally re-running the turn.
+    Retry { after: std::time::Duration },
+    /// Inject a follow-up prompt instead of ending the turn.
+    Nudge,
+    /// End the turn; the surface presents the error as-is.
+    Stop,
+}
+
+/// Headless's existing retry budgets (`headless/recovery.rs`, pre-AGE-244),
+/// now the policy's parameters for that surface instead of being duplicated
+/// in `is_retryable_stream_error`/`recovery_attempt_limit_for_error`.
+pub const HEADLESS_TRANSPORT_RETRY_ATTEMPTS: usize = 5;
+pub const HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS: usize = 2;
+
+/// Decide what to do about a stream-ending error, per the D5 policy table.
+///
+/// `attempt` is how many recovery attempts have already been made for this
+/// same error kind on this turn (0 for the first occurrence).
+pub fn decide_recovery(
+    kind: StreamErrorKind,
+    surface: StreamSurface,
+    attempt: usize,
+) -> RecoveryAction {
+    match kind {
+        // Refresh (Azure) and retry the turn once, same on every surface.
+        StreamErrorKind::Auth => {
+            if attempt == 0 {
+                RecoveryAction::Retry {
+                    after: std::time::Duration::ZERO,
+                }
+            } else {
+                RecoveryAction::Stop
+            }
+        }
+        // Headless retries on a fixed schedule (today's behaviour); the
+        // desktop and interactive TUI show the error with no auto retry.
+        StreamErrorKind::RateLimited
+        | StreamErrorKind::ProviderStatus(_)
+        | StreamErrorKind::Transport => match surface {
+            StreamSurface::Headless if attempt < HEADLESS_TRANSPORT_RETRY_ATTEMPTS => {
+                RecoveryAction::Retry {
+                    after: std::time::Duration::from_secs(10 * (attempt as u64 + 1)),
+                }
+            }
+            _ => RecoveryAction::Stop,
+        },
+        // One protocol nudge, same on every surface; headless counts it
+        // against its own (smaller) recovery budget.
+        StreamErrorKind::MalformedToolCall => {
+            let limit = match surface {
+                StreamSurface::Headless => HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS,
+                StreamSurface::Desktop | StreamSurface::InteractiveTui => 1,
+            };
+            if attempt < limit {
+                RecoveryAction::Nudge
+            } else {
+                RecoveryAction::Stop
+            }
+        }
+        // Stalled: end the turn with the stall message (today). Cancelled:
+        // finalize per D4, handled outside this path. Other: surface as today.
+        StreamErrorKind::Stalled | StreamErrorKind::Cancelled | StreamErrorKind::Other => {
+            RecoveryAction::Stop
+        }
+    }
+}
+
 /// Trait for handling stream chunks and progress events.
 ///
 /// Both the GPUI and TUI frontends implement this trait to receive stream
@@ -158,9 +291,10 @@ pub async fn run_stream_loop(
                         "Stream produced nothing for too long; ending the turn as stalled"
                     );
                     if let Err(e) = handler
-                        .on_chunk(Ok(StreamChunk::Error(
-                            STALLED_STREAM_MESSAGE.to_string(),
-                        )))
+                        .on_chunk(Ok(StreamChunk::Error(StreamError::new(
+                            StreamErrorKind::Stalled,
+                            STALLED_STREAM_MESSAGE,
+                        ))))
                         .await
                     {
                         loop_result = Err(e);
@@ -567,5 +701,140 @@ mod tests {
             "progress must be drained before the turn ends, got {:?}",
             handler.calls
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Recovery policy (AGE-244 / D5): every kind x surface combination.
+    // -------------------------------------------------------------------
+
+    const ALL_KINDS: [StreamErrorKind; 7] = [
+        StreamErrorKind::Auth,
+        StreamErrorKind::RateLimited,
+        StreamErrorKind::ProviderStatus(503),
+        StreamErrorKind::Transport,
+        StreamErrorKind::MalformedToolCall,
+        StreamErrorKind::Stalled,
+        StreamErrorKind::Cancelled,
+    ];
+    const ALL_SURFACES: [StreamSurface; 3] = [
+        StreamSurface::Desktop,
+        StreamSurface::InteractiveTui,
+        StreamSurface::Headless,
+    ];
+
+    #[test]
+    fn policy_covers_every_kind_and_surface_without_panicking() {
+        for kind in ALL_KINDS {
+            for surface in ALL_SURFACES {
+                // Exhaustiveness is the point of this test: every combination
+                // must return *some* decision, not panic on an unhandled arm.
+                let _ = decide_recovery(kind, surface, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn auth_retries_once_then_stops() {
+        for surface in ALL_SURFACES {
+            assert!(matches!(
+                decide_recovery(StreamErrorKind::Auth, surface, 0),
+                RecoveryAction::Retry { .. }
+            ));
+            assert_eq!(
+                decide_recovery(StreamErrorKind::Auth, surface, 1),
+                RecoveryAction::Stop
+            );
+        }
+    }
+
+    #[test]
+    fn transport_class_retries_only_on_headless() {
+        for kind in [
+            StreamErrorKind::RateLimited,
+            StreamErrorKind::ProviderStatus(500),
+            StreamErrorKind::Transport,
+        ] {
+            assert_eq!(
+                decide_recovery(kind, StreamSurface::Desktop, 0),
+                RecoveryAction::Stop
+            );
+            assert_eq!(
+                decide_recovery(kind, StreamSurface::InteractiveTui, 0),
+                RecoveryAction::Stop
+            );
+            assert!(matches!(
+                decide_recovery(kind, StreamSurface::Headless, 0),
+                RecoveryAction::Retry { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn headless_transport_retry_stops_after_its_budget() {
+        let last_retry = HEADLESS_TRANSPORT_RETRY_ATTEMPTS - 1;
+        assert!(matches!(
+            decide_recovery(
+                StreamErrorKind::Transport,
+                StreamSurface::Headless,
+                last_retry
+            ),
+            RecoveryAction::Retry { .. }
+        ));
+        assert_eq!(
+            decide_recovery(
+                StreamErrorKind::Transport,
+                StreamSurface::Headless,
+                HEADLESS_TRANSPORT_RETRY_ATTEMPTS
+            ),
+            RecoveryAction::Stop
+        );
+    }
+
+    #[test]
+    fn malformed_tool_call_nudges_once_on_interactive_surfaces() {
+        for surface in [StreamSurface::Desktop, StreamSurface::InteractiveTui] {
+            assert_eq!(
+                decide_recovery(StreamErrorKind::MalformedToolCall, surface, 0),
+                RecoveryAction::Nudge
+            );
+            assert_eq!(
+                decide_recovery(StreamErrorKind::MalformedToolCall, surface, 1),
+                RecoveryAction::Stop
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_tool_call_uses_the_smaller_headless_budget() {
+        let last_retry = HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS - 1;
+        assert_eq!(
+            decide_recovery(
+                StreamErrorKind::MalformedToolCall,
+                StreamSurface::Headless,
+                last_retry
+            ),
+            RecoveryAction::Nudge
+        );
+        assert_eq!(
+            decide_recovery(
+                StreamErrorKind::MalformedToolCall,
+                StreamSurface::Headless,
+                HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS
+            ),
+            RecoveryAction::Stop
+        );
+    }
+
+    #[test]
+    fn stalled_cancelled_and_other_always_stop() {
+        for kind in [
+            StreamErrorKind::Stalled,
+            StreamErrorKind::Cancelled,
+            StreamErrorKind::Other,
+        ] {
+            for surface in ALL_SURFACES {
+                assert_eq!(decide_recovery(kind, surface, 0), RecoveryAction::Stop);
+            }
+        }
     }
 }

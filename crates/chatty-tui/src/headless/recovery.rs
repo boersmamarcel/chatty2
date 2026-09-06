@@ -2,39 +2,34 @@
 //!
 //! Pure functions that classify provider errors and tool-call outputs into
 //! "retry / give up / parse exit code" decisions used by the headless
-//! recovery loop in `mod.rs`.
+//! recovery loop in `mod.rs`. Stream-error classification is a thin adapter
+//! over the shared policy in `chatty_core::services::decide_recovery`
+//! (AGE-244) rather than text-sniffing the error message, since the message
+//! text is no longer the source of truth — the error already carries its
+//! classified `StreamErrorKind` from where it was produced.
+
+use chatty_core::services::{
+    HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_TRANSPORT_RETRY_ATTEMPTS, RecoveryAction,
+    StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+};
 
 use super::*;
 use crate::engine::{ToolCallInfo, ToolCallState};
 
-pub(super) fn is_retryable_stream_error(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    is_malformed_stream_json_error(&lowered)
-        || lowered.contains("server overloaded")
-        || lowered.contains("service unavailable")
-        || lowered.contains("internal server error")
-        || lowered.contains("invalid status code 500")
-        || lowered.contains("invalid status code 502")
-        || lowered.contains("invalid status code 503")
-        || lowered.contains("invalid status code 504")
-        || lowered.contains("http 500")
-        || lowered.contains("http 502")
-        || lowered.contains("http 503")
-        || lowered.contains("http 504")
+/// Whether the shared recovery policy ever retries this error's kind on the
+/// headless surface. The caller tracks its own attempt count separately and
+/// compares it against `recovery_attempt_limit_for_error`.
+pub(super) fn is_retryable_stream_error(error: &StreamError) -> bool {
+    !matches!(
+        decide_recovery(error.kind, StreamSurface::Headless, 0),
+        RecoveryAction::Stop
+    )
 }
 
-pub(super) fn is_malformed_stream_json_error(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("jsonerror")
-        || lowered.contains("eof while parsing")
-        || lowered.contains("failed to parse")
-}
-
-pub(super) fn recovery_attempt_limit_for_error(error: Option<&str>) -> usize {
-    if error.map(is_malformed_stream_json_error).unwrap_or(false) {
-        MAX_MALFORMED_JSON_RECOVERY_ATTEMPTS
-    } else {
-        MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+pub(super) fn recovery_attempt_limit_for_error(error: Option<&StreamError>) -> usize {
+    match error.map(|e| e.kind) {
+        Some(StreamErrorKind::MalformedToolCall) => HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS,
+        _ => HEADLESS_TRANSPORT_RETRY_ATTEMPTS,
     }
 }
 
