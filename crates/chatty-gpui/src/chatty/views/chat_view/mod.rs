@@ -66,7 +66,7 @@ use super::chat_input::{
     ChatInput, ChatInputState, ModelOption, PrStatusBarView, slash_menu_items_with_skills,
 };
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
-use super::message_types::SystemTrace;
+use super::message_types::{ApprovalState, ClarificationState, SystemTrace, TraceItem};
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
@@ -910,6 +910,38 @@ impl ChatView {
         let last = &mut self.messages[idx];
 
         last.live_trace = Some(trace.clone());
+
+        // The agent may be blocked on a request raised while this
+        // conversation was off screen: bring the floating bar / popover back
+        // for it, since `load_history` cleared them.
+        if let Some(conversation_id) = self.conversation_id.clone() {
+            for item in &trace.items {
+                match item {
+                    TraceItem::ApprovalPrompt(approval)
+                        if approval.state == ApprovalState::Pending =>
+                    {
+                        self.pending_approval = Some(PendingApprovalInfo {
+                            id: approval.id.clone(),
+                            command: approval.command.clone(),
+                            is_sandboxed: approval.is_sandboxed,
+                            conversation_id: conversation_id.clone(),
+                        });
+                    }
+                    TraceItem::ClarificationPrompt(clarification)
+                        if clarification.state == ClarificationState::Pending =>
+                    {
+                        self.clarification_inputs_dirty = true;
+                        self.pending_clarification = Some(PendingClarificationInfo {
+                            id: clarification.id.clone(),
+                            conversation_id: conversation_id.clone(),
+                            questions: clarification.questions.clone(),
+                            choices: HashMap::new(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         if trace.has_items() {
             let trace_view = cx.new(|_cx| SystemTraceView::new(trace));

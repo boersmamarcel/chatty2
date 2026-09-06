@@ -695,29 +695,9 @@ impl ChatView {
             let id = pending.id.clone();
 
             // The request was raised on the stores of the conversation whose
-            // agent is waiting (AGE-195): the execution store first (shell
-            // commands), then the write store (filesystem writes).
+            // agent is waiting (AGE-195), execution or write.
             if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>() {
-                use crate::chatty::models::execution_approval_store::ApprovalDecision;
-                use crate::chatty::models::write_approval_store::WriteApprovalDecision;
-                let resolved = store.resolve_execution_approval(
-                    &id,
-                    if approved {
-                        ApprovalDecision::Approved
-                    } else {
-                        ApprovalDecision::Denied
-                    },
-                );
-                if !resolved {
-                    store.resolve_write_approval(
-                        &id,
-                        if approved {
-                            WriteApprovalDecision::Approved
-                        } else {
-                            WriteApprovalDecision::Denied
-                        },
-                    );
-                }
+                store.resolve_approval(&id, approved);
             }
 
             // Immediately clear pending approval to hide the bar

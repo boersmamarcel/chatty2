@@ -199,6 +199,26 @@ impl ConversationsStore {
             .any(|s| s.execution_approvals().resolve(id, decision.clone()))
     }
 
+    /// Resolve an approval of either kind by request id: the execution
+    /// store first (shell commands), then the write store (filesystem
+    /// writes). The UI raises both through the same buttons.
+    pub fn resolve_approval(&self, id: &str, approved: bool) -> bool {
+        let decision = if approved {
+            ApprovalDecision::Approved
+        } else {
+            ApprovalDecision::Denied
+        };
+        if self.resolve_execution_approval(id, decision) {
+            return true;
+        }
+        let decision = if approved {
+            WriteApprovalDecision::Approved
+        } else {
+            WriteApprovalDecision::Denied
+        };
+        self.resolve_write_approval(id, decision)
+    }
+
     /// Resolve a filesystem write approval by request id; see
     /// [`resolve_execution_approval`](Self::resolve_execution_approval).
     pub fn resolve_write_approval(&self, id: &str, decision: WriteApprovalDecision) -> bool {
