@@ -665,7 +665,8 @@ where
     // a streaming markdown message would switch the container from "flex
     // column with a wrapped flex_col child" to "block with N direct
     // children", which produced a one-frame layout reflow that has been
-    // observed as overlapping rendering. See `docs/debug_ui.md`.
+    // observed as overlapping rendering. See the Debug how-to
+    // (`docs-site/src/dev/guides/debug.md`).
     let mut container = div()
         .max_w(relative(1.)) // Max 100% of container width
         .flex()

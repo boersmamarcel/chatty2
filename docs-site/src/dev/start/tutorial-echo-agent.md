@@ -176,4 +176,5 @@ all three gateway protocols.
 
 - Scaffold your own module: [`templates/module/`](https://github.com/boersmamarcel/chatty2/tree/main/templates/module)
 - Multi-turn LLM + tools loop: [Tutorial: benford-agent](./tutorial-benford-agent.md)
-- Architecture and gateway routes: [Build a WASM plugin](./build-wasm-module.md)
+- Quick start, project layout and testing: [Build a WASM plugin](../guides/build-wasm-module.md)
+- Gateway routes and the `invoke_agent` flow: [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md)

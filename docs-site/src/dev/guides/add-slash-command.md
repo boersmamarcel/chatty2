@@ -6,7 +6,7 @@ source_files:
   - crates/chatty-tui/src/engine/commands.rs
 related:
   - ./dev/reference/slash-commands.md
-  - ./dev/guides/add-tool.md
+  - ./dev/start/first-change.md
 ---
 
 # Add a slash command

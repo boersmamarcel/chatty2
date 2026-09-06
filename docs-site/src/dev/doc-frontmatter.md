@@ -3,7 +3,7 @@ audience: [contributor, agent]
 source_files:
   - scripts/check-docs-frontmatter.sh
 related:
-  - ./dev/doc-index.md
+  - ./dev/guides/contribute-docs.md
   - ./dev/agents.md
 ---
 
@@ -31,7 +31,9 @@ related:
 | `related` | no | List of related doc links or issue ids |
 
 Unknown keys fail the lint. Inline lists (`audience: [agent]`) and block
-lists (`- agent`) are both accepted.
+lists (`- agent`) are both accepted. Paths in `related` are written relative
+to `docs-site/src/` (for example `./dev/guides/test.md`), whatever directory
+the page itself lives in.
 
 ## Lint
 
@@ -41,7 +43,8 @@ make docs-check-frontmatter
 bash scripts/check-docs-frontmatter.sh
 ```
 
-CI runs the same script in `.github/workflows/docs.yml` (AGE-115). The
-checker walks `docs/`, `docs-site/src/`, `AGENTS.md`, and `CLAUDE.md`.
-Synced copies under `docs-site/src/dev/architecture/` inherit whatever
-the source file in `docs/` has.
+CI runs the same script in `.github/workflows/docs.yml`. The checker walks
+`docs/`, `docs-site/src/`, `AGENTS.md`, and `CLAUDE.md`. Synced copies under
+`docs-site/src/dev/architecture/` inherit whatever the source file in `docs/`
+has. How the frontmatter fits into the rest of the docs workflow is in
+[Contribute to the docs](./guides/contribute-docs.md).
