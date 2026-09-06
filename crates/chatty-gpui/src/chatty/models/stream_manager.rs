@@ -539,9 +539,6 @@ impl StreamManager {
     /// messages go to the conversation, not through here. Set the trace
     /// (`set_trace`) before passing `Error` or `TurnEnded`, as `run_llm_stream`
     /// does today: both drop the stream.
-    // Exercised by the adapter characterization until AGE-195 moves
-    // `run_llm_stream` onto it; a binary crate flags an unused method.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn handle_session_event(
         &mut self,
         conv_id: &str,

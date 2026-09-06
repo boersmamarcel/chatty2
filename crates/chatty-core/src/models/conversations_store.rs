@@ -267,31 +267,6 @@ impl ConversationsStore {
     pub fn clear_active(&mut self) {
         self.active_conversation_id = None;
     }
-
-    // ── Legacy helpers (kept for compatibility) ───────────────────────────────
-
-    /// List the N most recent conversations from the in-memory cache.
-    /// Prefer `list_recent_metadata()` for sidebar display.
-    ///
-    /// Uses O(n) average selection via `select_nth_unstable_by` to find the top-K
-    /// without sorting the entire collection, then sorts only the K results.
-    /// Overall complexity: O(n + K log K) instead of O(n log n).
-    #[allow(dead_code)]
-    pub fn list_recent(&self, limit: usize) -> Vec<&Conversation> {
-        let mut convs: Vec<&Conversation> = self
-            .sessions
-            .values()
-            .filter_map(|s| s.conversation())
-            .collect();
-        if convs.len() > limit {
-            convs.select_nth_unstable_by(limit, |a, b| {
-                b.updated_at().cmp(&a.updated_at()) // descending: largest first
-            });
-            convs.truncate(limit);
-        }
-        convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at()));
-        convs
-    }
 }
 
 impl Default for ConversationsStore {
