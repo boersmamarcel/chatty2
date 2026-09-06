@@ -29,7 +29,6 @@ use crate::engine::{ChatEngine, ToolCallState};
 use crate::events::AppEvent;
 
 const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;
-const MAX_MALFORMED_JSON_RECOVERY_ATTEMPTS: usize = 2;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
 const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 3;

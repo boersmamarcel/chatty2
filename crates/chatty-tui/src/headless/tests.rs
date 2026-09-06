@@ -62,14 +62,21 @@ fn keeps_plain_text_payload_lines() {
 }
 
 #[test]
-fn detects_retryable_json_errors() {
-    assert!(is_retryable_stream_error(
-        "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563"
-    ));
-    assert!(is_retryable_stream_error(
-        "CompletionError: HttpError: Invalid status code 503 Service Unavailable with message: server overloaded"
-    ));
-    assert!(!is_retryable_stream_error("network timeout"));
+fn stream_error_retry_follows_the_shared_policy() {
+    use chatty_core::services::{StreamError, StreamErrorKind};
+
+    assert!(is_retryable_stream_error(&StreamError::new(
+        StreamErrorKind::MalformedToolCall,
+        "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563",
+    )));
+    assert!(is_retryable_stream_error(&StreamError::new(
+        StreamErrorKind::ProviderStatus(503),
+        "CompletionError: HttpError: Invalid status code 503 Service Unavailable with message: server overloaded",
+    )));
+    assert!(!is_retryable_stream_error(&StreamError::new(
+        StreamErrorKind::Other,
+        "network timeout",
+    )));
 }
 
 #[test]

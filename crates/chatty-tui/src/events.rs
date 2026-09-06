@@ -2,7 +2,7 @@ use crossterm::event::Event as CrosstermEvent;
 
 use chatty_core::models::Conversation;
 use chatty_core::services::github_pr_service::PullRequestSummary;
-use chatty_core::services::{EmbeddingService, McpService, MemoryService};
+use chatty_core::services::{EmbeddingService, McpService, MemoryService, StreamError};
 
 /// Heavy services loaded in the background after the TUI is displayed.
 /// Delivered via `AppEvent::ServicesReady` so the engine can patch itself.
@@ -65,7 +65,7 @@ pub enum AppEvent {
     },
     StreamCompleted,
     StreamCancelled,
-    StreamError(String),
+    StreamError(StreamError),
     AgentProtocolFollowUp(String),
 
     // ── Lifecycle events ─────────────────────────────────────────────────

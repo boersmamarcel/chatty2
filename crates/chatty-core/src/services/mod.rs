@@ -88,7 +88,9 @@ pub use stream_fixtures::{
     Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
 };
 pub use stream_processor::{
-    ChunkAction, FollowUpReason, STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE,
-    StreamChunkHandler, follow_up_requires_cancel, install_progress_channel, run_stream_loop,
+    ChunkAction, FollowUpReason, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS,
+    HEADLESS_TRANSPORT_RETRY_ATTEMPTS, RecoveryAction, STALL_TICK, STALL_TIMEOUT,
+    STALLED_STREAM_MESSAGE, StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface,
+    decide_recovery, follow_up_requires_cancel, install_progress_channel, run_stream_loop,
 };
 pub use title_generator::generate_title;
