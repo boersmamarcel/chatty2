@@ -158,6 +158,10 @@ for readme in "$ROOT"/crates/*/README.md; do
     "s|](\.\./\.\./\([a-z]*\)/|](https://github.com/boersmamarcel/chatty2/tree/main/\1/|g" \
     "s|](\.\./\([a-z0-9-]*\)/src/|](https://github.com/boersmamarcel/chatty2/tree/main/crates/\1/src/|g" \
     "s|](src/|](https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/src/|g" \
+    "s|^\(\[[^]]*\]\): src/|\1: https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/src/|" \
+    "s|^\(\[[^]]*\]\): \./src/|\1: https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/src/|" \
+    "s|^\(\[[^]]*\]\): tests/|\1: https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/tests/|" \
+    "s|^\(\[[^]]*\]\): \.\./\([a-z0-9-]*\)/README\.md|\1: ./\2.md|" \
     "s|](\./src/|](https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/src/|g" \
     "s|](tests/|](https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/tests/|g" \
     "s|](examples/|](https://github.com/boersmamarcel/chatty2/tree/main/crates/$crate/examples/|g" \
