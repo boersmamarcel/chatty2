@@ -123,6 +123,19 @@ impl HeadlessRunner {
         self.spawn_turn(input);
     }
 
+    /// Re-prompt after a stream error. Shown like a user turn but not a
+    /// human one: the session's recovery budget resets only on those
+    /// (AGE-273).
+    pub fn send_recovery_prompt(&mut self, prompt: String) {
+        let Some(input) = self.prepare_send(prompt, true) else {
+            return;
+        };
+        self.spawn_turn(TurnInput {
+            kind: TurnKind::ProtocolFollowUp,
+            ..input
+        });
+    }
+
     /// Inject a protocol / loop-guard follow-up without a user row.
     fn send_protocol_follow_up(&mut self, prompt: String) {
         let Some(input) = self.prepare_send(prompt, false) else {

@@ -24,7 +24,7 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
-use chatty_core::services::AgentLoopGuard;
+use chatty_core::services::{AgentLoopGuard, RecoveryAction};
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -33,7 +33,7 @@ use crate::events::AppEvent;
 mod runner;
 pub use runner::HeadlessRunner;
 
-const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;
+const MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS: usize = 5;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
 const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 3;
@@ -58,7 +58,7 @@ pub async fn run_headless(
 
     // Collect response
     let mut response = String::new();
-    let mut recovery_attempts = 0usize;
+    let mut text_overflow_attempts = 0usize;
     let mut finalization_attempts = 0usize;
     let mut tool_results_since_finalization = 0usize;
     let mut failed_tool_results_since_finalization = 0usize;
@@ -74,8 +74,9 @@ pub async fn run_headless(
     let mut pending_compact_file_prompt: Option<String> = None;
     let mut pending_loop_pivot_prompt: Option<String> = None;
     let mut finalization_pending_after_cancel = false;
-    let mut recovery_pending_after_error = false;
-    let mut pending_recovery_attempt_limit = MAX_STREAM_ERROR_RECOVERY_ATTEMPTS;
+    // The session decides whether a stream error is retried and after how
+    // long (AGE-273); the delay is held here until the turn has ended.
+    let mut recovery_pending_after_error: Option<std::time::Duration> = None;
     let mut infer_missing_answer = should_infer_missing_answer(&message);
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.
@@ -287,37 +288,37 @@ pub async fn run_headless(
                     engine.send_message(pivot);
                     continue;
                 }
-                if recovery_pending_after_error {
-                    recovery_pending_after_error = false;
+                if let Some(delay) = recovery_pending_after_error.take() {
                     tool_results_since_finalization = 0;
                     failed_tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
                     failure_budget_stop_requested = false;
-                    let delay_secs = 10u64 * recovery_attempts as u64;
                     eprintln!(
-                        "Retrying after stream error ({}/{}) in {}s with a compact continuation prompt.",
-                        recovery_attempts, pending_recovery_attempt_limit, delay_secs
+                        "Retrying after stream error in {}s with a compact continuation prompt.",
+                        delay.as_secs()
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                    tokio::time::sleep(delay).await;
                     if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
-                        engine.send_message(build_compact_file_recovery_prompt(compact_prompt));
+                        engine.send_recovery_prompt(build_compact_file_recovery_prompt(
+                            compact_prompt,
+                        ));
                     } else {
-                        engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                        engine.send_recovery_prompt(STREAM_ERROR_RECOVERY_PROMPT.to_string());
                     }
                     continue;
                 }
                 if was_text_overflow {
                     // Model generated too much text without calling a tool (response completed naturally).
                     // Inject a focused action prompt to redirect toward a tool call.
-                    if recovery_attempts < MAX_STREAM_ERROR_RECOVERY_ATTEMPTS {
-                        recovery_attempts += 1;
+                    if text_overflow_attempts < MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS {
+                        text_overflow_attempts += 1;
                         tool_results_since_finalization = 0;
                         failed_tool_results_since_finalization = 0;
                         tool_budget_stop_requested = false;
                         failure_budget_stop_requested = false;
                         eprintln!(
                             "Text overflow (no tool call after 4KB): injecting action prompt ({}/{}).",
-                            recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                            text_overflow_attempts, MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS
                         );
                         engine.send_message(TEXT_OVERFLOW_RECOVERY_PROMPT.to_string());
                         continue;
@@ -387,11 +388,14 @@ pub async fn run_headless(
                     break;
                 }
 
-                let max_recovery_attempts = recovery_attempt_limit_for_error(Some(&error));
-                if is_retryable_stream_error(&error) && recovery_attempts < max_recovery_attempts {
-                    recovery_attempts += 1;
-                    pending_recovery_attempt_limit = max_recovery_attempts;
-                    recovery_pending_after_error = true;
+                let retry_after = match engine.session.recovery_action(&error) {
+                    RecoveryAction::Retry { after } => Some(after),
+                    // A protocol nudge: re-prompt right away.
+                    RecoveryAction::Nudge => Some(std::time::Duration::ZERO),
+                    RecoveryAction::Stop => None,
+                };
+                if let Some(after) = retry_after {
+                    recovery_pending_after_error = Some(after);
                     continue;
                 }
 
