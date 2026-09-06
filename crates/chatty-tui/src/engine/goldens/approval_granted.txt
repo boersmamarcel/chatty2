@@ -4,4 +4,3 @@ ApprovalRequested(id="approval-1", "rm -rf build", sandboxed=false)
 ApprovalResolved(id="approval-1", approved=true)
 ToolCallResult(id="call-1", "removed 'build'")
 StreamCompleted
-=> loop returned Ok

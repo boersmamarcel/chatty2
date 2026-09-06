@@ -57,12 +57,9 @@ pub enum AppEvent {
     /// arrives, so the last call's prompt size can stand in for the actual
     /// current context fill (AGE-223).
     ApiCallUsage(chatty_core::models::token_usage::ApiCallUsage),
-    TokenUsage {
-        input_tokens: u32,
-        output_tokens: u32,
-        cache_read_tokens: u32,
-        cache_write_tokens: u32,
-    },
+    /// The turn's usage, folded from its per-request records by the session
+    /// (the last call's prompt size is the actual context fill, AGE-223).
+    TokenUsage(chatty_core::models::token_usage::TokenUsage),
     /// rig's record of the turn's messages, persisted behind the final text
     /// when the stream completes (AGE-247).
     TurnMessages(Vec<rig_core::completion::Message>),
@@ -141,18 +138,7 @@ impl std::fmt::Debug for AppEvent {
                 .field("questions", &questions.len())
                 .finish(),
             Self::ApiCallUsage(call) => f.debug_tuple("ApiCallUsage").field(call).finish(),
-            Self::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => f
-                .debug_struct("TokenUsage")
-                .field("input_tokens", input_tokens)
-                .field("output_tokens", output_tokens)
-                .field("cache_read_tokens", cache_read_tokens)
-                .field("cache_write_tokens", cache_write_tokens)
-                .finish(),
+            Self::TokenUsage(usage) => f.debug_tuple("TokenUsage").field(usage).finish(),
             Self::TurnMessages(messages) => f
                 .debug_tuple("TurnMessages")
                 .field(&messages.len())
@@ -225,12 +211,7 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
                 AppEvent::ClarificationRequested { id, questions }
             }
             SessionEvent::ApiCallUsage(call) => AppEvent::ApiCallUsage(call),
-            SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-            },
+            SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage(usage),
             SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
             SessionEvent::SubAgent(progress) => match progress {
                 InvokeAgentProgress::Started {

@@ -163,6 +163,10 @@ async fn a_scripted_turn_runs_end_to_end_and_persists_its_reply() {
         .expect("has a conversation");
     assert!(matches!(outcome, TurnOutcome::Persisted));
     assert!(!session.is_turn_active());
+    assert!(
+        session.finish_turn(None, vec![]).is_none(),
+        "finishing the same turn twice commits once"
+    );
 
     let history = session.conversation().unwrap().messages();
     assert_eq!(history.len(), 2);
@@ -192,6 +196,49 @@ async fn usage_is_folded_from_per_call_records_and_recorded_on_finish() {
     session.finish_turn(None, vec![]);
     let conversation = session.conversation().unwrap();
     assert_eq!(conversation.token_usage().total_input_tokens, 234);
+    assert!(
+        session.last_turn_usage().is_none(),
+        "recorded once, on the turn it belongs to"
+    );
+}
+
+/// The todo protocol's other nudge: a plan whose todos are all done but
+/// never verified asks for `verify_completion` once the turn ends.
+#[tokio::test]
+async fn a_finished_plan_without_verification_is_nudged_after_the_turn() {
+    use crate::services::AgentTodoStatus;
+
+    let controller = AgentTaskController::new();
+    controller
+        .write_todos(
+            "Ship".into(),
+            vec![("t1".into(), "Implement".into(), "Implement change".into())],
+        )
+        .unwrap();
+    controller
+        .update_todo("t1".into(), AgentTodoStatus::Done, None, None)
+        .unwrap();
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let stream = crate::services::scripted_stream(scenario("text_only").items, cancel_flag.clone());
+    let events: Rc<RefCell<Vec<SessionEvent>>> = Rc::default();
+    let sink = events.clone();
+    drive(
+        stream,
+        Vec::new(),
+        controller,
+        cancel_flag,
+        Arc::new(parking_lot::Mutex::new(None)),
+        policy(),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .await;
+
+    let events = events.borrow();
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::FollowUp(prompt)) if prompt.contains("verify_completion")
+    ));
 }
 
 #[tokio::test]

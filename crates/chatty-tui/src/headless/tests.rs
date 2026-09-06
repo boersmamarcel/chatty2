@@ -270,6 +270,7 @@ mod deferred_send_after_cancel {
                 module_agents: Vec::new(),
                 is_sub_agent: false,
                 services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
             },
             event_tx,
         );
@@ -281,7 +282,7 @@ mod deferred_send_after_cancel {
             "llama3.2".to_string(),
         );
         let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
-        engine.conversation = Some(
+        engine.session.set_conversation(Some(
             Conversation::new(
                 "c1".to_string(),
                 "Test".to_string(),
@@ -311,7 +312,7 @@ mod deferred_send_after_cancel {
             )
             .await
             .expect("conversation should build without network access"),
-        );
+        ));
         engine.is_ready = true;
         engine
     }

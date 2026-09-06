@@ -195,7 +195,7 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
     fn on_stream_error(&mut self, error: &StreamError) {
         tracing::error!(error = %error.message, kind = ?error.kind, "Stream error");
         match decide_recovery(error.kind, self.surface, 0) {
-            RecoveryAction::Retry { .. } => {
+            RecoveryAction::Retry { .. } if error.kind == StreamErrorKind::Auth => {
                 // The Entra token is attached fresh to every request
                 // (AGE-245), so an auth rejection is a credential problem with
                 // nothing left for the turn to refresh.
@@ -203,6 +203,9 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
                     "Authentication rejected - check the configured API key/header, or the Entra ID credential (az login, managed identity or service principal)"
                 );
             }
+            // A transport retry is the surface's own loop (headless
+            // `recovery.rs`), driven from the `Error` event after the turn.
+            RecoveryAction::Retry { .. } => {}
             RecoveryAction::Nudge => {
                 // The cap lives in conversation history, not in a field: the
                 // handler is rebuilt for every injected follow-up, so a flag

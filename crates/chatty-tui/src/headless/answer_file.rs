@@ -123,7 +123,7 @@ pub(super) fn build_compact_file_answer_prompt(
 }
 
 pub(super) fn send_compact_file_answer_prompt(engine: &mut ChatEngine, prompt: String) {
-    if let Some(conversation) = engine.conversation.as_mut() {
+    if let Some(conversation) = engine.session.conversation_mut() {
         conversation.replace_history(Vec::new(), 0);
     }
     engine.send_message(prompt);
@@ -137,7 +137,7 @@ pub(super) fn build_compact_file_recovery_prompt(compact_prompt: &str) -> String
 
 pub(super) fn send_answer_file_finalization_prompt(engine: &mut ChatEngine, original_prompt: &str) {
     let prompt = build_answer_file_finalization_prompt(engine, original_prompt);
-    if let Some(conversation) = engine.conversation.as_mut() {
+    if let Some(conversation) = engine.session.conversation_mut() {
         conversation.replace_history(Vec::new(), 0);
     }
     engine.execution_settings.max_agent_turns = engine

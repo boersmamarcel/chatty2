@@ -355,6 +355,7 @@ async fn main() -> Result<()> {
                 module_agents: module_agents.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
             },
             event_tx,
         );
@@ -387,6 +388,7 @@ async fn main() -> Result<()> {
                 module_agents,
                 is_sub_agent: false,
                 services_loaded: false,
+                surface: chatty_core::services::StreamSurface::InteractiveTui,
             },
             event_tx.clone(),
         );

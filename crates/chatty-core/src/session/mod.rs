@@ -341,46 +341,81 @@ impl AgentSession {
 
     /// Fold the UI-agnostic part of an event into the session: streaming
     /// text, the turn's messages, the todo snapshot after a todo tool, and
-    /// usage. Display state is the caller's, after this.
+    /// usage. Display state is the caller's, after this. An owner whose
+    /// channel already carries its own event type calls the narrower
+    /// methods below instead.
     pub fn apply(&mut self, event: &SessionEvent) {
-        let Some(conversation) = self.conversation.as_mut() else {
-            return;
-        };
         match event {
-            SessionEvent::Text(text) => conversation.append_streaming_content(text),
-            SessionEvent::ToolCallStarted { id, name } => {
-                self.pending_tool_names.insert(id.clone(), name.clone());
-            }
+            SessionEvent::Text(text) => self.append_streaming_text(text),
+            SessionEvent::ToolCallStarted { id, name } => self.note_tool_started(id, name),
             SessionEvent::ToolCallResult { id, .. } | SessionEvent::ToolCallError { id, .. } => {
-                if let Some(name) = self.pending_tool_names.remove(id)
-                    && is_agent_todo_tool(&name)
-                {
-                    let snapshot = conversation.agent().task_controller().snapshot();
-                    conversation.set_agent_task_snapshot(Some(snapshot));
-                }
+                self.note_tool_finished(id)
             }
-            SessionEvent::TurnMessages(messages) => {
-                conversation.set_streaming_turn_messages(Some(messages.clone()));
-            }
-            SessionEvent::TokenUsage(usage) => {
-                self.last_turn_usage = Some(usage.clone());
-            }
+            SessionEvent::TurnMessages(messages) => self.set_turn_messages(messages.clone()),
+            SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
             _ => {}
         }
+    }
+
+    /// `SessionEvent::Text`: extend the reply in flight.
+    pub fn append_streaming_text(&mut self, text: &str) {
+        if let Some(conversation) = self.conversation.as_mut() {
+            conversation.append_streaming_content(text);
+        }
+    }
+
+    /// `SessionEvent::ToolCallStarted`: remember the tool's name, so its
+    /// result can be told apart from any other's.
+    pub fn note_tool_started(&mut self, id: &str, name: &str) {
+        self.pending_tool_names
+            .insert(id.to_string(), name.to_string());
+    }
+
+    /// `SessionEvent::ToolCallResult` / `ToolCallError`: after a todo tool,
+    /// take the agent's new todo snapshot onto the conversation.
+    pub fn note_tool_finished(&mut self, id: &str) {
+        let Some(name) = self.pending_tool_names.remove(id) else {
+            return;
+        };
+        if let Some(conversation) = self.conversation.as_mut()
+            && is_agent_todo_tool(&name)
+        {
+            let snapshot = conversation.agent().task_controller().snapshot();
+            conversation.set_agent_task_snapshot(Some(snapshot));
+        }
+    }
+
+    /// `SessionEvent::TurnMessages`: keep rig's record of the turn until
+    /// `finish_turn` persists it (AGE-247).
+    pub fn set_turn_messages(&mut self, messages: Vec<Message>) {
+        if let Some(conversation) = self.conversation.as_mut() {
+            conversation.set_streaming_turn_messages(Some(messages));
+        }
+    }
+
+    /// `SessionEvent::TokenUsage`: the turn's usage, recorded on the
+    /// conversation by `finish_turn`.
+    pub fn record_turn_usage(&mut self, usage: TokenUsage) {
+        self.last_turn_usage = Some(usage);
     }
 
     /// Commit the turn under the shared empty-turn rule (AGE-243 / D4) and
     /// clear per-turn state. `trace` and `artifacts` are the frontend's: the
     /// tool-call trace it rendered and the files `add_attachment` queued.
     ///
-    /// Returns `None` when there is no conversation. A `DroppedAndRolledBack`
-    /// outcome carries the text of the user message that was rolled back, for
-    /// the caller to put back into its composer.
+    /// Returns `None` when there is no conversation or no turn to finish: a
+    /// second call for the same turn is a no-op, so an owner that finalizes
+    /// on both `Cancelled` and `TurnEnded` commits once. A
+    /// `DroppedAndRolledBack` outcome carries the text of the user message
+    /// that was rolled back, for the caller to put back into its composer.
     pub fn finish_turn(
         &mut self,
         trace: Option<serde_json::Value>,
         artifacts: Vec<PathBuf>,
     ) -> Option<TurnOutcome> {
+        if !self.is_turn_active() {
+            return None;
+        }
         self.cancel_flag = None;
         self.pending_tool_names.clear();
         // Unblock any `ask_user` still waiting, so a cancelled turn cannot
@@ -395,7 +430,7 @@ impl AgentSession {
         let outcome = conversation.finalize_turn(response, artifacts, trace);
         conversation.set_streaming_message(None);
 
-        if let Some(usage) = self.last_turn_usage.clone() {
+        if let Some(usage) = self.last_turn_usage.take() {
             conversation.add_token_usage(usage);
         }
 
