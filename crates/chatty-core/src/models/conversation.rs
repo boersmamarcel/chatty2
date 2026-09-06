@@ -478,7 +478,6 @@ impl Conversation {
     }
 
     /// Get regeneration records for this conversation
-    #[allow(dead_code)]
     pub fn regeneration_records(&self) -> &[RegenerationRecord] {
         &self.regeneration_records
     }

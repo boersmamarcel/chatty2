@@ -1164,26 +1164,19 @@ impl ChattyApp {
             .detach();
         }
 
-        // 6. Persist to disk
-        self.persist_conversation(&conv_id, cx);
-
-        // 7. Auto-export ATIF if enabled in training settings
-        if cx
+        // 6-8. Persist to disk, and — if enabled in training settings — write
+        // the ATIF / JSONL auto-exports from the same ConversationData built
+        // for the save, instead of rebuilding it per export (finding F3,
+        // AGE-220).
+        let export_atif = cx
             .try_global::<TrainingSettingsModel>()
             .map(|s| s.atif_auto_export)
-            .unwrap_or(false)
-        {
-            self.export_conversation_atif(&conv_id, cx);
-        }
-
-        // 8. Auto-export JSONL (SFT + DPO) if enabled in training settings
-        if cx
+            .unwrap_or(false);
+        let export_jsonl = cx
             .try_global::<TrainingSettingsModel>()
             .map(|s| s.jsonl_auto_export)
-            .unwrap_or(false)
-        {
-            self.export_conversation_jsonl(&conv_id, cx);
-        }
+            .unwrap_or(false);
+        self.persist_and_export_conversation(&conv_id, export_atif, export_jsonl, cx);
     }
 
     /// Handle the finalization of a stopped stream (partial response saving).

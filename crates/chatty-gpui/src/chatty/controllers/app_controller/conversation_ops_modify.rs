@@ -14,6 +14,7 @@
 //! - Conversation creation / loading / restore — `conversation_ops.rs`.
 //! - The persistence layer itself — `chatty_core::repositories::conversation_*`.
 
+use super::export_ops::{write_atif_export, write_jsonl_export};
 use super::*;
 
 impl ChattyApp {
@@ -484,26 +485,63 @@ impl ChattyApp {
     /// Persist a conversation to disk asynchronously.
     /// Also updates the metadata store so the sidebar reflects the latest title and cost.
     pub(super) fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
+        self.persist_and_export_conversation(conv_id, false, false, cx);
+    }
+
+    /// Persist a conversation to disk asynchronously, optionally also writing
+    /// the ATIF / JSONL training exports from the same `ConversationData` —
+    /// built once, off the UI thread, and reused for the save and each
+    /// requested export instead of re-serializing per consumer (finding F3,
+    /// AGE-220).
+    pub(super) fn persist_and_export_conversation(
+        &self,
+        conv_id: &str,
+        export_atif: bool,
+        export_jsonl: bool,
+        cx: &mut Context<Self>,
+    ) {
         let conv_id = conv_id.to_string();
         let repo = self.conversation_repo.clone();
 
-        let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+        // Cheap clone of the fields build_conversation_data needs — the
+        // actual serde_json::to_string work happens in the spawned task
+        // below, off the UI thread.
+        let snapshot = cx.update_global::<ConversationsStore, _>(|store, _cx| {
             store
                 .get_conversation(&conv_id)
-                .and_then(build_conversation_data)
+                .map(ConversationSnapshot::from_conversation)
         });
 
-        if let Some(conv_data) = conv_data_opt {
-            // Update metadata so title and cost changes are reflected in the sidebar
-            let total_cost = conv_data.total_cost();
-            cx.update_global::<ConversationsStore, _>(|store, _| {
-                store.upsert_metadata(
-                    &conv_data.id,
-                    &conv_data.title,
-                    total_cost,
-                    conv_data.updated_at,
-                );
-            });
+        let Some(snapshot) = snapshot else {
+            error!(conv_id = %conv_id, "Conversation not found for persistence");
+            return;
+        };
+
+        // Update metadata immediately from typed fields so the sidebar
+        // reflects title/cost right away, without waiting on the deferred
+        // serialization below.
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let total_cost = snapshot.token_usage.total_estimated_cost_usd;
+        cx.update_global::<ConversationsStore, _>(|store, _| {
+            store.upsert_metadata(&snapshot.id, &snapshot.title, total_cost, now);
+        });
+
+        let model_config: Option<ModelConfig> = if export_atif || export_jsonl {
+            cx.global::<ModelsModel>()
+                .get_model(&snapshot.model_id)
+                .cloned()
+        } else {
+            None
+        };
+
+        cx.spawn(async move |_, _cx| {
+            let Some(conv_data) = build_conversation_data(&snapshot) else {
+                error!(conv_id = %conv_id, "Failed to build conversation data for persistence (serialization failed)");
+                return Ok::<_, anyhow::Error>(());
+            };
 
             debug!(
                 conv_id = %conv_id,
@@ -512,18 +550,21 @@ impl ChattyApp {
                 "Persisting conversation data"
             );
 
-            let conv_id_for_save = conv_id.clone();
-            cx.spawn(async move |_, _cx| {
-                if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
-                    warn!(error = ?e, conv_id = %conv_id_for_save, "Failed to save conversation to disk");
-                } else {
-                    debug!(conv_id = %conv_id_for_save, "Conversation saved to disk");
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .detach();
-        } else {
-            error!(conv_id = %conv_id, "Failed to build conversation data for persistence (serialization failed)");
-        }
+            if let Err(e) = repo.save(&conv_id, conv_data.clone()).await {
+                warn!(error = ?e, conv_id = %conv_id, "Failed to save conversation to disk");
+            } else {
+                debug!(conv_id = %conv_id, "Conversation saved to disk");
+            }
+
+            if export_atif {
+                write_atif_export(&conv_id, &conv_data, model_config.as_ref()).await;
+            }
+            if export_jsonl {
+                write_jsonl_export(&conv_id, &conv_data, model_config.as_ref()).await;
+            }
+
+            Ok(())
+        })
+        .detach();
     }
 }
