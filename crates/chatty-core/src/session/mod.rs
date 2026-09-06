@@ -412,14 +412,12 @@ impl AgentSession {
         } else {
             contents
         };
-        let already_asked_to_retry = history
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                Message::User { content } => Some(extract_user_text(content)),
-                _ => None,
-            })
-            .is_some_and(|text| text.trim_start().starts_with(MALFORMED_TOOL_CALL_FOLLOW_UP));
+        // The retry is bounded by the message being sent, not the snapshot:
+        // the nudge turn carries the follow-up text itself, and the handler
+        // must not nudge a second time on it.
+        let already_asked_to_retry = extract_user_text(&contents)
+            .trim_start()
+            .starts_with(MALFORMED_TOOL_CALL_FOLLOW_UP);
 
         let mut llm_contents = contents.clone();
         llm_contents.extend(llm_only_contents);

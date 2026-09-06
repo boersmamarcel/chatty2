@@ -528,6 +528,42 @@ async fn a_malformed_tool_call_is_retried_once() {
     );
 }
 
+/// The bound holds through `prepare_turn`: the nudge turn is the one that
+/// carries the follow-up text, so it is the one that must not nudge again.
+#[tokio::test]
+async fn the_retry_turn_itself_does_not_nudge_again() {
+    let malformed = || Scenario {
+        name: "malformed_tool_call",
+        progress: Vec::new(),
+        items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+            StreamErrorKind::MalformedToolCall,
+            "invalid JSON",
+        )))],
+    };
+    let mut session = session_with_conversation().await;
+
+    let first = run_turn(&mut session, TurnInput::text("do it"), malformed()).await;
+    let nudge = first.iter().find_map(|e| match e {
+        SessionEvent::FollowUp(prompt) => Some(prompt.clone()),
+        _ => None,
+    });
+    assert_eq!(nudge.as_deref(), Some(MALFORMED_TOOL_CALL_FOLLOW_UP));
+    session.finish_turn(None, vec![]);
+
+    let retried = run_turn(
+        &mut session,
+        TurnInput::protocol_follow_up(nudge.unwrap()),
+        malformed(),
+    )
+    .await;
+    assert!(
+        !retried
+            .iter()
+            .any(|e| matches!(e, SessionEvent::FollowUp(_))),
+        "the retry turn is the last one"
+    );
+}
+
 /// The retry is bounded by spotting this text in history, and hidden from
 /// the transcript by the same prefix. Both depend on the matcher recognising
 /// it — if the text drifts, the retry silently becomes unbounded and visible
