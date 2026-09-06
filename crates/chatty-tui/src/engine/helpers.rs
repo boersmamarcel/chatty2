@@ -109,7 +109,9 @@ pub(super) fn run_sub_agent_process(
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                if chatty_core::tools::is_chatty_progress_line(&line) {
+                // Machine lines are the parent tool's; the row shows the
+                // child's human-readable log.
+                if chatty_core::tools::is_chatty_event_line(&line) {
                     continue;
                 }
                 let _ = event_tx.send(AppEvent::SubAgentProgress(line));
@@ -132,6 +134,35 @@ pub(super) fn run_sub_agent_process(
             "exit code {:?}: sub-agent process failed",
             output.status.code()
         )
+    }
+}
+
+/// The transcript line for a sub-agent progress event.
+pub(crate) fn sub_agent_line(
+    progress: &chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+) -> String {
+    use chatty_core::models::message_types::ToolSource;
+    use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+    match progress {
+        InvokeAgentProgress::Started {
+            agent_name,
+            prompt,
+            source,
+        } => {
+            let mode = match source {
+                ToolSource::Local => "local",
+                _ => "remote",
+            };
+            format!("[{mode} agent: {agent_name}] {prompt}")
+        }
+        InvokeAgentProgress::Text(text) => text.clone(),
+        InvokeAgentProgress::Finished { success, result } => result.clone().unwrap_or_else(|| {
+            if *success {
+                "Agent completed.".to_string()
+            } else {
+                "Agent failed.".to_string()
+            }
+        }),
     }
 }
 

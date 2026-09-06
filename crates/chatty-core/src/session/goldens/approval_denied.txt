@@ -1,6 +1,6 @@
-StreamStarted
+TurnStarted
 ToolCallStarted(id="call-1", "run_shell")
 ApprovalRequested(id="approval-1", "rm -rf build", sandboxed=false)
 ApprovalResolved(id="approval-1", approved=false)
 ToolCallError(id="call-1", "Error: run_shell: the user denied this command")
-StreamCompleted
+TurnEnded

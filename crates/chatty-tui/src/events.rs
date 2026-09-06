@@ -57,12 +57,9 @@ pub enum AppEvent {
     /// arrives, so the last call's prompt size can stand in for the actual
     /// current context fill (AGE-223).
     ApiCallUsage(chatty_core::models::token_usage::ApiCallUsage),
-    TokenUsage {
-        input_tokens: u32,
-        output_tokens: u32,
-        cache_read_tokens: u32,
-        cache_write_tokens: u32,
-    },
+    /// The turn's usage, folded from its per-request records by the session
+    /// (the last call's prompt size is the actual context fill, AGE-223).
+    TokenUsage(chatty_core::models::token_usage::TokenUsage),
     /// rig's record of the turn's messages, persisted behind the final text
     /// when the stream completes (AGE-247).
     TurnMessages(Vec<rig_core::completion::Message>),
@@ -89,6 +86,9 @@ pub enum AppEvent {
     TitleGenerated(String),
     SubAgentProgress(String),
     SubAgentFinished(String),
+    /// A turn's sub-agent progress, typed: the session records it in the
+    /// trace and the transcript renders it as a line (AGE-274).
+    SubAgent(chatty_core::tools::invoke_agent_tool::InvokeAgentProgress),
 
     // ── Terminal events ──────────────────────────────────────────────────
     TerminalInput(CrosstermEvent),
@@ -141,18 +141,7 @@ impl std::fmt::Debug for AppEvent {
                 .field("questions", &questions.len())
                 .finish(),
             Self::ApiCallUsage(call) => f.debug_tuple("ApiCallUsage").field(call).finish(),
-            Self::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => f
-                .debug_struct("TokenUsage")
-                .field("input_tokens", input_tokens)
-                .field("output_tokens", output_tokens)
-                .field("cache_read_tokens", cache_read_tokens)
-                .field("cache_write_tokens", cache_write_tokens)
-                .finish(),
+            Self::TokenUsage(usage) => f.debug_tuple("TokenUsage").field(usage).finish(),
             Self::TurnMessages(messages) => f
                 .debug_tuple("TurnMessages")
                 .field(&messages.len())
@@ -179,8 +168,59 @@ impl std::fmt::Debug for AppEvent {
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
             Self::SubAgentProgress(s) => f.debug_tuple("SubAgentProgress").field(s).finish(),
             Self::SubAgentFinished(s) => f.debug_tuple("SubAgentFinished").field(s).finish(),
+            Self::SubAgent(p) => f.debug_tuple("SubAgent").field(p).finish(),
             Self::TerminalInput(e) => f.debug_tuple("TerminalInput").field(e).finish(),
             Self::Tick => write!(f, "Tick"),
+        }
+    }
+}
+
+/// The TUI's binding to chatty-core's turn contract (AGE-194): every
+/// [`SessionEvent`](chatty_core::session::SessionEvent) maps onto exactly
+/// one stream `AppEvent`, so the engine's event handling is unchanged by
+/// where the turn runs.
+///
+/// One deliberate reconciliation with the pre-session TUI: a transport
+/// failure mid-stream arrives as `StreamError` *before* `StreamCompleted`,
+/// rather than as an `Err` the spawning task turned into a `StreamError`
+/// *after* it. The sequence is the desktop's, and the one a frontend can act
+/// on in order.
+impl From<chatty_core::session::SessionEvent> for AppEvent {
+    fn from(event: chatty_core::session::SessionEvent) -> Self {
+        use chatty_core::session::SessionEvent;
+
+        match event {
+            SessionEvent::TurnStarted => AppEvent::StreamStarted,
+            SessionEvent::Text(text) => AppEvent::TextChunk(text),
+            SessionEvent::ToolCallStarted { id, name } => AppEvent::ToolCallStarted { id, name },
+            SessionEvent::ToolCallInput { id, arguments } => {
+                AppEvent::ToolCallInput { id, arguments }
+            }
+            SessionEvent::ToolCallResult { id, result } => AppEvent::ToolCallResult { id, result },
+            SessionEvent::ToolCallError { id, error } => AppEvent::ToolCallError { id, error },
+            SessionEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            } => AppEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            },
+            SessionEvent::ApprovalResolved { id, approved } => {
+                AppEvent::ApprovalResolved { id, approved }
+            }
+            SessionEvent::ClarificationRequested { id, questions } => {
+                AppEvent::ClarificationRequested { id, questions }
+            }
+            SessionEvent::ApiCallUsage(call) => AppEvent::ApiCallUsage(call),
+            SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage(usage),
+            SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
+            SessionEvent::SubAgent(progress) => AppEvent::SubAgent(progress),
+            SessionEvent::Error(error) => AppEvent::StreamError(error),
+            SessionEvent::Cancelled => AppEvent::StreamCancelled,
+            SessionEvent::TurnEnded => AppEvent::StreamCompleted,
+            SessionEvent::FollowUp(prompt) => AppEvent::AgentProtocolFollowUp(prompt),
         }
     }
 }

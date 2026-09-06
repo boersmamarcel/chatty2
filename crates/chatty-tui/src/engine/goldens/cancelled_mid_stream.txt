@@ -3,4 +3,3 @@ TextChunk("Working on ")
 TextChunk("it")
 StreamCancelled
 StreamCompleted
-=> loop returned Ok

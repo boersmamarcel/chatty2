@@ -1,48 +1,33 @@
-//! Characterization of the desktop send path (AGE-191).
+//! Characterization of the desktop send path (AGE-191, reparented in AGE-195).
 //!
-//! Drives the real [`GpuiStreamHandler`] through chatty-core's `run_stream_loop`
-//! against the scripted scenarios in `chatty_core::services::stream_fixtures`,
-//! and records the resulting [`StreamManagerEvent`] sequence as a golden file.
+//! The desktop's turn is chatty-core's `AgentSession`; what the UI sees is
+//! its `SessionEvent` stream through `StreamManager::handle_session_event`.
+//! This replays the scripted scenarios in
+//! `chatty_core::services::stream_fixtures` through exactly that path and
+//! records the resulting [`StreamManagerEvent`] sequence as a golden file —
+//! the contract a change to the turn must not alter by accident. A
+//! deliberate change is made by re-running with `UPDATE_GOLDENS=1` and
+//! explaining the diff in review.
 //!
-//! This is the desktop counterpart to `chatty-tui`'s
-//! `engine/streaming_characterization.rs`, and both script from the same
-//! fixtures: a divergence between the two frontends shows up as a difference
-//! between two golden directories rather than as behaviour nobody notices.
-//!
-//! The handler talks to real entities — a `ChatView` in a headless test window,
-//! a live `StreamManager` — so what is recorded is what the UI would actually
-//! receive. The controller handle is deliberately invalid: `run_llm_stream`
-//! holds a `WeakEntity<ChattyApp>` that can already be gone by the time a
-//! background turn finishes, and every use of it in the handler is best-effort.
+//! The matching TUI goldens live in `crates/chatty-tui/src/engine/goldens/`,
+//! and both frontends script from the same fixtures.
 //!
 //! # What these goldens cover, and what they do not
 //!
 //! Covered: the `StreamManagerEvent` stream, which is what the transcript UI
-//! subscribes to — every chunk's mapping, text batching, the API turn counter,
-//! the terminal `StreamEnded` and the follow-up the handler queues.
+//! subscribes to — every event's mapping, text batching, the terminal
+//! `StreamEnded` and the follow-up the session queues.
 //!
 //! Not covered:
 //!
 //! * **Sub-agent progress.** The desktop routes it to `ConversationsStore` and
 //!   `ChatView` rather than through `StreamManager`, so none of it appears
-//!   here — `sub_agent_progress.txt` records only that scenario's chunks. The
-//!   store holds no conversation under the test's id, so those writes are
-//!   no-ops. Catching a regression in `on_progress` needs a real `Conversation`
-//!   in the store, which needs a model and provider config; worth doing, not
-//!   done here.
+//!   here — `sub_agent_progress.txt` records only that scenario's chunks.
 //! * **User-pressed Stop.** `cancelled_mid_stream` sets the cancel flag
-//!   directly, which is the loop-guard and todo-protocol path. A user Stop goes
-//!   through `StreamManager::stop_stream`, which reports the turn differently —
-//!   that flag-only path is why this golden ends `Completed` rather than
-//!   `Cancelled`.
-//!
-//! # A divergence these pin
-//!
-//! `provider_error_mid_stream` ends differently in the two frontends: the
-//! desktop converts a transport `Err` into a `StreamChunk::Error`, emits
-//! `StreamEnded(Error)` and returns `Ok` from the loop, while the TUI lets the
-//! `?` propagate and the loop returns `Err` with no terminal event at all.
-//! Recorded as-is; reconciling them is a later phase's decision.
+//!   directly, which is the loop-guard and todo-protocol path. A user Stop
+//!   goes through `StreamManager::stop_stream`, which reports the turn
+//!   differently — that flag-only path is why this golden ends `Completed`
+//!   rather than `Cancelled`.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -50,9 +35,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use chatty_core::services::{
-    Scenario, assert_golden, clarification_scenario, run_stream_loop, scenarios, scripted_stream,
-};
+use chatty_core::services::{Scenario, assert_golden, clarification_scenario, scenarios};
 
 // Brings `ChatView`, `ConversationsStore`, `ExecutionSettingsModel` and gpui's
 // `AppContext` into scope, the same way `message_ops_internals` gets them.
@@ -132,37 +115,15 @@ fn describe(event: &StreamManagerEvent) -> String {
     }
 }
 
-/// Run one scenario through the real handler and return the events the UI saw.
+/// Run one scenario through chatty-core's session handler and
+/// `StreamManager::handle_session_event`, recording what the UI would see.
+///
+/// This is `run_llm_stream`'s path: the manager keeps the lifecycle
+/// (registration, text batching, the terminal `StreamEnded`), and the
+/// turn's own logic — the follow-up, the usage folding, the loop guard — is
+/// the session's.
 async fn record(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String> {
     let conv_id = "characterization-conv".to_string();
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-
-    cx.update(|cx| {
-        gpui_component::init(cx);
-        if !cx.has_global::<ConversationsStore>() {
-            cx.set_global(ConversationsStore::new());
-        }
-        if !cx.has_global::<ExecutionSettingsModel>() {
-            cx.set_global(ExecutionSettingsModel::default());
-        }
-    });
-
-    // A real ChatView, in a headless window, under a `gpui_component::Root` —
-    // the component library asserts the window's first layer is one, and the
-    // app builds its window the same way. `cx.entity()` is not usable here for
-    // the same reason: the root is the Root, not the view.
-    let chat_view_slot: Rc<RefCell<Option<gpui::Entity<ChatView>>>> = Rc::default();
-    let slot = chat_view_slot.clone();
-    let _window = cx.add_window(move |window, cx| {
-        let view = cx.new(|cx| ChatView::new(window, cx));
-        *slot.borrow_mut() = Some(view.clone());
-        gpui_component::Root::new(view, window, cx)
-    });
-    let chat_view = chat_view_slot
-        .borrow()
-        .clone()
-        .expect("the window builder ran and stored its entity");
-
     let stream_manager = cx.update(|cx| cx.new(|_cx| StreamManager::new()));
 
     let events: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -176,8 +137,7 @@ async fn record(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String
         )
     });
 
-    // Register the turn, so the manager has the state `handle_chunk` mutates
-    // (text batching, the API turn counter) rather than dropping chunks.
+    let cancel_flag = Arc::new(AtomicBool::new(false));
     cx.update(|cx| {
         stream_manager.update(cx, |manager: &mut StreamManager, cx| {
             let task = cx.background_executor().spawn(async { Ok(()) });
@@ -185,58 +145,38 @@ async fn record(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String
         });
     });
 
-    // Progress is queued before the loop starts rather than interleaved with
-    // chunks — see the fixture module on why the interleave is not contract.
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    for progress in scenario.progress {
-        progress_tx
-            .send(progress)
-            .expect("receiver is alive for the whole scenario");
-    }
-    drop(progress_tx);
+    // The desktop's policy (`desktop_session_config`): the loop guard runs.
+    let session_events = chatty_core::session::replay_scenario(
+        scenario,
+        chatty_core::session::TurnPolicy {
+            surface: chatty_core::services::StreamSurface::Desktop,
+            max_agent_turns: 10,
+            loop_guard: true,
+            already_asked_to_retry: false,
+        },
+    )
+    .await;
 
-    let mut stream = scripted_stream(scenario.items, cancel_flag.clone());
-    let mut handler = GpuiStreamHandler {
-        conv_id: conv_id.clone(),
-        cx: cx.to_async(),
-        chat_view,
-        stream_manager: Some(stream_manager.clone()),
-        weak_ctrl: gpui::WeakEntity::new_invalid(),
-        agent_task_controller: chatty_core::services::AgentTaskController::new(),
-        loop_guard: chatty_core::services::AgentLoopGuard::new(10, false),
-        cancel_flag: cancel_flag.clone(),
-        pending_tool_name: std::collections::HashMap::new(),
-        pending_tool_args: std::collections::HashMap::new(),
-        pending_follow_up: None,
-        stream_errored: false,
-        text_overflow_stop_requested: false,
-    };
-
-    let outcome = run_stream_loop(&mut stream, &mut progress_rx, &cancel_flag, &mut handler).await;
-
-    // `run_llm_stream`'s finalization, minus the trace read: a turn that did not
-    // end in error is finalized by the caller, and that is where the UI's
-    // StreamEnded comes from for the completed cases.
-    if !handler.stream_errored {
-        cx.update(|cx| {
-            stream_manager.update(cx, |manager: &mut StreamManager, cx| {
-                manager.finalize_stream(&conv_id, cx)
-            });
+    let mut follow_up = None;
+    cx.update(|cx| {
+        stream_manager.update(cx, |manager: &mut StreamManager, cx| {
+            for event in session_events {
+                if let chatty_core::session::SessionEvent::FollowUp(prompt) = &event {
+                    follow_up = Some(prompt.clone());
+                }
+                manager.handle_session_event(&conv_id, event, cx);
+            }
         });
-    }
+    });
 
-    // `cx.emit` is delivered on the next effect flush, not inline.
     cx.run_until_parked();
     drop(subscription);
 
     let mut recorded = events.borrow().clone();
-    recorded.push(match outcome {
-        Ok(()) => "=> loop returned Ok".to_string(),
-        Err(e) => format!("=> loop returned Err({:?})", e.to_string()),
-    });
-    recorded.push(match handler.pending_follow_up {
-        // The prompt text is long and tuned often; the golden pins that a
-        // follow-up was queued and which protocol asked for it.
+    // The session never propagates an error out of the loop; the trailer is
+    // kept so the recording stays byte-comparable with the Phase 0 golden.
+    recorded.push("=> loop returned Ok".to_string());
+    recorded.push(match follow_up {
         Some(ref prompt) if prompt.contains("write_todos") => {
             "=> follow-up queued: write_todos".to_string()
         }

@@ -73,7 +73,7 @@ impl ChatEngine {
 
     /// Clear all display and conversation state so a fresh conversation can be initialized.
     pub fn clear_conversation(&mut self) {
-        self.messages.clear();
+        self.transcript.clear();
         self.title = "New Chat".to_string();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
@@ -83,10 +83,10 @@ impl ChatEngine {
         self.pin_to_bottom();
         self.pending_approval = None;
         self.pending_clarification = None;
-        self.clarification_store.cancel_all();
+        self.session.clarifications().cancel_all();
         self.model_picker = None;
         self.tool_picker = None;
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message("Started a new conversation.".to_string());
     }
@@ -174,7 +174,7 @@ impl ChatEngine {
         let canonical_str = canonical.to_string_lossy().to_string();
         self.execution_settings.workspace_dir = Some(canonical_str.clone());
         self.refresh_workspace_context();
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message(format!(
             "Working directory changed to '{}'. Conversation context was reset.",
@@ -205,7 +205,7 @@ impl ChatEngine {
         let workspace_str = new_workspace.to_string_lossy().to_string();
         self.execution_settings.workspace_dir = Some(workspace_str.clone());
         self.refresh_workspace_context();
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message(format!(
             "Added directory '{}'. Workspace expanded to '{}'. Conversation context was reset.",
@@ -217,7 +217,7 @@ impl ChatEngine {
 
     /// Summarize older conversation history to reduce context usage.
     pub async fn compact_conversation(&mut self) -> Result<()> {
-        let (agent, history) = match self.conversation.as_ref() {
+        let (agent, history) = match self.session.conversation() {
             Some(conv) => (conv.agent().clone(), conv.messages()),
             None => {
                 self.add_system_message("No active conversation to compact.".to_string());
@@ -237,7 +237,7 @@ impl ChatEngine {
             .await
             .context("Failed to summarize conversation")?;
 
-        if let Some(conv) = self.conversation.as_mut() {
+        if let Some(conv) = self.session.conversation_mut() {
             conv.replace_history(result.new_history, midpoint);
         }
 
@@ -251,6 +251,7 @@ impl ChatEngine {
     /// Copy the latest assistant message to the system clipboard.
     pub fn copy_last_response_to_clipboard(&mut self) -> Result<()> {
         let text = self
+            .transcript
             .messages
             .iter()
             .rev()
@@ -324,7 +325,7 @@ impl ChatEngine {
 
         let label = format!("[remote agent: {}] {}", config.name, prompt);
         self.add_system_message(label);
-        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+        self.transcript.mark_last_as_sub_agent_row();
 
         let event_tx = self.event_tx.clone();
 
@@ -406,7 +407,7 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching local sub-agent...".to_string());
-        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+        self.transcript.mark_last_as_sub_agent_row();
 
         tokio::task::spawn_blocking(move || {
             let message = match super::helpers::run_sub_agent_process(
@@ -499,7 +500,7 @@ impl ChatEngine {
         let model_name = new_model.name.clone();
         self.model_config = new_model;
         self.provider_config = new_provider;
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
 
         self.add_system_message(format!(
@@ -621,7 +622,7 @@ impl ChatEngine {
             self.execution_settings.execute_code_enabled = true;
         }
 
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message(
             "Tool settings updated. Conversation context was reset.".to_string(),
@@ -676,7 +677,7 @@ impl ChatEngine {
         };
         let state = if enabled { "enabled" } else { "disabled" };
         self.add_system_message(format!("Tool '{}' {}. Reinitializing...", name, state));
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         true
     }
@@ -759,7 +760,7 @@ impl ChatEngine {
                 }
             });
 
-            self.conversation = None;
+            self.session.set_conversation(None);
             self.is_ready = false;
             self.add_system_message(format!(
                 "Modules settings updated: enabled={}, dir={}, port={}. Conversation context was reset.",

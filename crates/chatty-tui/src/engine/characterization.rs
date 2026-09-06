@@ -1,40 +1,43 @@
-//! Characterization of the TUI send path (AGE-191).
+//! Characterization of the TUI send path (AGE-191, reparented in AGE-195).
 //!
-//! Drives [`TuiStreamHandler`] through the shared `run_stream_loop` against the
-//! scripted scenarios in `chatty_core::services::stream_fixtures`, and records
-//! the resulting [`AppEvent`] sequence as a golden file.
-//!
-//! These goldens are the contract for AGE-190's phases 1–4: the desktop adopting
-//! the core loop, and both frontends later reparenting onto `AgentSession`, must
-//! leave every sequence here byte-identical. A deliberate change is made by
-//! re-running with `UPDATE_GOLDENS=1` and explaining the diff in review.
+//! The TUI's turn is chatty-core's `AgentSession`; what the engine sees is
+//! its `SessionEvent` stream through `From<SessionEvent> for AppEvent`. This
+//! replays the scripted scenarios in `chatty_core::services::stream_fixtures`
+//! through exactly that path and records the resulting [`AppEvent`] sequence
+//! as a golden file — the contract a change to the turn must not alter by
+//! accident. A deliberate change is made by re-running with
+//! `UPDATE_GOLDENS=1` and explaining the diff in review.
 //!
 //! The matching desktop goldens live in
 //! `crates/chatty-gpui/src/chatty/controllers/app_controller/goldens/`.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use chatty_core::services::{
-    AgentTaskController, Scenario, assert_golden, clarification_scenario, run_stream_loop,
-    scenarios, scripted_stream,
+    Scenario, StreamSurface, assert_golden, clarification_scenario, scenarios,
 };
-use tokio::sync::mpsc;
+use chatty_core::session::{TurnPolicy, replay_scenario};
 
-use super::TuiStreamHandler;
 use crate::events::AppEvent;
 
 fn goldens_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/engine/goldens")
 }
 
+/// The interactive TUI's policy, as `ChatEngine::new` configures its session.
+fn policy() -> TurnPolicy {
+    TurnPolicy {
+        surface: StreamSurface::InteractiveTui,
+        max_agent_turns: 10,
+        loop_guard: false,
+        already_asked_to_retry: false,
+    }
+}
+
 /// One line per event, in a shape that reads as a diff.
 ///
-/// `AppEvent` has no `Debug`, and deriving one just for tests would put a
-/// formatting choice in production code. Spelling it out here also keeps the
-/// golden stable when an unrelated variant is added.
+/// `AppEvent`'s `Debug` is for logs; spelling the lines out here keeps the
+/// golden stable when an unrelated variant or field is added.
 fn describe(event: &AppEvent) -> String {
     match event {
         AppEvent::StreamStarted => "StreamStarted".to_string(),
@@ -65,13 +68,12 @@ fn describe(event: &AppEvent) -> String {
             call.cache_read_tokens,
             call.cache_write_tokens
         ),
-        AppEvent::TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-        } => format!(
-            "TokenUsage(in={input_tokens}, out={output_tokens}, cache_read={cache_read_tokens}, cache_write={cache_write_tokens})"
+        AppEvent::TokenUsage(usage) => format!(
+            "TokenUsage(in={}, out={}, cache_read={}, cache_write={})",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens
         ),
         AppEvent::StreamCompleted => "StreamCompleted".to_string(),
         AppEvent::StreamCancelled => "StreamCancelled".to_string(),
@@ -91,51 +93,35 @@ fn describe(event: &AppEvent) -> String {
         }
         AppEvent::SubAgentProgress(text) => format!("SubAgentProgress({text:?})"),
         AppEvent::SubAgentFinished(text) => format!("SubAgentFinished({text:?})"),
-        // Lifecycle and terminal events, which the stream loop never sends.
-        // Recorded rather than ignored so a loop that starts emitting one is
+        // Rendered as the transcript line it becomes, so the goldens read
+        // the same whether the progress arrived typed or as a line.
+        AppEvent::SubAgent(progress) => {
+            let line = super::helpers::sub_agent_line(progress);
+            if matches!(
+                progress,
+                chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
+            ) {
+                format!("SubAgentFinished({line:?})")
+            } else {
+                format!("SubAgentProgress({line:?})")
+            }
+        }
+        // Lifecycle and terminal events, which a turn never produces.
+        // Recorded rather than ignored so a turn that starts emitting one is
         // caught instead of quietly passing.
         _ => "UNEXPECTED(non-stream event)".to_string(),
     }
 }
 
-/// Run one scenario through the real loop and return the events it produced.
+/// Run one scenario through the session and the adapter, and return the
+/// events the engine would handle.
 async fn record(scenario: Scenario) -> Vec<String> {
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-
-    // Progress is queued before the loop starts rather than interleaved with
-    // chunks — see the fixture module on why the interleave is not contract.
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    for progress in scenario.progress {
-        progress_tx
-            .send(progress)
-            .expect("receiver is alive for the whole scenario");
-    }
-    drop(progress_tx);
-
-    let mut stream = scripted_stream(scenario.items, cancel_flag.clone());
-    let mut handler = TuiStreamHandler {
-        event_tx,
-        task_controller: AgentTaskController::new(),
-        pending_tool_names: HashMap::new(),
-        pending_follow_up: None,
-        cancelled: false,
-    };
-
-    // A transport `Err` propagates out of `on_chunk` and so out of the loop —
-    // `run_stream` hands it to the caller rather than turning it into an event.
-    // That is part of the contract, so the outcome is recorded, not unwrapped.
-    let outcome = run_stream_loop(&mut stream, &mut progress_rx, &cancel_flag, &mut handler).await;
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_rx.try_recv() {
-        events.push(describe(&event));
-    }
-    events.push(match outcome {
-        Ok(()) => "=> loop returned Ok".to_string(),
-        Err(e) => format!("=> loop returned Err({:?})", e.to_string()),
-    });
-    events
+    replay_scenario(scenario, policy())
+        .await
+        .into_iter()
+        .map(AppEvent::from)
+        .map(|event| describe(&event))
+        .collect()
 }
 
 #[tokio::test]

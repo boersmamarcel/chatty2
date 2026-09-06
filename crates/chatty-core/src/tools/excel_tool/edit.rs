@@ -10,6 +10,7 @@ use umya_spreadsheet::{reader, writer};
 
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
 use crate::services::filesystem_service::FileSystemService;
+use crate::settings::models::execution_settings::ApprovalMode;
 
 use super::ExcelToolError;
 use super::parsing::{
@@ -203,13 +204,19 @@ pub struct EditExcelOutput {
 #[derive(Clone)]
 pub struct EditExcelTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl EditExcelTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -450,6 +457,7 @@ impl Tool for EditExcelTool {
 
         let approved = request_write_approval(
             &self.pending_approvals,
+            &self.approval_mode,
             WriteOperation::WriteFile {
                 path: output_canonical.display().to_string(),
                 is_overwrite: output_canonical.exists(),
