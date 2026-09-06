@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::models::ClarificationStore;
 use chatty_core::models::Conversation;
+use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{
     ClarificationAnswer, ClarificationNotification, ClarifyingQuestion,
 };
@@ -286,6 +287,15 @@ pub struct ChatEngine {
     pub cancel_flag: Option<Arc<AtomicBool>>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_clarification: Option<PendingClarification>,
+    /// Set when `finalize_turn` rolled back the pending user message
+    /// (`TurnOutcome::DroppedAndRolledBack`); the caller restores this into
+    /// the input so the user doesn't lose what they typed (AGE-243).
+    pub pending_restore_text: Option<String>,
+    /// An agent-protocol follow-up that arrived while a turn was already
+    /// streaming. Queued rather than dropped (AGE-242 / D3) and sent once the
+    /// in-flight turn ends (`StreamCompleted` / `StreamCancelled`); the first
+    /// one queued wins if another arrives before it is sent.
+    pending_agent_follow_up: Option<String>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
@@ -383,6 +393,8 @@ impl ChatEngine {
             is_streaming: false,
             cancel_flag: None,
             pending_approval: None,
+            pending_restore_text: None,
+            pending_agent_follow_up: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
@@ -611,6 +623,18 @@ impl ChatEngine {
 
     /// Send a message and start streaming the response
     pub fn send_message(&mut self, message: String) {
+        self.send_message_inner(message, true);
+    }
+
+    /// Inject an agent-protocol / loop-guard follow-up without pushing a user
+    /// bubble — the earlier system line (`Agent protocol follow-up: …`, or
+    /// the loop-guard/deadline `eprintln!` in headless) is the only visible
+    /// signal (AGE-242 / D3, mirrors the desktop's `send_protocol_follow_up`).
+    pub fn send_protocol_follow_up(&mut self, message: String) {
+        self.send_message_inner(message, false);
+    }
+
+    fn send_message_inner(&mut self, message: String, show_in_transcript: bool) {
         if !self.is_ready || self.is_streaming {
             return;
         }
@@ -628,11 +652,14 @@ impl ChatEngine {
             None => return,
         };
 
-        // Add user message to display
-        self.messages.push(DisplayMessage::with_text(
-            MessageRole::User,
-            message.clone(),
-        ));
+        // Add user message to display, unless this is a protocol follow-up
+        // that already rendered its own system line (AGE-242 / D3).
+        if show_in_transcript {
+            self.messages.push(DisplayMessage::with_text(
+                MessageRole::User,
+                message.clone(),
+            ));
+        }
 
         let (raw_history, contents) = prepare_user_turn(conversation, message);
 
@@ -641,20 +668,20 @@ impl ChatEngine {
             .push(DisplayMessage::new(MessageRole::Assistant, true));
         self.is_streaming = true;
 
-        // Set up approval channels
+        // Set up approval channels. Each store gets the sender installed
+        // directly on it (AGE-246 / D7) rather than via a process-wide
+        // global, so a request only ever reaches the receiver for the store
+        // that was actually handed to this turn's tools. Write approvals
+        // share the execution approval channel/UI, so they get a clone too.
         let (approval_tx, approval_rx) = mpsc::unbounded_channel::<ApprovalNotification>();
         let (resolution_tx, resolution_rx) = mpsc::unbounded_channel::<ApprovalResolution>();
-        chatty_core::models::execution_approval_store::set_global_approval_notifier(
-            approval_tx.clone(),
-        );
+        self.write_approval_store.set_notifier(approval_tx.clone());
         self.execution_approval_store
             .set_notifiers(approval_tx, resolution_tx);
 
         let (clarification_tx, clarification_rx) =
             mpsc::unbounded_channel::<ClarificationNotification>();
-        chatty_core::models::clarification_store::set_global_clarification_notifier(
-            clarification_tx,
-        );
+        self.clarification_store.set_notifier(clarification_tx);
 
         // Spawn stream task
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -849,6 +876,7 @@ impl ChatEngine {
             }
             AppEvent::StreamCompleted => {
                 self.finalize_stream();
+                self.send_pending_agent_follow_up();
                 EngineAction::Redraw
             }
             AppEvent::StreamError(error) => {
@@ -858,14 +886,22 @@ impl ChatEngine {
                     last.push_text(&format!("{}[Error: {}]", prefix, error));
                     last.is_streaming = false;
                 }
-                self.finalize_partial_response(false);
+                self.finalize_partial_response();
                 self.reset_stream_state();
                 EngineAction::Redraw
             }
             AppEvent::AgentProtocolFollowUp(prompt) => {
                 self.add_system_message(format!("Agent protocol follow-up: {}", prompt));
                 if !self.is_streaming {
-                    self.send_message(prompt);
+                    self.send_protocol_follow_up(prompt);
+                } else if self.pending_agent_follow_up.is_none() {
+                    // Queue rather than drop it (AGE-242 / D3): sent once the
+                    // in-flight turn ends.
+                    self.pending_agent_follow_up = Some(prompt);
+                } else {
+                    warn!(
+                        "Dropping a later agent protocol follow-up; an earlier one is already queued"
+                    );
                 }
                 EngineAction::Redraw
             }
@@ -874,8 +910,9 @@ impl ChatEngine {
                     last.push_text("\n\n[Cancelled]");
                     last.is_streaming = false;
                 }
-                self.finalize_partial_response(true);
+                self.finalize_partial_response();
                 self.reset_stream_state();
+                self.send_pending_agent_follow_up();
                 EngineAction::Redraw
             }
             AppEvent::TitleGenerated(title) => {
@@ -1143,7 +1180,7 @@ impl ChatEngine {
             last.is_streaming = false;
         }
 
-        self.finalize_partial_response(false);
+        self.finalize_partial_response();
         self.reset_stream_state();
 
         // Generate title after first exchange.
@@ -1166,25 +1203,32 @@ impl ChatEngine {
         }
     }
 
-    /// Commit the streamed response to conversation history, or roll back an
-    /// empty cancelled turn.
-    ///
-    /// A turn that produced no text has nothing to persist: committing it
-    /// would write an empty assistant message that goes back to the provider
-    /// on the next request (AGE-222). On cancellation specifically, the user
-    /// message that triggered the empty turn is removed too, so a stopped
-    /// stream with no output leaves history exactly as it was before the send.
-    fn finalize_partial_response(&mut self, is_cancel: bool) {
+    /// Commit the streamed response to conversation history using the one
+    /// shared empty-turn rule (AGE-243 / D4): persist when there is response
+    /// text, otherwise the turn is empty — committing it would write an empty
+    /// assistant message that goes back to the provider on the next request
+    /// (AGE-222/AGE-151). The pending user message that triggered it is
+    /// rolled back so history is left exactly as it was before the send, and
+    /// its text is queued in `pending_restore_text` so the caller can put it
+    /// back into the input.
+    fn finalize_partial_response(&mut self) {
         if let Some(conv) = self.conversation.as_mut() {
             let response = conv.streaming_message().cloned().unwrap_or_default();
-            if response.is_empty() {
-                if is_cancel {
-                    conv.remove_last_user_message();
-                }
-            } else {
-                conv.finalize_response(response, vec![], None);
+            if let TurnOutcome::DroppedAndRolledBack(text) =
+                conv.finalize_turn(response, vec![], None)
+            {
+                self.pending_restore_text = Some(text);
             }
             conv.set_streaming_message(None);
+        }
+    }
+
+    /// Send a follow-up that arrived while a turn was still streaming
+    /// (AGE-242 / D3), now that the turn has ended. A no-op when none is
+    /// queued.
+    fn send_pending_agent_follow_up(&mut self) {
+        if let Some(prompt) = self.pending_agent_follow_up.take() {
+            self.send_protocol_follow_up(prompt);
         }
     }
 
@@ -1430,9 +1474,33 @@ mod tests {
         );
         conv.set_streaming_message(Some(String::new()));
 
-        engine.finalize_partial_response(true);
+        engine.finalize_partial_response();
 
         assert_eq!(engine.conversation.unwrap().messages(), before_send);
+    }
+
+    /// AGE-243 / D4: the one shared empty-turn rule applies regardless of why
+    /// the turn ended — a *completed* turn with no text and no trace is
+    /// rolled back too (previously only the cancelled path did this), and the
+    /// dropped user text is queued for restoring into the input.
+    #[tokio::test]
+    async fn completed_turn_with_no_text_rolls_back_the_user_message_too() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        let before_send = conv.messages();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some(String::new()));
+
+        engine.finalize_partial_response();
+
+        assert_eq!(engine.conversation.unwrap().messages(), before_send);
+        assert_eq!(engine.pending_restore_text.as_deref(), Some("hi"));
     }
 
     /// AGE-222: an errored turn that produced some text still persists that
@@ -1450,7 +1518,7 @@ mod tests {
         );
         conv.set_streaming_message(Some("partial answer".to_string()));
 
-        engine.finalize_partial_response(false);
+        engine.finalize_partial_response();
 
         let messages = engine.conversation.unwrap().messages();
         assert_eq!(messages.len(), 2);
@@ -1480,7 +1548,7 @@ mod tests {
         );
         conv.set_streaming_message(Some("full answer".to_string()));
 
-        engine.finalize_partial_response(false);
+        engine.finalize_partial_response();
 
         let messages = engine.conversation.unwrap().messages();
         assert_eq!(messages.len(), 2);

@@ -787,7 +787,9 @@ impl AgentClient {
                     .map(|s| s.approval_mode.clone())
                     .unwrap_or_default();
                 let approvals = pending_approvals.clone().unwrap_or_else(|| {
-                    std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()))
+                    std::sync::Arc::new(parking_lot::Mutex::new(
+                        crate::models::execution_approval_store::PendingApprovalsState::new(),
+                    ))
                 });
 
                 tracing::info!(workspace = %workspace_dir, "Git tools enabled");
