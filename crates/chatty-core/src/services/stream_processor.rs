@@ -184,17 +184,17 @@ pub fn decide_recovery(
 /// events through their respective UI update mechanisms (GPUI entity updates
 /// vs. channel-based event dispatch).
 ///
-/// `on_chunk` is async because the desktop refreshes an expired Azure token in
-/// place when a 401 arrives mid-stream, and has to await it before deciding
-/// whether the turn is over. No `Send` bound: the desktop's handler holds an
-/// `AsyncApp`, which is deliberately not `Send`.
-#[allow(async_fn_in_trait)]
+/// `on_chunk` is synchronous: nothing a handler does has to wait on I/O. The
+/// Azure Entra token used to be refreshed here after a mid-stream 401, but it
+/// is attached per request now (`AzureAuthHttpClient`, AGE-245). No `Send`
+/// bound: the desktop's handler holds an `AsyncApp`, which is deliberately not
+/// `Send`.
 pub trait StreamChunkHandler {
     /// Called once when the stream loop starts (before the first chunk).
     fn on_stream_started(&mut self);
 
     /// Called for each LLM stream chunk. Return [`ChunkAction::Break`] to stop.
-    async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction>;
+    fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction>;
 
     /// Called for each sub-agent progress event from `invoke_agent`.
     fn on_progress(&mut self, progress: InvokeAgentProgress);
@@ -290,13 +290,12 @@ pub async fn run_stream_loop(
                         idle_secs = last_activity.elapsed().as_secs(),
                         "Stream produced nothing for too long; ending the turn as stalled"
                     );
-                    if let Err(e) = handler
-                        .on_chunk(Ok(StreamChunk::Error(StreamError::new(
-                            StreamErrorKind::Stalled,
-                            STALLED_STREAM_MESSAGE,
-                        ))))
-                        .await
-                    {
+                    // Capture rather than `?`: the turn must still reach
+                    // `on_stream_ended` on this exit path (AGE-213).
+                    if let Err(e) = handler.on_chunk(Ok(StreamChunk::Error(StreamError::new(
+                        StreamErrorKind::Stalled,
+                        STALLED_STREAM_MESSAGE,
+                    )))) {
                         loop_result = Err(e);
                     }
                     break;
@@ -307,7 +306,9 @@ pub async fn run_stream_loop(
                 last_activity = std::time::Instant::now();
                 match chunk_result {
                     Some(result) => {
-                        match handler.on_chunk(result).await {
+                        // Capture rather than `?`, so a handler error still
+                        // reaches `on_stream_ended` (AGE-213).
+                        match handler.on_chunk(result) {
                             Ok(ChunkAction::Continue) => {}
                             Ok(ChunkAction::Break) => break,
                             Err(e) => {
@@ -401,7 +402,7 @@ mod tests {
             self.started = true;
         }
 
-        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+        fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
             let chunk = chunk?;
             let is_done = matches!(chunk, StreamChunk::Done);
             let is_error = matches!(chunk, StreamChunk::Error(_));
@@ -494,7 +495,7 @@ mod tests {
             self.started = true;
         }
 
-        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+        fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
             chunk?;
             self.chunk_count += 1;
             if self.chunk_count == 2 {
@@ -564,6 +565,7 @@ mod tests {
             StreamChunk::ClarificationRequested { .. } => "ClarificationRequested",
             StreamChunk::ApiCallUsage(_) => "ApiCallUsage",
             StreamChunk::TurnUsage(_) => "TokenUsage",
+            StreamChunk::TurnMessages(_) => "TurnMessages",
             StreamChunk::Done => "Done",
             StreamChunk::Error(_) => "Error",
         }
@@ -574,7 +576,7 @@ mod tests {
             self.calls.push("on_stream_started".to_string());
         }
 
-        async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+        fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
             match chunk {
                 Ok(chunk) => {
                     let name = label(&chunk);
@@ -678,7 +680,6 @@ mod tests {
         // Break on Done before the biased progress branch can run.
         handler
             .on_chunk(Ok(StreamChunk::Done))
-            .await
             .expect("handler does not fail");
         handler.calls.clear();
 

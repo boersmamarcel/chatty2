@@ -2,6 +2,10 @@
 
 Chatty estimates token usage before each LLM call and updates with real counts after the response.
 
+What happens when the estimate crosses the budget, the generational compaction
+that replaces `context_shaper` and `summarize_oldest_half`, is described in
+[`context-compaction.md`](context-compaction.md).
+
 ## Architecture
 
 ```

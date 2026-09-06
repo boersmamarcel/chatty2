@@ -56,6 +56,11 @@ pub enum StreamChunk {
     /// final response. Arrives after the per-call chunks. `turn` is always 0
     /// (see [`normalize_usage`]'s aggregate convention).
     TurnUsage(ApiCallUsage),
+    /// rig's own record of the turn, in order: the prompt, each assistant
+    /// tool-call message, each tool-result message, the final text. Arrives
+    /// with the final response, before `Done`, so the frontends can persist
+    /// the tool round-trips behind the final text (AGE-247).
+    TurnMessages(Vec<Message>),
     Done,
     Error(crate::services::stream_processor::StreamError),
 }
@@ -179,9 +184,10 @@ fn resolve_call_id(
 /// A tool call yields two chunks (`ToolCallStarted` then `ToolCallInput`); a
 /// tool result yields one (`ToolCallResult` or `ToolCallError`, depending on
 /// [`tool_result_looks_like_error`]); a `CompletionCall` yields one
-/// (`ApiCallUsage`); a `FinalResponse` yields one (`TokenUsage`). An item this
-/// stream does not render (e.g. `ToolExecutionCommitted`, `ModelTurnRetried`,
-/// a streamed delta) yields none.
+/// (`ApiCallUsage`); a `FinalResponse` yields the turn's usage aggregate
+/// (`TurnUsage`) and, when rig recorded the turn, its messages
+/// (`TurnMessages`). An item this stream does not render (e.g.
+/// `ToolExecutionCommitted`, `ModelTurnRetried`, a streamed delta) yields none.
 fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamChunk> {
     match item {
         MultiTurnStreamItem::StreamAssistantItem(content) => match content {
@@ -247,7 +253,17 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
         }
         MultiTurnStreamItem::FinalResponse(final_response) => {
             let usage = normalize_usage(semantics, 0, &final_response.usage());
-            vec![StreamChunk::TurnUsage(usage)]
+            let mut chunks = vec![StreamChunk::TurnUsage(usage)];
+            // rig's record of the turn, when the run supplied one: the prompt,
+            // each assistant tool-call message, each tool-result message, the
+            // final text. The frontends persist its tool round-trips behind the
+            // final text entry (AGE-247). After the usage aggregate, before
+            // `Done`. `map_item` is the single mapping path, so this one arm
+            // replaces the two duplicated macro sites AGE-247 originally had.
+            if let Some(messages) = final_response.messages {
+                chunks.push(StreamChunk::TurnMessages(messages));
+            }
+            chunks
         }
         _ => Vec::new(),
     }

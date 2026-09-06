@@ -79,7 +79,10 @@ pub use memory_query::simplify_memory_query;
 pub use memory_service::MemoryService;
 #[cfg(feature = "mermaid")]
 pub use mermaid_renderer_service::MermaidRendererService;
-pub use message_helpers::{extract_user_text, extract_user_text_lines, gather_mcp_tools};
+pub use message_helpers::{
+    exchange_count, extract_user_text, extract_user_text_lines, gather_mcp_tools,
+    is_persisted_tool_round_trip, is_tool_call_message, is_tool_message, is_tool_result_message,
+};
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;

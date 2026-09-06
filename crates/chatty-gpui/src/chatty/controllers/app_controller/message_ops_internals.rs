@@ -160,7 +160,7 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
         debug!(conv_id = %self.conv_id, "Entering stream processing loop");
     }
 
-    async fn on_chunk(
+    fn on_chunk(
         &mut self,
         chunk_result: anyhow::Result<StreamChunk>,
     ) -> anyhow::Result<ChunkAction> {
@@ -211,35 +211,17 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
             Ok(StreamChunk::Error(ref err)) => {
                 error!(error = %err.message, kind = ?err.kind, conv_id = %self.conv_id, "Stream error");
 
-                // Retry means "refresh (Azure) and retry the turn once" for
-                // Auth (AGE-244 / D5); this handler only owns the refresh
-                // half, since retrying the turn itself is a higher-level
-                // decision this trait's `on_chunk` contract can't make.
+                // AGE-244 / D5 decides what to do from the typed kind; AGE-245
+                // decides what "Retry" can still mean here. The Entra token is
+                // attached fresh to every request by AzureAuthHttpClient, so a
+                // 401 is a credential problem rather than an expired token:
+                // there is nothing left for this handler to refresh, and the
+                // AzureTokenCache global it used to reach for is gone.
                 match decide_recovery(err.kind, StreamSurface::Desktop, 0) {
                     RecoveryAction::Retry { .. } => {
-                        if let Some(cache) = self
-                            .cx
-                            .update(|cx| {
-                                cx.try_global::<chatty_core::auth::AzureTokenCache>()
-                                    .cloned()
-                            })
-                            .map_err(
-                                |e| warn!(error = ?e, "Failed to read Azure token cache global"),
-                            )
-                            .ok()
-                            .flatten()
-                        {
-                            tracing::warn!("Detected an auth error - refreshing the Azure token");
-                            if let Err(e) = cache.refresh_token().await {
-                                error!(error = ?e, "Failed to refresh Azure token after auth error");
-                            } else {
-                                tracing::info!("Azure token refreshed successfully.");
-                            }
-                        } else {
-                            tracing::warn!(
-                                "Detected an authentication error - check the configured API key/header"
-                            );
-                        }
+                        tracing::warn!(
+                            "Authentication rejected - check the configured API key/header, or the Entra ID credential (az login, managed identity or service principal)"
+                        );
                     }
                     RecoveryAction::Nudge => {
                         // A truncated tool call is a model defect, not a dead
@@ -308,6 +290,22 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
 
         // PHASE 2: forward every chunk, so the UI's subscription sees it.
         match chunk_result {
+            Ok(StreamChunk::TurnMessages(messages)) => {
+                // rig's record of the turn. Kept on the conversation for
+                // `finalize_turn` to persist behind the final text
+                // (AGE-247); not forwarded, the UI renders tool activity from
+                // the trace, and the payloads can be large.
+                let conv_id = self.conv_id.clone();
+                self.cx
+                    .update_global::<ConversationsStore, _>(|store, _cx| {
+                        if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                            conv.set_streaming_turn_messages(Some(messages));
+                        }
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to store the turn's messages"))
+                    .ok();
+                Ok(ChunkAction::Continue)
+            }
             Ok(chunk) => {
                 let is_break = matches!(chunk, StreamChunk::Error(_));
                 if is_break {
@@ -908,8 +906,9 @@ mod tests {
     // once in chatty-core (llm_service::tests::classifies_401_as_auth /
     // classifies_403_as_auth, stream_processor::tests::auth_retries_once_then_stops,
     // AGE-244 / D5) instead of here per-provider: the desktop no longer knows
-    // or cares which provider produced the error, only whether an
-    // AzureTokenCache global exists to refresh.
+    // or cares which provider produced the error, and since the Entra token is
+    // attached per request (AGE-245) it has nothing to refresh either — the
+    // arm only warns.
 
     #[test]
     fn select_attachments_returns_image_paths() {

@@ -71,7 +71,7 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
         let _ = self.event_tx.send(AppEvent::StreamStarted);
     }
 
-    async fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
+    fn on_chunk(&mut self, chunk: Result<StreamChunk>) -> Result<ChunkAction> {
         match chunk? {
             StreamChunk::Text(text) => {
                 let _ = self.event_tx.send(AppEvent::TextChunk(text));
@@ -143,6 +143,10 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
                 });
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::TurnMessages(messages) => {
+                let _ = self.event_tx.send(AppEvent::TurnMessages(messages));
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::Done => Ok(ChunkAction::Break),
@@ -298,28 +302,24 @@ mod tests {
                 id: "a".into(),
                 name: "read_file".into(),
             }))
-            .await
             .unwrap();
         handler
             .on_chunk(Ok(StreamChunk::ToolCallResult {
                 id: "a".into(),
                 result: "ok".into(),
             }))
-            .await
             .unwrap();
         handler
             .on_chunk(Ok(StreamChunk::ToolCallStarted {
                 id: "b".into(),
                 name: "search_code".into(),
             }))
-            .await
             .unwrap();
         let action = handler
             .on_chunk(Ok(StreamChunk::ToolCallResult {
                 id: "b".into(),
                 result: "ok".into(),
             }))
-            .await
             .unwrap();
         // AGE-242 / D3: a todo-protocol follow-up must not cancel the
         // in-flight turn, so the loop keeps going instead of breaking.

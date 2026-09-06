@@ -879,6 +879,12 @@ impl ChatEngine {
                 });
                 EngineAction::Redraw
             }
+            AppEvent::TurnMessages(messages) => {
+                if let Some(conv) = self.conversation.as_mut() {
+                    conv.set_streaming_turn_messages(Some(messages));
+                }
+                EngineAction::None
+            }
             AppEvent::StreamCompleted => {
                 self.finalize_stream();
                 self.send_pending_agent_follow_up();
@@ -1167,16 +1173,18 @@ impl ChatEngine {
     }
 
     /// Whether the first exchange just completed and a title should be
-    /// generated. Counts conversation history, not display messages: a
-    /// system line (slash-command notice, protocol follow-up) inflates
-    /// `self.messages.len()` without adding a real exchange, which used to
-    /// defeat this check (AGE-223).
+    /// generated. Counts *exchanges* in the conversation history, not display
+    /// messages: a system line (slash-command notice, protocol follow-up)
+    /// inflates `self.messages.len()` without adding a real exchange, which
+    /// used to defeat this check (AGE-223), and a turn with tool calls
+    /// persists its tool round-trips too, so the message count is no longer
+    /// two after one exchange (AGE-247).
     fn should_generate_title(&self) -> bool {
         self.title == "New Chat"
-            && self
-                .conversation
-                .as_ref()
-                .is_some_and(|conv| conv.message_count() == 2)
+            && self.conversation.as_ref().is_some_and(|conv| {
+                chatty_core::services::exchange_count(conv.entries().iter().map(|e| &e.message))
+                    == 1
+            })
     }
 
     fn finalize_stream(&mut self) {
@@ -1188,7 +1196,9 @@ impl ChatEngine {
         self.finalize_partial_response();
         self.reset_stream_state();
 
-        // Generate title after first exchange.
+        // Generate title after the first exchange. Counted on the persisted
+        // history, not on display rows: a turn with tool calls persists its
+        // tool round-trips too (AGE-247).
         if self.should_generate_title()
             && let Some(conv) = &self.conversation
         {
