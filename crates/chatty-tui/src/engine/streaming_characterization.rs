@@ -57,6 +57,14 @@ fn describe(event: &AppEvent) -> String {
             let texts: Vec<&str> = questions.iter().map(|q| q.question.as_str()).collect();
             format!("ClarificationRequested(id={id:?}, {texts:?})")
         }
+        AppEvent::ApiCallUsage(call) => format!(
+            "ApiCallUsage(turn={}, in={}, out={}, cache_read={}, cache_write={})",
+            call.turn,
+            call.input_tokens,
+            call.output_tokens,
+            call.cache_read_tokens,
+            call.cache_write_tokens
+        ),
         AppEvent::TokenUsage {
             input_tokens,
             output_tokens,
@@ -67,7 +75,7 @@ fn describe(event: &AppEvent) -> String {
         ),
         AppEvent::StreamCompleted => "StreamCompleted".to_string(),
         AppEvent::StreamCancelled => "StreamCancelled".to_string(),
-        AppEvent::StreamError(message) => format!("StreamError({message:?})"),
+        AppEvent::StreamError(error) => format!("StreamError(kind={:?})", error.kind),
         AppEvent::AgentProtocolFollowUp(prompt) => {
             // The prompt text is long and tuned often; the golden pins that a
             // follow-up was injected and which protocol asked for it, not its

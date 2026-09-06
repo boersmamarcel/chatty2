@@ -1,3 +1,4 @@
 StreamStarted
 TextChunk("Partial ")
+StreamCompleted
 => loop returned Err("connection reset by peer")

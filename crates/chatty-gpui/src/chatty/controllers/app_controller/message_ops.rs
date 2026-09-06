@@ -30,7 +30,7 @@
 //! See `docs/stream-manager.md` for the full stream architecture.
 
 use super::message_ops_internals::{
-    LlmStreamParams, attachment_to_user_content, run_llm_stream,
+    LlmStreamParams, attachment_to_user_content, is_pdf_path, run_llm_stream,
     select_recent_assistant_attachments,
 };
 use super::*;
@@ -225,7 +225,19 @@ impl ChattyApp {
                                 .working_dir()
                                 .cloned()
                                 .or_else(|| settings.workspace_dir.as_ref().map(PathBuf::from));
-                            conv.agent_workspace_dir().cloned() != effective_workspace_dir
+                            let needs_refresh = agent_workspace_needs_refresh(
+                                conv.agent_workspace_dir().map(|p| p.as_path()),
+                                effective_workspace_dir.as_deref(),
+                            );
+                            if needs_refresh {
+                                debug!(
+                                    conv_id = %conv_id,
+                                    agent_workspace_dir = ?conv.agent_workspace_dir(),
+                                    effective_workspace_dir = ?effective_workspace_dir,
+                                    "Workspace directory changed, agent rebuild needed"
+                                );
+                            }
+                            needs_refresh
                         })
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -239,36 +251,39 @@ impl ChattyApp {
                     rebuild_conversation_agent(&conv_id, cx).await?;
                 }
 
-                // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                // Extract agent, history, and capabilities synchronously
+                let (agent, history, provider_supports_pdf, provider_supports_images, assistant_att_paths, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
 
                             // Get capabilities from ModelsModel
-                            let (provider_type, supports_pdf, supports_images) = cx
+                            let (supports_pdf, supports_images) = cx
                                 .global::<ModelsModel>()
                                 .get_model(&model_id)
-                                .map(|m| (m.provider_type.clone(), m.supports_pdf, m.supports_images))
-                                .unwrap_or((
-                                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
-                                    false,
-                                    false,
-                                )); // Safe fallback if model not found
+                                .map(|m| (m.supports_pdf, m.supports_images))
+                                .unwrap_or((false, false)); // Safe fallback if model not found
 
                             // Clear any leftover artifacts from a previous stream
                             if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                                 artifacts.clear();
                             }
 
+                            // Computed inside the store borrow so we don't have to
+                            // clone every MessageEntry (trace JSON included) just to
+                            // read one entry's attachment paths (finding B1, AGE-219).
+                            let assistant_att_paths = select_recent_assistant_attachments(
+                                conv.entries(),
+                                supports_images,
+                                supports_pdf,
+                            );
+
                             Ok((
-                                conv.agent().clone(),
+                                conv.agent(),
                                 conv.messages(),
-                                model_id,
-                                provider_type,
                                 supports_pdf,
                                 supports_images,
-                                conv.entries().to_vec(),
+                                assistant_att_paths,
                                 conv.invoke_agent_progress_slot(),
                             ))
                         } else {
@@ -287,7 +302,7 @@ impl ChattyApp {
                 // Convert file attachments to UserContent
                 // Filter based on model capabilities to prevent panics in rig-core
                 for path in &attachments {
-                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    let is_pdf = is_pdf_path(path);
                     if is_pdf && !provider_supports_pdf {
                         warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
                         continue;
@@ -302,16 +317,15 @@ impl ChattyApp {
                     }
                 }
 
-                // Include the most recent assistant-generated attachments so the LLM
-                // can reference displayed images/PDFs in follow-up questions.
-                let assistant_att_paths = select_recent_assistant_attachments(
-                    &conv_entries,
-                    provider_supports_images,
-                    provider_supports_pdf,
-                );
+                // Include the most recent assistant-generated attachments (from the
+                // immediately preceding turn only) so the LLM can reference displayed
+                // images/PDFs in follow-up questions. These are sent to the LLM but kept
+                // out of the persisted user message — otherwise every later turn would
+                // carry and re-persist another copy of the same artifact (finding F2).
+                let mut extra_llm_contents = Vec::with_capacity(assistant_att_paths.len());
                 for path in &assistant_att_paths {
                     match attachment_to_user_content(path).await {
-                        Ok(content) => contents.push(content),
+                        Ok(content) => extra_llm_contents.push(content),
                         Err(e) => warn!(
                             ?path,
                             error = ?e,
@@ -327,10 +341,10 @@ impl ChattyApp {
                         agent,
                         history,
                         user_contents: contents,
+                        extra_llm_contents,
                         add_user_message_to_model: true,
                         reset_agent_task: show_in_transcript,
                         attachment_paths: attachments,
-                        provider_type,
                         chat_view,
                         stream_manager,
                         cancel_flag: cancel_flag_for_loop,
@@ -876,9 +890,10 @@ impl ChattyApp {
         });
 
         // 2. Read response text from ConversationsStore (single source of truth),
-        //    finalize in conversation model, check if title gen needed, and
-        //    extract model_id for pricing lookup (avoids a second global access later).
-        let (should_generate_title, assistant_history_index, model_id_opt) =
+        //    finalize in conversation model via the one shared empty-turn rule
+        //    (AGE-243 / D4), check if title gen needed, and extract model_id
+        //    for pricing lookup (avoids a second global access later).
+        let (should_generate_title, assistant_history_index, model_id_opt, rolled_back_text) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 if let Some(conv) = store.get_conversation_mut(&conv_id) {
                     let response_text = conv
@@ -888,38 +903,51 @@ impl ChattyApp {
                     let has_trace = trace_json.is_some();
                     let model_id = conv.model_id().to_string();
 
-                    // A turn that produced neither text nor a trace has nothing
-                    // to persist. Committing it wrote an empty assistant
-                    // message into history — the billed-but-empty turn in
-                    // AGE-151 — which is worse than no turn at all: it is
-                    // indistinguishable from a real empty answer and it goes
-                    // back to the provider on the next request.
-                    if response_text.trim().is_empty() && !has_trace {
-                        warn!(
-                            conv_id = %conv_id,
-                            "Stream completed with no text and no trace; dropping the turn rather than persisting an empty message"
-                        );
-                        return (false, None, Some(model_id));
+                    match conv.finalize_turn(response_text, artifact_paths, trace_json) {
+                        TurnOutcome::DroppedAndRolledBack(text) => {
+                            // A turn that produced neither text nor a trace has
+                            // nothing to persist. Committing it wrote an empty
+                            // assistant message into history — the
+                            // billed-but-empty turn in AGE-151 — which is worse
+                            // than no turn at all: it is indistinguishable from
+                            // a real empty answer and it goes back to the
+                            // provider on the next request.
+                            warn!(
+                                conv_id = %conv_id,
+                                "Stream completed with no text and no trace; dropping the turn rather than persisting an empty message"
+                            );
+                            (false, None, Some(model_id), Some(text))
+                        }
+                        TurnOutcome::Persisted => {
+                            let msg_count = conv.message_count();
+                            let traces_len = conv.entries().len();
+                            // The assistant message was just pushed; its index is msg_count - 1
+                            let assistant_idx = msg_count.saturating_sub(1);
+                            // Exchanges, not messages: a turn with tool calls
+                            // persists its tool round-trips as well (AGE-247).
+                            let should_gen = chatty_core::services::exchange_count(
+                                conv.entries().iter().map(|e| &e.message),
+                            ) == 1
+                                && conv.title() == "New Chat";
+                            debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
+                            (should_gen, Some(assistant_idx), Some(model_id), None)
+                        }
                     }
-
-                    conv.finalize_response(response_text, artifact_paths, trace_json);
-                    let msg_count = conv.message_count();
-                    let traces_len = conv.entries().len();
-                    // The assistant message was just pushed; its index is msg_count - 1
-                    let assistant_idx = msg_count.saturating_sub(1);
-                    // Exchanges, not messages: a turn with tool calls persists
-                    // its tool round-trips as well (AGE-247).
-                    let should_gen = chatty_core::services::exchange_count(
-                        conv.entries().iter().map(|e| &e.message),
-                    ) == 1
-                        && conv.title() == "New Chat";
-                    debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
-                    (should_gen, Some(assistant_idx), Some(model_id))
                 } else {
                     error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    (false, None, None)
+                    (false, None, None, None)
                 }
             });
+
+        // On rollback, put the text back into the composer rather than
+        // silently losing what the user typed (AGE-243).
+        if let Some(text) = rolled_back_text {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+        }
 
         // 2b. Set history_index on the last assistant DisplayMessage so feedback
         //     clicks on freshly-streamed messages are properly persisted.
@@ -1078,7 +1106,7 @@ impl ChattyApp {
             let conv_id_for_title = conv_id.clone();
             let sidebar_for_title = sidebar.clone();
 
-            cx.spawn(async move |_weak, cx| {
+            cx.spawn(async move |weak, cx| {
                 // Get agent and history for title generation
                 let title_data = cx
                     .update_global::<ConversationsStore, _>(|store, _cx| {
@@ -1112,6 +1140,19 @@ impl ChattyApp {
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
                             .ok();
 
+                            // Persist so the generated title survives a restart — the
+                            // synchronous save later in send_message already ran by the
+                            // time this completes (finding F7, AGE-218).
+                            if let Some(app) = weak.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.persist_conversation(&conv_id_for_title, cx);
+                                })
+                                .map_err(|e| {
+                                    warn!(error = ?e, "Failed to persist conversation after title generation")
+                                })
+                                .ok();
+                            }
+
                             // Update sidebar with new title from metadata
                             sidebar_for_title
                                 .update(cx, |sidebar, cx| {
@@ -1137,26 +1178,19 @@ impl ChattyApp {
             .detach();
         }
 
-        // 6. Persist to disk
-        self.persist_conversation(&conv_id, cx);
-
-        // 7. Auto-export ATIF if enabled in training settings
-        if cx
+        // 6-8. Persist to disk, and — if enabled in training settings — write
+        // the ATIF / JSONL auto-exports from the same ConversationData built
+        // for the save, instead of rebuilding it per export (finding F3,
+        // AGE-220).
+        let export_atif = cx
             .try_global::<TrainingSettingsModel>()
             .map(|s| s.atif_auto_export)
-            .unwrap_or(false)
-        {
-            self.export_conversation_atif(&conv_id, cx);
-        }
-
-        // 8. Auto-export JSONL (SFT + DPO) if enabled in training settings
-        if cx
+            .unwrap_or(false);
+        let export_jsonl = cx
             .try_global::<TrainingSettingsModel>()
             .map(|s| s.jsonl_auto_export)
-            .unwrap_or(false)
-        {
-            self.export_conversation_jsonl(&conv_id, cx);
-        }
+            .unwrap_or(false);
+        self.persist_and_export_conversation(&conv_id, export_atif, export_jsonl, cx);
     }
 
     /// Handle the finalization of a stopped stream (partial response saving).
@@ -1181,36 +1215,49 @@ impl ChattyApp {
         });
 
         // Read partial response from ConversationsStore (single source of truth)
-        // and save to conversation history — but ONLY if there's actual content.
-        // An empty assistant message would cause LLM API errors (400 Bad Request)
+        // and finalize via the one shared empty-turn rule (AGE-243 / D4) — an
+        // empty assistant message would cause LLM API errors (400 Bad Request)
         // on the next request.
-        let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                let partial_text = conv.streaming_message().cloned().unwrap_or_default();
+        let (assistant_history_index, rolled_back_text) =
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation_mut(&conv_id) {
+                    let partial_text = conv.streaming_message().cloned().unwrap_or_default();
 
-                if partial_text.is_empty() {
-                    // No content was received before cancellation.
-                    // Roll back the user message that triggered this stream to avoid
-                    // a trailing user message with no assistant response, which would
-                    // break the alternating User/Assistant pattern expected by LLM APIs.
-                    let removed = conv.remove_last_user_message();
-                    debug!(
-                        conv_id = %conv_id,
-                        user_msg_removed = removed,
-                        "Stream cancelled with no content — skipped empty assistant message"
-                    );
-                    None
+                    match conv.finalize_turn(partial_text, Vec::new(), trace_json) {
+                        TurnOutcome::DroppedAndRolledBack(text) => {
+                            // No content was received before cancellation. The
+                            // user message that triggered this stream was
+                            // rolled back to avoid a trailing user message with
+                            // no assistant response, which would break the
+                            // alternating User/Assistant pattern expected by
+                            // LLM APIs.
+                            debug!(
+                                conv_id = %conv_id,
+                                "Stream cancelled with no content — skipped empty assistant message"
+                            );
+                            (None, Some(text))
+                        }
+                        TurnOutcome::Persisted => {
+                            conv.set_streaming_message(None);
+                            let idx = conv.message_count().saturating_sub(1);
+                            debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+                            (Some(idx), None)
+                        }
+                    }
                 } else {
-                    conv.finalize_response(partial_text, Vec::new(), trace_json);
-                    conv.set_streaming_message(None);
-                    let idx = conv.message_count().saturating_sub(1);
-                    debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
-                    Some(idx)
+                    (None, None)
                 }
-            } else {
-                None
-            }
-        });
+            });
+
+        // On rollback, put the text back into the composer rather than
+        // silently losing what the user typed (AGE-243).
+        if let Some(text) = rolled_back_text {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+        }
 
         // Set history_index on the cancelled assistant message for feedback persistence
         if let Some(h_idx) = assistant_history_index {
@@ -1343,24 +1390,15 @@ impl ChattyApp {
                 .ok();
 
             // Extract agent and history (ends with the user message after removal)
-            let (agent, history, provider_type, invoke_agent_progress_slot) = cx
+            let (agent, history, invoke_agent_progress_slot) = cx
                 .update_global::<ConversationsStore, _>(|store, _cx| {
                     if let Some(conv) = store.get_conversation(&conv_id) {
-                        let model_id = conv.model_id().to_string();
-                        let provider_type = _cx
-                            .global::<ModelsModel>()
-                            .get_model(&model_id)
-                            .map(|m| m.provider_type.clone())
-                            .unwrap_or(
-                                chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
-                            );
                         if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                             artifacts.clear();
                         }
                         Ok((
                             conv.agent().clone(),
                             conv.messages(),
-                            provider_type,
                             conv.invoke_agent_progress_slot(),
                         ))
                     } else {
@@ -1376,9 +1414,7 @@ impl ChattyApp {
             }
             let history_context = history[..len - 1].to_vec();
             let user_contents = match &history[len - 1] {
-                rig_core::completion::Message::User { content, .. } => {
-                    content.to_vec()
-                }
+                rig_core::completion::Message::User { content, .. } => content.to_vec(),
                 _ => {
                     return Err(anyhow::anyhow!(
                         "Last message in history is not a user message"
@@ -1393,10 +1429,10 @@ impl ChattyApp {
                     agent,
                     history: history_context,
                     user_contents,
+                    extra_llm_contents: vec![],
                     add_user_message_to_model: false,
                     reset_agent_task: true,
                     attachment_paths: vec![],
-                    provider_type,
                     chat_view,
                     stream_manager,
                     cancel_flag: cancel_flag_for_loop,

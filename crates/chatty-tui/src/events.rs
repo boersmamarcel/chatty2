@@ -2,7 +2,7 @@ use crossterm::event::Event as CrosstermEvent;
 
 use chatty_core::models::Conversation;
 use chatty_core::services::github_pr_service::PullRequestSummary;
-use chatty_core::services::{EmbeddingService, McpService, MemoryService};
+use chatty_core::services::{EmbeddingService, McpService, MemoryService, StreamError};
 
 /// Heavy services loaded in the background after the TUI is displayed.
 /// Delivered via `AppEvent::ServicesReady` so the engine can patch itself.
@@ -52,6 +52,11 @@ pub enum AppEvent {
         id: String,
         questions: Vec<chatty_core::models::clarification_store::ClarifyingQuestion>,
     },
+    /// Per-request usage for one provider call within the turn. Folded into
+    /// `ChatEngine::last_turn_usage` once `TokenUsage` (the turn's aggregate)
+    /// arrives, so the last call's prompt size can stand in for the actual
+    /// current context fill (AGE-223).
+    ApiCallUsage(chatty_core::models::token_usage::ApiCallUsage),
     TokenUsage {
         input_tokens: u32,
         output_tokens: u32,
@@ -63,7 +68,7 @@ pub enum AppEvent {
     TurnMessages(Vec<rig_core::completion::Message>),
     StreamCompleted,
     StreamCancelled,
-    StreamError(String),
+    StreamError(StreamError),
     AgentProtocolFollowUp(String),
 
     // ── Lifecycle events ─────────────────────────────────────────────────
@@ -135,6 +140,7 @@ impl std::fmt::Debug for AppEvent {
                 .field("id", id)
                 .field("questions", &questions.len())
                 .finish(),
+            Self::ApiCallUsage(call) => f.debug_tuple("ApiCallUsage").field(call).finish(),
             Self::TokenUsage {
                 input_tokens,
                 output_tokens,

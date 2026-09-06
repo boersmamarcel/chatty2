@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::models::execution_approval_store::notify_approval_via_global;
+use crate::models::execution_approval_store::ApprovalNotification;
 use crate::models::write_approval_store::{
     PendingWriteApprovals, WriteApprovalDecision, WriteApprovalRequest, WriteOperation,
 };
@@ -67,14 +67,26 @@ pub async fn request_write_approval(
         responder: tx,
     };
 
-    // Insert the pending request
+    // Insert the pending request and notify through the store's own
+    // per-turn notifier so the UI can show an approval bar (AGE-246 / D7).
     {
-        let mut store = pending.lock();
-        store.insert(id.clone(), request);
+        let mut state = pending.lock();
+        state.requests.insert(id.clone(), request);
+        match &state.notifier {
+            Some(tx) => {
+                if let Err(e) = tx.send(ApprovalNotification {
+                    id: id.clone(),
+                    command: description,
+                    is_sandboxed: false,
+                }) {
+                    warn!(approval_id = %id, error = ?e, "Failed to send write approval notification");
+                }
+            }
+            None => {
+                warn!(approval_id = %id, "Write approval notifier not set - notification not sent!");
+            }
+        }
     }
-
-    // Notify the stream so the UI can show an approval bar
-    notify_approval_via_global(id.clone(), description, false);
 
     debug!(approval_id = %id, "Waiting for write approval");
 
@@ -91,15 +103,13 @@ pub async fn request_write_approval(
         Ok(Err(_)) => {
             warn!(approval_id = %id, "Approval channel closed");
             // Clean up
-            let mut store = pending.lock();
-            store.remove(&id);
+            pending.lock().requests.remove(&id);
             Ok(false)
         }
         Err(_) => {
             warn!(approval_id = %id, "Write approval timed out");
             // Clean up
-            let mut store = pending.lock();
-            store.remove(&id);
+            pending.lock().requests.remove(&id);
             Err(anyhow::anyhow!(
                 "Write approval timed out after {} seconds",
                 APPROVAL_TIMEOUT.as_secs()
@@ -728,7 +738,58 @@ impl Tool for MoveFileTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_final_answer, preview};
+    use super::{
+        normalize_final_answer, preview, request_write_approval, set_global_write_approval_mode,
+    };
+    use crate::models::write_approval_store::{
+        WriteApprovalDecision, WriteApprovalStore, WriteOperation,
+    };
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    /// AGE-246 / D7: two agents, each with its own `WriteApprovalStore`, must
+    /// not cross-notify — a request made against agent A's store is
+    /// delivered only to A's receiver, never B's.
+    #[tokio::test]
+    async fn write_approval_notifies_only_the_owning_store() {
+        // Other tests in this crate flip the process-wide write-approval
+        // mode to auto-approve; force "always ask" so this test reaches the
+        // notifier regardless of test execution order.
+        set_global_write_approval_mode(ApprovalMode::AlwaysAsk);
+
+        let mut store_a = WriteApprovalStore::new();
+        let mut store_b = WriteApprovalStore::new();
+
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        store_a.set_notifier(tx_a);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        store_b.set_notifier(tx_b);
+
+        let pending_a = store_a.get_pending_approvals();
+        let waiter = tokio::spawn({
+            let pending_a = pending_a.clone();
+            async move {
+                request_write_approval(
+                    &pending_a,
+                    WriteOperation::DeleteFile {
+                        path: "/tmp/x".to_string(),
+                    },
+                )
+                .await
+            }
+        });
+
+        let notification = rx_a
+            .recv()
+            .await
+            .expect("agent A's receiver must see the notification");
+        assert!(
+            rx_b.try_recv().is_err(),
+            "agent B's receiver must not see agent A's request"
+        );
+
+        assert!(store_a.resolve(&notification.id, WriteApprovalDecision::Approved));
+        assert!(waiter.await.unwrap().unwrap());
+    }
 
     #[test]
     fn preview_truncates_on_char_boundary_not_bytes() {

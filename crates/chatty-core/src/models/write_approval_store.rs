@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use parking_lot::Mutex;
+
+use crate::models::execution_approval_store::ApprovalNotification;
 
 /// Decision for a filesystem write approval request
 #[derive(Clone, Debug)]
@@ -88,10 +90,33 @@ pub struct WriteApprovalRequest {
     pub responder: oneshot::Sender<WriteApprovalDecision>,
 }
 
-/// Thread-safe storage for pending write approvals
-pub type PendingWriteApprovals = Arc<Mutex<HashMap<String, WriteApprovalRequest>>>;
+/// Inner state behind `PendingWriteApprovals`: the in-flight requests plus
+/// the per-turn notifier the frontend installs (AGE-246 / D7) so the write
+/// tools can announce a new request through the store they hold, rather than
+/// a process-wide global. Shares `ApprovalNotification` with
+/// `execution_approval_store` so shell/git and filesystem-write approvals
+/// keep surfacing on the same notification channel/UI.
+pub struct PendingWriteApprovalsState {
+    // `pub(crate)`: `request_write_approval` lives in `tools::filesystem_write_tool`,
+    // a sibling module, and needs direct access (mirrors how `PendingApprovalsState`
+    // and `PendingClarificationsState` are used from within their own file).
+    pub(crate) requests: HashMap<String, WriteApprovalRequest>,
+    pub(crate) notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
+}
 
-/// Global store for pending filesystem write approval requests
+impl PendingWriteApprovalsState {
+    fn new() -> Self {
+        Self {
+            requests: HashMap::new(),
+            notifier: None,
+        }
+    }
+}
+
+/// Thread-safe storage for pending write approvals
+pub type PendingWriteApprovals = Arc<Mutex<PendingWriteApprovalsState>>;
+
+/// Per-agent store for pending filesystem write approval requests
 pub struct WriteApprovalStore {
     pending_requests: PendingWriteApprovals,
 }
@@ -99,7 +124,7 @@ pub struct WriteApprovalStore {
 impl WriteApprovalStore {
     pub fn new() -> Self {
         Self {
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            pending_requests: Arc::new(Mutex::new(PendingWriteApprovalsState::new())),
         }
     }
 
@@ -108,10 +133,17 @@ impl WriteApprovalStore {
         self.pending_requests.clone()
     }
 
+    /// Set the notifier for the current turn: it lives on `PendingWriteApprovals`
+    /// itself, since that is the handle `request_write_approval` actually holds
+    /// (AGE-246 / D7).
+    pub fn set_notifier(&mut self, tx: mpsc::UnboundedSender<ApprovalNotification>) {
+        self.pending_requests.lock().notifier = Some(tx);
+    }
+
     /// Resolve an approval request by ID
     pub fn resolve(&self, id: &str, decision: WriteApprovalDecision) -> bool {
-        let mut pending = self.pending_requests.lock();
-        if let Some(request) = pending.remove(id) {
+        let mut state = self.pending_requests.lock();
+        if let Some(request) = state.requests.remove(id) {
             let _ = request.responder.send(decision);
             true
         } else {

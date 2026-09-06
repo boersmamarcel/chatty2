@@ -50,8 +50,9 @@ Runs BPE token counting off the UI thread:
 - **Preamble** — counted via BPE if the cache is cold; reused if the hash matches
 - **Tool definitions** — `counter.estimate_tool_tokens(tool_count)`, a per-schema
   estimate rather than a count of the real schemas
-- **Conversation history** — `count_history()`: full BPE count of every
-  `rig_core::completion::Message` serialised to JSON, counted fresh every turn
+- **Conversation history** — `count_history()`: a BPE count of the text content of
+  every `rig_core::completion::Message` entry, with non-text parts charged a fixed
+  per-item estimate (see "Known limitations"); counted fresh every turn
 - **Latest user message** — plain text from `UserContent::Text` variants
   (`extract_user_message_text()`); images and PDFs are skipped
 
@@ -129,12 +130,27 @@ Accuracy by provider:
 - **Mistral / Ollama** — ±5–10%
 
 **Known limitations:**
-- Images and PDFs are not counted. Conversations with many large images are
-  significantly under-estimated (Gemini in particular counts image tiles separately).
+- The *latest user message* component skips images and PDFs entirely —
+  `extract_user_message_text()` only concatenates `UserContent::Text` variants.
+  *History* counting differs: `TokenCounter::count_message()` walks each message's
+  content parts and BPE-counts the text (plain text, tool-result text, tool-call
+  name and arguments), substituting a fixed `NON_TEXT_CONTENT_TOKENS` estimate
+  (1000) for each image, document, audio or video part and each non-text tool-result
+  item. Before AGE-229 it JSON-serialised and fully BPE-tokenized the base64
+  payload, which was slow and produced a number unrelated to what a provider
+  actually bills (images are priced per pixel or tile). Either way, a conversation
+  with many large images is only ever a rough estimate.
 - History is counted *before* the new user message is appended to the conversation
   model, so the snapshot reflects the state at send time.
-- Tool results in history (e.g. web fetch responses) *are* counted, via the JSON
-  serialisation in `count_history()`.
+- Tool results in history (e.g. web fetch responses) *are* counted, via
+  `count_message()`'s per-content-part walk rather than a full-message JSON
+  serialisation.
+- `count_history()` still re-tokenizes every entry on every call.
+  `chatty_core::token_budget::cache::HistoryTokenCache` caches each entry's count
+  keyed by its index and a content hash, so a caller that holds one across turns
+  recounts only the entries that changed. As of AGE-229 it exists and is unit-tested
+  in chatty-core, but `compute_snapshot_background()` in the desktop manager does not
+  yet hold one, so `GlobalTokenBudget` still does a full recount on every send.
 
 ## `CachedTokenCounts`
 

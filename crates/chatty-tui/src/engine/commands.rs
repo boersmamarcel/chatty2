@@ -79,6 +79,7 @@ impl ChatEngine {
         self.total_output_tokens = 0;
         self.total_cache_read_tokens = 0;
         self.total_cache_write_tokens = 0;
+        self.last_turn_usage = None;
         self.pin_to_bottom();
         self.pending_approval = None;
         self.pending_clarification = None;
@@ -92,9 +93,17 @@ impl ChatEngine {
 
     /// Show current context usage and working directory.
     pub fn context_summary(&self) -> String {
+        // The last request's prompt is the actual context size; summing every
+        // request's input tokens over the whole session over-states it (AGE-223).
         let used_tokens = self
-            .total_input_tokens
-            .saturating_add(self.total_output_tokens);
+            .last_turn_usage
+            .as_ref()
+            .and_then(|usage| usage.last_call())
+            .map(|call| call.prompt_tokens())
+            .unwrap_or_else(|| {
+                self.total_input_tokens
+                    .saturating_add(self.total_output_tokens)
+            });
         let workspace = self.current_working_directory();
         let cache_line = if self.total_cache_read_tokens > 0 || self.total_cache_write_tokens > 0 {
             format!(

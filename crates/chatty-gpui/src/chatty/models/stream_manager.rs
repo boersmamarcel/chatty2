@@ -451,12 +451,14 @@ impl StreamManager {
                     state.calls.push(call);
                 }
             }
-            StreamChunk::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => {
+            StreamChunk::TurnUsage(aggregate) => {
+                let ApiCallUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    ..
+                } = aggregate;
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     // The per-request records are the source of truth; the
                     // provider's aggregate only stands in when none arrived.
@@ -498,9 +500,13 @@ impl StreamManager {
             StreamChunk::Error(error) => {
                 // Flush any buffered text before emitting StreamEnded
                 self.flush_pending_text(conv_id, cx);
+                // StreamStatus stays a display string (AGE-244 / D5's typed
+                // `kind` is for recovery decisions, made in on_chunk before
+                // this point; nothing downstream of StreamManager re-classifies).
+                let message = error.message;
                 let (token_usage, trace_json, epoch) =
                     if let Some(state) = self.streams.get_mut(conv_id) {
-                        state.status = StreamStatus::Error(error.clone());
+                        state.status = StreamStatus::Error(message.clone());
                         (
                             state.token_usage.take(),
                             state.trace_json.clone(),
@@ -512,7 +518,7 @@ impl StreamManager {
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: conv_id.to_string(),
                     epoch,
-                    status: StreamStatus::Error(error),
+                    status: StreamStatus::Error(message),
                     token_usage,
                     trace_json,
                     pending_artifacts: None,

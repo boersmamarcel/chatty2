@@ -98,7 +98,7 @@ fn question(id: &str, text: &str) -> ClarifyingQuestion {
     }
 }
 
-/// The nine scenarios both frontends are characterized against.
+/// The ten scenarios both frontends are characterized against.
 ///
 /// Values are fixed strings, not generated: a golden file is only useful if
 /// re-running the test produces byte-identical output.
@@ -264,12 +264,13 @@ pub fn scenarios() -> Vec<Scenario> {
                     cache_write_tokens: 0,
                     output_tokens: 56,
                 })),
-                ScriptedItem::Chunk(StreamChunk::TokenUsage {
+                ScriptedItem::Chunk(StreamChunk::TurnUsage(ApiCallUsage {
+                    turn: 0,
                     input_tokens: 234,
-                    output_tokens: 56,
                     cache_read_tokens: 1000,
                     cache_write_tokens: 0,
-                }),
+                    output_tokens: 56,
+                })),
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],
         },
@@ -282,6 +283,36 @@ pub fn scenarios() -> Vec<Scenario> {
                 ScriptedItem::Chunk(StreamChunk::Text("Partial ".into())),
                 ScriptedItem::Failure("connection reset by peer".into()),
                 // Never reached: the loop stops on the failure above.
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        },
+        // 10. A todo-protocol nudge fires mid-turn, on the second non-todo
+        //     tool result. It must not cancel the turn (AGE-242 / D3,
+        //     `follow_up_requires_cancel(TodoProtocol) == false`): both tool
+        //     results are still delivered and the stream runs on to `Done`,
+        //     with the follow-up appearing only once the turn completes
+        //     naturally rather than tearing down the in-flight turn.
+        Scenario {
+            name: "todo_nudge_mid_stream",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call-1".into(),
+                    result: "# Chatty".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call-2".into(),
+                    name: "search_code".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call-2".into(),
+                    result: "3 matches".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text("Still investigating.".into())),
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],
         },

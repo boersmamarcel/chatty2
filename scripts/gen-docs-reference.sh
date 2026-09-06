@@ -722,10 +722,9 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | Name | Location | Type | Purpose |
 |------|----------|------|---------|
 | `GLOBAL_WRITE_APPROVAL_MODE` | `tools/filesystem_write_tool.rs` | `OnceLock<Mutex<ApprovalMode>>` | Write-tool approval without coupling to UI |
-| `GLOBAL_APPROVAL_NOTIFIER` | `models/execution_approval_store.rs` | `OnceLock<Mutex<Option<UnboundedSender>>>` | Shell tools notify GPUI of pending approvals |
-| `GLOBAL_CLARIFICATION_NOTIFIER` | `models/clarification_store.rs` | `OnceLock<…>` | `ask_user` tool hands clarifying questions to the UI |
 | `REGISTRY` | `services/browser/registry.rs` | `LazyLock<Mutex<HashMap<String, Arc<BrowserManager>>>>` | `conversation_id → BrowserManager` so the transcript can dock a live browser panel |
 | `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
+| `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
 

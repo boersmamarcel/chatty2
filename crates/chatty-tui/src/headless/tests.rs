@@ -62,14 +62,21 @@ fn keeps_plain_text_payload_lines() {
 }
 
 #[test]
-fn detects_retryable_json_errors() {
-    assert!(is_retryable_stream_error(
-        "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563"
-    ));
-    assert!(is_retryable_stream_error(
-        "CompletionError: HttpError: Invalid status code 503 Service Unavailable with message: server overloaded"
-    ));
-    assert!(!is_retryable_stream_error("network timeout"));
+fn stream_error_retry_follows_the_shared_policy() {
+    use chatty_core::services::{StreamError, StreamErrorKind};
+
+    assert!(is_retryable_stream_error(&StreamError::new(
+        StreamErrorKind::MalformedToolCall,
+        "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563",
+    )));
+    assert!(is_retryable_stream_error(&StreamError::new(
+        StreamErrorKind::ProviderStatus(503),
+        "CompletionError: HttpError: Invalid status code 503 Service Unavailable with message: server overloaded",
+    )));
+    assert!(!is_retryable_stream_error(&StreamError::new(
+        StreamErrorKind::Other,
+        "network timeout",
+    )));
 }
 
 #[test]
@@ -214,4 +221,129 @@ fn extracts_known_paths_for_finalization() {
     );
     assert!(paths.contains("/app/data/payments.csv"));
     assert!(paths.contains("data/merchant_data.json"));
+}
+
+/// AGE-242 / D3: `stop_stream()` + `send_message()` in the same breath
+/// (what `run_headless`'s loop-pivot and compact-file branches used to do
+/// directly) is a silent no-op because `is_streaming` is still true —
+/// `pending_loop_pivot_prompt` / `pending_compact_file_prompt` now hold the
+/// prompt until `StreamCompleted` confirms the cancellation went through.
+///
+/// Driving `run_headless`'s own event loop end-to-end here would need a
+/// mocked LLM stream (the deferred send itself starts a real one against
+/// Ollama); this instead pins the exact `is_streaming` gate that mechanism
+/// depends on, directly on `ChatEngine`.
+mod deferred_send_after_cancel {
+    use super::*;
+    use crate::engine::ChatEngineConfig;
+    use chatty_core::factories::agent_factory::AgentBuildContext;
+    use chatty_core::models::Conversation;
+    use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
+    use chatty_core::settings::models::models_store::{ModelConfig, ModelsModel};
+    use chatty_core::settings::models::module_settings::ModuleSettingsModel;
+    use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+
+    /// A `ChatEngine` wrapping a real (network-free) `Conversation`. Ollama
+    /// client construction is purely local, so this is safe in unit tests.
+    async fn test_engine() -> ChatEngine {
+        let _ = chatty_core::init_repositories();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: ModuleSettingsModel::default(),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+            },
+            event_tx,
+        );
+
+        let model_config = ModelConfig::new(
+            "m1".to_string(),
+            "Test Model".to_string(),
+            ProviderType::Ollama,
+            "llama3.2".to_string(),
+        );
+        let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        engine.conversation = Some(
+            Conversation::new(
+                "c1".to_string(),
+                "Test".to_string(),
+                &model_config,
+                &provider_config,
+                AgentBuildContext {
+                    mcp_tools: None,
+                    exec_settings: None,
+                    pending_approvals: None,
+                    pending_clarifications: None,
+                    pending_write_approvals: None,
+                    pending_artifacts: None,
+                    shell_session: None,
+                    user_secrets: Vec::new(),
+                    theme_colors: None,
+                    memory_service: None,
+                    skill_service: None,
+                    search_settings: None,
+                    embedding_service: None,
+                    allow_sub_agent: false,
+                    module_agents: Vec::new(),
+                    gateway_port: None,
+                    remote_agents: Vec::new(),
+                    available_model_ids: Vec::new(),
+                    conversation_id: None,
+                },
+            )
+            .await
+            .expect("conversation should build without network access"),
+        );
+        engine.is_ready = true;
+        engine
+    }
+
+    #[tokio::test]
+    async fn send_message_right_after_stop_stream_is_refused_but_succeeds_once_cancelled() {
+        let mut engine = test_engine().await;
+
+        engine.send_message("first turn".to_string());
+        assert!(engine.is_streaming);
+        let messages_after_first_send = engine.messages.len();
+
+        engine.stop_stream();
+        // Immediately re-entering here is exactly the old bug: is_streaming
+        // is still true, so this must be a no-op.
+        engine.send_message("queued pivot prompt".to_string());
+        assert_eq!(
+            engine.messages.len(),
+            messages_after_first_send,
+            "send_message must no-op while is_streaming is still true"
+        );
+
+        // What headless's StreamCancelled/StreamCompleted handling actually
+        // does after a cancellation: clears is_streaming.
+        engine.handle_event(AppEvent::StreamCancelled);
+        engine.handle_event(AppEvent::StreamCompleted);
+        assert!(!engine.is_streaming);
+
+        engine.send_message("queued pivot prompt".to_string());
+        assert!(
+            engine.messages.len() > messages_after_first_send,
+            "send_message must succeed once the cancellation has completed"
+        );
+    }
 }

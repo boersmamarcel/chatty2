@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::models::ClarificationStore;
 use chatty_core::models::Conversation;
+use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{
     ClarificationAnswer, ClarificationNotification, ClarifyingQuestion,
 };
@@ -20,7 +21,9 @@ use chatty_core::models::message_types::{
 };
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
-use chatty_core::services::{ContextShaperSettings, McpService, MemoryService, shape_context};
+use chatty_core::services::{
+    ContextShaperSettings, McpService, MemoryService, StreamError, StreamErrorKind, shape_context,
+};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -286,10 +289,26 @@ pub struct ChatEngine {
     pub cancel_flag: Option<Arc<AtomicBool>>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_clarification: Option<PendingClarification>,
+    /// Set when `finalize_turn` rolled back the pending user message
+    /// (`TurnOutcome::DroppedAndRolledBack`); the caller restores this into
+    /// the input so the user doesn't lose what they typed (AGE-243).
+    pub pending_restore_text: Option<String>,
+    /// An agent-protocol follow-up that arrived while a turn was already
+    /// streaming. Queued rather than dropped (AGE-242 / D3) and sent once the
+    /// in-flight turn ends (`StreamCompleted` / `StreamCancelled`); the first
+    /// one queued wins if another arrives before it is sent.
+    pending_agent_follow_up: Option<String>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
     pub total_cache_write_tokens: u32,
+    /// Per-request usage records for the turn currently streaming, folded
+    /// into `last_turn_usage` once the turn's aggregate arrives.
+    current_turn_calls: Vec<chatty_core::models::token_usage::ApiCallUsage>,
+    /// The most recently completed turn's per-request usage. Its last call's
+    /// prompt size is the model's actual current context fill — summing every
+    /// request in the turn over-states it by the tool-call count (AGE-223).
+    pub last_turn_usage: Option<chatty_core::models::token_usage::TokenUsage>,
     pub title: String,
     pub is_ready: bool,
     /// Whether deferred background services (MCP, memory, embedding, etc.) have
@@ -376,10 +395,14 @@ impl ChatEngine {
             is_streaming: false,
             cancel_flag: None,
             pending_approval: None,
+            pending_restore_text: None,
+            pending_agent_follow_up: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            current_turn_calls: Vec::new(),
+            last_turn_usage: None,
             title: "New Chat".to_string(),
             is_ready: false,
             services_loaded: config.services_loaded,
@@ -460,6 +483,54 @@ impl ChatEngine {
         self.models.models().iter().map(|m| m.id.clone()).collect()
     }
 
+    /// Whether any execution-related setting is enabled — gates whether the
+    /// built agent gets `exec_settings` (and thus execution tools) at all.
+    fn any_tool_enabled(es: &ExecutionSettingsModel) -> bool {
+        es.enabled
+            || es.filesystem_read_enabled
+            || es.filesystem_write_enabled
+            || es.fetch_enabled
+            || es.git_enabled
+            || es.execute_code_enabled
+    }
+
+    /// Build the `AgentBuildContext` shared by `init_conversation` and
+    /// `spawn_init_conversation`. `mcp_tools` is left `None`; both callers set
+    /// it themselves after gathering it, since that gathering is async and,
+    /// for the background path, must happen inside the spawned task rather
+    /// than while still borrowing `&self` (AGE-224).
+    fn build_agent_context(&self) -> AgentBuildContext {
+        let exec_settings = if Self::any_tool_enabled(&self.execution_settings) {
+            Some(self.execution_settings.clone())
+        } else {
+            None
+        };
+        AgentBuildContext {
+            mcp_tools: None,
+            exec_settings,
+            pending_approvals: Some(self.execution_approval_store.get_pending_approvals()),
+            pending_clarifications: Some(self.clarification_store.get_pending_clarifications()),
+            pending_write_approvals: Some(self.write_approval_store.get_pending_approvals()),
+            pending_artifacts: None,
+            shell_session: None,
+            user_secrets: self.user_secrets.clone(),
+            theme_colors: None, // no theme colors in TUI
+            memory_service: self.memory_service.clone(),
+            skill_service: Some(self.skill_service.clone()),
+            search_settings: self.search_settings.clone(),
+            embedding_service: self.embedding_service.clone(),
+            allow_sub_agent: !self.is_sub_agent,
+            module_agents: self.module_agents.clone(),
+            gateway_port: self
+                .module_settings
+                .enabled
+                .then_some(self.module_settings.gateway_port),
+            remote_agents: self.remote_agents.clone(),
+            available_model_ids: self.available_model_ids(),
+            conversation_id: None, // browser feature isn't enabled in the TUI
+        }
+    }
+
     /// Initialize the conversation (async — creates agent with tools)
     pub async fn init_conversation(&mut self) -> Result<()> {
         // Bump generation so any in-flight background init is ignored
@@ -473,52 +544,15 @@ impl ChatEngine {
             None => None,
         };
 
-        let es = &self.execution_settings;
-        let any_tool_enabled = es.enabled
-            || es.filesystem_read_enabled
-            || es.filesystem_write_enabled
-            || es.fetch_enabled
-            || es.git_enabled
-            || es.execute_code_enabled;
-        let exec_settings = if any_tool_enabled {
-            Some(self.execution_settings.clone())
-        } else {
-            None
-        };
-
-        let pending_approvals = self.execution_approval_store.get_pending_approvals();
-        let pending_clarifications = self.clarification_store.get_pending_clarifications();
-        let pending_write_approvals = self.write_approval_store.get_pending_approvals();
+        let mut ctx = self.build_agent_context();
+        ctx.mcp_tools = mcp_tools;
 
         let conversation = Conversation::new(
             id,
             "New Chat".to_string(),
             &self.model_config,
             &self.provider_config,
-            AgentBuildContext {
-                mcp_tools,
-                exec_settings,
-                pending_approvals: Some(pending_approvals),
-                pending_clarifications: Some(pending_clarifications),
-                pending_write_approvals: Some(pending_write_approvals),
-                pending_artifacts: None,
-                shell_session: None,
-                user_secrets: self.user_secrets.clone(),
-                theme_colors: None, // no theme colors in TUI
-                memory_service: self.memory_service.clone(),
-                skill_service: Some(self.skill_service.clone()),
-                search_settings: self.search_settings.clone(),
-                embedding_service: self.embedding_service.clone(),
-                allow_sub_agent: !self.is_sub_agent,
-                module_agents: self.module_agents.clone(),
-                gateway_port: self
-                    .module_settings
-                    .enabled
-                    .then_some(self.module_settings.gateway_port),
-                remote_agents: self.remote_agents.clone(),
-                available_model_ids: self.available_model_ids(),
-                conversation_id: None, // browser feature isn't enabled in the TUI
-            },
+            ctx,
         )
         .await
         .context("Failed to create conversation")?;
@@ -543,40 +577,14 @@ impl ChatEngine {
         let model_config = self.model_config.clone();
         let provider_config = self.provider_config.clone();
         let mcp_service = self.mcp_service.clone();
-        let execution_settings = self.execution_settings.clone();
-        let pending_approvals = self.execution_approval_store.get_pending_approvals();
-        let pending_clarifications = self.clarification_store.get_pending_clarifications();
-        let pending_write_approvals = self.write_approval_store.get_pending_approvals();
-        let user_secrets = self.user_secrets.clone();
-        let remote_agents = self.remote_agents.clone();
-        let module_agents = self.module_agents.clone();
-        let available_model_ids = self.available_model_ids();
-        let module_settings = self.module_settings.clone();
-        let memory_service = self.memory_service.clone();
-        let search_settings = self.search_settings.clone();
-        let embedding_service = self.embedding_service.clone();
+        let mut ctx = self.build_agent_context();
         let event_tx = self.event_tx.clone();
-        let is_sub_agent = self.is_sub_agent;
-        let skill_service = self.skill_service.clone();
 
         tokio::spawn(async move {
             // Gather MCP tools
-            let mcp_tools = match mcp_service {
+            ctx.mcp_tools = match mcp_service {
                 Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
                 None => None,
-            };
-
-            let es = &execution_settings;
-            let any_tool_enabled = es.enabled
-                || es.filesystem_read_enabled
-                || es.filesystem_write_enabled
-                || es.fetch_enabled
-                || es.git_enabled
-                || es.execute_code_enabled;
-            let exec_settings = if any_tool_enabled {
-                Some(execution_settings.clone())
-            } else {
-                None
             };
 
             let result = Conversation::new(
@@ -584,29 +592,7 @@ impl ChatEngine {
                 "New Chat".to_string(),
                 &model_config,
                 &provider_config,
-                AgentBuildContext {
-                    mcp_tools,
-                    exec_settings,
-                    pending_approvals: Some(pending_approvals),
-                    pending_clarifications: Some(pending_clarifications),
-                    pending_write_approvals: Some(pending_write_approvals),
-                    pending_artifacts: None,
-                    shell_session: None,
-                    user_secrets,
-                    theme_colors: None, // no theme colors in TUI
-                    memory_service,
-                    skill_service: Some(skill_service.clone()),
-                    search_settings,
-                    embedding_service,
-                    allow_sub_agent: !is_sub_agent,
-                    module_agents,
-                    gateway_port: module_settings
-                        .enabled
-                        .then_some(module_settings.gateway_port),
-                    remote_agents,
-                    available_model_ids,
-                    conversation_id: None, // browser feature isn't enabled in the TUI
-                },
+                ctx,
             )
             .await;
 
@@ -639,6 +625,18 @@ impl ChatEngine {
 
     /// Send a message and start streaming the response
     pub fn send_message(&mut self, message: String) {
+        self.send_message_inner(message, true);
+    }
+
+    /// Inject an agent-protocol / loop-guard follow-up without pushing a user
+    /// bubble — the earlier system line (`Agent protocol follow-up: …`, or
+    /// the loop-guard/deadline `eprintln!` in headless) is the only visible
+    /// signal (AGE-242 / D3, mirrors the desktop's `send_protocol_follow_up`).
+    pub fn send_protocol_follow_up(&mut self, message: String) {
+        self.send_message_inner(message, false);
+    }
+
+    fn send_message_inner(&mut self, message: String, show_in_transcript: bool) {
         if !self.is_ready || self.is_streaming {
             return;
         }
@@ -656,47 +654,42 @@ impl ChatEngine {
             None => return,
         };
 
-        // Add user message to display
-        self.messages.push(DisplayMessage::with_text(
-            MessageRole::User,
-            message.clone(),
-        ));
+        // Add user message to display, unless this is a protocol follow-up
+        // that already rendered its own system line (AGE-242 / D3).
+        if show_in_transcript {
+            self.messages.push(DisplayMessage::with_text(
+                MessageRole::User,
+                message.clone(),
+            ));
+        }
 
-        // Build user content
-        let contents = vec![UserContent::text(message.clone())];
-
-        // Add user message to conversation history
-        let user_msg = rig_core::completion::Message::User {
-            content: vec![UserContent::text(message)],
-        };
-        conversation.add_user_message_with_attachments(user_msg, vec![]);
+        let (raw_history, contents) = prepare_user_turn(conversation, message);
 
         // Start assistant placeholder
         self.messages
             .push(DisplayMessage::new(MessageRole::Assistant, true));
         self.is_streaming = true;
 
-        // Set up approval channels
+        // Set up approval channels. Each store gets the sender installed
+        // directly on it (AGE-246 / D7) rather than via a process-wide
+        // global, so a request only ever reaches the receiver for the store
+        // that was actually handed to this turn's tools. Write approvals
+        // share the execution approval channel/UI, so they get a clone too.
         let (approval_tx, approval_rx) = mpsc::unbounded_channel::<ApprovalNotification>();
         let (resolution_tx, resolution_rx) = mpsc::unbounded_channel::<ApprovalResolution>();
-        chatty_core::models::execution_approval_store::set_global_approval_notifier(
-            approval_tx.clone(),
-        );
+        self.write_approval_store.set_notifier(approval_tx.clone());
         self.execution_approval_store
             .set_notifiers(approval_tx, resolution_tx);
 
         let (clarification_tx, clarification_rx) =
             mpsc::unbounded_channel::<ClarificationNotification>();
-        chatty_core::models::clarification_store::set_global_clarification_notifier(
-            clarification_tx,
-        );
+        self.clarification_store.set_notifier(clarification_tx);
 
         // Spawn stream task
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.cancel_flag = Some(cancel_flag.clone());
 
         let agent = conversation.agent().clone();
-        let raw_history = conversation.messages();
         let invoke_agent_progress_slot = conversation.invoke_agent_progress_slot();
         let event_tx = self.event_tx.clone();
         let max_agent_turns = self.execution_settings.max_agent_turns as usize;
@@ -731,7 +724,10 @@ impl ChatEngine {
             .await;
 
             if let Err(e) = result {
-                let _ = event_tx.send(AppEvent::StreamError(e.to_string()));
+                let _ = event_tx.send(AppEvent::StreamError(StreamError::new(
+                    StreamErrorKind::Other,
+                    e.to_string(),
+                )));
             }
         });
     }
@@ -847,16 +843,40 @@ impl ChatEngine {
                 });
                 EngineAction::Redraw
             }
+            AppEvent::ApiCallUsage(call) => {
+                self.current_turn_calls.push(call);
+                EngineAction::None
+            }
             AppEvent::TokenUsage {
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
             } => {
-                self.total_input_tokens += input_tokens;
-                self.total_output_tokens += output_tokens;
-                self.total_cache_read_tokens += cache_read_tokens;
-                self.total_cache_write_tokens += cache_write_tokens;
+                self.total_input_tokens = self.total_input_tokens.saturating_add(input_tokens);
+                self.total_output_tokens = self.total_output_tokens.saturating_add(output_tokens);
+                self.total_cache_read_tokens = self
+                    .total_cache_read_tokens
+                    .saturating_add(cache_read_tokens);
+                self.total_cache_write_tokens = self
+                    .total_cache_write_tokens
+                    .saturating_add(cache_write_tokens);
+                // The per-request records are the source of truth; the
+                // provider's aggregate only stands in when none arrived
+                // (mirrors StreamManager on the desktop).
+                self.last_turn_usage = Some(if self.current_turn_calls.is_empty() {
+                    let mut usage = chatty_core::models::token_usage::TokenUsage::new(
+                        input_tokens,
+                        output_tokens,
+                    );
+                    usage.cache_read_tokens = cache_read_tokens;
+                    usage.cache_write_tokens = cache_write_tokens;
+                    usage
+                } else {
+                    chatty_core::models::token_usage::TokenUsage::from_calls(std::mem::take(
+                        &mut self.current_turn_calls,
+                    ))
+                });
                 EngineAction::Redraw
             }
             AppEvent::TurnMessages(messages) => {
@@ -867,6 +887,7 @@ impl ChatEngine {
             }
             AppEvent::StreamCompleted => {
                 self.finalize_stream();
+                self.send_pending_agent_follow_up();
                 EngineAction::Redraw
             }
             AppEvent::StreamError(error) => {
@@ -883,7 +904,15 @@ impl ChatEngine {
             AppEvent::AgentProtocolFollowUp(prompt) => {
                 self.add_system_message(format!("Agent protocol follow-up: {}", prompt));
                 if !self.is_streaming {
-                    self.send_message(prompt);
+                    self.send_protocol_follow_up(prompt);
+                } else if self.pending_agent_follow_up.is_none() {
+                    // Queue rather than drop it (AGE-242 / D3): sent once the
+                    // in-flight turn ends.
+                    self.pending_agent_follow_up = Some(prompt);
+                } else {
+                    warn!(
+                        "Dropping a later agent protocol follow-up; an earlier one is already queued"
+                    );
                 }
                 EngineAction::Redraw
             }
@@ -894,6 +923,7 @@ impl ChatEngine {
                 }
                 self.finalize_partial_response();
                 self.reset_stream_state();
+                self.send_pending_agent_follow_up();
                 EngineAction::Redraw
             }
             AppEvent::TitleGenerated(title) => {
@@ -1142,6 +1172,21 @@ impl ChatEngine {
         }
     }
 
+    /// Whether the first exchange just completed and a title should be
+    /// generated. Counts *exchanges* in the conversation history, not display
+    /// messages: a system line (slash-command notice, protocol follow-up)
+    /// inflates `self.messages.len()` without adding a real exchange, which
+    /// used to defeat this check (AGE-223), and a turn with tool calls
+    /// persists its tool round-trips too, so the message count is no longer
+    /// two after one exchange (AGE-247).
+    fn should_generate_title(&self) -> bool {
+        self.title == "New Chat"
+            && self.conversation.as_ref().is_some_and(|conv| {
+                chatty_core::services::exchange_count(conv.entries().iter().map(|e| &e.message))
+                    == 1
+            })
+    }
+
     fn finalize_stream(&mut self) {
         // Mark display message as done
         if let Some(last) = self.streaming_assistant_mut() {
@@ -1154,9 +1199,8 @@ impl ChatEngine {
         // Generate title after the first exchange. Counted on the persisted
         // history, not on display rows: a turn with tool calls persists its
         // tool round-trips too (AGE-247).
-        if self.title == "New Chat"
+        if self.should_generate_title()
             && let Some(conv) = &self.conversation
-            && chatty_core::services::exchange_count(conv.entries().iter().map(|e| &e.message)) == 1
         {
             let event_tx = self.event_tx.clone();
             let agent = conv.agent().clone();
@@ -1174,11 +1218,32 @@ impl ChatEngine {
         }
     }
 
+    /// Commit the streamed response to conversation history using the one
+    /// shared empty-turn rule (AGE-243 / D4): persist when there is response
+    /// text, otherwise the turn is empty — committing it would write an empty
+    /// assistant message that goes back to the provider on the next request
+    /// (AGE-222/AGE-151). The pending user message that triggered it is
+    /// rolled back so history is left exactly as it was before the send, and
+    /// its text is queued in `pending_restore_text` so the caller can put it
+    /// back into the input.
     fn finalize_partial_response(&mut self) {
         if let Some(conv) = self.conversation.as_mut() {
             let response = conv.streaming_message().cloned().unwrap_or_default();
-            conv.finalize_response(response, vec![], None);
+            if let TurnOutcome::DroppedAndRolledBack(text) =
+                conv.finalize_turn(response, vec![], None)
+            {
+                self.pending_restore_text = Some(text);
+            }
             conv.set_streaming_message(None);
+        }
+    }
+
+    /// Send a follow-up that arrived while a turn was still streaming
+    /// (AGE-242 / D3), now that the turn has ended. A no-op when none is
+    /// queued.
+    fn send_pending_agent_follow_up(&mut self) {
+        if let Some(prompt) = self.pending_agent_follow_up.take() {
+            self.send_protocol_follow_up(prompt);
         }
     }
 
@@ -1236,6 +1301,27 @@ fn streaming_assistant_index(messages: &[DisplayMessage], after: Option<usize>) 
     })
 }
 
+/// Snapshot the conversation history for the outgoing request, then commit the
+/// new user message to the conversation.
+///
+/// The returned `history` is captured BEFORE the message is added: rig's
+/// `stream_prompt` appends `contents` after the caller-supplied `history` with
+/// no de-duplication, so sending the same text in both would carry the user's
+/// message twice on every request (AGE-221).
+fn prepare_user_turn(
+    conversation: &mut Conversation,
+    message: String,
+) -> (Vec<rig_core::completion::Message>, Vec<UserContent>) {
+    let user_content = UserContent::text(message);
+    let contents = vec![user_content.clone()];
+    let raw_history = conversation.messages();
+    let user_msg = rig_core::completion::Message::User {
+        content: vec![user_content],
+    };
+    conversation.add_user_message_with_attachments(user_msg, vec![]);
+    (raw_history, contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1267,5 +1353,409 @@ mod tests {
             "done".to_string(),
         )];
         assert_eq!(streaming_assistant_index(&messages, None), None);
+    }
+
+    /// Builds a real `Conversation` with no tools enabled. Ollama client
+    /// construction is purely local (no network access), so this is safe to
+    /// run in unit tests.
+    async fn test_conversation() -> Conversation {
+        use chatty_core::settings::models::providers_store::ProviderType;
+
+        // Agent construction unconditionally resolves the MCP repository (for
+        // the always-on list_mcp tool), which panics unless the process-global
+        // registry has been set up. `init_repositories()` only resolves the
+        // config directory path here — it does not touch disk — and repeat
+        // calls are a harmless no-op (`OnceLock::set` after the first).
+        let _ = chatty_core::init_repositories();
+
+        let model_config = ModelConfig::new(
+            "m1".to_string(),
+            "Test Model".to_string(),
+            ProviderType::Ollama,
+            "llama3.2".to_string(),
+        );
+        let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        Conversation::new(
+            "c1".to_string(),
+            "Test".to_string(),
+            &model_config,
+            &provider_config,
+            AgentBuildContext {
+                mcp_tools: None,
+                exec_settings: None,
+                pending_approvals: None,
+                pending_clarifications: None,
+                pending_write_approvals: None,
+                pending_artifacts: None,
+                shell_session: None,
+                user_secrets: Vec::new(),
+                theme_colors: None,
+                memory_service: None,
+                skill_service: None,
+                search_settings: None,
+                embedding_service: None,
+                allow_sub_agent: false,
+                module_agents: Vec::new(),
+                gateway_port: None,
+                remote_agents: Vec::new(),
+                available_model_ids: Vec::new(),
+                conversation_id: None,
+            },
+        )
+        .await
+        .expect("conversation should build without network access")
+    }
+
+    #[tokio::test]
+    async fn prepare_user_turn_snapshots_history_before_the_new_message() {
+        let mut conversation = test_conversation().await;
+
+        // Seed one prior exchange so the "before" history is non-trivial.
+        conversation.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conversation.finalize_response("hello!".to_string(), vec![], None);
+        let before_len = conversation.messages().len();
+        assert_eq!(before_len, 2);
+
+        let (history, contents) = prepare_user_turn(&mut conversation, "what's next?".to_string());
+
+        // The history handed to run_stream must have the length the
+        // conversation had BEFORE this send...
+        assert_eq!(history.len(), before_len);
+        // ...and must not already end with the new prompt (AGE-221: rig
+        // appends `contents` after `history` with no de-duplication).
+        let new_user_message = rig_core::completion::Message::User { content: contents };
+        assert_ne!(history.last(), Some(&new_user_message));
+
+        // The new message is still committed to the conversation itself.
+        assert_eq!(conversation.messages().len(), before_len + 1);
+        assert_eq!(conversation.messages().last(), Some(&new_user_message));
+    }
+
+    /// A `ChatEngine` wrapping a real (network-free) `Conversation`, for tests
+    /// that exercise conversation-history side effects of engine methods.
+    async fn test_engine() -> ChatEngine {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new(
+                    "Ollama".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                ),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: ModuleSettingsModel::default(),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+            },
+            event_tx,
+        );
+        engine.conversation = Some(test_conversation().await);
+        engine
+    }
+
+    /// AGE-222: a cancelled turn that produced no text must leave history
+    /// exactly as it was before the send — the user message that triggered it
+    /// is rolled back, not left dangling with no reply.
+    #[tokio::test]
+    async fn cancelled_turn_with_no_text_rolls_back_the_user_message() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        let before_send = conv.messages();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some(String::new()));
+
+        engine.finalize_partial_response();
+
+        assert_eq!(engine.conversation.unwrap().messages(), before_send);
+    }
+
+    /// AGE-243 / D4: the one shared empty-turn rule applies regardless of why
+    /// the turn ended — a *completed* turn with no text and no trace is
+    /// rolled back too (previously only the cancelled path did this), and the
+    /// dropped user text is queued for restoring into the input.
+    #[tokio::test]
+    async fn completed_turn_with_no_text_rolls_back_the_user_message_too() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        let before_send = conv.messages();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some(String::new()));
+
+        engine.finalize_partial_response();
+
+        assert_eq!(engine.conversation.unwrap().messages(), before_send);
+        assert_eq!(engine.pending_restore_text.as_deref(), Some("hi"));
+    }
+
+    /// AGE-222: an errored turn that produced some text still persists that
+    /// text as the assistant's reply.
+    #[tokio::test]
+    async fn errored_turn_with_text_persists_the_partial_response() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some("partial answer".to_string()));
+
+        engine.finalize_partial_response();
+
+        let messages = engine.conversation.unwrap().messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages.last(),
+            Some(&rig_core::completion::Message::Assistant {
+                id: None,
+                content: vec![rig_core::completion::message::AssistantContent::text(
+                    "partial answer"
+                )],
+            })
+        );
+    }
+
+    /// AGE-222: a normal completion with text is unaffected by the empty-turn
+    /// guard — behaviour is unchanged from before the fix.
+    #[tokio::test]
+    async fn normal_completion_with_text_is_unchanged() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.set_streaming_message(Some("full answer".to_string()));
+
+        engine.finalize_partial_response();
+
+        let messages = engine.conversation.unwrap().messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages.last(),
+            Some(&rig_core::completion::Message::Assistant {
+                id: None,
+                content: vec![rig_core::completion::message::AssistantContent::text(
+                    "full answer"
+                )],
+            })
+        );
+    }
+
+    /// A `ChatEngine` with no conversation, for tests that only exercise
+    /// event-handling state (token counters, usage folding) with no need for
+    /// a real agent.
+    fn bare_engine() -> ChatEngine {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new(
+                    "Ollama".to_string(),
+                    chatty_core::settings::models::providers_store::ProviderType::Ollama,
+                ),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: ModuleSettingsModel::default(),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+            },
+            event_tx,
+        )
+    }
+
+    /// AGE-223: per-call usage chunks fold into `last_turn_usage` via
+    /// `TokenUsage::from_calls` once the turn's aggregate arrives, mirroring
+    /// `StreamManager` on the desktop.
+    #[test]
+    fn api_call_usage_chunks_fold_into_last_turn_usage() {
+        let mut engine = bare_engine();
+
+        let call1 = chatty_core::models::token_usage::ApiCallUsage {
+            turn: 1,
+            input_tokens: 100,
+            cache_read_tokens: 0,
+            cache_write_tokens: 900,
+            output_tokens: 20,
+        };
+        let call2 = chatty_core::models::token_usage::ApiCallUsage {
+            turn: 2,
+            input_tokens: 50,
+            cache_read_tokens: 900,
+            cache_write_tokens: 0,
+            output_tokens: 10,
+        };
+
+        engine.handle_event(AppEvent::ApiCallUsage(call1));
+        engine.handle_event(AppEvent::ApiCallUsage(call2));
+        engine.handle_event(AppEvent::TokenUsage {
+            input_tokens: 150,
+            output_tokens: 30,
+            cache_read_tokens: 900,
+            cache_write_tokens: 900,
+        });
+
+        let usage = engine.last_turn_usage.as_ref().expect("usage recorded");
+        assert_eq!(usage.calls, vec![call1, call2]);
+        // The last call's prompt, not the turn total, is the real context
+        // size — used by `/context` instead of summing every request.
+        assert_eq!(usage.last_call(), Some(&call2));
+        assert_eq!(usage.last_call().unwrap().prompt_tokens(), 950);
+
+        // Session totals still accumulate as before.
+        assert_eq!(engine.total_input_tokens, 150);
+        assert_eq!(engine.total_output_tokens, 30);
+        assert_eq!(engine.total_cache_read_tokens, 900);
+        assert_eq!(engine.total_cache_write_tokens, 900);
+    }
+
+    /// AGE-223: with no per-call records (e.g. a provider that doesn't stream
+    /// them), `TokenUsage` falls back to the turn's reported aggregate.
+    #[test]
+    fn token_usage_without_prior_calls_falls_back_to_the_aggregate() {
+        let mut engine = bare_engine();
+
+        engine.handle_event(AppEvent::TokenUsage {
+            input_tokens: 40,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+
+        let usage = engine.last_turn_usage.as_ref().expect("usage recorded");
+        assert!(usage.calls.is_empty());
+        assert_eq!(usage.input_tokens, 40);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    /// AGE-223: the running totals saturate instead of wrapping on overflow.
+    #[test]
+    fn token_usage_counters_saturate_instead_of_overflowing() {
+        let mut engine = bare_engine();
+        engine.total_input_tokens = u32::MAX;
+
+        engine.handle_event(AppEvent::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+
+        assert_eq!(engine.total_input_tokens, u32::MAX);
+    }
+
+    /// AGE-223: the title-generation trigger counts conversation history, not
+    /// display messages — a system line padding `self.messages` must not
+    /// defeat it.
+    #[tokio::test]
+    async fn should_generate_title_counts_conversation_history_not_display_messages() {
+        let mut engine = test_engine().await;
+        engine.add_system_message("Agent protocol follow-up: ...".to_string());
+        engine
+            .messages
+            .push(DisplayMessage::with_text(MessageRole::User, "hi".into()));
+        engine.messages.push(DisplayMessage::with_text(
+            MessageRole::Assistant,
+            "hello".into(),
+        ));
+        assert_eq!(engine.messages.len(), 3);
+
+        let conv = engine.conversation.as_mut().unwrap();
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.finalize_response("hello".to_string(), vec![], None);
+        assert_eq!(conv.message_count(), 2);
+
+        assert!(engine.should_generate_title());
+    }
+
+    /// AGE-223: once the conversation has grown past the first exchange, the
+    /// trigger no longer fires.
+    #[tokio::test]
+    async fn should_generate_title_is_false_past_the_first_exchange() {
+        let mut engine = test_engine().await;
+        let conv = engine.conversation.as_mut().unwrap();
+        for _ in 0..2 {
+            conv.add_user_message_with_attachments(
+                rig_core::completion::Message::User {
+                    content: vec![UserContent::text("hi".to_string())],
+                },
+                vec![],
+            );
+            conv.finalize_response("hello".to_string(), vec![], None);
+        }
+        assert_eq!(conv.message_count(), 4);
+
+        assert!(!engine.should_generate_title());
+    }
+
+    /// AGE-223: once a title has already been set, the trigger no longer fires.
+    #[tokio::test]
+    async fn should_generate_title_is_false_once_a_title_is_set() {
+        let mut engine = test_engine().await;
+        engine.title = "Custom Title".to_string();
+        let conv = engine.conversation.as_mut().unwrap();
+        conv.add_user_message_with_attachments(
+            rig_core::completion::Message::User {
+                content: vec![UserContent::text("hi".to_string())],
+            },
+            vec![],
+        );
+        conv.finalize_response("hello".to_string(), vec![], None);
+
+        assert!(!engine.should_generate_title());
     }
 }

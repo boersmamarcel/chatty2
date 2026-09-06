@@ -121,6 +121,12 @@ Regenerate with `make docs-gen`; the tables live in
 | `singleton-inventory.md` | Process-global state and repositories |
 | `llms.txt`, `llms-full.txt` | Agent discovery index and concatenated key pages |
 
+## Upstream patch proposals (`docs/upstream/`, not synced)
+
+| File | What it covers |
+|---|---|
+| [`upstream/rig-core-prompt-caching-latest-message.md`](upstream/rig-core-prompt-caching-latest-message.md) | Drafted rig-core patch marking the latest message inside `finalize_openrouter_request_body`, which would let chatty delete the `PromptCachingHttpClient` workaround (AGE-239, origin AGE-205). Not yet submitted upstream. |
+
 ## Archived (`docs/archive/`, not synced)
 
 Point-in-time plans and audits kept for their reasoning; open items live in

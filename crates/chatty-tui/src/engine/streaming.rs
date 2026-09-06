@@ -17,7 +17,7 @@ use chatty_core::models::clarification_store::ClarificationNotification;
 use crate::events::AppEvent;
 
 pub(super) struct StreamParams {
-    pub agent: AgentClient,
+    pub agent: Arc<AgentClient>,
     pub history: Vec<rig_core::completion::Message>,
     pub contents: Vec<UserContent>,
     pub cancel_flag: Arc<AtomicBool>,
@@ -39,6 +39,31 @@ struct TuiStreamHandler {
     pending_tool_names: HashMap<String, String>,
     pending_follow_up: Option<String>,
     cancelled: bool,
+}
+
+impl TuiStreamHandler {
+    /// Queue a todo-protocol follow-up observed from a just-forwarded tool
+    /// result, keeping the first one queued this turn (AGE-242 / D3: the
+    /// unanswered follow-up question keeps the desktop's `is_none()` guard).
+    fn queue_follow_up_from_tool_result(&mut self, tool_name: Option<String>) {
+        use chatty_core::services::{FollowUpReason, follow_up_requires_cancel};
+
+        let Some(name) = tool_name else { return };
+        let Some(prompt) = self.task_controller.observe_tool_result(&name) else {
+            return;
+        };
+        // TodoProtocol never requires cancelling the in-flight turn (shared
+        // policy) — the caller already keeps streaming regardless.
+        debug_assert!(!follow_up_requires_cancel(FollowUpReason::TodoProtocol));
+        if self.pending_follow_up.is_none() {
+            self.pending_follow_up = Some(prompt);
+        } else {
+            tracing::warn!(
+                dropped_prompt = %prompt,
+                "Dropping a later todo-protocol follow-up; an earlier one is already queued"
+            );
+        }
+    }
 }
 
 impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
@@ -64,23 +89,20 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallResult { id, result } => {
-                if let Some(name) = self.pending_tool_names.remove(&id)
-                    && let Some(prompt) = self.task_controller.observe_tool_result(&name)
-                {
-                    self.pending_follow_up = Some(prompt);
-                    return Ok(ChunkAction::Break);
-                }
+                // Forward the chunk regardless: a todo-protocol follow-up
+                // must not cancel the in-flight turn (shared policy,
+                // AGE-242 / D3 — mirrors the desktop's `follow_up_requires_cancel`),
+                // so the tool result is always delivered and the stream keeps
+                // running until it ends naturally.
+                let follow_up_name = self.pending_tool_names.remove(&id);
                 let _ = self.event_tx.send(AppEvent::ToolCallResult { id, result });
+                self.queue_follow_up_from_tool_result(follow_up_name);
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallError { id, error } => {
-                if let Some(name) = self.pending_tool_names.remove(&id)
-                    && let Some(prompt) = self.task_controller.observe_tool_result(&name)
-                {
-                    self.pending_follow_up = Some(prompt);
-                    return Ok(ChunkAction::Break);
-                }
+                let follow_up_name = self.pending_tool_names.remove(&id);
                 let _ = self.event_tx.send(AppEvent::ToolCallError { id, error });
+                self.queue_follow_up_from_tool_result(follow_up_name);
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ApprovalRequested {
@@ -107,20 +129,19 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                     .send(AppEvent::ClarificationRequested { id, questions });
                 Ok(ChunkAction::Continue)
             }
-            // Per-request records are logged where they are produced; the
-            // terminal shows the exchange aggregate only.
-            StreamChunk::ApiCallUsage(_) => Ok(ChunkAction::Continue),
-            StreamChunk::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            } => {
+            // Per-request records are also logged where they are produced;
+            // forwarded here so the engine can fold them into the turn's
+            // per-call usage for an accurate `/context` size (AGE-223).
+            StreamChunk::ApiCallUsage(call) => {
+                let _ = self.event_tx.send(AppEvent::ApiCallUsage(call));
+                Ok(ChunkAction::Continue)
+            }
+            StreamChunk::TurnUsage(usage) => {
                 let _ = self.event_tx.send(AppEvent::TokenUsage {
-                    input_tokens,
-                    output_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
                 });
                 Ok(ChunkAction::Continue)
             }
@@ -203,9 +224,9 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
     if reset_agent_task {
         task_controller.reset();
     }
-    let (mut stream, _user_message) = stream_prompt(
+    let mut stream = stream_prompt(
         &agent,
-        &history,
+        history,
         contents,
         Some(approval_rx),
         Some(resolution_rx),
@@ -225,13 +246,22 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
         cancelled: false,
     };
 
-    chatty_core::services::run_stream_loop(
+    let result = chatty_core::services::run_stream_loop(
         &mut stream,
         &mut progress_rx,
         &cancel_flag,
         &mut handler,
     )
-    .await
+    .await;
+
+    // Clear the progress slot sender so stale references don't accumulate,
+    // mirroring the desktop's cleanup in message_ops_internals.rs (AGE-223).
+    {
+        let mut slot = invoke_agent_progress_slot.lock();
+        *slot = None;
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -291,11 +321,20 @@ mod tests {
                 result: "ok".into(),
             }))
             .unwrap();
-        assert!(matches!(action, ChunkAction::Break));
+        // AGE-242 / D3: a todo-protocol follow-up must not cancel the
+        // in-flight turn, so the loop keeps going instead of breaking.
+        assert!(matches!(action, ChunkAction::Continue));
 
         handler.on_stream_ended();
         let events = drain_events(&mut event_rx);
 
+        // The tool result that triggered the nudge is still delivered —
+        // the regression this fix targets (T2/AGE-151).
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::ToolCallResult { id, .. } if id == "b"))
+        );
         assert!(
             events
                 .iter()

@@ -10,20 +10,27 @@ use super::*;
 // its cancellation checks and its stall watchdog live there, and only the
 // dispatch below is desktop-specific (AGE-192).
 use chatty_core::services::ChunkAction;
+use chatty_core::services::{FollowUpReason, follow_up_requires_cancel};
+use chatty_core::services::{
+    RecoveryAction, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+};
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Parameters for the shared LLM stream processing.
 pub(super) struct LlmStreamParams {
     pub(super) conv_id: String,
-    pub(super) agent: AgentClient,
+    pub(super) agent: Arc<AgentClient>,
     pub(super) history: Vec<rig_core::completion::Message>,
     pub(super) user_contents: Vec<rig_core::message::UserContent>,
+    /// Additional content sent to the LLM alongside `user_contents` but never
+    /// persisted as part of the user message — e.g. the previous turn's
+    /// assistant-generated attachments (finding F2, AGE-216).
+    pub(super) extra_llm_contents: Vec<rig_core::message::UserContent>,
     pub(super) add_user_message_to_model: bool,
     /// True when a human turn starts this stream. Injected protocol follow-ups
     /// pass `false` so they keep the todo state of the turn they belong to.
     pub(super) reset_agent_task: bool,
     pub(super) attachment_paths: Vec<PathBuf>,
-    pub(super) provider_type: chatty_core::settings::models::providers_store::ProviderType,
     pub(super) chat_view: Entity<ChatView>,
     pub(super) stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     pub(super) cancel_flag: Arc<AtomicBool>,
@@ -56,7 +63,6 @@ pub(super) struct GpuiStreamHandler {
     chat_view: Entity<ChatView>,
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     weak_ctrl: gpui::WeakEntity<ChattyApp>,
-    provider_type: chatty_core::settings::models::providers_store::ProviderType,
     agent_task_controller: chatty_core::services::AgentTaskController,
     loop_guard: chatty_core::services::AgentLoopGuard,
     cancel_flag: Arc<AtomicBool>,
@@ -180,7 +186,7 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
                         "Text-only response exceeded verbosity limit; will inject brevity prompt after response completes.");
                 }
             }
-            Ok(StreamChunk::TokenUsage { .. }) => {
+            Ok(StreamChunk::TurnUsage(_)) => {
                 // Token usage tracked by StreamManager
             }
             Ok(StreamChunk::Done) => {
@@ -203,23 +209,38 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
                 return Ok(ChunkAction::Break);
             }
             Ok(StreamChunk::Error(ref err)) => {
-                error!(error = %err, conv_id = %self.conv_id, "Stream error");
+                error!(error = %err.message, kind = ?err.kind, conv_id = %self.conv_id, "Stream error");
 
-                // Detect authentication errors (401/Unauthorized). The Azure
-                // Entra token is attached fresh to every request (AGE-245), so
-                // a 401 here is a credential problem, not an expired token.
-                if is_azure_auth_stream_error(&self.provider_type, err) {
-                    tracing::warn!(
-                        "Detected Azure auth error - check the Entra ID credential (az login, managed identity or service principal)"
-                    );
-                } else if matches!(
-                    self.provider_type,
-                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter
-                ) && is_auth_stream_error(err)
-                {
-                    tracing::warn!(
-                        "Detected OpenRouter authentication error - check the configured API key/header"
-                    );
+                // AGE-244 / D5 decides what to do from the typed kind; AGE-245
+                // decides what "Retry" can still mean here. The Entra token is
+                // attached fresh to every request by AzureAuthHttpClient, so a
+                // 401 is a credential problem rather than an expired token:
+                // there is nothing left for this handler to refresh, and the
+                // AzureTokenCache global it used to reach for is gone.
+                match decide_recovery(err.kind, StreamSurface::Desktop, 0) {
+                    RecoveryAction::Retry { .. } => {
+                        tracing::warn!(
+                            "Authentication rejected - check the configured API key/header, or the Entra ID credential (az login, managed identity or service principal)"
+                        );
+                    }
+                    RecoveryAction::Nudge => {
+                        // A truncated tool call is a model defect, not a dead
+                        // connection: hand the parse error back and let it
+                        // retry. The cap has to live in conversation history,
+                        // not in a field: the handler is rebuilt for every
+                        // injected follow-up, so a flag here would reset each
+                        // time and the retry would never terminate (AGE-150
+                        // Defect 2, easy to rebuild by accident).
+                        if self.pending_follow_up.is_none()
+                            && !already_asked_to_retry(&self.conv_id, &mut self.cx)
+                        {
+                            warn!(conv_id = %self.conv_id, error = %err.message,
+                                "Malformed tool-call JSON; asking the model to retry");
+                            self.pending_follow_up =
+                                Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
+                        }
+                    }
+                    RecoveryAction::Stop => {}
                 }
             }
             Ok(StreamChunk::ToolCallStarted { ref id, ref name }) => {
@@ -271,7 +292,7 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
         match chunk_result {
             Ok(StreamChunk::TurnMessages(messages)) => {
                 // rig's record of the turn. Kept on the conversation for
-                // `finalize_response` to persist behind the final text
+                // `finalize_turn` to persist behind the final text
                 // (AGE-247); not forwarded, the UI renders tool activity from
                 // the trace, and the payloads can be large.
                 let conv_id = self.conv_id.clone();
@@ -301,28 +322,20 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
                 }
             }
             Err(e) => {
+                // This is the generic `ResponseStream` contract's transport
+                // `Err`, distinct from `Ok(StreamChunk::Error(_))` above: rig
+                // errors always arrive typed via the latter (`map_stream_result`
+                // in llm_service.rs), so in practice this arm is exercised only
+                // by test fixtures (`ScriptedItem::Failure`) that model a raw
+                // stream failure with no typed classification available.
                 let message = e.to_string();
-
-                // A truncated tool call is a model defect, not a dead
-                // connection: hand the parse error back and let it retry.
-                //
-                // The cap has to live in conversation history, not in a field:
-                // the handler is rebuilt for every injected follow-up, so a flag
-                // here would reset each time and the retry would never
-                // terminate. That is AGE-150 Defect 2, and it is easy to rebuild
-                // by accident.
-                if is_malformed_tool_call_error(&message)
-                    && self.pending_follow_up.is_none()
-                    && !already_asked_to_retry(&self.conv_id, &mut self.cx)
-                {
-                    warn!(conv_id = %self.conv_id, error = %message,
-                        "Malformed tool-call JSON; asking the model to retry");
-                    self.pending_follow_up = Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
-                }
 
                 // Keep the failed turn's tool calls in the transcript.
                 self.capture_trace_before_error();
-                self.forward(StreamChunk::Error(message));
+                self.forward(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Other,
+                    message,
+                )));
                 Ok(ChunkAction::Break)
             }
         }
@@ -410,6 +423,18 @@ impl chatty_core::services::StreamChunkHandler for GpuiStreamHandler {
 #[path = "stream_handler_characterization.rs"]
 mod characterization;
 
+/// Combine the contents that will be persisted as the user message with any
+/// additional content that must reach the LLM but never be persisted — e.g.
+/// the previous turn's assistant-generated attachments (finding F2, AGE-216).
+fn build_llm_contents(
+    user_contents: &[rig_core::message::UserContent],
+    extra_llm_contents: Vec<rig_core::message::UserContent>,
+) -> Vec<rig_core::message::UserContent> {
+    let mut combined = user_contents.to_vec();
+    combined.extend(extra_llm_contents);
+    combined
+}
+
 /// Shared LLM stream processing used by both `send_message` and `handle_regeneration`.
 ///
 /// Handles:
@@ -430,23 +455,31 @@ pub(super) async fn run_llm_stream(
         agent,
         history,
         user_contents,
+        extra_llm_contents,
         add_user_message_to_model,
         reset_agent_task,
         attachment_paths,
-        provider_type,
         chat_view,
         stream_manager,
         cancel_flag,
         invoke_agent_progress_slot,
         weak_ctrl,
     } = params;
-    // 1. Create approval notification channels
+    // 1. Create approval notification channels. Each store gets the sender
+    // installed directly on it (AGE-246 / D7) rather than via a process-wide
+    // global, so a request only ever reaches the receiver for the store that
+    // was actually handed to this turn's tools. Write approvals share the
+    // execution approval channel/UI, so they get a clone too.
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    crate::chatty::models::execution_approval_store::set_global_approval_notifier(
-        approval_tx.clone(),
-    );
+    cx.update_global::<crate::chatty::models::write_approval_store::WriteApprovalStore, _>(
+        |store, _cx| {
+            store.set_notifier(approval_tx.clone());
+        },
+    )
+    .map_err(|e| warn!(error = ?e, "Failed to update write approval store with notifier"))
+    .ok();
     cx.update_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore, _>(
         |store, _cx| {
             store.set_notifiers(approval_tx, resolution_tx);
@@ -456,34 +489,18 @@ pub(super) async fn run_llm_stream(
     .ok();
 
     let (clarification_tx, clarification_rx) = tokio::sync::mpsc::unbounded_channel();
-    chatty_core::models::clarification_store::set_global_clarification_notifier(clarification_tx);
+    cx.update_global::<crate::chatty::models::clarification_store::ClarificationStore, _>(
+        |store, _cx| {
+            store.set_notifier(clarification_tx);
+        },
+    )
+    .map_err(|e| warn!(error = ?e, "Failed to update clarification store with notifier"))
+    .ok();
 
-    // 2. Get max agent turns and workspace dir
+    // 2. Get max agent turns
     let max_agent_turns = cx
         .update(|cx| cx.global::<ExecutionSettingsModel>().max_agent_turns as usize)
         .unwrap_or(10);
-    // Use per-conversation workspace dir override if set, fall back to global setting
-    let _workspace_dir = cx
-        .update(|cx| {
-            // Check per-conversation override first
-            let per_conv = cx
-                .global::<ConversationsStore>()
-                .get_conversation(&conv_id)
-                .and_then(|c| {
-                    c.working_dir()
-                        .map(|p| normalize_workspace_path(p).to_string_lossy().to_string())
-                });
-            // Fall back to global workspace_dir
-            per_conv.or_else(|| {
-                cx.global::<ExecutionSettingsModel>()
-                    .workspace_dir
-                    .as_deref()
-                    .map(normalize_workspace_string)
-            })
-        })
-        .map_err(|e| warn!(error = ?e, "Failed to resolve workspace directory override"))
-        .ok()
-        .flatten();
 
     // 2b. Compute token budget snapshot in parallel with the LLM call.
     //
@@ -495,15 +512,18 @@ pub(super) async fn run_llm_stream(
     // whatever repaint follows the count completing (~1–10 ms later).
     {
         let user_message_text_for_budget = extract_user_message_text(&user_contents);
-        let history_for_budget = history.clone();
         let conv_id_for_budget = conv_id.clone();
 
+        // `history` is only borrowed here: `gather_snapshot_inputs` clones it
+        // (once) itself, and only on the success path, so a conversation or
+        // model lookup miss no longer wastes a full history clone (finding
+        // B1, AGE-219).
         let budget_inputs = cx
             .update(|cx| {
                 gather_snapshot_inputs(
                     &conv_id_for_budget,
                     user_message_text_for_budget,
-                    history_for_budget,
+                    &history,
                     cx,
                 )
             })
@@ -571,11 +591,28 @@ pub(super) async fn run_llm_stream(
     if reset_agent_task {
         agent_task_controller.reset();
     }
-    let llm_user_contents = user_contents.clone();
+    // `extra_llm_contents` (e.g. the previous turn's assistant-generated
+    // attachments) rides along to the LLM but must never reach the persisted
+    // user message (finding F2, AGE-216). Build the user content once: when
+    // the turn will be persisted, `user_contents` must survive on its own for
+    // that, so cloning it before appending the LLM-only extras is
+    // unavoidable; otherwise (e.g. regeneration) there is nothing to keep
+    // separate and the same Vec moves straight into the LLM call (F5).
+    let (llm_user_contents, user_message_to_persist) = if add_user_message_to_model {
+        let llm_contents = build_llm_contents(&user_contents, extra_llm_contents);
+        let message = rig_core::completion::Message::User {
+            content: user_contents,
+        };
+        (llm_contents, Some(message))
+    } else {
+        let mut combined = user_contents;
+        combined.extend(extra_llm_contents);
+        (combined, None)
+    };
     debug!(conv_id = %conv_id, "Calling stream_prompt()");
-    let (mut stream, _user_message) = stream_prompt(
+    let mut stream = stream_prompt(
         &agent,
-        &shaped_history,
+        shaped_history,
         llm_user_contents,
         Some(approval_rx),
         Some(resolution_rx),
@@ -585,10 +622,7 @@ pub(super) async fn run_llm_stream(
     .await?;
 
     // 4. Optionally add user message to conversation model.
-    if add_user_message_to_model {
-        let user_message = rig_core::completion::Message::User {
-            content: user_contents,
-        };
+    if let Some(user_message) = user_message_to_persist {
         cx.update_global::<ConversationsStore, _>(|store, _cx| {
             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                 conv.add_user_message_with_attachments(user_message, attachment_paths);
@@ -616,7 +650,6 @@ pub(super) async fn run_llm_stream(
         chat_view: chat_view.clone(),
         stream_manager: stream_manager.clone(),
         weak_ctrl: weak_ctrl.clone(),
-        provider_type,
         agent_task_controller: agent_task_controller.clone(),
         loop_guard: chatty_core::services::AgentLoopGuard::new(max_agent_turns, false),
         cancel_flag: cancel_flag.clone(),
@@ -724,20 +757,6 @@ pub(super) async fn run_llm_stream(
     Ok(())
 }
 
-pub(super) fn is_auth_stream_error(err: &str) -> bool {
-    err.contains("401") || err.contains("Unauthorized")
-}
-
-pub(super) fn is_azure_auth_stream_error(
-    provider_type: &chatty_core::settings::models::providers_store::ProviderType,
-    err: &str,
-) -> bool {
-    matches!(
-        provider_type,
-        chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
-    ) && is_auth_stream_error(err)
-}
-
 fn is_agent_todo_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -745,8 +764,22 @@ fn is_agent_todo_tool(tool_name: &str) -> bool {
     )
 }
 
-/// Select attachment paths from the most recent assistant message that the
-/// current model can handle. Returns paths filtered by capability.
+/// True when `path`'s extension is `pdf`, checked case-insensitively so
+/// `report.PDF` is recognized the same as `report.pdf` (finding F7, AGE-218).
+pub(super) fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
+/// Select attachment paths from the immediately preceding assistant message
+/// (the previous turn), if any, that the current model can handle. Returns
+/// paths filtered by capability.
+///
+/// Stops at the most recent assistant entry regardless of whether it has
+/// attachments — walking further back would re-attach an artifact from an
+/// older turn on every later send (finding F2, AGE-216).
 ///
 /// Used to include tool-generated images/PDFs in follow-up prompts so the
 /// LLM can reference previously displayed files.
@@ -758,32 +791,26 @@ pub(super) fn select_recent_assistant_attachments(
     if !supports_images && !supports_pdf {
         return Vec::new();
     }
-    for entry in entries.iter().rev() {
-        if matches!(
+    let Some(last_assistant_entry) = entries.iter().rev().find(|entry| {
+        matches!(
             entry.message,
             rig_core::completion::Message::Assistant { .. }
-        ) && !entry.attachment_paths.is_empty()
-        {
-            return entry
-                .attachment_paths
-                .iter()
-                .filter(|path| {
-                    let is_pdf = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.eq_ignore_ascii_case("pdf"))
-                        .unwrap_or(false);
-                    if is_pdf {
-                        supports_pdf
-                    } else {
-                        supports_images
-                    }
-                })
-                .cloned()
-                .collect();
-        }
-    }
-    Vec::new()
+        )
+    }) else {
+        return Vec::new();
+    };
+    last_assistant_entry
+        .attachment_paths
+        .iter()
+        .filter(|path| {
+            if is_pdf_path(path) {
+                supports_pdf
+            } else {
+                supports_images
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 /// Convert a file attachment to a rig-core UserContent
@@ -875,24 +902,13 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn azure_auth_error_detection_is_provider_specific() {
-        use chatty_core::settings::models::providers_store::ProviderType;
-
-        let err = "ProviderError: Invalid status code 401 Unauthorized";
-        assert!(is_azure_auth_stream_error(&ProviderType::AzureOpenAI, err));
-        assert!(!is_azure_auth_stream_error(&ProviderType::OpenRouter, err));
-        assert!(!is_azure_auth_stream_error(&ProviderType::Ollama, err));
-    }
-
-    #[test]
-    fn auth_stream_error_detects_common_401_text() {
-        assert!(is_auth_stream_error(
-            "Invalid status code 401 Unauthorized with message: missing auth"
-        ));
-        assert!(is_auth_stream_error("ProviderError: Unauthorized"));
-        assert!(!is_auth_stream_error("ProviderError: rate limited"));
-    }
+    // Auth-kind classification and its retry-once policy are now tested
+    // once in chatty-core (llm_service::tests::classifies_401_as_auth /
+    // classifies_403_as_auth, stream_processor::tests::auth_retries_once_then_stops,
+    // AGE-244 / D5) instead of here per-provider: the desktop no longer knows
+    // or cares which provider produced the error, and since the Entra token is
+    // attached per request (AGE-245) it has nothing to refresh either — the
+    // arm only warns.
 
     #[test]
     fn select_attachments_returns_image_paths() {
@@ -960,8 +976,11 @@ mod tests {
     }
 
     #[test]
-    fn select_attachments_skips_assistant_without_attachments() {
-        // Most recent assistant has no attachments, but an earlier one does
+    fn select_attachments_does_not_walk_back_past_the_last_assistant_turn() {
+        // The immediately preceding assistant message has no attachments, so
+        // nothing is attached — even though an earlier turn did produce one.
+        // Walking further back would re-attach a stale artifact on every
+        // later send (finding F2, AGE-216).
         let entries = vec![
             entry(user_msg("first"), vec![]),
             entry(
@@ -972,8 +991,7 @@ mod tests {
             entry(assistant_msg("no chart"), vec![]),
         ];
         let result = select_recent_assistant_attachments(&entries, true, true);
-        // Should skip the empty one and find the older one
-        assert_eq!(result, vec![PathBuf::from("/tmp/old.png")]);
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -1000,6 +1018,55 @@ mod tests {
         ];
         let result = select_recent_assistant_attachments(&entries, false, true);
         assert_eq!(result, vec![PathBuf::from("/tmp/report.PDF")]);
+    }
+
+    #[test]
+    fn is_pdf_path_is_case_insensitive() {
+        assert!(is_pdf_path(&PathBuf::from("/tmp/report.pdf")));
+        assert!(is_pdf_path(&PathBuf::from("/tmp/report.PDF")));
+        assert!(is_pdf_path(&PathBuf::from("/tmp/report.Pdf")));
+        assert!(!is_pdf_path(&PathBuf::from("/tmp/report")));
+        assert!(!is_pdf_path(&PathBuf::from("/tmp/chart.png")));
+    }
+
+    #[test]
+    fn llm_contents_include_extra_but_leave_persisted_contents_untouched() {
+        // A user-uploaded image, as it would be built for persistence.
+        let user_contents = vec![
+            UserContent::text("look at this"),
+            UserContent::image_base64(
+                "user-image-data".to_string(),
+                Some(rig_core::completion::message::ImageMediaType::PNG),
+                None,
+            ),
+        ];
+        // The previous turn's assistant-generated attachment, LLM-only.
+        let extra_llm_contents = vec![UserContent::image_base64(
+            "assistant-chart-data".to_string(),
+            Some(rig_core::completion::message::ImageMediaType::PNG),
+            None,
+        )];
+
+        let llm_contents = build_llm_contents(&user_contents, extra_llm_contents.clone());
+
+        // The LLM sees both the user's upload and the assistant artifact.
+        assert_eq!(
+            llm_contents.len(),
+            user_contents.len() + extra_llm_contents.len()
+        );
+        assert!(llm_contents.iter().any(|c| matches!(
+            c,
+            UserContent::Image(img) if matches!(&img.data, rig_core::completion::message::DocumentSourceKind::Base64(b) if b == "assistant-chart-data")
+        )));
+
+        // `user_contents` — what gets persisted as the user message — is
+        // untouched: no injected artifact content, and the user's own
+        // upload is still there exactly as before (finding F2, AGE-216).
+        assert_eq!(user_contents.len(), 2);
+        assert!(!user_contents.iter().any(|c| matches!(
+            c,
+            UserContent::Image(img) if matches!(&img.data, rig_core::completion::message::DocumentSourceKind::Base64(b) if b == "assistant-chart-data")
+        )));
     }
 }
 
@@ -1040,32 +1107,6 @@ fn extract_trace_json(
     })
 }
 
-/// Why a follow-up prompt is being queued for after the current turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FollowUpReason {
-    /// The todo protocol wants a plan (or a verification) before more work.
-    TodoProtocol,
-    /// `AgentLoopGuard` saw the agent repeating itself.
-    LoopGuard,
-}
-
-/// Whether queuing this follow-up should also cancel the in-flight stream.
-///
-/// Only the loop guard's pivot should: it fires precisely because the agent is
-/// going in circles, so letting the turn run on is the thing being prevented.
-///
-/// The todo-protocol nudge must not. Cancelling for it broke the stream loop
-/// before `StreamChunk::Done`, so the turn's streamed text was discarded — the
-/// billed-but-empty assistant message in AGE-151 — and the nudge was delivered
-/// into a turn that had just been torn down. The nudge asks the agent to plan
-/// before doing *more* work; it never needed the work already done thrown away.
-pub(super) fn follow_up_requires_cancel(reason: FollowUpReason) -> bool {
-    match reason {
-        FollowUpReason::TodoProtocol => false,
-        FollowUpReason::LoopGuard => true,
-    }
-}
-
 /// Injected once when a provider rejects a tool call for malformed JSON.
 ///
 /// The `Agent protocol follow-up:` prefix is what
@@ -1101,24 +1142,9 @@ fn already_asked_to_retry(conv_id: &str, cx: &mut AsyncApp) -> bool {
     .unwrap_or(false)
 }
 
-/// Whether a stream error is the provider handing us a tool call whose JSON
-/// arguments were truncated or otherwise unparseable.
-///
-/// This is a model output defect, not a transport failure: the right response
-/// is to tell the model what broke and let it retry, rather than ending the
-/// conversation on a dead stream.
-fn is_malformed_tool_call_error(error: &str) -> bool {
-    let error = error.to_lowercase();
-    error.contains("malformed json input")
-        || (error.contains("tool call") && error.contains("malformed"))
-}
-
 #[cfg(test)]
 mod stream_error_tests {
-    use super::{
-        FollowUpReason, MALFORMED_TOOL_CALL_FOLLOW_UP, follow_up_requires_cancel,
-        is_malformed_tool_call_error,
-    };
+    use super::{FollowUpReason, MALFORMED_TOOL_CALL_FOLLOW_UP, follow_up_requires_cancel};
 
     /// The retry is bounded by spotting this text in history, and hidden from
     /// the transcript by the same prefix. Both depend on chatty-core's matcher
@@ -1141,27 +1167,9 @@ mod stream_error_tests {
         assert!(text.contains("smaller steps"), "offers a way out");
     }
 
-    #[test]
-    fn detects_truncated_tool_call_arguments() {
-        assert!(is_malformed_tool_call_error(
-            "CompletionError: ResponseError: tool call `shell_execute` arrived with \
-             malformed JSON input: EOF while parsing a string at line 1 column 308"
-        ));
-    }
-
-    #[test]
-    fn ignores_transport_and_auth_failures() {
-        for other in [
-            "CompletionError: ProviderError: Http client error: error decoding response body",
-            "401 Unauthorized",
-            "SSE error: connection reset",
-        ] {
-            assert!(
-                !is_malformed_tool_call_error(other),
-                "{other} should not be treated as a malformed tool call"
-            );
-        }
-    }
+    // Malformed-tool-call classification now lives once in chatty-core
+    // (llm_service::tests::classifies_json_error_as_malformed_tool_call,
+    // AGE-244 / D5) instead of this string matcher.
 
     // -------------------------------------------------------------------
     // Follow-up cancellation policy (AGE-151)

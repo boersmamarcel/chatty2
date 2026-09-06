@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
 
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, Text};
+use rig_core::completion::message::{AssistantContent, Text, UserContent};
 
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;
@@ -24,6 +25,20 @@ use crate::tools::PendingArtifacts;
 pub enum MessageFeedback {
     ThumbsUp,
     ThumbsDown,
+}
+
+/// Outcome of `Conversation::finalize_turn` (AGE-243 / D4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnOutcome {
+    /// The turn produced response text or a trace and was persisted to
+    /// history, along with its tool round-trips when rig recorded any
+    /// (AGE-247).
+    Persisted,
+    /// The turn produced neither, so it was dropped: the pending user message
+    /// that triggered it was rolled back rather than left dangling with no
+    /// response. Carries that message's text so the caller can put it back
+    /// into the composer/input.
+    DroppedAndRolledBack(String),
 }
 
 /// Record of a regenerated assistant response, capturing the original text
@@ -61,7 +76,7 @@ pub struct Conversation {
     id: String,
     title: String,
     model_id: String,
-    agent: AgentClient,
+    agent: Arc<AgentClient>,
     /// All messages with their metadata, in chronological order.
     entries: Vec<MessageEntry>,
     /// Regeneration records capturing original responses before replacement (DPO preference pairs)
@@ -131,10 +146,9 @@ impl Conversation {
             shell_session: None, // Factory creates session on-demand when execution is enabled
             ..ctx
         };
-        let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
-                .await
-                .context("Failed to create agent from config")?;
+        let built = AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+            .await
+            .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -142,7 +156,7 @@ impl Conversation {
             id,
             title,
             model_id: model_config.id.clone(),
-            agent,
+            agent: Arc::new(built.client),
             entries: Vec::new(),
             regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
@@ -153,11 +167,11 @@ impl Conversation {
             streaming_sub_agent_trace: None,
             streaming_turn_messages: None,
             pending_artifacts,
-            shell_session,
+            shell_session: built.shell_session,
             working_dir: None,
             agent_task_snapshot: None,
             agent_workspace_dir,
-            invoke_agent_progress_slot,
+            invoke_agent_progress_slot: built.invoke_agent_progress_slot,
         })
     }
 
@@ -193,10 +207,9 @@ impl Conversation {
             shell_session: None, // Factory creates session on-demand
             ..ctx
         };
-        let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
-                .await
-                .context("Failed to create agent from config")?;
+        let built = AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+            .await
+            .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)
@@ -256,7 +269,7 @@ impl Conversation {
             id: data.id,
             title: data.title,
             model_id: data.model_id,
-            agent,
+            agent: Arc::new(built.client),
             entries,
             regeneration_records,
             token_usage,
@@ -267,11 +280,11 @@ impl Conversation {
             streaming_sub_agent_trace: None,
             streaming_turn_messages: None,
             pending_artifacts,
-            shell_session,
+            shell_session: built.shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
             agent_task_snapshot,
             agent_workspace_dir,
-            invoke_agent_progress_slot,
+            invoke_agent_progress_slot: built.invoke_agent_progress_slot,
         })
     }
 
@@ -341,7 +354,38 @@ impl Conversation {
         self.updated_at = now;
     }
 
-    /// Keep rig's record of the turn in flight until `finalize_response`.
+    /// Finalize a turn's response using the one shared empty-turn rule
+    /// (AGE-243 / D4): persist when the response carries text or a trace,
+    /// otherwise treat the turn as empty and roll back the pending user
+    /// message that triggered it — a dangling unanswered user message would
+    /// be rejected by the provider on the next request. Both frontends'
+    /// finalizers (desktop's `finalize_completed_stream` /
+    /// `finalize_stopped_stream`, TUI's `finalize_partial_response`) call
+    /// this instead of each implementing their own drop-vs-persist rule.
+    ///
+    /// A persisted turn also persists rig's record of its tool round-trips
+    /// ahead of the final text, when the stream delivered one
+    /// (`set_streaming_turn_messages`, AGE-247). The record is taken on both
+    /// outcomes, so a dropped turn discards it rather than leaking it into
+    /// the next one.
+    pub fn finalize_turn(
+        &mut self,
+        text: String,
+        artifacts: Vec<PathBuf>,
+        trace: Option<serde_json::Value>,
+    ) -> TurnOutcome {
+        let outcome = finalize_turn_state(
+            &mut self.entries,
+            self.streaming_turn_messages.take(),
+            text,
+            artifacts,
+            trace,
+        );
+        self.updated_at = SystemTime::now();
+        outcome
+    }
+
+    /// Keep rig's record of the turn in flight until the turn is finalized.
     pub fn set_streaming_turn_messages(&mut self, messages: Option<Vec<Message>>) {
         self.streaming_turn_messages = messages;
     }
@@ -491,7 +535,6 @@ impl Conversation {
     }
 
     /// Get regeneration records for this conversation
-    #[allow(dead_code)]
     pub fn regeneration_records(&self) -> &[RegenerationRecord] {
         &self.regeneration_records
     }
@@ -582,9 +625,10 @@ impl Conversation {
         self.updated_at = SystemTime::now();
     }
 
-    /// Get the agent
-    pub fn agent(&self) -> &AgentClient {
-        &self.agent
+    /// Get the agent. Returns a cheap `Arc` clone rather than a deep copy of
+    /// rig's `AgentConfig` (finding B1, AGE-219).
+    pub fn agent(&self) -> Arc<AgentClient> {
+        self.agent.clone()
     }
 
     /// Get the pending artifacts handle for this conversation's tools
@@ -648,7 +692,7 @@ impl Conversation {
     /// Set the agent and model ID synchronously (for model switching without blocking)
     pub fn set_agent(
         &mut self,
-        agent: AgentClient,
+        agent: Arc<AgentClient>,
         model_id: String,
         agent_workspace_dir: Option<PathBuf>,
     ) {
@@ -895,6 +939,58 @@ fn finalize_sub_agent_progress_state(
     }
 }
 
+/// The logic behind `Conversation::finalize_turn`, extracted for direct unit
+/// testing (mirrors `append_trace_item_state` et al.): persist an assistant
+/// entry when there's text or a trace, otherwise pop the last (user) entry
+/// and return its text so the caller can restore it to the composer/input.
+fn finalize_turn_state(
+    entries: &mut Vec<MessageEntry>,
+    turn_messages: Option<Vec<Message>>,
+    text: String,
+    artifacts: Vec<PathBuf>,
+    trace: Option<serde_json::Value>,
+) -> TurnOutcome {
+    if !text.trim().is_empty() || trace.is_some() {
+        let now = SystemTime::now();
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        // Delegate to the same helper `finalize_response` uses, so the turn's
+        // tool round-trips are persisted ahead of the final text entry
+        // (AGE-247) by exactly one code path rather than two that can drift.
+        finalize_response_state(entries, turn_messages, text, artifacts, trace, timestamp);
+        return TurnOutcome::Persisted;
+    }
+
+    let rolled_back_text = entries
+        .last()
+        .map(|e| user_message_text(&e.message))
+        .unwrap_or_default();
+    if matches!(
+        entries.last().map(|e| &e.message),
+        Some(Message::User { .. })
+    ) {
+        entries.pop();
+    }
+    TurnOutcome::DroppedAndRolledBack(rolled_back_text)
+}
+
+/// The plain-text parts of a user message, joined with blank lines between
+/// parts. Non-text content (images, documents, tool results) is dropped —
+/// used to restore what the user typed into the composer/input, not what
+/// they attached.
+fn user_message_text(message: &Message) -> String {
+    match message {
+        Message::User { content } => content
+            .iter()
+            .filter_map(|c| match c {
+                UserContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,6 +1208,97 @@ mod tests {
         assert!(entries[0].system_trace.is_none());
     }
 
+    // AGE-243 / D4: one shared empty-turn rule, exercised on the four
+    // combinations of empty/non-empty text and trace.
+
+    #[test]
+    fn finalize_turn_persists_non_empty_text_with_no_trace() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            None,
+            "hello there".to_string(),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(outcome, TurnOutcome::Persisted);
+        assert_eq!(entries.len(), 2);
+        match &entries[1].message {
+            Message::Assistant { content, .. } => match &content[0] {
+                AssistantContent::Text(t) => assert_eq!(t.text, "hello there"),
+                other => panic!("expected Text, got {other:?}"),
+            },
+            other => panic!("expected Assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_turn_persists_empty_text_with_a_trace() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+        let trace = serde_json::to_value(SystemTrace::new()).unwrap();
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            None,
+            String::new(),
+            Vec::new(),
+            Some(trace.clone()),
+        );
+
+        assert_eq!(outcome, TurnOutcome::Persisted);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].system_trace, Some(trace));
+    }
+
+    #[test]
+    fn finalize_turn_persists_non_empty_text_with_a_trace() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+        let trace = serde_json::to_value(SystemTrace::new()).unwrap();
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            None,
+            "hello".to_string(),
+            Vec::new(),
+            Some(trace),
+        );
+
+        assert_eq!(outcome, TurnOutcome::Persisted);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn finalize_turn_drops_and_rolls_back_empty_text_with_no_trace() {
+        let mut entries = vec![entry(Message::user("what happened?"), None)];
+
+        let outcome = finalize_turn_state(&mut entries, None, String::new(), Vec::new(), None);
+
+        assert_eq!(
+            outcome,
+            TurnOutcome::DroppedAndRolledBack("what happened?".to_string())
+        );
+        assert!(
+            entries.is_empty(),
+            "pending user message must be rolled back"
+        );
+    }
+
+    #[test]
+    fn finalize_turn_drops_whitespace_only_text_with_no_trace() {
+        let mut entries = vec![entry(Message::user("still there?"), None)];
+
+        let outcome =
+            finalize_turn_state(&mut entries, None, "   \n".to_string(), Vec::new(), None);
+
+        assert_eq!(
+            outcome,
+            TurnOutcome::DroppedAndRolledBack("still there?".to_string())
+        );
+        assert!(entries.is_empty());
+    }
+
     // -------------------------------------------------------------------
     // Tool turns persisted with the answer (AGE-247)
     // -------------------------------------------------------------------
@@ -1227,6 +1414,66 @@ mod tests {
         let history: Vec<Message> = messages(&entries).into_iter().cloned().collect();
         assert!(history.iter().any(crate::services::is_tool_call_message));
         assert!(history.iter().any(is_tool_result_message));
+    }
+
+    /// Both frontends finalize a streamed turn through `finalize_turn`, not
+    /// `finalize_response` — so the ordering tests above, which drive
+    /// `finalize_response_state` directly, do not by themselves prove the
+    /// shipping path persists anything. This pins that wiring: the record
+    /// parked by `StreamChunk::TurnMessages` must survive `finalize_turn_state`.
+    ///
+    /// Without it, the delegation could be dropped in a later refactor and
+    /// every test here would still pass while tool turns silently stopped
+    /// being persisted — which is exactly how AGE-247 arrived broken in the
+    /// merge that introduced this path.
+    #[test]
+    fn finalize_turn_persists_tool_round_trips_on_the_live_path() {
+        let mut entries = vec![entry(Message::user("read both"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            Some(two_tool_turn()),
+            "Let me look.\n\nBoth read.".to_string(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(outcome, TurnOutcome::Persisted));
+
+        let shape: Vec<&str> = messages(&entries)
+            .iter()
+            .map(|m| match m {
+                Message::User { .. } if is_tool_result_message(m) => "result",
+                Message::User { .. } => "user",
+                Message::Assistant { .. } if crate::services::is_tool_call_message(m) => "call",
+                Message::Assistant { .. } => "text",
+                Message::System { .. } => "system",
+            })
+            .collect();
+        assert_eq!(shape, ["user", "call", "result", "call", "result", "text"]);
+        assert_pairs_intact(&entries);
+    }
+
+    /// A turn that produced neither text nor a trace is rolled back, and its
+    /// tool messages go with it: a dropped turn must not persist half a turn
+    /// (tool calls with no answer behind them).
+    #[test]
+    fn a_dropped_turn_persists_none_of_its_tool_messages() {
+        let mut entries = vec![entry(Message::user("read both"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            Some(two_tool_turn()),
+            String::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(outcome, TurnOutcome::DroppedAndRolledBack(_)));
+        assert!(
+            entries.is_empty(),
+            "the pending user entry is rolled back and no tool message is left behind"
+        );
     }
 
     #[test]

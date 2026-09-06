@@ -29,7 +29,6 @@ use crate::engine::{ChatEngine, ToolCallState};
 use crate::events::AppEvent;
 
 const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;
-const MAX_MALFORMED_JSON_RECOVERY_ATTEMPTS: usize = 2;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
 const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 3;
@@ -62,6 +61,13 @@ pub async fn run_headless(
     let mut failure_budget_stop_requested = false;
     let mut compact_file_finalization_sent = false;
     let mut last_compact_file_prompt: Option<String> = None;
+    // `stop_stream()` only sets the cancel flag; `send_message()` right after
+    // it is refused because `is_streaming` is still true (T3/AGE-242 — the
+    // deferred-flag pattern used by `finalization_pending_after_cancel` and
+    // `recovery_pending_after_error` below). These two hold the prompt until
+    // `StreamCompleted` confirms the cancellation actually went through.
+    let mut pending_compact_file_prompt: Option<String> = None;
+    let mut pending_loop_pivot_prompt: Option<String> = None;
     let mut finalization_pending_after_cancel = false;
     let mut recovery_pending_after_error = false;
     let mut pending_recovery_attempt_limit = MAX_STREAM_ERROR_RECOVERY_ATTEMPTS;
@@ -187,8 +193,10 @@ pub async fn run_headless(
                     eprintln!(
                         "Complete compact file extraction captured; requesting answer from evidence."
                     );
+                    // Deferred: send once StreamCompleted confirms the
+                    // cancellation went through (AGE-242 / D3).
+                    pending_compact_file_prompt = Some(compact_prompt);
                     engine.stop_stream();
-                    send_compact_file_answer_prompt(&mut engine, compact_prompt);
                     continue;
                 } else if let Some(pivot) = pivot_msg {
                     eprintln!(
@@ -196,8 +204,10 @@ pub async fn run_headless(
                         loop_guard.loop_pivot_count(),
                         3
                     );
+                    // Deferred: send once StreamCompleted confirms the
+                    // cancellation went through (AGE-242 / D3).
+                    pending_loop_pivot_prompt = Some(pivot);
                     engine.stop_stream();
-                    engine.send_message(pivot);
                     tool_results_since_finalization = 0;
                     continue;
                 }
@@ -291,6 +301,17 @@ pub async fn run_headless(
                 text_overflow_stop_requested = false;
                 text_hard_stop_requested = false;
                 text_bytes_this_turn = 0;
+                // The stop that led here was requested specifically to send
+                // one of these; the cancellation has now gone through, so
+                // send_message() will actually take (AGE-242 / D3).
+                if let Some(compact_prompt) = pending_compact_file_prompt.take() {
+                    send_compact_file_answer_prompt(&mut engine, compact_prompt);
+                    continue;
+                }
+                if let Some(pivot) = pending_loop_pivot_prompt.take() {
+                    engine.send_message(pivot);
+                    continue;
+                }
                 if recovery_pending_after_error {
                     recovery_pending_after_error = false;
                     tool_results_since_finalization = 0;
