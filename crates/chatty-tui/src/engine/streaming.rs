@@ -41,6 +41,31 @@ struct TuiStreamHandler {
     cancelled: bool,
 }
 
+impl TuiStreamHandler {
+    /// Queue a todo-protocol follow-up observed from a just-forwarded tool
+    /// result, keeping the first one queued this turn (AGE-242 / D3: the
+    /// unanswered follow-up question keeps the desktop's `is_none()` guard).
+    fn queue_follow_up_from_tool_result(&mut self, tool_name: Option<String>) {
+        use chatty_core::services::{FollowUpReason, follow_up_requires_cancel};
+
+        let Some(name) = tool_name else { return };
+        let Some(prompt) = self.task_controller.observe_tool_result(&name) else {
+            return;
+        };
+        // TodoProtocol never requires cancelling the in-flight turn (shared
+        // policy) — the caller already keeps streaming regardless.
+        debug_assert!(!follow_up_requires_cancel(FollowUpReason::TodoProtocol));
+        if self.pending_follow_up.is_none() {
+            self.pending_follow_up = Some(prompt);
+        } else {
+            tracing::warn!(
+                dropped_prompt = %prompt,
+                "Dropping a later todo-protocol follow-up; an earlier one is already queued"
+            );
+        }
+    }
+}
+
 impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
     fn on_stream_started(&mut self) {
         let _ = self.event_tx.send(AppEvent::StreamStarted);
@@ -64,23 +89,20 @@ impl chatty_core::services::StreamChunkHandler for TuiStreamHandler {
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallResult { id, result } => {
-                if let Some(name) = self.pending_tool_names.remove(&id)
-                    && let Some(prompt) = self.task_controller.observe_tool_result(&name)
-                {
-                    self.pending_follow_up = Some(prompt);
-                    return Ok(ChunkAction::Break);
-                }
+                // Forward the chunk regardless: a todo-protocol follow-up
+                // must not cancel the in-flight turn (shared policy,
+                // AGE-242 / D3 — mirrors the desktop's `follow_up_requires_cancel`),
+                // so the tool result is always delivered and the stream keeps
+                // running until it ends naturally.
+                let follow_up_name = self.pending_tool_names.remove(&id);
                 let _ = self.event_tx.send(AppEvent::ToolCallResult { id, result });
+                self.queue_follow_up_from_tool_result(follow_up_name);
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ToolCallError { id, error } => {
-                if let Some(name) = self.pending_tool_names.remove(&id)
-                    && let Some(prompt) = self.task_controller.observe_tool_result(&name)
-                {
-                    self.pending_follow_up = Some(prompt);
-                    return Ok(ChunkAction::Break);
-                }
+                let follow_up_name = self.pending_tool_names.remove(&id);
                 let _ = self.event_tx.send(AppEvent::ToolCallError { id, error });
+                self.queue_follow_up_from_tool_result(follow_up_name);
                 Ok(ChunkAction::Continue)
             }
             StreamChunk::ApprovalRequested {
@@ -299,11 +321,20 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(matches!(action, ChunkAction::Break));
+        // AGE-242 / D3: a todo-protocol follow-up must not cancel the
+        // in-flight turn, so the loop keeps going instead of breaking.
+        assert!(matches!(action, ChunkAction::Continue));
 
         handler.on_stream_ended();
         let events = drain_events(&mut event_rx);
 
+        // The tool result that triggered the nudge is still delivered —
+        // the regression this fix targets (T2/AGE-151).
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::ToolCallResult { id, .. } if id == "b"))
+        );
         assert!(
             events
                 .iter()

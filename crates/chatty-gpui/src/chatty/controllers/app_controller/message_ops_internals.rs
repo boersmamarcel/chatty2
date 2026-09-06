@@ -10,6 +10,7 @@ use super::*;
 // its cancellation checks and its stall watchdog live there, and only the
 // dispatch below is desktop-specific (AGE-192).
 use chatty_core::services::ChunkAction;
+use chatty_core::services::{FollowUpReason, follow_up_requires_cancel};
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Parameters for the shared LLM stream processing.
@@ -453,13 +454,21 @@ pub(super) async fn run_llm_stream(
         invoke_agent_progress_slot,
         weak_ctrl,
     } = params;
-    // 1. Create approval notification channels
+    // 1. Create approval notification channels. Each store gets the sender
+    // installed directly on it (AGE-246 / D7) rather than via a process-wide
+    // global, so a request only ever reaches the receiver for the store that
+    // was actually handed to this turn's tools. Write approvals share the
+    // execution approval channel/UI, so they get a clone too.
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    crate::chatty::models::execution_approval_store::set_global_approval_notifier(
-        approval_tx.clone(),
-    );
+    cx.update_global::<crate::chatty::models::write_approval_store::WriteApprovalStore, _>(
+        |store, _cx| {
+            store.set_notifier(approval_tx.clone());
+        },
+    )
+    .map_err(|e| warn!(error = ?e, "Failed to update write approval store with notifier"))
+    .ok();
     cx.update_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore, _>(
         |store, _cx| {
             store.set_notifiers(approval_tx, resolution_tx);
@@ -469,7 +478,13 @@ pub(super) async fn run_llm_stream(
     .ok();
 
     let (clarification_tx, clarification_rx) = tokio::sync::mpsc::unbounded_channel();
-    chatty_core::models::clarification_store::set_global_clarification_notifier(clarification_tx);
+    cx.update_global::<crate::chatty::models::clarification_store::ClarificationStore, _>(
+        |store, _cx| {
+            store.set_notifier(clarification_tx);
+        },
+    )
+    .map_err(|e| warn!(error = ?e, "Failed to update clarification store with notifier"))
+    .ok();
 
     // 2. Get max agent turns
     let max_agent_turns = cx
@@ -1105,32 +1120,6 @@ fn extract_trace_json(
             None
         }
     })
-}
-
-/// Why a follow-up prompt is being queued for after the current turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FollowUpReason {
-    /// The todo protocol wants a plan (or a verification) before more work.
-    TodoProtocol,
-    /// `AgentLoopGuard` saw the agent repeating itself.
-    LoopGuard,
-}
-
-/// Whether queuing this follow-up should also cancel the in-flight stream.
-///
-/// Only the loop guard's pivot should: it fires precisely because the agent is
-/// going in circles, so letting the turn run on is the thing being prevented.
-///
-/// The todo-protocol nudge must not. Cancelling for it broke the stream loop
-/// before `StreamChunk::Done`, so the turn's streamed text was discarded — the
-/// billed-but-empty assistant message in AGE-151 — and the nudge was delivered
-/// into a turn that had just been torn down. The nudge asks the agent to plan
-/// before doing *more* work; it never needed the work already done thrown away.
-pub(super) fn follow_up_requires_cancel(reason: FollowUpReason) -> bool {
-    match reason {
-        FollowUpReason::TodoProtocol => false,
-        FollowUpReason::LoopGuard => true,
-    }
 }
 
 /// Injected once when a provider rejects a tool call for malformed JSON.

@@ -16,6 +16,35 @@ pub enum ChunkAction {
     Break,
 }
 
+/// Why a follow-up prompt is being queued for after the current turn.
+///
+/// Shared by both frontends (AGE-242 / D3) so the cancel-or-not policy for a
+/// queued follow-up can't drift between the two hand-rolled stream handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowUpReason {
+    /// The todo protocol wants a plan (or a verification) before more work.
+    TodoProtocol,
+    /// `AgentLoopGuard` saw the agent repeating itself.
+    LoopGuard,
+}
+
+/// Whether queuing this follow-up should also cancel the in-flight stream.
+///
+/// Only the loop guard's pivot should: it fires precisely because the agent is
+/// going in circles, so letting the turn run on is the thing being prevented.
+///
+/// The todo-protocol nudge must not. Cancelling for it broke the stream loop
+/// before `StreamChunk::Done`, so the turn's streamed text was discarded — the
+/// billed-but-empty assistant message in AGE-151 — and the nudge was delivered
+/// into a turn that had just been torn down. The nudge asks the agent to plan
+/// before doing *more* work; it never needed the work already done thrown away.
+pub fn follow_up_requires_cancel(reason: FollowUpReason) -> bool {
+    match reason {
+        FollowUpReason::TodoProtocol => false,
+        FollowUpReason::LoopGuard => true,
+    }
+}
+
 /// Trait for handling stream chunks and progress events.
 ///
 /// Both the GPUI and TUI frontends implement this trait to receive stream
@@ -175,6 +204,20 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::atomic::AtomicBool;
+
+    // -------------------------------------------------------------------
+    // Follow-up cancel policy (AGE-242 / D3)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn todo_protocol_follow_up_does_not_require_cancel() {
+        assert!(!follow_up_requires_cancel(FollowUpReason::TodoProtocol));
+    }
+
+    #[test]
+    fn loop_guard_follow_up_requires_cancel() {
+        assert!(follow_up_requires_cancel(FollowUpReason::LoopGuard));
+    }
 
     // -------------------------------------------------------------------
     // Stall watchdog (AGE-188)
