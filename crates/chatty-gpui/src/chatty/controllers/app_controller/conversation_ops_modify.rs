@@ -285,7 +285,7 @@ impl ChattyApp {
                             if let Some(conv) = store.get_conversation_mut(&conv_id) {
                                 debug!("Updating conversation model");
                                 conv.set_agent(
-                                    new_agent,
+                                    std::sync::Arc::new(new_agent),
                                     model_config.id.clone(),
                                     built_workspace_dir.clone(),
                                 );

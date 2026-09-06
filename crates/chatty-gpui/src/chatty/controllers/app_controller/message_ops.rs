@@ -252,7 +252,7 @@ impl ChattyApp {
                 }
 
                 // Extract agent, history, and capabilities synchronously
-                let (agent, history, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                let (agent, history, provider_type, provider_supports_pdf, provider_supports_images, assistant_att_paths, invoke_agent_progress_slot) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
@@ -273,13 +273,22 @@ impl ChattyApp {
                                 artifacts.clear();
                             }
 
+                            // Computed inside the store borrow so we don't have to
+                            // clone every MessageEntry (trace JSON included) just to
+                            // read one entry's attachment paths (finding B1, AGE-219).
+                            let assistant_att_paths = select_recent_assistant_attachments(
+                                conv.entries(),
+                                supports_images,
+                                supports_pdf,
+                            );
+
                             Ok((
-                                conv.agent().clone(),
+                                conv.agent(),
                                 conv.messages(),
                                 provider_type,
                                 supports_pdf,
                                 supports_images,
-                                conv.entries().to_vec(),
+                                assistant_att_paths,
                                 conv.invoke_agent_progress_slot(),
                             ))
                         } else {
@@ -318,11 +327,6 @@ impl ChattyApp {
                 // images/PDFs in follow-up questions. These are sent to the LLM but kept
                 // out of the persisted user message — otherwise every later turn would
                 // carry and re-persist another copy of the same artifact (finding F2).
-                let assistant_att_paths = select_recent_assistant_attachments(
-                    &conv_entries,
-                    provider_supports_images,
-                    provider_supports_pdf,
-                );
                 let mut extra_llm_contents = Vec::with_capacity(assistant_att_paths.len());
                 for path in &assistant_att_paths {
                     match attachment_to_user_content(path).await {

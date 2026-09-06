@@ -371,7 +371,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     cx.update_global::<ConversationsStore, _>(|store, _cx| {
         if let Some(conv) = store.get_conversation_mut(&conv_id) {
             conv.set_agent(
-                new_agent,
+                std::sync::Arc::new(new_agent),
                 model_config.id.clone(),
                 built_workspace_dir.clone(),
             );
