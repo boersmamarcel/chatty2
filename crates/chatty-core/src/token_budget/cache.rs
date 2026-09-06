@@ -438,7 +438,7 @@ mod tests {
         let msg2 = user_text_message("Another message here.");
 
         let mut cache = HistoryTokenCache::new();
-        cache.count_history(&[msg1.clone()], &c);
+        cache.count_history(std::slice::from_ref(&msg1), &c);
 
         // Corrupt the cached count for entry 0, bypassing count_message. If
         // appending msg2 caused entry 0 to be recomputed, this corruption
@@ -462,7 +462,7 @@ mod tests {
         cache.count_history(&[user_text_message("Hi")], &c);
 
         let changed = user_text_message("A much longer message than before.");
-        let total = cache.count_history(&[changed.clone()], &c);
+        let total = cache.count_history(std::slice::from_ref(&changed), &c);
 
         assert_eq!(total, c.count_message(&changed));
     }
