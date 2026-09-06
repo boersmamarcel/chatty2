@@ -1,141 +1,93 @@
-# Features
+# Chatting
 
-**When to read this:** Product capabilities beyond the agent loop.
+**When to read this:** You have a model connected and want to know what the chat window can do — rendering, attachments, artifacts, cost tracking, search and themes.
 
-## Multi-provider support
+## The composer
 
-Connect several LLM backends in one window. Per-model vision, PDF, and
-temperature flags drive the UI. Table and setup:
-[Providers & models](./providers-and-models.md).
+- **Model selector** at the bottom switches models mid-conversation; the roster and default come from [Providers & models](./providers-and-models.md).
+- Type `/` for the command picker (`↑/↓`, `Enter`). Saved skills appear there with a skill badge. Full list: [slash commands](../dev/reference/slash-commands.md).
+- Type `@` to mention a file from the working directory. Hidden files and common build folders (`.git`, `node_modules`, `target`, `dist`, `build`) are skipped.
+- **Add attachments** attaches images and PDFs. The buttons only appear for models that accept them.
+- The folder icon sets a per-chat working directory: [Agents & tools](./agents-and-tools.md).
 
 ## Rich rendering
 
-- **Markdown** with full formatting
-- **Syntax-highlighted code** (30+ languages via tree-sitter) and one-click copy
+Responses render as Markdown with:
+
+- **Syntax-highlighted code** in dozens of languages, with **Copy code** on every block.
 
   ![Syntax-highlighted code blocks](../assets/animations/codehighlighting.gif)
 
-- **LaTeX math** — inline (`$...$`) and block (`$$...$$`) compiled to SVG via Typst
+- **Math** — inline `$...$` and block `$$...$$`, drawn in the theme colour, with **Copy LaTeX**.
 
-  ![LaTeX math rendering](../assets/animations/advanced_math_rendering.gif)
+  ![Math rendering](../assets/animations/advanced_math_rendering.gif)
 
-- **Mermaid diagrams** — fenced mermaid code blocks as inline SVG, theme-aware
-  dark/light, copy source or PNG. 23 diagram types (flowcharts, sequence, ER,
-  Gantt, …) via a pure-Rust renderer; no browser required
+- **Mermaid diagrams** from fenced `mermaid` blocks — flowcharts, sequence, class, ER, Gantt and many more — drawn inline in light or dark to match the theme. **Copy Mermaid** copies the source; **Copy as PNG** copies the image.
 
   ![Mermaid diagram rendering](../assets/animations/mermaid.gif)
 
-- **Image and PDF** previews in chat
+- **Image and PDF previews** for attachments and generated files.
+
+Models that think out loud (for example Claude extended thinking) get their reasoning folded into a collapsible section so it stays inspectable without filling the transcript.
 
 ## Artifacts
 
-When a tool produces a document, Chatty shows a card in the transcript and
-opens the file in a side panel next to the chat:
+When the agent produces a document, a card appears in the transcript and the file opens in a panel beside the chat:
 
-- **PDFs** compiled from Typst with `compile_typst`, paged in the panel
+- **PDFs** the agent typesets, paged in the panel.
 
-  ![Typst PDF artifact](../assets/animations/artifact_pdf.gif)
+  ![PDF artifact](../assets/animations/artifact_pdf.gif)
 
-- **Charts** from `create_chart`, rendered natively and theme-aware
+- **Charts** — bar, line, pie, donut, area and candlestick — drawn natively and theme-aware, with **Copy as PNG**.
 
   ![Chart artifact](../assets/animations/artifact_chart.gif)
 
-- **Query results** from `query_data` (DuckDB over CSV/Parquet in the workspace)
-  as a table with the SQL source one tab away
+- **Query results** from SQL the agent ran over CSV, Parquet or JSON files in the workspace, shown as a table with the SQL one tab away.
 
   ![Table artifact](../assets/animations/artifact_table.gif)
 
-- **Markdown documents** written by the agent, rendered or as source
+- **Markdown documents** the agent wrote, rendered or as source.
 
   ![Markdown artifact](../assets/animations/artifact_markdown.gif)
 
+When browser tools are on, a live view of the page the agent is driving docks in the same panel: [Agents & tools](./agents-and-tools.md).
+
 ## Tool-call traces
 
-Each tool call is a collapsible block: name, arguments, output, duration,
-status (success / error / cancelled). `apply_diff` gets a visual diff
-(additions green, deletions red, collapsed unchanged runs, “Show N more lines”
-on large patches).
+Every tool call is a collapsible block showing the name, arguments, output, duration and status (success, error or cancelled). File edits get a proper diff — additions green, deletions red, unchanged runs collapsed with *Show N more lines* on large patches. Multi-step work also shows a **To-dos** card that updates in place; see [Agents & tools](./agents-and-tools.md).
+
+## Context window
+
+Long agent runs fill the context quickly. The footer shows:
+
+- **Fill bar** — segments for the system preamble, tool definitions, history and the latest message, coloured green, amber or red as the window fills. It appears once **Max Context Window** is set on the model (**Edit… → Advanced**).
+- **Token popover** — hover the bar for per-segment estimates and the provider's input and output counts.
+- **`/compact`** — summarises the older half of the history so the run can continue.
 
 ## Pull request status
 
-When the workspace is a git checkout whose `origin` is on GitHub, a bar above
-the composer shows the pull request for the branch you are on: number, repo,
-branch, `+added −deleted` and a CI pill that lists each check. Clicking the
-number, repo or branch opens the PR in your browser; `×` hides the bar until
-the branch or the PR changes.
+When the workspace is a git checkout whose `origin` is on GitHub, a bar above the composer shows the pull request for the current branch: number, repository, branch, `+added −deleted` and a CI pill listing each check. Click the number, repository or branch to open the PR in your browser; `×` hides the bar until the branch or PR changes.
 
 ![Pull request status bar](../assets/animations/pr_status_bar.gif)
 
-It follows the **Git integration** toggle in Settings → Execution. The lookup
-uses the `gh` CLI when it is installed and signed in — which is what makes
-private repositories work — and otherwise falls back to GitHub's public REST
-API, optionally with a `GITHUB_TOKEN` / `GH_TOKEN` from the environment. No PR,
-no GitHub remote, or no workspace means no bar. The terminal app shows the same
-thing as `#591 open ✓` in its status line.
+The bar follows **Enable Git Integration** in Settings → Code Execution. Private repositories need the GitHub CLI (`gh`) installed and signed in; public ones work without it. No PR, no GitHub remote or no workspace means no bar. The terminal app shows the same thing (`#591 open ✓`) in its status line.
 
-## Conversations & cost
+## Conversations, cost and search
 
-- Conversations persist in local SQLite (no Chatty-hosted sync)
-- Auto-generated titles; title-bar search filters the sidebar live
-- **Export to Markdown** from the conversation `…` menu
-- Per-conversation cost in the sidebar; per-message input/output tokens and cost
-- Pricing uses the model's configured cost per million input/output tokens
-- Regenerating an assistant reply captures the original as a DPO pair
+- Conversations are stored in a local database on your machine; there is no hosted sync.
+- Titles are generated automatically. The search icon in the title bar opens **Search conversations…**, which filters the sidebar as you type.
+- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, and **Delete**.
+- The sidebar shows the running cost per conversation; each reply shows its input and output tokens and cost. Pricing uses the per-million-token rates on the model, which the OpenRouter catalogue fills in for you.
+- **Regenerate** under a reply asks for a fresh answer. Chatty keeps both versions, which is what makes preference-pair export possible ([Advanced](./advanced.md)).
 
 ![Token and cost tracking](../assets/animations/advanced_token_tracking.gif)
 
-## Training-data export
+## Themes and text
 
-**Settings → Training Data** can auto-export runs for fine-tuning.
+Settings → **General** offers twenty-odd theme families (Ayu, Catppuccin, Everforest, Flexoki, Gruvbox, Matrix, Solarized, Tokyo Night and more), a **Dark Mode** switch for the light or dark variant of each, and a **Font Size** from 8 to 32.
 
-### ATIF (Agent Trajectory Interchange Format)
+## Next
 
-Structured JSON for agent pipelines ([Harbor trajectory format](https://harborframework.com/docs/agents/trajectory-format)):
-messages, tool calls, reasoning, timestamps, token metrics, thumbs feedback,
-and regeneration pairs (rejected vs chosen).
-
-### JSONL
-
-- **SFT** — ChatML for OpenAI, Anthropic, Together AI, and similar APIs
-- **DPO** — preference pairs from regenerations
-- Re-export replaces the previous entry for that conversation
-- Tool calls can be included in ChatML
-
-SFT appends to `sft.jsonl`, DPO to `dpo.jsonl`:
-
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/chatty/exports/` |
-| Linux | `~/.config/chatty/exports/` |
-| Windows | `%APPDATA%\chatty\exports\` |
-
-## Environment secrets
-
-**Settings → Secrets** — key-value pairs injected into every agent shell
-session. The agent sees names (`os.environ["API_KEY"]`) but never values.
-Secrets persist locally and are masked in tool output.
-
-## Themes & UI
-
-20+ themes with light and dark variants (Ayu, Catppuccin, Everforest, Flexoki,
-Gruvbox, Matrix, Solarized, TokyoNight, …). Configurable font size.
-
-## Auto-updates
-
-Background checks against GitHub Releases, SHA-256 verified. macOS replaces
-the app bundle and relaunches. On Linux, a CLI installed from the desktop app
-is refreshed on the next launch after an update.
-
-## Demos not inlined here
-
-These recordings are too large for the docs site; they stay in
-[`assets/animations/`](https://github.com/boersmamarcel/chatty2/tree/main/assets/animations)
-and on the [marketing repo](https://github.com/boersmamarcel/chatty):
-
-| File | Shows |
-|------|-------|
-| `hero.gif` | App overview (also on the repo README) |
-| `add_provider_and_model.gif` | First-run provider + model setup |
-| `file_add_edit_delete.gif` | File tools |
-| `shell_command.gif` | Sandboxed shell |
-| `mcp_add_edit_delete2.gif` | MCP server management |
+- [Agents & tools](./agents-and-tools.md)
+- [Providers & models](./providers-and-models.md)
+- [Advanced](./advanced.md)
