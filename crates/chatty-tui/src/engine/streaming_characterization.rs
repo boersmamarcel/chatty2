@@ -35,7 +35,7 @@ fn goldens_dir() -> PathBuf {
 /// `AppEvent` has no `Debug`, and deriving one just for tests would put a
 /// formatting choice in production code. Spelling it out here also keeps the
 /// golden stable when an unrelated variant is added.
-fn describe(event: &AppEvent) -> String {
+pub(super) fn describe(event: &AppEvent) -> String {
     match event {
         AppEvent::StreamStarted => "StreamStarted".to_string(),
         AppEvent::TextChunk(text) => format!("TextChunk({text:?})"),

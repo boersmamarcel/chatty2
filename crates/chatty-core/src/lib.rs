@@ -43,6 +43,7 @@ pub mod models;
 pub mod repositories;
 pub mod sandbox;
 pub mod services;
+pub mod session;
 pub mod settings;
 pub mod slash_commands;
 pub mod token_budget;

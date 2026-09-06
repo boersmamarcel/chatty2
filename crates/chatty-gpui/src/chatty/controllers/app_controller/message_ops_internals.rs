@@ -758,10 +758,7 @@ pub(super) async fn run_llm_stream(
 }
 
 fn is_agent_todo_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "write_todos" | "update_todo" | "verify_completion"
-    )
+    chatty_core::session::is_agent_todo_tool(tool_name)
 }
 
 /// True when `path`'s extension is `pdf`, checked case-insensitively so
@@ -1108,15 +1105,9 @@ fn extract_trace_json(
 }
 
 /// Injected once when a provider rejects a tool call for malformed JSON.
-///
-/// The `Agent protocol follow-up:` prefix is what
-/// `chatty_core::services::is_protocol_follow_up_text` matches on, which keeps
-/// this hidden from the transcript like every other injected nudge, and is what
-/// [`already_asked_to_retry`] looks for in history.
-pub(super) const MALFORMED_TOOL_CALL_FOLLOW_UP: &str = "Agent protocol follow-up: your last tool call was rejected because its JSON arguments \
-     were malformed or truncated. Make the same call again, keeping the arguments small and \
-     fully closed. If the arguments were large, write the content to a file in smaller steps \
-     instead.";
+/// Defined once, in chatty-core's session module, so the text the desktop
+/// injects and the text `already_asked_to_retry` looks for cannot drift.
+pub(super) use chatty_core::session::MALFORMED_TOOL_CALL_FOLLOW_UP;
 
 /// Whether we already asked this conversation to retry a malformed tool call.
 ///

@@ -184,3 +184,81 @@ impl std::fmt::Debug for AppEvent {
         }
     }
 }
+
+/// The TUI's binding to chatty-core's turn contract (AGE-194): every
+/// [`SessionEvent`](chatty_core::session::SessionEvent) maps onto exactly
+/// one stream `AppEvent`, so the engine's event handling is unchanged by
+/// where the turn runs.
+///
+/// One deliberate reconciliation with the pre-session TUI: a transport
+/// failure mid-stream arrives as `StreamError` *before* `StreamCompleted`,
+/// rather than as an `Err` the spawning task turned into a `StreamError`
+/// *after* it. The sequence is the desktop's, and the one a frontend can act
+/// on in order.
+impl From<chatty_core::session::SessionEvent> for AppEvent {
+    fn from(event: chatty_core::session::SessionEvent) -> Self {
+        use chatty_core::session::SessionEvent;
+        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+
+        match event {
+            SessionEvent::TurnStarted => AppEvent::StreamStarted,
+            SessionEvent::Text(text) => AppEvent::TextChunk(text),
+            SessionEvent::ToolCallStarted { id, name } => AppEvent::ToolCallStarted { id, name },
+            SessionEvent::ToolCallInput { id, arguments } => {
+                AppEvent::ToolCallInput { id, arguments }
+            }
+            SessionEvent::ToolCallResult { id, result } => AppEvent::ToolCallResult { id, result },
+            SessionEvent::ToolCallError { id, error } => AppEvent::ToolCallError { id, error },
+            SessionEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            } => AppEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            },
+            SessionEvent::ApprovalResolved { id, approved } => {
+                AppEvent::ApprovalResolved { id, approved }
+            }
+            SessionEvent::ClarificationRequested { id, questions } => {
+                AppEvent::ClarificationRequested { id, questions }
+            }
+            SessionEvent::ApiCallUsage(call) => AppEvent::ApiCallUsage(call),
+            SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+            },
+            SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
+            SessionEvent::SubAgent(progress) => match progress {
+                InvokeAgentProgress::Started {
+                    agent_name,
+                    prompt,
+                    source,
+                } => {
+                    let mode = match source {
+                        chatty_core::models::message_types::ToolSource::Local => "local",
+                        _ => "remote",
+                    };
+                    AppEvent::SubAgentProgress(format!("[{mode} agent: {agent_name}] {prompt}"))
+                }
+                InvokeAgentProgress::Text(text) => AppEvent::SubAgentProgress(text),
+                InvokeAgentProgress::Finished { success, result } => {
+                    AppEvent::SubAgentFinished(result.unwrap_or_else(|| {
+                        if success {
+                            "Agent completed.".to_string()
+                        } else {
+                            "Agent failed.".to_string()
+                        }
+                    }))
+                }
+            },
+            SessionEvent::Error(error) => AppEvent::StreamError(error),
+            SessionEvent::Cancelled => AppEvent::StreamCancelled,
+            SessionEvent::TurnEnded => AppEvent::StreamCompleted,
+            SessionEvent::FollowUp(prompt) => AppEvent::AgentProtocolFollowUp(prompt),
+        }
+    }
+}

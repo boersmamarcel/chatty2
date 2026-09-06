@@ -269,6 +269,10 @@ pub(super) async fn run_stream(params: StreamParams) -> Result<()> {
 mod characterization;
 
 #[cfg(test)]
+#[path = "session_adapter_characterization.rs"]
+mod session_adapter_characterization;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chatty_core::services::{AgentTaskController, AgentTodoStatus, StreamChunkHandler};

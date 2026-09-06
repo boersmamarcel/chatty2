@@ -266,3 +266,97 @@ async fn desktop_send_path_matches_goldens(cx: &mut gpui::TestAppContext) {
         assert_golden(&dir, name, &events);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The same goldens through `AgentSession` (AGE-194)
+// ---------------------------------------------------------------------------
+
+/// Run one scenario through chatty-core's session handler and
+/// `StreamManager::handle_session_event`, recording what the UI would see.
+///
+/// This is what `run_llm_stream` becomes once the desktop reparents onto the
+/// session (AGE-195): the manager keeps the lifecycle (registration, text
+/// batching, the terminal `StreamEnded`), and the turn's own logic — the
+/// follow-up, the usage folding, the loop guard — is the session's.
+async fn record_via_session(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String> {
+    let conv_id = "characterization-conv".to_string();
+    let stream_manager = cx.update(|cx| cx.new(|_cx| StreamManager::new()));
+
+    let events: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = events.clone();
+    let subscription = cx.update(|cx| {
+        cx.subscribe(
+            &stream_manager,
+            move |_manager, event: &StreamManagerEvent, _cx| {
+                sink.borrow_mut().push(describe(event));
+            },
+        )
+    });
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    cx.update(|cx| {
+        stream_manager.update(cx, |manager: &mut StreamManager, cx| {
+            let task = cx.background_executor().spawn(async { Ok(()) });
+            manager.register_stream(conv_id.clone(), task, cancel_flag.clone(), None, cx);
+        });
+    });
+
+    // The desktop's policy: the loop guard runs, sized as `run_llm_stream`
+    // sizes it (the harness above uses the same `10`).
+    let session_events = chatty_core::session::replay_scenario(
+        scenario,
+        chatty_core::session::TurnPolicy {
+            surface: chatty_core::services::StreamSurface::Desktop,
+            max_agent_turns: 10,
+            loop_guard: true,
+            already_asked_to_retry: false,
+        },
+    )
+    .await;
+
+    let mut follow_up = None;
+    cx.update(|cx| {
+        stream_manager.update(cx, |manager: &mut StreamManager, cx| {
+            for event in session_events {
+                if let chatty_core::session::SessionEvent::FollowUp(prompt) = &event {
+                    follow_up = Some(prompt.clone());
+                }
+                manager.handle_session_event(&conv_id, event, cx);
+            }
+        });
+    });
+
+    cx.run_until_parked();
+    drop(subscription);
+
+    let mut recorded = events.borrow().clone();
+    // The session never propagates an error out of the loop; the trailer is
+    // kept so the recording stays byte-comparable with the Phase 0 golden.
+    recorded.push("=> loop returned Ok".to_string());
+    recorded.push(match follow_up {
+        Some(ref prompt) if prompt.contains("write_todos") => {
+            "=> follow-up queued: write_todos".to_string()
+        }
+        Some(ref prompt) if prompt.contains("verify_completion") => {
+            "=> follow-up queued: verify_completion".to_string()
+        }
+        Some(_) => "=> follow-up queued: other".to_string(),
+        None => "=> no follow-up".to_string(),
+    });
+    recorded
+}
+
+/// The Phase 0 goldens, unchanged, through the session and its adapter
+/// (AGE-194 acceptance).
+#[gpui::test]
+async fn desktop_session_adapter_matches_goldens(cx: &mut gpui::TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create a Tokio runtime");
+    let _guard = runtime.enter();
+
+    let dir = goldens_dir();
+    for scenario in scenarios().into_iter().chain([clarification_scenario()]) {
+        let name = scenario.name;
+        let events = record_via_session(scenario, cx).await;
+        assert_golden(&dir, name, &events);
+    }
+}

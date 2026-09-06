@@ -528,6 +528,96 @@ impl StreamManager {
         }
     }
 
+    /// The desktop's binding to chatty-core's turn contract (AGE-194): fold
+    /// one [`SessionEvent`] into the stream's lifecycle state and emit the
+    /// `StreamManagerEvent` the UI subscribes to.
+    ///
+    /// The manager keeps owning what is genuinely the desktop's — text
+    /// batching, the epoch, the terminal `StreamEnded` — and stops owning
+    /// turn orchestration: usage arrives already folded, the follow-up is
+    /// the caller's to inject, and sub-agent progress and the turn's
+    /// messages go to the conversation, not through here. Set the trace
+    /// (`set_trace`) before passing `Error` or `TurnEnded`, as `run_llm_stream`
+    /// does today: both drop the stream.
+    // Exercised by the adapter characterization until AGE-195 moves
+    // `run_llm_stream` onto it; a binary crate flags an unused method.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn handle_session_event(
+        &mut self,
+        conv_id: &str,
+        event: chatty_core::session::SessionEvent,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        use chatty_core::session::SessionEvent;
+        match event {
+            // `StreamStarted` is emitted by `register_stream`.
+            SessionEvent::TurnStarted => {}
+            SessionEvent::Text(text) => self.handle_chunk(conv_id, StreamChunk::Text(text), cx),
+            SessionEvent::ToolCallStarted { id, name } => {
+                self.handle_chunk(conv_id, StreamChunk::ToolCallStarted { id, name }, cx)
+            }
+            SessionEvent::ToolCallInput { id, arguments } => {
+                self.handle_chunk(conv_id, StreamChunk::ToolCallInput { id, arguments }, cx)
+            }
+            SessionEvent::ToolCallResult { id, result } => {
+                self.handle_chunk(conv_id, StreamChunk::ToolCallResult { id, result }, cx)
+            }
+            SessionEvent::ToolCallError { id, error } => {
+                self.handle_chunk(conv_id, StreamChunk::ToolCallError { id, error }, cx)
+            }
+            SessionEvent::ApprovalRequested {
+                id,
+                command,
+                is_sandboxed,
+            } => self.handle_chunk(
+                conv_id,
+                StreamChunk::ApprovalRequested {
+                    id,
+                    command,
+                    is_sandboxed,
+                },
+                cx,
+            ),
+            SessionEvent::ApprovalResolved { id, approved } => {
+                self.handle_chunk(conv_id, StreamChunk::ApprovalResolved { id, approved }, cx)
+            }
+            SessionEvent::ClarificationRequested { id, questions } => self.handle_chunk(
+                conv_id,
+                StreamChunk::ClarificationRequested { id, questions },
+                cx,
+            ),
+            // Folded into `TokenUsage` by the session.
+            SessionEvent::ApiCallUsage(_) => {}
+            SessionEvent::TokenUsage(usage) => {
+                if let Some(state) = self.streams.get_mut(conv_id) {
+                    state.token_usage = Some(usage.clone());
+                }
+                cx.emit(StreamManagerEvent::TokenUsage {
+                    conversation_id: conv_id.to_string(),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
+                });
+            }
+            // The conversation's (`AgentSession::apply`), not the manager's.
+            SessionEvent::TurnMessages(_) | SessionEvent::SubAgent(_) => {}
+            SessionEvent::Error(error) => self.handle_chunk(conv_id, StreamChunk::Error(error), cx),
+            // A cancelled turn still ends; `stop_stream` already reported a
+            // user-pressed Stop, and a flag-only cancel ends as completed.
+            SessionEvent::Cancelled => {}
+            SessionEvent::TurnEnded => {
+                // An errored stream already emitted `StreamEnded` and dropped
+                // itself above.
+                if self.streams.contains_key(conv_id) {
+                    self.finalize_stream(conv_id, cx);
+                }
+            }
+            // The caller's to inject as the next turn.
+            SessionEvent::FollowUp(_) => {}
+        }
+    }
+
     /// Mark a stream as completed and emit StreamEnded.
     /// Called when the stream loop finishes normally.
     /// Flushes any pending batched text, then drains any pending artifacts queued by AddAttachmentTool.
