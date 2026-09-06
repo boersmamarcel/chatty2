@@ -590,6 +590,10 @@ impl ChattyApp {
                 &notifier,
                 |this, _notifier, event: &AgentConfigEvent, cx| {
                     if matches!(event, AgentConfigEvent::RebuildRequired) {
+                        // A stale workspace-scoped service (AGE-240) must not
+                        // survive a settings change that could invalidate it.
+                        chatty_core::factories::agent_factory::invalidate_workspace_services_cache(
+                        );
                         this.rebuild_active_agent(cx);
                     }
                 },
