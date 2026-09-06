@@ -15,6 +15,9 @@ on:
       - 'scripts/check-docs-links.sh'
       - 'scripts/check-docs-nav-drift.sh'
       - 'scripts/check-docs-frontmatter.sh'
+      - 'scripts/check-docs-site-links.sh'
+      - 'scripts/check-docs-user-leakage.sh'
+      - 'scripts/check-docs-reference-drift.sh'
       - 'Makefile'
       - '.lychee.toml'
       - '.github/workflows/docs.yml'
@@ -31,6 +34,9 @@ on:
       - 'scripts/check-docs-links.sh'
       - 'scripts/check-docs-nav-drift.sh'
       - 'scripts/check-docs-frontmatter.sh'
+      - 'scripts/check-docs-site-links.sh'
+      - 'scripts/check-docs-user-leakage.sh'
+      - 'scripts/check-docs-reference-drift.sh'
       - 'Makefile'
       - '.lychee.toml'
       - '.github/workflows/docs.yml'
@@ -75,14 +81,23 @@ jobs:
           install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
           install -m 644 docs/generated/llms-full.txt docs-site/book/llms-full.txt
 
-      - name: Check documentation links
+      - name: Check documentation links (sources)
         run: bash scripts/check-docs-links.sh
+
+      - name: Check documentation links (built site)
+        run: bash scripts/check-docs-site-links.sh
 
       - name: Check docs nav drift (INDEX + SUMMARY)
         run: bash scripts/check-docs-nav-drift.sh
 
       - name: Check doc frontmatter schema
         run: bash scripts/check-docs-frontmatter.sh
+
+      - name: Check user guides for contributor leakage
+        run: bash scripts/check-docs-user-leakage.sh
+
+      - name: Check reference tables against source
+        run: bash scripts/check-docs-reference-drift.sh
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
