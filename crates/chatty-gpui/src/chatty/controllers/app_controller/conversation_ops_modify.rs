@@ -160,10 +160,6 @@ impl ChattyApp {
                         // Get execution settings for tool creation
                         let (
                             exec_settings,
-                            pending_approvals,
-                            pending_clarifications,
-                            pending_write_approvals,
-                            pending_artifacts,
                             shell_session,
                             user_secrets,
                             theme_colors,
@@ -174,12 +170,6 @@ impl ChattyApp {
                                 let mut settings = cx
                                     .global::<crate::settings::models::ExecutionSettingsModel>()
                                     .clone();
-                                // The rebuilt agent keeps raising its requests on
-                                // this conversation's own session stores (AGE-195).
-                                let handles = cx
-                                    .global::<ConversationsStore>()
-                                    .get_session(&conv_id)
-                                    .map(|session| session.approval_handles());
                                 let conv =
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
                                 if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
@@ -193,7 +183,6 @@ impl ChattyApp {
                                     .workspace_dir
                                     .as_ref()
                                     .map(|dir| normalize_workspace_path(Path::new(dir)));
-                                let artifacts = conv.map(|c| c.pending_artifacts());
                                 let session = conv.and_then(|c| c.shell_session());
                                 let secrets = cx
                                     .global::<crate::settings::models::UserSecretsModel>()
@@ -204,10 +193,6 @@ impl ChattyApp {
                                     .cloned();
                                 (
                                     Some(settings),
-                                    handles.as_ref().map(|h| h.pending_approvals.clone()),
-                                    handles.as_ref().map(|h| h.pending_clarifications.clone()),
-                                    handles.as_ref().map(|h| h.pending_write_approvals.clone()),
-                                    artifacts,
                                     session,
                                     secrets,
                                     Some(colors),
@@ -249,17 +234,15 @@ impl ChattyApp {
                             })
                             .unwrap_or_default();
 
-                        // Factory creates shell session on-demand if not provided
-                        let built_agent = AgentClient::from_model_config_with_tools(
-                            &model_config,
-                            &provider_config,
-                            AgentBuildContext {
+                        // The rebuilt agent keeps raising its requests on this
+                        // conversation's own session stores (AGE-272).
+                        let ctx = AgentBuildContext {
                                 mcp_tools,
                                 exec_settings,
-                                pending_approvals,
-                                pending_clarifications,
-                                pending_write_approvals,
-                                pending_artifacts,
+                                pending_approvals: None,
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
+                                pending_artifacts: None,
                                 shell_session,
                                 user_secrets,
                                 theme_colors,
@@ -273,7 +256,21 @@ impl ChattyApp {
                                 remote_agents,
                                 available_model_ids,
                                 conversation_id: Some(conv_id.clone()),
-                            },
+                        };
+                        let ctx = cx
+                            .update(|cx| {
+                                cx.global::<ConversationsStore>()
+                                    .get_session(&conv_id)
+                                    .map(|session| session.build_context(ctx))
+                            })
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                            .ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
+
+                        // Factory creates shell session on-demand if not provided
+                        let built_agent = AgentClient::from_model_config_with_tools(
+                            &model_config,
+                            &provider_config,
+                            ctx,
                         )
                         .await?;
 
@@ -282,24 +279,16 @@ impl ChattyApp {
                             // The settings the tools were built with are the
                             // session's too.
                             let config = desktop_session_config(cx);
-                            if let Some(session) = store.get_session_mut(&conv_id) {
-                                session.set_config(config);
-                            }
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                debug!("Updating conversation model");
-                                conv.set_agent(
-                                    std::sync::Arc::new(built_agent.client),
-                                    model_config.id.clone(),
-                                    built_workspace_dir.clone(),
-                                );
-                                // Always store the new shell session — the factory either reused
-                                // the existing one or created a fresh one.
-                                if built_agent.shell_session.is_some() {
-                                    conv.set_shell_session(built_agent.shell_session);
-                                }
-                                conv.set_invoke_agent_progress_slot(
-                                    built_agent.invoke_agent_progress_slot,
-                                );
+                            let session = store
+                                .get_session_mut(&conv_id)
+                                .ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
+                            session.set_config(config);
+                            debug!("Updating conversation model");
+                            if session.install_agent(
+                                built_agent,
+                                model_config.id.clone(),
+                                built_workspace_dir,
+                            ) {
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))

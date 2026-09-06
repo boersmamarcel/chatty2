@@ -217,7 +217,6 @@ mod runner {
     use super::*;
     use crate::engine::{ChatEngineConfig, MessageRole};
     use chatty_core::factories::agent_factory::AgentBuildContext;
-    use chatty_core::models::Conversation;
     use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
     use chatty_core::settings::models::models_store::{ModelConfig, ModelsModel};
     use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -260,9 +259,9 @@ mod runner {
             event_tx,
         );
 
-        let handles = runner.session.approval_handles();
-        runner.session.set_conversation(Some(
-            Conversation::new(
+        runner
+            .session
+            .create_conversation(
                 "c1".to_string(),
                 "New Chat".to_string(),
                 &model_config,
@@ -270,9 +269,9 @@ mod runner {
                 AgentBuildContext {
                     mcp_tools: None,
                     exec_settings: None,
-                    pending_approvals: Some(handles.pending_approvals),
-                    pending_clarifications: Some(handles.pending_clarifications),
-                    pending_write_approvals: Some(handles.pending_write_approvals),
+                    pending_approvals: None,
+                    pending_clarifications: None,
+                    pending_write_approvals: None,
                     pending_artifacts: None,
                     shell_session: None,
                     user_secrets: Vec::new(),
@@ -290,8 +289,7 @@ mod runner {
                 },
             )
             .await
-            .expect("conversation should build without network access"),
-        ));
+            .expect("conversation should build without network access");
         runner.is_ready = true;
         (runner, event_rx)
     }

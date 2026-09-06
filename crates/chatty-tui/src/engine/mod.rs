@@ -11,9 +11,7 @@ use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::models::write_approval_store::WriteApprovalDecision;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
 use chatty_core::services::{McpService, MemoryService, StreamSurface};
-use chatty_core::session::{
-    AgentSession, AgentSessionConfig, ApprovalHandles, TurnInput, TurnKind,
-};
+use chatty_core::session::{AgentSession, AgentSessionConfig, TurnInput, TurnKind};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -480,7 +478,6 @@ impl ChatEngine {
             remote_agents: &self.remote_agents,
             module_agents: &self.module_agents,
             is_sub_agent: self.is_sub_agent,
-            handles: self.session.approval_handles(),
         })
     }
 
@@ -500,17 +497,17 @@ impl ChatEngine {
         let mut ctx = self.build_agent_context();
         ctx.mcp_tools = mcp_tools;
 
-        let conversation = Conversation::new(
-            id,
-            "New Chat".to_string(),
-            &self.model_config,
-            &self.provider_config,
-            ctx,
-        )
-        .await
-        .context("Failed to create conversation")?;
+        self.session
+            .create_conversation(
+                id,
+                "New Chat".to_string(),
+                &self.model_config,
+                &self.provider_config,
+                ctx,
+            )
+            .await
+            .context("Failed to create conversation")?;
 
-        self.session.set_conversation(Some(conversation));
         self.is_ready = true;
         Ok(())
     }
@@ -530,7 +527,10 @@ impl ChatEngine {
         let model_config = self.model_config.clone();
         let provider_config = self.provider_config.clone();
         let mcp_service = self.mcp_service.clone();
-        let mut ctx = self.build_agent_context();
+        // Built off the session (its stores go into the tools) but outside
+        // it: the task cannot hold the engine, so the conversation comes
+        // back through `ConversationInitialized`.
+        let mut ctx = self.session.build_context(self.build_agent_context());
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -1135,12 +1135,11 @@ pub(crate) struct AgentContextInputs<'a> {
     pub remote_agents: &'a [A2aAgentConfig],
     pub module_agents: &'a [LocalModuleAgentSummary],
     pub is_sub_agent: bool,
-    /// The session's store handles, so the agent's tools raise requests on it.
-    pub handles: ApprovalHandles,
 }
 
-/// The `AgentBuildContext` for a TUI-hosted agent. `mcp_tools` is left
-/// `None`; callers gather it themselves, since that is async.
+/// The services part of the `AgentBuildContext` for a TUI-hosted agent. The
+/// session fills in its stores (`AgentSession::build_context`); `mcp_tools`
+/// is left `None`, since gathering it is async.
 pub(crate) fn build_agent_context(inputs: AgentContextInputs<'_>) -> AgentBuildContext {
     let exec_settings = if any_tool_enabled(inputs.execution_settings) {
         Some(inputs.execution_settings.clone())
@@ -1150,9 +1149,9 @@ pub(crate) fn build_agent_context(inputs: AgentContextInputs<'_>) -> AgentBuildC
     AgentBuildContext {
         mcp_tools: None,
         exec_settings,
-        pending_approvals: Some(inputs.handles.pending_approvals),
-        pending_clarifications: Some(inputs.handles.pending_clarifications),
-        pending_write_approvals: Some(inputs.handles.pending_write_approvals),
+        pending_approvals: None,
+        pending_clarifications: None,
+        pending_write_approvals: None,
         pending_artifacts: None,
         shell_session: None,
         user_secrets: inputs.user_secrets.to_vec(),

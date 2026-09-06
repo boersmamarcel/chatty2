@@ -239,10 +239,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
 
     let (
         exec_settings,
-        pending_approvals,
-        pending_clarifications,
-        pending_write_approvals,
-        pending_artifacts,
         shell_session,
         user_secrets,
         theme_colors,
@@ -253,12 +249,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             let mut settings = cx
                 .global::<crate::settings::models::ExecutionSettingsModel>()
                 .clone();
-            // The rebuilt agent keeps raising its requests on this
-            // conversation's own session stores (AGE-195).
-            let handles = cx
-                .global::<ConversationsStore>()
-                .get_session(&conv_id)
-                .map(|session| session.approval_handles());
             let conv = cx.global::<ConversationsStore>().get_conversation(&conv_id);
             if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
                 settings.workspace_dir = Some(
@@ -271,7 +261,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .workspace_dir
                 .as_ref()
                 .map(|dir| normalize_workspace_path(Path::new(dir)));
-            let artifacts = conv.map(|c| c.pending_artifacts());
             let isolation_changed = conv
                 .and_then(|c| c.shell_session())
                 .map(|s| s.network_isolation() != settings.network_isolation)
@@ -306,10 +295,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .cloned();
             (
                 Some(settings),
-                handles.as_ref().map(|h| h.pending_approvals.clone()),
-                handles.as_ref().map(|h| h.pending_clarifications.clone()),
-                handles.as_ref().map(|h| h.pending_write_approvals.clone()),
-                artifacts,
                 session,
                 secrets,
                 Some(colors),
@@ -346,49 +331,59 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         })
         .unwrap_or_default();
 
-    let built_agent = AgentClient::from_model_config_with_tools(
-        &model_config,
-        &provider_config,
-        AgentBuildContext {
-            mcp_tools,
-            exec_settings,
-            pending_approvals,
-            pending_clarifications,
-            pending_write_approvals,
-            pending_artifacts,
-            shell_session,
-            user_secrets,
-            theme_colors,
-            memory_service,
-            skill_service: Some(skill_service),
-            search_settings,
-            embedding_service,
-            allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
-            module_agents,
-            gateway_port,
-            remote_agents,
-            available_model_ids,
-            conversation_id: Some(conv_id.clone()),
-        },
-    )
-    .await?;
+    // The rebuilt agent keeps raising its requests on this conversation's
+    // own session stores (AGE-272).
+    let ctx = AgentBuildContext {
+        mcp_tools,
+        exec_settings,
+        pending_approvals: None,
+        pending_clarifications: None,
+        pending_write_approvals: None,
+        pending_artifacts: None,
+        shell_session,
+        user_secrets,
+        theme_colors,
+        memory_service,
+        skill_service: Some(skill_service),
+        search_settings,
+        embedding_service,
+        allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
+        module_agents,
+        gateway_port,
+        remote_agents,
+        available_model_ids,
+        conversation_id: Some(conv_id.clone()),
+    };
+    let Some(ctx) = cx
+        .update(|cx| {
+            cx.global::<ConversationsStore>()
+                .get_session(&conv_id)
+                .map(|session| session.build_context(ctx))
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    else {
+        warn!(
+            conv_id = %conv_id,
+            "Conversation not found during agent rebuild — skipping"
+        );
+        return Ok(());
+    };
+
+    let built_agent =
+        AgentClient::from_model_config_with_tools(&model_config, &provider_config, ctx).await?;
 
     cx.update_global::<ConversationsStore, _>(|store, cx| {
         // The settings the tools were built with are the session's too.
         let config = desktop_session_config(cx);
-        if let Some(session) = store.get_session_mut(&conv_id) {
-            session.set_config(config);
-        }
-        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-            conv.set_agent(
-                std::sync::Arc::new(built_agent.client),
-                model_config.id.clone(),
-                built_workspace_dir.clone(),
+        let Some(session) = store.get_session_mut(&conv_id) else {
+            warn!(
+                conv_id = %conv_id,
+                "Conversation not found during agent rebuild — skipping"
             );
-            if built_agent.shell_session.is_some() {
-                conv.set_shell_session(built_agent.shell_session);
-            }
-            conv.set_invoke_agent_progress_slot(built_agent.invoke_agent_progress_slot);
+            return;
+        };
+        session.set_config(config);
+        if session.install_agent(built_agent, model_config.id.clone(), built_workspace_dir) {
             info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
         } else {
             warn!(

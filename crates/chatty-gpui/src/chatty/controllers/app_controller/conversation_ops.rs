@@ -25,16 +25,18 @@
 use super::*;
 
 impl ChattyApp {
-    /// Restore a single conversation from persisted data
+    /// Restore a single conversation from persisted data onto its session
     ///
-    /// Looks up the model and provider configs, then calls Conversation::from_data()
+    /// Looks up the model and provider configs, then has the session build
+    /// the agent against its own stores (AGE-272).
     async fn restore_conversation_from_data(
+        session: &mut AgentSession,
         data: ConversationData,
         models: &ModelsModel,
         providers: &ProviderModel,
         mcp_service: &crate::chatty::services::McpService,
         mut ctx: AgentBuildContext,
-    ) -> anyhow::Result<Conversation> {
+    ) -> anyhow::Result<()> {
         if let Some(working_dir) = data.working_dir.as_ref()
             && let Some(ref mut exec) = ctx.exec_settings
         {
@@ -70,7 +72,9 @@ impl ChattyApp {
         ctx.mcp_tools = mcp_tools;
 
         // Restore conversation using factory method (bash tool will be created in agent_factory if enabled)
-        Conversation::from_data(data, model_config, provider_config, ctx).await
+        session
+            .restore_conversation(data, model_config, provider_config, ctx)
+            .await
     }
 
     /// Load conversation metadata at startup (fast — no message deserialization).
@@ -310,12 +314,9 @@ impl ChattyApp {
                     let mcp_tools =
                         chatty_core::services::gather_mcp_tools(&mcp_service).await;
 
-                    // Get execution settings, approval stores, user secrets, and theme colors for tools
+                    // Get execution settings, user secrets, and theme colors for tools
                     let (
                         exec_settings,
-                        pending_approvals,
-                        pending_clarifications,
-                        pending_write_approvals,
                         user_secrets,
                         theme_colors,
                         search_settings,
@@ -334,7 +335,6 @@ impl ChattyApp {
                         // The conversation's session owns the stores its
                         // agent's tools raise requests on (AGE-195).
                         let session = AgentSession::new(desktop_session_config(cx));
-                        let handles = session.approval_handles();
                         let secrets = cx
                             .global::<crate::settings::models::UserSecretsModel>()
                             .as_env_pairs();
@@ -344,9 +344,6 @@ impl ChattyApp {
                             .cloned();
                         (
                             Some(settings),
-                            Some(handles.pending_approvals),
-                            Some(handles.pending_clarifications),
-                            Some(handles.pending_write_approvals),
                             secrets,
                             Some(colors),
                             search_cfg,
@@ -386,19 +383,20 @@ impl ChattyApp {
 
                     let skill_service = get_skill_service(cx);
 
-                    let mut conversation = Conversation::new(
-                        conv_id.clone(),
-                        title.clone(),
-                        &model_config,
-                        &provider_config,
-                        AgentBuildContext {
-                            mcp_tools,
-                            exec_settings,
-                            pending_approvals,
-                            pending_clarifications,
-                            pending_write_approvals,
-                            pending_artifacts: None, // set inside Conversation::new
-                            shell_session: None,
+                    session
+                        .create_conversation(
+                            conv_id.clone(),
+                            title.clone(),
+                            &model_config,
+                            &provider_config,
+                            AgentBuildContext {
+                                mcp_tools,
+                                exec_settings,
+                                pending_approvals: None, // the session's (AGE-272)
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
+                                pending_artifacts: None, // set inside Conversation::new
+                                shell_session: None,
                             user_secrets,
                             theme_colors,
                             memory_service,
@@ -414,10 +412,11 @@ impl ChattyApp {
                         },
                     )
                     .await?;
-                    conversation.set_working_dir(selected_working_dir.clone());
+                    if let Some(conversation) = session.conversation_mut() {
+                        conversation.set_working_dir(selected_working_dir.clone());
+                    }
 
                     // PHASE 3: Add to global store and refresh sidebar with real data
-                    session.set_conversation(Some(conversation));
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
                         store.insert_loaded(session);
                         store.set_active_by_id(conv_id.clone());
@@ -530,10 +529,6 @@ impl ChattyApp {
                 // The conversation's session owns the stores its agent's tools
                 // raise requests on (AGE-195).
                 let mut session = cx.update(|cx| AgentSession::new(desktop_session_config(cx)))?;
-                let handles = session.approval_handles();
-                let pending_approvals = handles.pending_approvals;
-                let pending_clarifications = handles.pending_clarifications;
-                let pending_write_approvals = handles.pending_write_approvals;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx
                     .update(|cx| extract_theme_chart_colors(cx))
@@ -555,13 +550,13 @@ impl ChattyApp {
                     Ok(Some(data)) => {
                         let embedding_service = get_embedding_service(cx);
                         match Self::restore_conversation_from_data(
-                            data, &models, &providers, &mcp_service,
+                            &mut session, data, &models, &providers, &mcp_service,
                             AgentBuildContext {
                                 mcp_tools: None,
                                 exec_settings: Some(exec_settings.clone()),
-                                pending_approvals: Some(pending_approvals),
-                                pending_clarifications: Some(pending_clarifications),
-                                pending_write_approvals: Some(pending_write_approvals),
+                                pending_approvals: None, // the session's (AGE-272)
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
                                 pending_artifacts: None,
                                 shell_session: None,
                                 user_secrets,
@@ -580,10 +575,9 @@ impl ChattyApp {
                         )
                         .await
                         {
-                            Ok(conversation) => {
+                            Ok(()) => {
                                 // Insert and check active state atomically to avoid a TOCTOU
                                 // where the user switches conversations between the insert and check.
-                                session.set_conversation(Some(conversation));
                                 let is_still_active = cx
                                     .update_global::<ConversationsStore, _>(|store, _| {
                                         store.insert_loaded(session);

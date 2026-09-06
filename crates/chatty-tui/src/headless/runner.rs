@@ -15,7 +15,6 @@
 //! the human-readable log.
 
 use anyhow::{Context, Result};
-use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::services::StreamSurface;
 use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
@@ -98,20 +97,19 @@ impl HeadlessRunner {
             remote_agents: &self.config.remote_agents,
             module_agents: &self.config.module_agents,
             is_sub_agent: self.config.is_sub_agent,
-            handles: self.session.approval_handles(),
         });
         ctx.mcp_tools = mcp_tools;
 
-        let conversation = Conversation::new(
-            uuid::Uuid::new_v4().to_string(),
-            "New Chat".to_string(),
-            &self.config.model_config,
-            &self.config.provider_config,
-            ctx,
-        )
-        .await
-        .context("Failed to create conversation")?;
-        self.session.set_conversation(Some(conversation));
+        self.session
+            .create_conversation(
+                uuid::Uuid::new_v4().to_string(),
+                "New Chat".to_string(),
+                &self.config.model_config,
+                &self.config.provider_config,
+                ctx,
+            )
+            .await
+            .context("Failed to create conversation")?;
         self.is_ready = true;
         Ok(())
     }
