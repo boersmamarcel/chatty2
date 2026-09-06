@@ -9,14 +9,12 @@
 //
 // ## Service singletons (this file)
 // - `MCP_UPDATE_SENDER` — mpsc channel for MCP config updates (OnceLock)
-// - `MCP_SERVICE`        — shared McpService instance for tool context (OnceLock)
 //
 // ## Repository singletons (this file, via RepositoryRegistry)
 // - `REGISTRY` — holds all repository Arc<dyn …> instances, initialized by
 //   `init_repositories()`. Accessor functions below provide typed access.
 //
 // ## Domain-local singletons (in their respective modules)
-// - `GLOBAL_WRITE_APPROVAL_MODE` — tools/filesystem_write_tool.rs (OnceLock<Mutex>)
 // - `AZURE_TOKEN_CACHE`          — factories/agent_factory/provider_builder.rs (OnceLock)
 // - `MCP_WRITE_LOCK`             — settings/models/mcp_store.rs (LazyLock<Mutex>)
 // - `PATH_AUGMENTED`             — auth/azure_auth.rs (OnceLock)
@@ -25,6 +23,11 @@
 // coupling unrelated modules through a central registry. Service and repository
 // singletons are centralized here because they're cross-cutting concerns
 // needed by many modules.
+//
+// Everything listed is startup-scoped. Nothing on the message send path is
+// process-global: approval notifiers and the write-approval policy travel on
+// the per-agent stores and `AgentBuildContext` (AGE-193), so two agents in one
+// process cannot cross-wire.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -57,9 +60,6 @@ mod gpui_globals;
 pub static MCP_UPDATE_SENDER: OnceLock<
     tokio::sync::mpsc::Sender<Vec<settings::models::mcp_store::McpServerConfig>>,
 > = OnceLock::new();
-
-/// McpService instance accessible from tool context (no UI framework available there).
-pub static MCP_SERVICE: OnceLock<services::McpService> = OnceLock::new();
 
 // ── Repository singletons ────────────────────────────────────────────────────
 // Initialized via `init_repositories()` at startup. Access via accessor functions below.

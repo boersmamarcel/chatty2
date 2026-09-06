@@ -63,7 +63,7 @@ pub struct MemoryInitSignal(pub tokio::sync::watch::Receiver<bool>);
 impl Global for MemoryInitSignal {}
 
 // Use global singletons from chatty-core
-use chatty_core::{MCP_SERVICE, MCP_UPDATE_SENDER};
+use chatty_core::MCP_UPDATE_SENDER;
 
 /// Flag to prevent theme observer from saving during initialization.
 /// This avoids a race condition where the default theme could overwrite
@@ -571,9 +571,6 @@ fn main() {
 
         // Initialize MCP service for managing MCP server connections
         let mcp_service = chatty::services::McpService::new();
-        MCP_SERVICE.set(mcp_service.clone())
-            .map_err(|_| warn!("MCP_SERVICE already initialized"))
-            .ok();
         cx.set_global(mcp_service);
         info!("MCP service initialized");
 
@@ -761,10 +758,6 @@ fn main() {
             // Apply execution settings result
             match exec_settings_result {
                 Ok(settings) => {
-                    let approval_mode = settings.approval_mode.clone();
-                    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
-                        approval_mode,
-                    );
                     cx.update(|cx| {
                         info!(
                             enabled = settings.enabled,
@@ -780,10 +773,6 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load execution settings, using defaults");
-                    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
-                        chatty_core::settings::models::execution_settings::ExecutionSettingsModel::default()
-                            .approval_mode,
-                    );
                     // Defaults will be used (enabled=false); conversations will still load
                 }
             }
