@@ -302,61 +302,11 @@ impl ChattyApp {
                         let conv_data_res =
                             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 store.get_conversation(&conv_id).and_then(|conv| {
-                                    let history = match conv.serialize_history() {
-                                        Ok(h) => h,
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to serialize conversation history for save after model change");
-                                            return None;
-                                        }
-                                    };
-                                    let traces = match conv.serialize_traces() {
-                                        Ok(t) => t,
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to serialize conversation traces for save after model change");
-                                            return None;
-                                        }
-                                    };
-                                    let now = SystemTime::now()
-                                        .duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs()
-                                        as i64;
-
-                                    Some(ConversationData {
-                                        id: conv.id().to_string(),
-                                        title: conv.title().to_string(),
-                                        model_id: conv.model_id().to_string(),
-                                        message_history: history,
-                                        system_traces: traces,
-                                        token_usage: conv
-                                            .serialize_token_usage()
-                                            .unwrap_or_else(|_| "{}".to_string()),
-                                        attachment_paths: conv
-                                            .serialize_attachment_paths()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        message_timestamps: conv
-                                            .serialize_message_timestamps()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        message_feedback: conv
-                                            .serialize_message_feedback()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        regeneration_records: conv
-                                            .serialize_regeneration_records()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        created_at: conv
-                                            .created_at()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs()
-                                            as i64,
-                                        updated_at: now,
-                                        working_dir: conv
-                                            .working_dir()
-                                            .map(|p| p.to_string_lossy().to_string()),
-                                        agent_task_snapshot: conv
-                                            .serialize_agent_task_snapshot()
-                                            .unwrap_or(None),
-                                    })
+                                    conv.to_conversation_data()
+                                        .map_err(|e| {
+                                            warn!(error = ?e, "Failed to serialize conversation for save after model change");
+                                        })
+                                        .ok()
                                 })
                             });
 
@@ -496,13 +446,11 @@ impl ChattyApp {
         let conv_id = conv_id.to_string();
         let repo = self.conversation_repo.clone();
 
-        // Cheap clone of the fields build_conversation_data needs — the
-        // actual serde_json::to_string work happens in the spawned task
-        // below, off the UI thread.
+        // Cheap clone of the fields the row is built from — the actual
+        // serde_json::to_string work happens in the spawned task below, off
+        // the UI thread (AGE-220, finding F3).
         let snapshot = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store
-                .get_conversation(&conv_id)
-                .map(ConversationSnapshot::from_conversation)
+            store.get_conversation(&conv_id).map(Conversation::snapshot)
         });
 
         let Some(snapshot) = snapshot else {
@@ -531,9 +479,12 @@ impl ChattyApp {
         };
 
         cx.spawn(async move |_, _cx| {
-            let Some(conv_data) = build_conversation_data(&snapshot) else {
-                error!(conv_id = %conv_id, "Failed to build conversation data for persistence (serialization failed)");
-                return Ok::<_, anyhow::Error>(());
+            let conv_data = match snapshot.to_data() {
+                Ok(data) => data,
+                Err(e) => {
+                    error!(conv_id = %conv_id, error = ?e, "Failed to build conversation data for persistence (serialization failed)");
+                    return Ok::<_, anyhow::Error>(());
+                }
             };
 
             debug!(
