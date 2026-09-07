@@ -52,6 +52,8 @@ mod message_ops;
 mod message_ops_internals;
 mod slash_commands;
 
+pub(crate) use conversation_ops_modify::move_ui_enabled;
+
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
 /// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
 ///

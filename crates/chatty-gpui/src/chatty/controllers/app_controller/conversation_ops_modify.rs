@@ -32,6 +32,18 @@ enum MoveOutcome {
     CameBack(Vec<Message>),
 }
 
+/// Whether the per-conversation move between this machine and a server is
+/// offered at all (AGE-308).
+///
+/// Off by default: a move carries the transcript and nothing else today, so
+/// the sidebar does not offer it and the event it would emit is a no-op.
+/// Conversations already marked hosted are unaffected — the mode is data on
+/// the row, and this gates only the move.
+pub(crate) fn move_ui_enabled(cx: &App) -> bool {
+    cx.try_global::<ExecutionSettingsModel>()
+        .is_some_and(|settings| settings.hosted_conversations_enabled)
+}
+
 impl ChattyApp {
     /// Navigate to the next or previous conversation in the sidebar list.
     /// `direction`: -1 for previous (up in sidebar), +1 for next (down in sidebar).
@@ -394,6 +406,13 @@ impl ChattyApp {
     /// and the menu entry cannot disagree about which way it goes.
     pub(super) fn confirm_conversation_move(&mut self, id: &str, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
+        if !move_ui_enabled(cx) {
+            debug!(
+                conv_id = %conv_id,
+                "Ignoring a conversation move: hosted conversations are not enabled"
+            );
+            return;
+        }
         if !cx.global::<ConversationsStore>().is_loaded(&conv_id) {
             // The move needs the history, and only a loaded conversation has
             // it. Loading also opens the conversation, which is the one the
@@ -707,5 +726,36 @@ impl ChattyApp {
             Ok(())
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_ui_enabled;
+    use crate::settings::models::execution_settings::ExecutionSettingsModel;
+
+    /// AGE-308: the default build offers no move, and it takes an explicit
+    /// opt-in to get one. Both halves matter — the first is what keeps users
+    /// away from a transport that carries only the transcript.
+    #[gpui::test]
+    fn the_move_is_offered_only_when_hosted_conversations_are_enabled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            assert!(
+                !move_ui_enabled(cx),
+                "no settings loaded yet: the move must not be offered"
+            );
+
+            cx.set_global(ExecutionSettingsModel::default());
+            assert!(
+                !move_ui_enabled(cx),
+                "default settings must not offer the move"
+            );
+
+            cx.global_mut::<ExecutionSettingsModel>()
+                .hosted_conversations_enabled = true;
+            assert!(move_ui_enabled(cx), "the developer toggle turns it back on");
+        });
     }
 }
