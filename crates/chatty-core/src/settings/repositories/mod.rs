@@ -56,6 +56,17 @@ macro_rules! define_single_json_repository {
             }
         }
 
+        /// Test-only constructor for a custom file path (used by unit tests
+        /// and the `store_conformance` suite exported behind `test-support`).
+        #[cfg(any(test, feature = "test-support"))]
+        impl $StructName {
+            pub fn with_path(file_path: std::path::PathBuf) -> Self {
+                Self {
+                    inner: generic_json_repository::GenericJsonRepository::with_path(file_path),
+                }
+            }
+        }
+
         impl $TraitName for $StructName {
             fn load(
                 &self,
@@ -108,6 +119,17 @@ macro_rules! define_list_json_repository {
                 Ok(Self {
                     inner: generic_json_repository::GenericJsonListRepository::new($filename)?,
                 })
+            }
+        }
+
+        /// Test-only constructor for a custom file path (used by unit tests
+        /// and the `store_conformance` suite exported behind `test-support`).
+        #[cfg(any(test, feature = "test-support"))]
+        impl $StructName {
+            pub fn with_path(file_path: std::path::PathBuf) -> Self {
+                Self {
+                    inner: generic_json_repository::GenericJsonListRepository::with_path(file_path),
+                }
             }
         }
 
@@ -168,15 +190,6 @@ define_single_json_repository!(
     model = crate::settings::models::user_secrets_store::UserSecretsModel,
     filename = "user_secrets.json",
 );
-
-#[cfg(test)]
-impl UserSecretsJsonRepository {
-    pub(crate) fn with_path(file_path: std::path::PathBuf) -> Self {
-        Self {
-            inner: generic_json_repository::GenericJsonRepository::with_path(file_path),
-        }
-    }
-}
 
 define_single_json_repository!(
     trait HiveSettingsRepository,

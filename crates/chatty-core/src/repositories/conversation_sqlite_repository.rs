@@ -51,8 +51,18 @@ pub struct ConversationSqliteRepository {
 impl ConversationSqliteRepository {
     /// Open (or create) the SQLite database at the platform-specific config path.
     pub async fn new() -> RepositoryResult<Self> {
-        let db_path = Self::db_path()?;
+        Self::open(Self::db_path()?).await
+    }
 
+    /// Open (or create) the SQLite database at an arbitrary path. Test-only:
+    /// used by unit tests and the `store_conformance` suite exported behind
+    /// `test-support` to run against an isolated database per test.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn with_path(db_path: PathBuf) -> RepositoryResult<Self> {
+        Self::open(db_path).await
+    }
+
+    async fn open(db_path: PathBuf) -> RepositoryResult<Self> {
         if let Some(parent) = db_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
