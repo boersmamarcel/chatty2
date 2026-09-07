@@ -147,6 +147,14 @@ async fn run_loop(
                             KeyAction::ShowContext => {
                                 engine.add_system_message(engine.context_summary());
                             }
+                            KeyAction::ShowOnlineStatus => {
+                                engine.add_system_message(engine.online_status());
+                            }
+                            KeyAction::SetOnline(target) => {
+                                if let Err(e) = engine.set_online(target).await {
+                                    engine.add_system_message(e.to_string());
+                                }
+                            }
                             KeyAction::CopyLastResponse => {
                                 if let Err(e) = engine.copy_last_response_to_clipboard() {
                                     engine.add_system_message(e.to_string());
@@ -215,6 +223,10 @@ enum KeyAction {
     UpdateCli,
     ShowWorkingDirectory,
     ChangeWorkingDirectory(String),
+    /// `/online` — where this conversation runs, and what a move would carry.
+    ShowOnlineStatus,
+    /// `/online <url>` takes it online; `/online off` brings it back.
+    SetOnline(Option<String>),
 }
 
 fn handle_terminal_event(
@@ -549,6 +561,13 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Update => Some(KeyAction::UpdateCli),
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
+        // `/online` alone shows the table before anything leaves this machine;
+        // naming a URL is the confirmation. `off` is the way back.
+        Command::Online(None) => Some(KeyAction::ShowOnlineStatus),
+        Command::Online(Some(target)) if target.eq_ignore_ascii_case("off") => {
+            Some(KeyAction::SetOnline(None))
+        }
+        Command::Online(Some(url)) => Some(KeyAction::SetOnline(Some(url))),
         Command::Quit => Some(KeyAction::Quit),
     }
 }

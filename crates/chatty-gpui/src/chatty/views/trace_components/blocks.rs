@@ -568,7 +568,15 @@ impl SystemTraceView {
                                     let id = approval_id.clone();
                                     move |_event, _window, cx| {
                                         if let Some(store) = cx.try_global::<ConversationsStore>() {
-                                            store.resolve_approval(&id, true);
+                                            // A conversation running online
+                                            // keeps its approval stores on the
+                                            // server, so an id no local store
+                                            // knows goes over the wire (AGE-298).
+                                            if !store.resolve_approval(&id, true) {
+                                                let send =
+                                                    store.resolve_approval_remotely(&id, true);
+                                                cx.background_spawn(send).detach();
+                                            }
 
                                             // Update UI state
                                             if let Some(entity) = entity_for_approve.upgrade() {
@@ -600,7 +608,15 @@ impl SystemTraceView {
                                     let id = approval_id;
                                     move |_event, _window, cx| {
                                         if let Some(store) = cx.try_global::<ConversationsStore>() {
-                                            store.resolve_approval(&id, false);
+                                            // A conversation running online
+                                            // keeps its approval stores on the
+                                            // server, so an id no local store
+                                            // knows goes over the wire (AGE-298).
+                                            if !store.resolve_approval(&id, false) {
+                                                let send =
+                                                    store.resolve_approval_remotely(&id, false);
+                                                cx.background_spawn(send).detach();
+                                            }
 
                                             // Update UI state
                                             if let Some(entity) = entity_for_deny.upgrade() {
