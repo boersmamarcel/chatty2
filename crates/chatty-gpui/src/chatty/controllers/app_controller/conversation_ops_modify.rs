@@ -394,6 +394,13 @@ impl ChattyApp {
     /// and the menu entry cannot disagree about which way it goes.
     pub(super) fn confirm_conversation_move(&mut self, id: &str, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
+        if !cx.global::<ConversationsStore>().is_loaded(&conv_id) {
+            // The move needs the history, and only a loaded conversation has
+            // it. Loading also opens the conversation, which is the one the
+            // user is acting on anyway; the dialog reads the direction from
+            // the row meanwhile.
+            self.load_conversation(&conv_id, cx);
+        }
         let store = cx.global::<ConversationsStore>();
         let mode = store
             .get_conversation(&conv_id)
@@ -440,14 +447,29 @@ impl ChattyApp {
     /// learned the id of is unreachable rather than half-adopted.
     pub fn move_conversation(&mut self, id: &str, target: Option<String>, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
-        let store = cx.global::<ConversationsStore>();
-        let Some(conversation) = store.get_conversation(&conv_id) else {
+        let loaded = cx
+            .global::<ConversationsStore>()
+            .get_conversation(&conv_id)
+            .map(|conversation| {
+                (
+                    conversation.title().to_string(),
+                    conversation.messages(),
+                    conversation.mode().clone(),
+                )
+            });
+        let Some((title, messages, mode)) = loaded else {
+            // The confirm opened before the load that the dialog started had
+            // finished; nothing has moved, so saying so is the whole recovery.
             warn!(conv_id = %conv_id, "Cannot move a conversation that is not loaded");
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(
+                    "This conversation is still loading. Try the move again in a moment."
+                        .to_string(),
+                    cx,
+                );
+            });
             return;
         };
-        let title = conversation.title().to_string();
-        let messages = conversation.messages();
-        let mode = conversation.mode().clone();
 
         cx.spawn(async move |weak, cx| {
             let outcome = match &target {

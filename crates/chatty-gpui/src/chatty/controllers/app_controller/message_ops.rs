@@ -693,6 +693,17 @@ impl ChattyApp {
         if let Some(session) = cx.global::<ConversationsStore>().get_session(&conv_id) {
             session.clarifications().cancel_all();
         }
+        // A conversation running online is stopped by telling the server: the
+        // cancel flag StreamManager sets below only stops this client draining
+        // frames, and the server's loop would otherwise run the turn to its
+        // end without us (AGE-298).
+        if let Some(cancel) = cx
+            .global::<ConversationsStore>()
+            .get_hosted(&conv_id)
+            .map(|hosted| hosted.cancel())
+        {
+            cx.background_spawn(cancel).detach();
+        }
         self.chat_view.update(cx, |view, cx| {
             view.clear_pending_clarification(cx);
         });

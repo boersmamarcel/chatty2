@@ -604,6 +604,62 @@ mod tests {
         assert_eq!(store.find_lru_evictable(), Some("b".to_string()));
     }
 
+    /// The sidebar badges a hosted conversation from the metadata row alone,
+    /// so no conversation has to be loaded to know where it runs (AGE-298).
+    #[test]
+    fn is_hosted_is_answered_from_the_metadata_row_without_loading() {
+        let mut store = make_store_with_n_entries(2);
+        store
+            .metadata
+            .iter_mut()
+            .find(|m| m.id == "conv-1")
+            .unwrap()
+            .mode = Some(
+            r#"{"kind":"hosted","server_url":"http://localhost:8081","remote_id":"r-1"}"#
+                .to_string(),
+        );
+
+        assert!(store.is_hosted("conv-1"));
+        assert!(!store.is_hosted("conv-0"));
+        assert!(!store.is_hosted("never-seen"));
+    }
+
+    /// The hosted client follows the mode: a move online creates it, a move
+    /// back removes it, and a delete never leaves one behind. Both maps are
+    /// written from the same call so they cannot disagree about where a
+    /// conversation runs.
+    #[test]
+    fn the_hosted_client_follows_the_conversation_mode() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+
+        store.set_conversation_mode(
+            "a",
+            ConversationMode::Hosted {
+                server_url: "http://localhost:8081/".to_string(),
+                remote_id: "r-1".to_string(),
+            },
+        );
+        let hosted = store
+            .get_hosted("a")
+            .expect("a hosted conversation has a client");
+        assert_eq!(hosted.server_url(), "http://localhost:8081");
+        assert_eq!(hosted.remote_id(), "r-1");
+
+        store.set_conversation_mode("a", ConversationMode::Local);
+        assert!(store.get_hosted("a").is_none(), "back home, no client");
+
+        store.set_conversation_mode(
+            "a",
+            ConversationMode::Hosted {
+                server_url: "http://localhost:8081".to_string(),
+                remote_id: "r-2".to_string(),
+            },
+        );
+        store.delete_conversation("a");
+        assert!(store.get_hosted("a").is_none(), "deleted, no client");
+    }
+
     #[test]
     fn max_cached_conversations_constant_is_reasonable() {
         // Guard: keep the constant between 5 and 50 to prevent accidental extremes
