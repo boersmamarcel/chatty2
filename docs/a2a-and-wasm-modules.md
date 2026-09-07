@@ -325,10 +325,10 @@ sub_agent(task, model?) → chatty-tui --headless --model <model> --message <tas
 The child has the **full Chatty tool set** (shell, files, MCP tools, …) but runs in
 its own process with its own conversation context; no A2A protocol is involved.
 
-While the child runs, headless mode emits structured `CHATTY_PROGRESS` lines on
-stderr (`tool_started` / `tool_finished`). `SubAgentTool` drains those into the shared
-`InvokeAgentProgressSlot`, so the parent UI shows compact tool activity in a
-collapsible `sub_agent` row. Assistant tokens are **not** forwarded; the parent model
+While the child runs, headless mode writes each `SessionEvent` of its turn to
+stderr as a `CHATTY_EVENT` line (JSON; assistant text and the turn's raw messages
+excepted). `SubAgentTool` parses those into the shared `InvokeAgentProgressSlot`, so
+the parent UI shows compact tool activity in a collapsible `sub_agent` row. Assistant tokens are **not** forwarded; the parent model
 receives only the child's final stdout as the tool result, and the parent turn waits
 on `Tool::call` until the child exits. `/agent` shows the child's human-readable
 stderr minus the protocol lines.

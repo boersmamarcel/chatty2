@@ -160,10 +160,6 @@ impl ChattyApp {
                         // Get execution settings for tool creation
                         let (
                             exec_settings,
-                            pending_approvals,
-                            pending_clarifications,
-                            pending_write_approvals,
-                            pending_artifacts,
                             shell_session,
                             user_secrets,
                             theme_colors,
@@ -174,15 +170,6 @@ impl ChattyApp {
                                 let mut settings = cx
                                     .global::<crate::settings::models::ExecutionSettingsModel>()
                                     .clone();
-                                let approvals = cx
-                                    .global::<crate::chatty::models::ExecutionApprovalStore>()
-                                    .get_pending_approvals();
-                                let clarifications = cx
-                                    .global::<crate::chatty::models::ClarificationStore>()
-                                    .get_pending_clarifications();
-                                let write_approvals = cx
-                                    .global::<crate::chatty::models::WriteApprovalStore>()
-                                    .get_pending_approvals();
                                 let conv =
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
                                 if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
@@ -196,7 +183,6 @@ impl ChattyApp {
                                     .workspace_dir
                                     .as_ref()
                                     .map(|dir| normalize_workspace_path(Path::new(dir)));
-                                let artifacts = conv.map(|c| c.pending_artifacts());
                                 let session = conv.and_then(|c| c.shell_session());
                                 let secrets = cx
                                     .global::<crate::settings::models::UserSecretsModel>()
@@ -207,10 +193,6 @@ impl ChattyApp {
                                     .cloned();
                                 (
                                     Some(settings),
-                                    Some(approvals),
-                                    Some(clarifications),
-                                    Some(write_approvals),
-                                    artifacts,
                                     session,
                                     secrets,
                                     Some(colors),
@@ -252,17 +234,15 @@ impl ChattyApp {
                             })
                             .unwrap_or_default();
 
-                        // Factory creates shell session on-demand if not provided
-                        let built_agent = AgentClient::from_model_config_with_tools(
-                            &model_config,
-                            &provider_config,
-                            AgentBuildContext {
+                        // The rebuilt agent keeps raising its requests on this
+                        // conversation's own session stores (AGE-272).
+                        let ctx = AgentBuildContext {
                                 mcp_tools,
                                 exec_settings,
-                                pending_approvals,
-                                pending_clarifications,
-                                pending_write_approvals,
-                                pending_artifacts,
+                                pending_approvals: None,
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
+                                pending_artifacts: None,
                                 shell_session,
                                 user_secrets,
                                 theme_colors,
@@ -276,27 +256,39 @@ impl ChattyApp {
                                 remote_agents,
                                 available_model_ids,
                                 conversation_id: Some(conv_id.clone()),
-                            },
+                        };
+                        let ctx = cx
+                            .update(|cx| {
+                                cx.global::<ConversationsStore>()
+                                    .get_session(&conv_id)
+                                    .map(|session| session.build_context(ctx))
+                            })
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                            .ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
+
+                        // Factory creates shell session on-demand if not provided
+                        let built_agent = AgentClient::from_model_config_with_tools(
+                            &model_config,
+                            &provider_config,
+                            ctx,
                         )
                         .await?;
 
                         // Update the conversation's agent synchronously
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                debug!("Updating conversation model");
-                                conv.set_agent(
-                                    std::sync::Arc::new(built_agent.client),
-                                    model_config.id.clone(),
-                                    built_workspace_dir.clone(),
-                                );
-                                // Always store the new shell session — the factory either reused
-                                // the existing one or created a fresh one.
-                                if built_agent.shell_session.is_some() {
-                                    conv.set_shell_session(built_agent.shell_session);
-                                }
-                                conv.set_invoke_agent_progress_slot(
-                                    built_agent.invoke_agent_progress_slot,
-                                );
+                        cx.update_global::<ConversationsStore, _>(|store, cx| {
+                            // The settings the tools were built with are the
+                            // session's too.
+                            let config = desktop_session_config(cx);
+                            let session = store
+                                .get_session_mut(&conv_id)
+                                .ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
+                            session.set_config(config);
+                            debug!("Updating conversation model");
+                            if session.install_agent(
+                                built_agent,
+                                model_config.id.clone(),
+                                built_workspace_dir,
+                            ) {
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))
@@ -310,61 +302,11 @@ impl ChattyApp {
                         let conv_data_res =
                             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 store.get_conversation(&conv_id).and_then(|conv| {
-                                    let history = match conv.serialize_history() {
-                                        Ok(h) => h,
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to serialize conversation history for save after model change");
-                                            return None;
-                                        }
-                                    };
-                                    let traces = match conv.serialize_traces() {
-                                        Ok(t) => t,
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to serialize conversation traces for save after model change");
-                                            return None;
-                                        }
-                                    };
-                                    let now = SystemTime::now()
-                                        .duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs()
-                                        as i64;
-
-                                    Some(ConversationData {
-                                        id: conv.id().to_string(),
-                                        title: conv.title().to_string(),
-                                        model_id: conv.model_id().to_string(),
-                                        message_history: history,
-                                        system_traces: traces,
-                                        token_usage: conv
-                                            .serialize_token_usage()
-                                            .unwrap_or_else(|_| "{}".to_string()),
-                                        attachment_paths: conv
-                                            .serialize_attachment_paths()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        message_timestamps: conv
-                                            .serialize_message_timestamps()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        message_feedback: conv
-                                            .serialize_message_feedback()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        regeneration_records: conv
-                                            .serialize_regeneration_records()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        created_at: conv
-                                            .created_at()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs()
-                                            as i64,
-                                        updated_at: now,
-                                        working_dir: conv
-                                            .working_dir()
-                                            .map(|p| p.to_string_lossy().to_string()),
-                                        agent_task_snapshot: conv
-                                            .serialize_agent_task_snapshot()
-                                            .unwrap_or(None),
-                                    })
+                                    conv.to_conversation_data()
+                                        .map_err(|e| {
+                                            warn!(error = ?e, "Failed to serialize conversation for save after model change");
+                                        })
+                                        .ok()
                                 })
                             });
 
@@ -504,13 +446,11 @@ impl ChattyApp {
         let conv_id = conv_id.to_string();
         let repo = self.conversation_repo.clone();
 
-        // Cheap clone of the fields build_conversation_data needs — the
-        // actual serde_json::to_string work happens in the spawned task
-        // below, off the UI thread.
+        // Cheap clone of the fields the row is built from — the actual
+        // serde_json::to_string work happens in the spawned task below, off
+        // the UI thread (AGE-220, finding F3).
         let snapshot = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store
-                .get_conversation(&conv_id)
-                .map(ConversationSnapshot::from_conversation)
+            store.get_conversation(&conv_id).map(Conversation::snapshot)
         });
 
         let Some(snapshot) = snapshot else {
@@ -539,9 +479,12 @@ impl ChattyApp {
         };
 
         cx.spawn(async move |_, _cx| {
-            let Some(conv_data) = build_conversation_data(&snapshot) else {
-                error!(conv_id = %conv_id, "Failed to build conversation data for persistence (serialization failed)");
-                return Ok::<_, anyhow::Error>(());
+            let conv_data = match snapshot.to_data() {
+                Ok(data) => data,
+                Err(e) => {
+                    error!(conv_id = %conv_id, error = ?e, "Failed to build conversation data for persistence (serialization failed)");
+                    return Ok::<_, anyhow::Error>(());
+                }
             };
 
             debug!(

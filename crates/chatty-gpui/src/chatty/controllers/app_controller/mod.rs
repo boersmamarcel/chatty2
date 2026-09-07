@@ -1,19 +1,18 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
+use crate::chatty::models::token_usage::{TokenPricing, TokenUsage};
 use crate::chatty::models::{
-    Conversation, ConversationsStore, GlobalStreamManager, MessageEntry, MessageFeedback,
-    RegenerationRecord, StreamManagerEvent, StreamStatus, TurnOutcome,
+    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
+    StreamStatus, TurnOutcome,
 };
-use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{AgentTaskSnapshot, generate_title, stream_prompt};
+use crate::chatty::services::{AgentTaskSnapshot, generate_title};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
@@ -21,9 +20,8 @@ use crate::chatty::token_budget::{
 use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
-    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
-    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem, friendly_tool_name,
-    is_denial_result,
+    ApprovalState, ClarificationState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
+    ToolSource, TraceItem,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
@@ -42,6 +40,7 @@ use chatty_core::exporters::jsonl_exporter::{
 use chatty_core::factories::AgentClient;
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::repositories::{ConversationData, ConversationRepository};
+use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
 use chatty_core::tools::LocalModuleAgentSummary;
 
 mod conversation_ops;
@@ -200,6 +199,16 @@ fn agent_workspace_needs_refresh(agent_dir: Option<&Path>, effective_dir: Option
     agent_dir.map(normalize_workspace_path) != effective_dir.map(normalize_workspace_path)
 }
 
+/// The desktop's session policy: settings by value from the global, the
+/// desktop recovery table, and the loop guard on (AGE-195).
+pub(super) fn desktop_session_config(cx: &App) -> AgentSessionConfig {
+    AgentSessionConfig {
+        execution_settings: cx.global::<ExecutionSettingsModel>().clone(),
+        surface: chatty_core::services::StreamSurface::Desktop,
+        loop_guard: true,
+    }
+}
+
 async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
     let conv_id = conv_id.to_string();
 
@@ -230,10 +239,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
 
     let (
         exec_settings,
-        pending_approvals,
-        pending_clarifications,
-        pending_write_approvals,
-        pending_artifacts,
         shell_session,
         user_secrets,
         theme_colors,
@@ -244,15 +249,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             let mut settings = cx
                 .global::<crate::settings::models::ExecutionSettingsModel>()
                 .clone();
-            let approvals = cx
-                .global::<crate::chatty::models::ExecutionApprovalStore>()
-                .get_pending_approvals();
-            let clarifications = cx
-                .global::<crate::chatty::models::ClarificationStore>()
-                .get_pending_clarifications();
-            let write_approvals = cx
-                .global::<crate::chatty::models::WriteApprovalStore>()
-                .get_pending_approvals();
             let conv = cx.global::<ConversationsStore>().get_conversation(&conv_id);
             if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
                 settings.workspace_dir = Some(
@@ -265,7 +261,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .workspace_dir
                 .as_ref()
                 .map(|dir| normalize_workspace_path(Path::new(dir)));
-            let artifacts = conv.map(|c| c.pending_artifacts());
             let isolation_changed = conv
                 .and_then(|c| c.shell_session())
                 .map(|s| s.network_isolation() != settings.network_isolation)
@@ -300,10 +295,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .cloned();
             (
                 Some(settings),
-                Some(approvals),
-                Some(clarifications),
-                Some(write_approvals),
-                artifacts,
                 session,
                 secrets,
                 Some(colors),
@@ -340,44 +331,59 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         })
         .unwrap_or_default();
 
-    let built_agent = AgentClient::from_model_config_with_tools(
-        &model_config,
-        &provider_config,
-        AgentBuildContext {
-            mcp_tools,
-            exec_settings,
-            pending_approvals,
-            pending_clarifications,
-            pending_write_approvals,
-            pending_artifacts,
-            shell_session,
-            user_secrets,
-            theme_colors,
-            memory_service,
-            skill_service: Some(skill_service),
-            search_settings,
-            embedding_service,
-            allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
-            module_agents,
-            gateway_port,
-            remote_agents,
-            available_model_ids,
-            conversation_id: Some(conv_id.clone()),
-        },
-    )
-    .await?;
+    // The rebuilt agent keeps raising its requests on this conversation's
+    // own session stores (AGE-272).
+    let ctx = AgentBuildContext {
+        mcp_tools,
+        exec_settings,
+        pending_approvals: None,
+        pending_clarifications: None,
+        pending_write_approvals: None,
+        pending_artifacts: None,
+        shell_session,
+        user_secrets,
+        theme_colors,
+        memory_service,
+        skill_service: Some(skill_service),
+        search_settings,
+        embedding_service,
+        allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
+        module_agents,
+        gateway_port,
+        remote_agents,
+        available_model_ids,
+        conversation_id: Some(conv_id.clone()),
+    };
+    let Some(ctx) = cx
+        .update(|cx| {
+            cx.global::<ConversationsStore>()
+                .get_session(&conv_id)
+                .map(|session| session.build_context(ctx))
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    else {
+        warn!(
+            conv_id = %conv_id,
+            "Conversation not found during agent rebuild — skipping"
+        );
+        return Ok(());
+    };
 
-    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-            conv.set_agent(
-                std::sync::Arc::new(built_agent.client),
-                model_config.id.clone(),
-                built_workspace_dir.clone(),
+    let built_agent =
+        AgentClient::from_model_config_with_tools(&model_config, &provider_config, ctx).await?;
+
+    cx.update_global::<ConversationsStore, _>(|store, cx| {
+        // The settings the tools were built with are the session's too.
+        let config = desktop_session_config(cx);
+        let Some(session) = store.get_session_mut(&conv_id) else {
+            warn!(
+                conv_id = %conv_id,
+                "Conversation not found during agent rebuild — skipping"
             );
-            if built_agent.shell_session.is_some() {
-                conv.set_shell_session(built_agent.shell_session);
-            }
-            conv.set_invoke_agent_progress_slot(built_agent.invoke_agent_progress_slot);
+            return;
+        };
+        session.set_config(config);
+        if session.install_agent(built_agent, model_config.id.clone(), built_workspace_dir) {
             info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
         } else {
             warn!(
@@ -758,8 +764,6 @@ impl ChattyApp {
     }
 }
 
-/// Serialize a `Conversation` into a `ConversationData` snapshot suitable for persistence
-/// or export. Returns `None` if history or traces cannot be serialized.
 /// Extract the current theme's chart colors as hex strings.
 ///
 /// These are captured at agent-creation time so that charts saved to disk by the
@@ -780,121 +784,6 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
             (r.g * 255.0) as u8,
             (r.b * 255.0) as u8
         )
-    })
-}
-
-/// Cheap, cloneable snapshot of the `Conversation` fields `build_conversation_data`
-/// needs. Cloning this (entries included) is inexpensive relative to
-/// JSON-serializing it, so it can be captured synchronously on the UI thread
-/// and then moved into a spawned task that does the actual
-/// `serde_json::to_string` work off the UI thread (finding F3, AGE-220).
-struct ConversationSnapshot {
-    id: String,
-    title: String,
-    model_id: String,
-    entries: Vec<MessageEntry>,
-    token_usage: ConversationTokenUsage,
-    regeneration_records: Vec<RegenerationRecord>,
-    created_at: SystemTime,
-    working_dir: Option<PathBuf>,
-    agent_task_snapshot: Option<AgentTaskSnapshot>,
-}
-
-impl ConversationSnapshot {
-    fn from_conversation(conv: &Conversation) -> Self {
-        Self {
-            id: conv.id().to_string(),
-            title: conv.title().to_string(),
-            model_id: conv.model_id().to_string(),
-            entries: conv.entries().to_vec(),
-            token_usage: conv.token_usage().clone(),
-            regeneration_records: conv.regeneration_records().to_vec(),
-            created_at: conv.created_at(),
-            working_dir: conv.working_dir().cloned(),
-            agent_task_snapshot: conv.agent_task_snapshot().cloned(),
-        }
-    }
-}
-
-///
-/// Sets `updated_at` to the current time; all other timestamps are taken from the
-/// conversation itself.
-///
-/// Pure CPU work over an owned snapshot — no globals, no GPUI context — so
-/// it is safe to call from a spawned task, off the UI thread (finding F3,
-/// AGE-220).
-fn build_conversation_data(snapshot: &ConversationSnapshot) -> Option<ConversationData> {
-    let messages: Vec<&rig_core::completion::Message> =
-        snapshot.entries.iter().map(|e| &e.message).collect();
-    let history = match serde_json::to_string(&messages) {
-        Ok(h) => h,
-        Err(e) => {
-            error!(conv_id = %snapshot.id, error = ?e, "Failed to serialize history in build_conversation_data");
-            return None;
-        }
-    };
-    let traces: Vec<Option<&serde_json::Value>> = snapshot
-        .entries
-        .iter()
-        .map(|e| e.system_trace.as_ref())
-        .collect();
-    let traces = match serde_json::to_string(&traces) {
-        Ok(t) => t,
-        Err(e) => {
-            error!(conv_id = %snapshot.id, error = ?e, "Failed to serialize traces in build_conversation_data");
-            return None;
-        }
-    };
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    let attachment_paths: Vec<&Vec<PathBuf>> = snapshot
-        .entries
-        .iter()
-        .map(|e| &e.attachment_paths)
-        .collect();
-    let message_timestamps: Vec<Option<i64>> =
-        snapshot.entries.iter().map(|e| e.timestamp).collect();
-    let message_feedback: Vec<Option<&MessageFeedback>> = snapshot
-        .entries
-        .iter()
-        .map(|e| e.feedback.as_ref())
-        .collect();
-
-    Some(ConversationData {
-        id: snapshot.id.clone(),
-        title: snapshot.title.clone(),
-        model_id: snapshot.model_id.clone(),
-        message_history: history,
-        system_traces: traces,
-        token_usage: serde_json::to_string(&snapshot.token_usage)
-            .unwrap_or_else(|_| "{}".to_string()),
-        attachment_paths: serde_json::to_string(&attachment_paths)
-            .unwrap_or_else(|_| "[]".to_string()),
-        message_timestamps: serde_json::to_string(&message_timestamps)
-            .unwrap_or_else(|_| "[]".to_string()),
-        message_feedback: serde_json::to_string(&message_feedback)
-            .unwrap_or_else(|_| "[]".to_string()),
-        regeneration_records: serde_json::to_string(&snapshot.regeneration_records)
-            .unwrap_or_else(|_| "[]".to_string()),
-        created_at: snapshot
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-        updated_at: now,
-        working_dir: snapshot
-            .working_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        agent_task_snapshot: snapshot
-            .agent_task_snapshot
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .unwrap_or(None),
     })
 }
 

@@ -6,4 +6,3 @@ ToolCallResult(id="call-2", "3 matches")
 TextChunk("Still investigating.")
 StreamCompleted
 AgentProtocolFollowUp(write_todos)
-=> loop returned Ok

@@ -1,8 +1,12 @@
 mod azure_auth_http;
+#[cfg(test)]
+mod cache_breakpoint_probe;
 mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
+#[cfg(test)]
+mod tool_block_determinism;
 mod tool_collector;
 mod tool_registry;
 
@@ -446,7 +450,13 @@ impl AgentClient {
                         None
                     };
 
-                    // Write tools
+                    // Write tools carry the agent's own approval policy
+                    // (AGE-193): no process-global, so concurrent agents can
+                    // run under different modes.
+                    let write_approval_mode = exec_settings
+                        .as_ref()
+                        .map(|s| s.approval_mode.clone())
+                        .unwrap_or_default();
                     let write_tools = if exec_settings
                         .as_ref()
                         .map(|s| s.filesystem_write_enabled)
@@ -455,12 +465,32 @@ impl AgentClient {
                         tracing::info!(workspace = %workspace_dir, "Filesystem write tools enabled");
                         pending_write_approvals.as_ref().map(|approvals| {
                             (
-                                WriteFileTool::new(service.clone(), approvals.clone()),
-                                FinalAnswerTool::new(service.clone(), approvals.clone()),
+                                WriteFileTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                FinalAnswerTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
                                 CreateDirectoryTool::new(service.clone()),
-                                DeleteFileTool::new(service.clone(), approvals.clone()),
-                                MoveFileTool::new(service.clone(), approvals.clone()),
-                                ApplyDiffTool::new(service.clone(), approvals.clone()),
+                                DeleteFileTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                MoveFileTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                ApplyDiffTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
                             )
                         })
                     } else {
@@ -481,8 +511,16 @@ impl AgentClient {
                         excel_write_tools = pending_write_approvals.as_ref().map(|approvals| {
                             tracing::info!(workspace = %workspace_dir, "Excel write tools enabled");
                             (
-                                WriteExcelTool::new(service.clone(), approvals.clone()),
-                                EditExcelTool::new(service.clone(), approvals.clone()),
+                                WriteExcelTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                EditExcelTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
                             )
                         });
                     }

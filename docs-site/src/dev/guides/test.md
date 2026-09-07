@@ -63,8 +63,9 @@ Both frontends and the core loop drive the **same** scenarios and record their o
 | Golden directory | Recorded by | Event type |
 |------------------|-------------|------------|
 | `crates/chatty-core/src/services/goldens/stream_loop/` | `loop_callback_sequence_matches_goldens` in [`stream_processor.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/src/services/stream_processor.rs) | `StreamChunkHandler` callbacks |
-| `crates/chatty-tui/src/engine/goldens/` | [`engine/streaming_characterization.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-tui/src/engine/streaming_characterization.rs) | `AppEvent` |
-| `crates/chatty-gpui/src/chatty/controllers/app_controller/goldens/` | [`stream_handler_characterization.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-gpui/src/chatty/controllers/app_controller/stream_handler_characterization.rs) | `StreamManagerEvent` |
+| `crates/chatty-core/src/session/goldens/` | [`session/tests.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/src/session/tests.rs) | `SessionEvent` |
+| `crates/chatty-tui/src/engine/goldens/` | [`engine/characterization.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-tui/src/engine/characterization.rs) | `AppEvent` |
+| `crates/chatty-gpui/src/chatty/controllers/app_controller/goldens/` | [`session_characterization.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-gpui/src/chatty/controllers/app_controller/session_characterization.rs) | `StreamManagerEvent` |
 
 Each directory holds one file per scenario: `text_only`, `tool_call_then_result`, `tool_error`, `approval_granted`, `approval_denied`, `clarification_requested`, `provider_error_mid_stream`, `cancelled_mid_stream`, `sub_agent_progress`, `token_usage_on_done`.
 
@@ -72,8 +73,9 @@ When a golden fails, the assertion prints both sequences. If the change is delib
 
 ```bash
 UPDATE_GOLDENS=1 cargo test -p chatty-core --lib loop_callback_sequence
-UPDATE_GOLDENS=1 cargo test -p chatty-tui streaming_characterization
-UPDATE_GOLDENS=1 cargo test -p chatty-gpui stream_handler_characterization
+UPDATE_GOLDENS=1 cargo test -p chatty-core session::
+UPDATE_GOLDENS=1 cargo test -p chatty-tui characterization
+UPDATE_GOLDENS=1 cargo test -p chatty-gpui characterization
 ```
 
 Deliberately *not* pinned: the real-time interleaving of progress events with chunks (racy in production, so scenarios queue progress before the chunks it accompanies), and anything wall-clock based — the stall watchdog has its own tests in `stream_processor.rs`.

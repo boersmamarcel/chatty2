@@ -16,16 +16,6 @@ use crate::tools::ToolError;
 /// Maximum wait time for user approval (5 minutes)
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
-// Global approval mode for write operations (set once at startup, read by tools)
-static GLOBAL_WRITE_APPROVAL_MODE: std::sync::OnceLock<parking_lot::Mutex<ApprovalMode>> =
-    std::sync::OnceLock::new();
-
-/// Set the global write approval mode (call at startup)
-pub fn set_global_write_approval_mode(mode: ApprovalMode) {
-    GLOBAL_WRITE_APPROVAL_MODE.get_or_init(|| parking_lot::Mutex::new(ApprovalMode::AlwaysAsk));
-    *GLOBAL_WRITE_APPROVAL_MODE.get().unwrap().lock() = mode;
-}
-
 /// Maximum characters to show in content preview
 const PREVIEW_MAX_CHARS: usize = 200;
 
@@ -41,18 +31,20 @@ fn preview(s: &str, max_chars: usize) -> String {
 /// Posts a request to the shared pending approvals store, then waits for the UI to resolve it.
 /// If `approval_mode` is `AutoApproveAll` or `AutoApproveSandboxed`, approves immediately
 /// without user interaction. `AlwaysAsk` prompts for each write.
+///
+/// The mode is the agent's own (`ExecutionSettingsModel::approval_mode` from
+/// its `AgentBuildContext`), never a process-wide setting, so two agents in
+/// one process can run under different policies (AGE-193).
 pub async fn request_write_approval(
     pending: &PendingWriteApprovals,
+    approval_mode: &ApprovalMode,
     operation: WriteOperation,
 ) -> Result<bool, anyhow::Error> {
-    use crate::settings::models::execution_settings::ApprovalMode;
-
-    // Check global auto-approve setting
-    if let Some(mode) = GLOBAL_WRITE_APPROVAL_MODE.get() {
-        let mode = mode.lock().clone();
-        if mode == ApprovalMode::AutoApproveAll || mode == ApprovalMode::AutoApproveSandboxed {
-            return Ok(true);
-        }
+    if matches!(
+        approval_mode,
+        ApprovalMode::AutoApproveAll | ApprovalMode::AutoApproveSandboxed
+    ) {
+        return Ok(true);
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -145,13 +137,19 @@ pub struct FinalAnswerOutput {
 #[derive(Clone)]
 pub struct FinalAnswerTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl FinalAnswerTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -235,7 +233,8 @@ impl Tool for FinalAnswerTool {
             content_preview: preview(&content, PREVIEW_MAX_CHARS),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Final answer write denied by user".to_string(),
@@ -394,13 +393,19 @@ pub struct WriteFileOutput {
 #[derive(Clone)]
 pub struct WriteFileTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl WriteFileTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -460,7 +465,8 @@ impl Tool for WriteFileTool {
             content_preview: preview(&args.content, PREVIEW_MAX_CHARS),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Write operation denied by user".to_string(),
@@ -566,13 +572,19 @@ pub struct DeleteFileOutput {
 #[derive(Clone)]
 pub struct DeleteFileTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl DeleteFileTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -623,7 +635,8 @@ impl Tool for DeleteFileTool {
             path: args.path.clone(),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Delete operation denied by user".to_string(),
@@ -656,13 +669,19 @@ pub struct MoveFileOutput {
 #[derive(Clone)]
 pub struct MoveFileTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl MoveFileTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -718,7 +737,8 @@ impl Tool for MoveFileTool {
             destination: args.destination.clone(),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Move operation denied by user".to_string(),
@@ -738,9 +758,7 @@ impl Tool for MoveFileTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_final_answer, preview, request_write_approval, set_global_write_approval_mode,
-    };
+    use super::{normalize_final_answer, preview, request_write_approval};
     use crate::models::write_approval_store::{
         WriteApprovalDecision, WriteApprovalStore, WriteOperation,
     };
@@ -751,11 +769,6 @@ mod tests {
     /// delivered only to A's receiver, never B's.
     #[tokio::test]
     async fn write_approval_notifies_only_the_owning_store() {
-        // Other tests in this crate flip the process-wide write-approval
-        // mode to auto-approve; force "always ask" so this test reaches the
-        // notifier regardless of test execution order.
-        set_global_write_approval_mode(ApprovalMode::AlwaysAsk);
-
         let mut store_a = WriteApprovalStore::new();
         let mut store_b = WriteApprovalStore::new();
 
@@ -770,6 +783,7 @@ mod tests {
             async move {
                 request_write_approval(
                     &pending_a,
+                    &ApprovalMode::AlwaysAsk,
                     WriteOperation::DeleteFile {
                         path: "/tmp/x".to_string(),
                     },
@@ -789,6 +803,55 @@ mod tests {
 
         assert!(store_a.resolve(&notification.id, WriteApprovalDecision::Approved));
         assert!(waiter.await.unwrap().unwrap());
+    }
+
+    /// AGE-193: the write-approval policy is the agent's own, not a process
+    /// global. Two agents streaming concurrently under different modes must
+    /// each get their own behaviour — B's auto-approve must not leak into A's
+    /// always-ask, and A's request must still reach only A's notifier.
+    #[tokio::test]
+    async fn concurrent_agents_keep_their_own_write_approval_mode() {
+        let mut store_a = WriteApprovalStore::new();
+        let mut store_b = WriteApprovalStore::new();
+
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        store_a.set_notifier(tx_a);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        store_b.set_notifier(tx_b);
+
+        let op = || WriteOperation::DeleteFile {
+            path: "/tmp/x".to_string(),
+        };
+
+        let pending_a = store_a.get_pending_approvals();
+        let waiter_a = tokio::spawn({
+            let pending_a = pending_a.clone();
+            async move { request_write_approval(&pending_a, &ApprovalMode::AlwaysAsk, op()).await }
+        });
+        let pending_b = store_b.get_pending_approvals();
+        let waiter_b = tokio::spawn({
+            let pending_b = pending_b.clone();
+            async move { request_write_approval(&pending_b, &ApprovalMode::AutoApproveAll, op()).await }
+        });
+
+        // B auto-approves without ever prompting.
+        assert!(waiter_b.await.unwrap().unwrap());
+        assert!(
+            rx_b.try_recv().is_err(),
+            "auto-approve must not post a notification"
+        );
+
+        // A is still waiting on its own prompt, untouched by B's policy.
+        let notification = rx_a
+            .recv()
+            .await
+            .expect("agent A's receiver must see the notification");
+        assert!(
+            !waiter_a.is_finished(),
+            "always-ask must block until resolved"
+        );
+        assert!(store_a.resolve(&notification.id, WriteApprovalDecision::Denied));
+        assert!(!waiter_a.await.unwrap().unwrap());
     }
 
     #[test]
@@ -868,13 +931,19 @@ pub struct ApplyDiffOutput {
 #[derive(Clone)]
 pub struct ApplyDiffTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl ApplyDiffTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -936,7 +1005,8 @@ impl Tool for ApplyDiffTool {
             new_preview: preview(&args.new_content, PREVIEW_MAX_CHARS),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Diff operation denied by user".to_string(),

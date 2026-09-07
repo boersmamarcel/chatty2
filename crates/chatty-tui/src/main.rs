@@ -5,7 +5,6 @@ mod headless;
 mod ui;
 
 use anyhow::{Context, Result, bail};
-use chatty_core::MCP_SERVICE;
 use chatty_core::services::McpService;
 use chatty_core::settings::models::ModelsModel;
 use chatty_core::settings::models::extensions_store::ExtensionsModel;
@@ -286,9 +285,6 @@ async fn main() -> Result<()> {
     if cli.auto_approve {
         use chatty_core::settings::models::execution_settings::ApprovalMode;
         execution_settings.approval_mode = ApprovalMode::AutoApproveAll;
-        chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
-            ApprovalMode::AutoApproveAll,
-        );
     }
 
     let models = {
@@ -342,7 +338,9 @@ async fn main() -> Result<()> {
         let embedding_service =
             init_embedding_service(&execution_settings, &providers, &memory_service).await;
 
-        let mut engine = ChatEngine::new(
+        // Headless rides the session directly: no engine, no terminal state
+        // (AGE-196).
+        let mut engine = headless::HeadlessRunner::new(
             ChatEngineConfig {
                 model_config,
                 provider_config,
@@ -359,6 +357,7 @@ async fn main() -> Result<()> {
                 module_agents: module_agents.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
             },
             event_tx,
         );
@@ -391,6 +390,7 @@ async fn main() -> Result<()> {
                 module_agents,
                 is_sub_agent: false,
                 services_loaded: false,
+                surface: chatty_core::services::StreamSurface::InteractiveTui,
             },
             event_tx.clone(),
         );
@@ -727,10 +727,6 @@ async fn start_mcp_servers() -> Option<McpService> {
     }
 
     let service = McpService::new();
-    MCP_SERVICE
-        .set(service.clone())
-        .map_err(|_| tracing::warn!("MCP_SERVICE already initialized"))
-        .ok();
 
     let svc = service.clone();
     tokio::spawn(async move {

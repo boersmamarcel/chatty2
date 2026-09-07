@@ -109,6 +109,10 @@ pub fn conversation_to_atif(
         total_completion_tokens: Some(token_usage.total_output_tokens),
         total_cost_usd: Some(token_usage.total_estimated_cost_usd),
         total_steps: Some(steps.len() as u32),
+        extra: AtifFinalMetricsExtra::from_totals(
+            token_usage.total_cache_read_tokens,
+            token_usage.total_cache_write_tokens,
+        ),
     };
 
     // PHASE 5: Build extra (feedback + regenerations)

@@ -80,8 +80,7 @@ pub fn set_workspace_dir(dir: Option<String>, cx: &mut App) {
 /// Update approval mode and persist to disk
 pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     // 1. Apply update immediately
-    cx.global_mut::<ExecutionSettingsModel>().approval_mode = mode.clone();
-    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(mode);
+    cx.global_mut::<ExecutionSettingsModel>().approval_mode = mode;
 
     // 2. Get updated state for async save
     let settings = cx.global::<ExecutionSettingsModel>().clone();
@@ -89,7 +88,12 @@ pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     // 3. Refresh UI immediately
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt: the approval
+    //    policy travels on each tool from its AgentBuildContext (AGE-193), so
+    //    a change only reaches the tools through a rebuild.
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {

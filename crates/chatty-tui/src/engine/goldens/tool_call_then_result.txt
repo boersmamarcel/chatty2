@@ -4,4 +4,3 @@ ToolCallInput(id="call-1", "{\"path\":\"README.md\"}")
 ToolCallResult(id="call-1", "# Chatty")
 TextChunk("It is the readme.")
 StreamCompleted
-=> loop returned Ok

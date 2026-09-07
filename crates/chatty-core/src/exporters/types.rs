@@ -122,6 +122,35 @@ pub struct AtifFinalMetrics {
     pub total_cost_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_steps: Option<u32>,
+    /// Metrics ATIF has no field for. Absent when there is nothing to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<AtifFinalMetricsExtra>,
+}
+
+/// Chatty-specific aggregate metrics, carried in `final_metrics.extra`.
+///
+/// The prompt-cache counts are what makes the hit rate reconstructable from an
+/// export: `total_prompt_tokens` already folds them in, so without these there
+/// is no way to tell a cached prompt from an uncached one. A field is `None`,
+/// not `0`, when the provider reported no cache activity — the two are
+/// different claims (AGE-278).
+#[derive(Debug, Serialize)]
+pub struct AtifFinalMetricsExtra {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+}
+
+impl AtifFinalMetricsExtra {
+    /// `None` when neither count was reported, so the block is omitted rather
+    /// than written as zeroes.
+    pub fn from_totals(cache_read: u32, cache_write: u32) -> Option<Self> {
+        (cache_read > 0 || cache_write > 0).then_some(Self {
+            cache_read_tokens: (cache_read > 0).then_some(cache_read),
+            cache_write_tokens: (cache_write > 0).then_some(cache_write),
+        })
+    }
 }
 
 /// Custom extra block for Chatty-specific data (feedback, regenerations).

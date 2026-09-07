@@ -12,22 +12,6 @@ use std::collections::BTreeSet;
 use crate::engine::{ToolCallInfo, ToolCallState};
 
 #[test]
-fn formats_structured_progress_lines() {
-    assert_eq!(
-        format_progress_line("tool_started", "read_file", None),
-        "CHATTY_PROGRESS\ttool_started\tread_file"
-    );
-    assert_eq!(
-        format_progress_line("tool_finished", "read_file", Some("ok")),
-        "CHATTY_PROGRESS\ttool_finished\tread_file\tok"
-    );
-    assert_eq!(
-        format_progress_line("tool_finished", "shell_execute", Some("err")),
-        "CHATTY_PROGRESS\ttool_finished\tshell_execute\terr"
-    );
-}
-
-#[test]
 fn formats_tool_call_with_pretty_json_and_error_output() {
     let tc = ToolCallInfo {
         id: "call-1".to_string(),
@@ -59,24 +43,6 @@ fn keeps_plain_text_payload_lines() {
         tool_payload_lines("stdout line 1\nstderr line 2\n"),
         vec!["stdout line 1".to_string(), "stderr line 2".to_string(),]
     );
-}
-
-#[test]
-fn stream_error_retry_follows_the_shared_policy() {
-    use chatty_core::services::{StreamError, StreamErrorKind};
-
-    assert!(is_retryable_stream_error(&StreamError::new(
-        StreamErrorKind::MalformedToolCall,
-        "CompletionError: JsonError: EOF while parsing a string at line 1 column 7563",
-    )));
-    assert!(is_retryable_stream_error(&StreamError::new(
-        StreamErrorKind::ProviderStatus(503),
-        "CompletionError: HttpError: Invalid status code 503 Service Unavailable with message: server overloaded",
-    )));
-    assert!(!is_retryable_stream_error(&StreamError::new(
-        StreamErrorKind::Other,
-        "network timeout",
-    )));
 }
 
 #[test]
@@ -223,40 +189,40 @@ fn extracts_known_paths_for_finalization() {
     assert!(paths.contains("data/merchant_data.json"));
 }
 
-/// AGE-242 / D3: `stop_stream()` + `send_message()` in the same breath
-/// (what `run_headless`'s loop-pivot and compact-file branches used to do
-/// directly) is a silent no-op because `is_streaming` is still true —
-/// `pending_loop_pivot_prompt` / `pending_compact_file_prompt` now hold the
-/// prompt until `StreamCompleted` confirms the cancellation went through.
+/// The headless runner on its own (AGE-196): a turn runs with no engine
+/// behind it, and the deferred-send gate `run_headless` relies on holds.
 ///
 /// Driving `run_headless`'s own event loop end-to-end here would need a
-/// mocked LLM stream (the deferred send itself starts a real one against
-/// Ollama); this instead pins the exact `is_streaming` gate that mechanism
-/// depends on, directly on `ChatEngine`.
-mod deferred_send_after_cancel {
+/// mocked LLM stream; these pin the runner's contract directly, with a
+/// real (network-free) `Conversation` on the session.
+mod runner {
     use super::*;
-    use crate::engine::ChatEngineConfig;
+    use crate::engine::{ChatEngineConfig, MessageRole};
     use chatty_core::factories::agent_factory::AgentBuildContext;
-    use chatty_core::models::Conversation;
     use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
     use chatty_core::settings::models::models_store::{ModelConfig, ModelsModel};
     use chatty_core::settings::models::module_settings::ModuleSettingsModel;
     use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+    use std::sync::{Arc, Mutex};
 
-    /// A `ChatEngine` wrapping a real (network-free) `Conversation`. Ollama
-    /// client construction is purely local, so this is safe in unit tests.
-    async fn test_engine() -> ChatEngine {
+    /// A runner around a real (network-free) `Conversation`. Ollama client
+    /// construction is purely local, so this is safe in unit tests. The
+    /// agent is built against the session's own store handles, as
+    /// `init_conversation` does.
+    async fn test_runner() -> (HeadlessRunner, mpsc::UnboundedReceiver<AppEvent>) {
         let _ = chatty_core::init_repositories();
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let mut engine = ChatEngine::new(
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let model_config = ModelConfig::new(
+            "m1".to_string(),
+            "Test Model".to_string(),
+            ProviderType::Ollama,
+            "llama3.2".to_string(),
+        );
+        let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        let mut runner = HeadlessRunner::new(
             ChatEngineConfig {
-                model_config: ModelConfig::new(
-                    "m1".to_string(),
-                    "Test Model".to_string(),
-                    ProviderType::Ollama,
-                    "llama3.2".to_string(),
-                ),
-                provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+                model_config: model_config.clone(),
+                provider_config: provider_config.clone(),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
                 models: ModelsModel::default(),
@@ -268,23 +234,18 @@ mod deferred_send_after_cancel {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
-                is_sub_agent: false,
+                is_sub_agent: true,
                 services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
             },
             event_tx,
         );
 
-        let model_config = ModelConfig::new(
-            "m1".to_string(),
-            "Test Model".to_string(),
-            ProviderType::Ollama,
-            "llama3.2".to_string(),
-        );
-        let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
-        engine.conversation = Some(
-            Conversation::new(
+        runner
+            .session
+            .create_conversation(
                 "c1".to_string(),
-                "Test".to_string(),
+                "New Chat".to_string(),
                 &model_config,
                 &provider_config,
                 AgentBuildContext {
@@ -310,39 +271,97 @@ mod deferred_send_after_cancel {
                 },
             )
             .await
-            .expect("conversation should build without network access"),
-        );
-        engine.is_ready = true;
-        engine
+            .expect("conversation should build without network access");
+        runner.is_ready = true;
+        (runner, event_rx)
     }
 
+    /// AGE-196 acceptance: a headless turn runs on the session directly —
+    /// no `ChatEngine`, no terminal state — and every event of it reaches
+    /// a parent process as a `CHATTY_EVENT` line.
+    #[tokio::test]
+    async fn a_headless_turn_runs_on_the_session_and_reports_to_the_parent() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = lines.clone();
+        runner.set_event_line_writer(Arc::new(move |line| sink.lock().unwrap().push(line)));
+
+        let input = runner
+            .prepare_send("what is this?".to_string(), true)
+            .expect("runner is ready and idle");
+        let scenario = chatty_core::services::scenarios()
+            .into_iter()
+            .find(|s| s.name == "tool_call_then_result")
+            .expect("scenario exists");
+        let turn = runner
+            .session
+            .begin_scripted_turn(input, scenario, runner.event_sink())
+            .expect("turn starts");
+        assert!(runner.is_streaming);
+        turn.await;
+        while let Ok(event) = event_rx.try_recv() {
+            runner.handle_event(event);
+        }
+
+        assert!(!runner.is_streaming);
+        let last = runner.transcript.messages.last().expect("assistant row");
+        assert!(matches!(last.role, MessageRole::Assistant));
+        assert_eq!(last.text(), "It is the readme.");
+        assert!(runner.transcript.tool_call("call-1").is_some());
+        assert_eq!(runner.session.conversation().unwrap().messages().len(), 2);
+
+        let lines = lines.lock().unwrap();
+        let events: Vec<chatty_core::session::SessionEvent> = lines
+            .iter()
+            .map(|line| chatty_core::tools::parse_event_line(line).expect("every line parses"))
+            .collect();
+        assert!(matches!(
+            events.first(),
+            Some(chatty_core::session::SessionEvent::TurnStarted)
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(chatty_core::session::SessionEvent::TurnEnded)
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, chatty_core::session::SessionEvent::ToolCallResult { id, .. } if id == "call-1"))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, chatty_core::session::SessionEvent::Text(_))),
+            "the answer is the child's stdout, not an event line"
+        );
+    }
+
+    /// T3/AGE-242: `stop_stream()` only sets the cancel flag, so a
+    /// `send_message()` right after it is refused; the deferred-send pattern
+    /// in `run_headless` holds the prompt until the cancellation completes.
     #[tokio::test]
     async fn send_message_right_after_stop_stream_is_refused_but_succeeds_once_cancelled() {
-        let mut engine = test_engine().await;
+        let (mut runner, _event_rx) = test_runner().await;
 
-        engine.send_message("first turn".to_string());
-        assert!(engine.is_streaming);
-        let messages_after_first_send = engine.messages.len();
+        runner.send_message("first turn".to_string());
+        assert!(runner.is_streaming);
+        let messages_after_first_send = runner.transcript.messages.len();
 
-        engine.stop_stream();
-        // Immediately re-entering here is exactly the old bug: is_streaming
-        // is still true, so this must be a no-op.
-        engine.send_message("queued pivot prompt".to_string());
+        runner.stop_stream();
+        runner.send_message("queued pivot prompt".to_string());
         assert_eq!(
-            engine.messages.len(),
+            runner.transcript.messages.len(),
             messages_after_first_send,
             "send_message must no-op while is_streaming is still true"
         );
 
-        // What headless's StreamCancelled/StreamCompleted handling actually
-        // does after a cancellation: clears is_streaming.
-        engine.handle_event(AppEvent::StreamCancelled);
-        engine.handle_event(AppEvent::StreamCompleted);
-        assert!(!engine.is_streaming);
+        runner.handle_event(AppEvent::StreamCancelled);
+        runner.handle_event(AppEvent::StreamCompleted);
+        assert!(!runner.is_streaming);
 
-        engine.send_message("queued pivot prompt".to_string());
+        runner.send_message("queued pivot prompt".to_string());
         assert!(
-            engine.messages.len() > messages_after_first_send,
+            runner.transcript.messages.len() > messages_after_first_send,
             "send_message must succeed once the cancellation has completed"
         );
     }
