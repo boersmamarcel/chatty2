@@ -11,7 +11,7 @@ pub mod write_approval_store;
 pub use clarification_store::ClarificationStore;
 #[allow(unused_imports)]
 pub use conversation::RegenerationRecord;
-pub use conversation::{Conversation, MessageEntry, MessageFeedback};
+pub use conversation::{Conversation, MessageEntry, MessageFeedback, TurnOutcome};
 pub use conversations_store::ConversationsStore;
 pub use error_store::ErrorStore;
 pub use execution_approval_store::ExecutionApprovalStore;

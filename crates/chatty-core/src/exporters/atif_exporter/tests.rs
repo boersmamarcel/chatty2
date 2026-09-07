@@ -7,7 +7,7 @@ use super::*;
 use crate::models::message_types::{
     SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
 };
-use crate::models::token_usage::TokenUsage;
+use crate::models::token_usage::{ApiCallUsage, TokenUsage};
 use crate::settings::models::models_store::ModelSource;
 use crate::settings::models::providers_store::ProviderType;
 use rig_core::completion::message::{AssistantContent, Text, UserContent};
@@ -520,6 +520,54 @@ fn final_metrics_totals() {
     assert_eq!(result["final_metrics"]["total_completion_tokens"], 500);
     assert_eq!(result["final_metrics"]["total_cost_usd"], 0.015);
     assert_eq!(result["final_metrics"]["total_steps"], 4);
+    assert!(
+        result["final_metrics"]["extra"].is_null(),
+        "a provider that reported no cache activity writes no cache block"
+    );
+}
+
+/// `total_prompt_tokens` folds cached tokens in, so without these the export
+/// cannot say whether a prompt was served from cache (AGE-278).
+#[test]
+fn final_metrics_carry_cache_counts_when_the_provider_reported_them() {
+    let mut usage = ConversationTokenUsage::default();
+    usage.add_usage(TokenUsage::from_calls(vec![ApiCallUsage {
+        turn: 1,
+        input_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 900,
+        output_tokens: 10,
+    }]));
+    usage.add_usage(TokenUsage::from_calls(vec![ApiCallUsage {
+        turn: 1,
+        input_tokens: 50,
+        cache_read_tokens: 1_200,
+        cache_write_tokens: 0,
+        output_tokens: 20,
+    }]));
+
+    let conv = make_conversation_data(
+        "id",
+        "m",
+        vec![
+            user_message("Q1"),
+            assistant_message("A1"),
+            user_message("Q2"),
+            assistant_message("A2"),
+        ],
+        vec![None, None, None, None],
+        usage,
+        vec![vec![], vec![], vec![], vec![]],
+        vec![None, None, None, None],
+        vec![None, None, None, None],
+        vec![],
+    );
+    let result = conversation_to_atif(&conv, None).unwrap();
+
+    assert_eq!(result["final_metrics"]["extra"]["cache_read_tokens"], 1_200);
+    assert_eq!(result["final_metrics"]["extra"]["cache_write_tokens"], 900);
+    // 150 uncached + 1200 read + 900 written.
+    assert_eq!(result["final_metrics"]["total_prompt_tokens"], 2_250);
 }
 
 #[test]

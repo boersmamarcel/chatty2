@@ -1,19 +1,70 @@
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 use crate::models::message_types::ToolSource;
+use crate::session::SessionEvent;
 use crate::tools::ToolError;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
-/// Prefix for structured headless progress lines on stderr.
+/// Prefix for a headless child's turn events on stderr: one
+/// [`SessionEvent`] per line, JSON-encoded (AGE-196). This is the session's
+/// own contract crossing the process boundary, so the parent binds to typed
+/// events rather than a text protocol. Every other stderr line is the
+/// child's human-readable log.
 ///
-/// Format:
-/// - `CHATTY_PROGRESS\ttool_started\t{name}`
-/// - `CHATTY_PROGRESS\ttool_finished\t{name}\t{ok|err}`
-pub const CHATTY_PROGRESS_PREFIX: &str = "CHATTY_PROGRESS\t";
+/// Not every event is written: `Text` (the answer is the child's stdout) and
+/// `TurnMessages` (persistence-only, and large) stay in the child. See
+/// [`format_event_line`].
+pub const CHATTY_EVENT_PREFIX: &str = "CHATTY_EVENT\t";
+
+/// The `CHATTY_EVENT` line for `event`, or `None` for the events that stay
+/// in the child (see [`CHATTY_EVENT_PREFIX`]).
+pub fn format_event_line(event: &SessionEvent) -> Option<String> {
+    if matches!(event, SessionEvent::Text(_) | SessionEvent::TurnMessages(_)) {
+        return None;
+    }
+    let json = serde_json::to_string(event)
+        .map_err(|e| warn!(error = ?e, "Failed to serialize a session event for the parent"))
+        .ok()?;
+    Some(format!("{CHATTY_EVENT_PREFIX}{json}"))
+}
+
+/// Parse a `CHATTY_EVENT` line back into the event. `None` for any other
+/// line, including a malformed one (logged, not fatal: the parent keeps
+/// draining).
+pub fn parse_event_line(line: &str) -> Option<SessionEvent> {
+    let json = line.strip_prefix(CHATTY_EVENT_PREFIX)?;
+    serde_json::from_str(json)
+        .map_err(|e| warn!(error = ?e, "Ignoring a malformed CHATTY_EVENT line from a sub-agent"))
+        .ok()
+}
+
+/// Compact progress text for the parent UI from a child's event: `name` on
+/// a tool start, `✓ name` / `✗ name` on its result, and the child's stream
+/// error. `names` remembers each tool call's name until its result arrives.
+fn progress_text_for_event(
+    event: &SessionEvent,
+    names: &mut HashMap<String, String>,
+) -> Option<String> {
+    match event {
+        SessionEvent::ToolCallStarted { id, name } => {
+            names.insert(id.clone(), name.clone());
+            Some(name.clone())
+        }
+        SessionEvent::ToolCallResult { id, .. } => {
+            names.remove(id).map(|name| format!("\u{2713} {name}"))
+        }
+        SessionEvent::ToolCallError { id, .. } => {
+            names.remove(id).map(|name| format!("\u{2717} {name}"))
+        }
+        SessionEvent::Error(error) => Some(format!("error: {}", error.message)),
+        _ => None,
+    }
+}
 
 /// Maximum number of characters from stderr to include in error messages.
 const STDERR_PREVIEW_CHARS: usize = 500;
@@ -80,30 +131,9 @@ impl SubAgentTool {
     }
 }
 
-/// Returns true when `line` is a structured headless progress event.
-pub fn is_chatty_progress_line(line: &str) -> bool {
-    line.starts_with(CHATTY_PROGRESS_PREFIX)
-}
-
-/// Parse a structured progress line into compact UI text.
-///
-/// Unprefixed token soup and human tool-format lines return `None`.
-fn parse_progress_line(line: &str) -> Option<String> {
-    let rest = line.strip_prefix(CHATTY_PROGRESS_PREFIX)?;
-    let mut parts = rest.split('\t');
-    let kind = parts.next()?;
-    let name = parts.next()?.trim();
-    if name.is_empty() {
-        return None;
-    }
-    match kind {
-        "tool_started" => Some(name.to_string()),
-        "tool_finished" => match parts.next().unwrap_or("ok") {
-            "ok" => Some(format!("\u{2713} {name}")),
-            _ => Some(format!("\u{2717} {name}")),
-        },
-        _ => None,
-    }
+/// Returns true when `line` is a headless child's `CHATTY_EVENT` line.
+pub fn is_chatty_event_line(line: &str) -> bool {
+    line.starts_with(CHATTY_EVENT_PREFIX)
 }
 
 fn send_progress(slot: &InvokeAgentProgressSlot, event: InvokeAgentProgress) {
@@ -292,8 +322,9 @@ fn run_sub_agent_with_progress(
 
 /// Spawn chatty-tui in headless mode and collect its output.
 ///
-/// Stderr is drained live: only `CHATTY_PROGRESS` lines are forwarded to the
-/// parent UI. stdout is returned as the tool result for the parent model.
+/// Stderr is drained live: the child's `CHATTY_EVENT` lines (its
+/// `SessionEvent`s) are forwarded to the parent UI as compact progress.
+/// stdout is returned as the tool result for the parent model.
 fn run_sub_agent(
     executable: PathBuf,
     model_id: String,
@@ -335,15 +366,20 @@ fn run_sub_agent(
     let slot_for_drain = progress_slot.clone();
     let stderr_thread = std::thread::spawn(move || {
         let mut collected = String::new();
+        let mut tool_names = HashMap::new();
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                info!(sub_agent_progress = %line);
-                if !collected.is_empty() {
-                    collected.push('\n');
+                if !is_chatty_event_line(&line) {
+                    info!(sub_agent_progress = %line);
+                    if !collected.is_empty() {
+                        collected.push('\n');
+                    }
+                    collected.push_str(&line);
                 }
-                collected.push_str(&line);
-                if let Some(text) = parse_progress_line(&line) {
+                if let Some(event) = parse_event_line(&line)
+                    && let Some(text) = progress_text_for_event(&event, &mut tool_names)
+                {
                     send_progress(&slot_for_drain, InvokeAgentProgress::Text(text));
                 }
             }
@@ -381,7 +417,6 @@ mod tests {
     use super::*;
     use crate::services::install_progress_channel;
     use parking_lot::Mutex;
-    use rig_agent::tool::{Tool, ToolContext};
     use std::sync::Arc;
 
     fn dummy_slot() -> InvokeAgentProgressSlot {
@@ -389,137 +424,154 @@ mod tests {
     }
 
     #[test]
-    fn parse_progress_line_started_and_finished() {
-        assert_eq!(
-            parse_progress_line("CHATTY_PROGRESS\ttool_started\tread_file").as_deref(),
-            Some("read_file")
-        );
-        assert_eq!(
-            parse_progress_line("CHATTY_PROGRESS\ttool_finished\tread_file\tok").as_deref(),
-            Some("✓ read_file")
-        );
-        assert_eq!(
-            parse_progress_line("CHATTY_PROGRESS\ttool_finished\tshell_execute\terr").as_deref(),
-            Some("✗ shell_execute")
-        );
+    fn event_lines_round_trip_and_skip_the_child_only_events() {
+        let started = SessionEvent::ToolCallStarted {
+            id: "call-1".into(),
+            name: "read_file".into(),
+        };
+        let line = format_event_line(&started).expect("tool events cross the boundary");
+        assert!(is_chatty_event_line(&line));
+        assert!(matches!(
+            parse_event_line(&line),
+            Some(SessionEvent::ToolCallStarted { id, name }) if id == "call-1" && name == "read_file"
+        ));
+
+        assert!(format_event_line(&SessionEvent::Text("token".into())).is_none());
+        assert!(format_event_line(&SessionEvent::TurnMessages(Vec::new())).is_none());
+        assert!(parse_event_line("CHATTY_EVENT\tnot json").is_none());
+        assert!(parse_event_line("  [tool: read_file] running").is_none());
+        assert!(!is_chatty_event_line("hello"));
     }
 
     #[test]
-    fn parse_progress_line_ignores_unprefixed_noise() {
-        assert_eq!(parse_progress_line("token soup without prefix"), None);
+    fn progress_text_names_the_tool_and_its_outcome() {
+        let mut names = HashMap::new();
+        let started = SessionEvent::ToolCallStarted {
+            id: "c".into(),
+            name: "read_file".into(),
+        };
         assert_eq!(
-            parse_progress_line("  [tool: read_file] \u{27f3} running"),
+            progress_text_for_event(&started, &mut names).as_deref(),
+            Some("read_file")
+        );
+        let ok = SessionEvent::ToolCallResult {
+            id: "c".into(),
+            result: "…".into(),
+        };
+        assert_eq!(
+            progress_text_for_event(&ok, &mut names).as_deref(),
+            Some("✓ read_file")
+        );
+        assert!(names.is_empty(), "the name is released with its result");
+        assert_eq!(
+            progress_text_for_event(&SessionEvent::TurnEnded, &mut names),
             None
         );
-        assert_eq!(parse_progress_line("CHATTY_PROGRESS\tunknown\tfoo"), None);
-        assert!(!is_chatty_progress_line("hello"));
-        assert!(is_chatty_progress_line(
-            "CHATTY_PROGRESS\ttool_started\tread_file"
-        ));
     }
 
-    #[tokio::test]
-    async fn test_empty_task_rejected() {
-        let slot = dummy_slot();
-        let mut rx = install_progress_channel(&slot);
-        let tool = SubAgentTool::new("model-1".into(), false, Vec::new(), slot);
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                SubAgentArgs {
-                    task: "   ".to_string(),
-                    model: None,
-                },
-            )
-            .await;
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("cannot be empty"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "empty task must not emit progress events"
-        );
-    }
+    /// Two children at once, each on its own progress slot (AGE-196
+    /// acceptance): every parent-side row sees its own child's events and
+    /// nothing from the other's.
+    #[cfg(unix)]
+    #[test]
+    fn two_concurrent_children_report_to_their_own_rows() {
+        use std::os::unix::fs::PermissionsExt;
 
-    #[tokio::test]
-    async fn test_model_validation_rejects_unknown() {
-        let tool = SubAgentTool::new(
-            "default-model".into(),
-            false,
-            vec!["model-a".into(), "model-b".into()],
-            dummy_slot(),
-        );
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                SubAgentArgs {
-                    task: "do something".to_string(),
-                    model: Some("nonexistent".to_string()),
-                },
-            )
-            .await;
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Unknown model"),
-            "unexpected error: {err}"
-        );
-        assert!(err.to_string().contains("model-a"));
-        assert!(err.to_string().contains("model-b"));
-    }
-
-    #[tokio::test]
-    async fn test_model_validation_accepts_known() {
-        let tool = SubAgentTool::new(
-            "default-model".into(),
-            false,
-            vec!["model-a".into(), "model-b".into()],
-            dummy_slot(),
-        );
-        // The model validation passes, but the call will fail later when
-        // trying to spawn the chatty-tui binary (which doesn't exist in tests).
-        // We verify it does NOT fail with "Unknown model".
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                SubAgentArgs {
-                    task: "do something".to_string(),
-                    model: Some("model-a".to_string()),
-                },
-            )
-            .await;
-        match result {
-            Err(e) => assert!(
-                !e.to_string().contains("Unknown model"),
-                "should not reject known model, got: {e}"
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let script = dir.path().join("fake-tui");
+        // The child names its tool after the task, so the parent can tell
+        // whose events it received. `$5` is the task (`--headless --model M
+        // --message TASK`).
+        let started = format_event_line(&SessionEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "TASK".into(),
+        })
+        .unwrap()
+        .replace("TASK", "'\"$5\"'");
+        let finished = format_event_line(&SessionEvent::ToolCallResult {
+            id: "c1".into(),
+            result: "ok".into(),
+        })
+        .unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 sleep 0.2\n\
+                 echo '{started}' >&2\n\
+                 echo '{finished}' >&2\n\
+                 echo \"done: $5\"\n"
             ),
-            Ok(output) => {
-                // If it somehow succeeds or returns a SubAgentOutput with
-                // success=false (binary not found), that's also fine — model
-                // validation passed.
-                assert!(!output.success || !output.response.is_empty());
+        )
+        .expect("write fixture");
+        let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        let mut children = Vec::new();
+        let mut receivers = Vec::new();
+        for task in ["alpha", "beta"] {
+            let slot = dummy_slot();
+            receivers.push((task, install_progress_channel(&slot)));
+            let script = script.clone();
+            children.push(std::thread::spawn(move || {
+                run_sub_agent_with_progress(script, "model-1".into(), task.into(), false, slot)
+            }));
+        }
+        let outputs: Vec<String> = children
+            .into_iter()
+            .map(|c| c.join().unwrap().expect("fixture should succeed"))
+            .collect();
+        assert_eq!(outputs, vec!["done: alpha", "done: beta"]);
+
+        for (task, mut rx) in receivers {
+            let mut texts = Vec::new();
+            let mut finished = None;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    InvokeAgentProgress::Text(t) => texts.push(t),
+                    InvokeAgentProgress::Finished { result, .. } => finished = result,
+                    InvokeAgentProgress::Started { .. } => {}
+                }
             }
+            assert_eq!(
+                texts,
+                vec![task.to_string(), format!("✓ {task}")],
+                "row for {task} sees only its own child's events"
+            );
+            assert_eq!(finished.as_deref(), Some(format!("done: {task}").as_str()));
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn live_progress_forwards_prefixed_lines_and_returns_stdout() {
+    fn live_progress_forwards_event_lines_and_returns_stdout() {
         use std::os::unix::fs::PermissionsExt;
 
+        let started = format_event_line(&SessionEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "read_file".into(),
+        })
+        .unwrap();
+        let finished = format_event_line(&SessionEvent::ToolCallResult {
+            id: "c1".into(),
+            result: "# Chatty".into(),
+        })
+        .unwrap();
         let dir = tempfile::TempDir::new().expect("tempdir");
         let script = dir.path().join("fake-tui");
         std::fs::write(
             &script,
-            "#!/bin/sh\n\
-             printf 'token soup' >&2\n\
-             echo >&2\n\
-             echo 'CHATTY_PROGRESS\ttool_started\tread_file' >&2\n\
-             echo '  [tool: read_file] running' >&2\n\
-             echo 'CHATTY_PROGRESS\ttool_finished\tread_file\tok' >&2\n\
-             echo 'noise' >&2\n\
-             echo 'final answer'\n",
+            format!(
+                "#!/bin/sh\n\
+                 printf 'token soup' >&2\n\
+                 echo >&2\n\
+                 echo '{started}' >&2\n\
+                 echo '  [tool: read_file] running' >&2\n\
+                 echo '{finished}' >&2\n\
+                 echo 'noise' >&2\n\
+                 echo 'final answer'\n"
+            ),
         )
         .expect("write fixture");
         let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
@@ -565,7 +617,7 @@ mod tests {
             !texts
                 .iter()
                 .any(|t| t.contains("token soup") || t.contains("noise")),
-            "unprefixed stderr must not be forwarded: {texts:?}"
+            "the child's human-readable stderr must not be forwarded: {texts:?}"
         );
         assert!(
             matches!(

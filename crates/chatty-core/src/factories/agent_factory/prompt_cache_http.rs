@@ -223,4 +223,68 @@ mod tests {
             .unwrap();
         assert_eq!(rewrite(listing).body(), &Bytes::from(body));
     }
+
+    /// Counts `cache_control` markers across every message's content blocks.
+    fn count_cache_control_breakpoints(body: &serde_json::Value) -> usize {
+        body["messages"]
+            .as_array()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter_map(|m| m.get("content")?.as_array())
+                    .flatten()
+                    .filter(|block| block.get("cache_control").is_some())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Pins the two-breakpoint shape this wrapper exists for (AGE-205,
+    /// AGE-239): rig's own `apply_prompt_caching` already marks the system
+    /// message before this wrapper ever sees the body (simulated here, since
+    /// that step happens upstream in rig-core, not in this file), and this
+    /// wrapper marks the latest user/assistant message. A follow-up
+    /// tool-loop turn resends the growing, already-marked history through
+    /// `rewrite()` again — that must not add a third breakpoint or touch the
+    /// existing one, so this wrapper's fallback can be dropped outright once
+    /// rig grows the upstream equivalent (AGE-239) without re-checking this
+    /// invariant by hand.
+    #[test]
+    fn rewrite_combined_with_rigs_system_breakpoint_yields_exactly_two_and_is_idempotent() {
+        let body = json!({ "messages": [
+            { "role": "system", "content": [
+                { "type": "text", "text": "sys", "cache_control": { "type": "ephemeral" } }
+            ]},
+            { "role": "user", "content": "first turn" },
+            { "role": "assistant", "content": "reply" },
+            { "role": "user", "content": "second turn" }
+        ]})
+        .to_string();
+
+        let request = |body: String| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("https://openrouter.ai/api/v1/chat/completions")
+                .body(Bytes::from(body))
+                .unwrap()
+        };
+
+        let out = rewrite(request(body));
+        let rewritten: serde_json::Value = serde_json::from_slice(out.body()).unwrap();
+        assert_eq!(count_cache_control_breakpoints(&rewritten), 2);
+
+        // Re-send the already-marked body, as the next provider request in
+        // the same tool loop would.
+        let out_again = rewrite(request(rewritten.to_string()));
+        let rewritten_again: serde_json::Value = serde_json::from_slice(out_again.body()).unwrap();
+        assert_eq!(
+            count_cache_control_breakpoints(&rewritten_again),
+            2,
+            "re-marking an already-marked block must not add a third breakpoint"
+        );
+        assert_eq!(
+            rewritten, rewritten_again,
+            "rewriting an already-marked body must be a no-op"
+        );
+    }
 }

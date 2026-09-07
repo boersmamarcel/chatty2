@@ -694,30 +694,10 @@ impl ChatView {
         if let Some(ref pending) = self.pending_approval {
             let id = pending.id.clone();
 
-            // Try execution approval store first (bash commands)
-            let mut resolved = false;
-            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
-                use crate::chatty::models::execution_approval_store::ApprovalDecision;
-                resolved = store.resolve(&id, if approved {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Denied
-                });
-            }
-
-            // If not found in execution store, try write approval store (filesystem writes)
-            if !resolved {
-                if let Some(store) = cx.try_global::<crate::chatty::models::WriteApprovalStore>() {
-                    use crate::chatty::models::write_approval_store::WriteApprovalDecision;
-                    store.resolve(
-                        &id,
-                        if approved {
-                            WriteApprovalDecision::Approved
-                        } else {
-                            WriteApprovalDecision::Denied
-                        },
-                    );
-                }
+            // The request was raised on the stores of the conversation whose
+            // agent is waiting (AGE-195), execution or write.
+            if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>() {
+                store.resolve_approval(&id, approved);
             }
 
             // Immediately clear pending approval to hide the bar
@@ -869,14 +849,14 @@ impl ChatView {
         // the stream can push its next chunk straight away.
         self.pending_clarification = None;
 
-        match cx.try_global::<chatty_core::models::ClarificationStore>() {
+        match cx.try_global::<crate::chatty::models::ConversationsStore>() {
             Some(store) => {
-                if !store.resolve(&id, answers.clone()) {
+                if !store.resolve_clarification(&id, answers.clone()) {
                     warn!(clarification_id = %id, "No pending clarification to resolve");
                 }
             }
             None => {
-                warn!(clarification_id = %id, "ClarificationStore global missing; answers dropped")
+                warn!(clarification_id = %id, "ConversationsStore global missing; answers dropped")
             }
         }
 

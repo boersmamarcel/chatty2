@@ -30,7 +30,7 @@
 //! See `docs/stream-manager.md` for the full stream architecture.
 
 use super::message_ops_internals::{
-    LlmStreamParams, attachment_to_user_content, run_llm_stream,
+    LlmStreamParams, attachment_to_user_content, is_pdf_path, run_llm_stream,
     select_recent_assistant_attachments,
 };
 use super::*;
@@ -225,7 +225,19 @@ impl ChattyApp {
                                 .working_dir()
                                 .cloned()
                                 .or_else(|| settings.workspace_dir.as_ref().map(PathBuf::from));
-                            conv.agent_workspace_dir().cloned() != effective_workspace_dir
+                            let needs_refresh = agent_workspace_needs_refresh(
+                                conv.agent_workspace_dir().map(|p| p.as_path()),
+                                effective_workspace_dir.as_deref(),
+                            );
+                            if needs_refresh {
+                                debug!(
+                                    conv_id = %conv_id,
+                                    agent_workspace_dir = ?conv.agent_workspace_dir(),
+                                    effective_workspace_dir = ?effective_workspace_dir,
+                                    "Workspace directory changed, agent rebuild needed"
+                                );
+                            }
+                            needs_refresh
                         })
                     })
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -239,38 +251,35 @@ impl ChattyApp {
                     rebuild_conversation_agent(&conv_id, cx).await?;
                 }
 
-                // Extract agent, history, model_id, and capabilities synchronously
-                let (agent, history, _model_id, provider_type, provider_supports_pdf, provider_supports_images, conv_entries, invoke_agent_progress_slot) = cx
+                // Extract capabilities synchronously; the session snapshots
+                // the history itself when the turn begins.
+                let (provider_supports_pdf, provider_supports_images, assistant_att_paths) = cx
                     .update_global::<ConversationsStore, _>(|store, cx| {
                         if let Some(conv) = store.get_conversation(&conv_id) {
                             let model_id = conv.model_id().to_string();
 
                             // Get capabilities from ModelsModel
-                            let (provider_type, supports_pdf, supports_images) = cx
+                            let (supports_pdf, supports_images) = cx
                                 .global::<ModelsModel>()
                                 .get_model(&model_id)
-                                .map(|m| (m.provider_type.clone(), m.supports_pdf, m.supports_images))
-                                .unwrap_or((
-                                    chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
-                                    false,
-                                    false,
-                                )); // Safe fallback if model not found
+                                .map(|m| (m.supports_pdf, m.supports_images))
+                                .unwrap_or((false, false)); // Safe fallback if model not found
 
                             // Clear any leftover artifacts from a previous stream
                             if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
                                 artifacts.clear();
                             }
 
-                            Ok((
-                                conv.agent().clone(),
-                                conv.messages(),
-                                model_id,
-                                provider_type,
-                                supports_pdf,
+                            // Computed inside the store borrow so we don't have to
+                            // clone every MessageEntry (trace JSON included) just to
+                            // read one entry's attachment paths (finding B1, AGE-219).
+                            let assistant_att_paths = select_recent_assistant_attachments(
+                                conv.entries(),
                                 supports_images,
-                                conv.entries().to_vec(),
-                                conv.invoke_agent_progress_slot(),
-                            ))
+                                supports_pdf,
+                            );
+
+                            Ok((supports_pdf, supports_images, assistant_att_paths))
                         } else {
                             Err(anyhow::anyhow!(
                                 "Could not find conversation after creation/lookup"
@@ -287,7 +296,7 @@ impl ChattyApp {
                 // Convert file attachments to UserContent
                 // Filter based on model capabilities to prevent panics in rig-core
                 for path in &attachments {
-                    let is_pdf = path.extension().and_then(|e| e.to_str()) == Some("pdf");
+                    let is_pdf = is_pdf_path(path);
                     if is_pdf && !provider_supports_pdf {
                         warn!(?path, "Skipping PDF attachment: provider does not support PDFs");
                         continue;
@@ -302,16 +311,15 @@ impl ChattyApp {
                     }
                 }
 
-                // Include the most recent assistant-generated attachments so the LLM
-                // can reference displayed images/PDFs in follow-up questions.
-                let assistant_att_paths = select_recent_assistant_attachments(
-                    &conv_entries,
-                    provider_supports_images,
-                    provider_supports_pdf,
-                );
+                // Include the most recent assistant-generated attachments (from the
+                // immediately preceding turn only) so the LLM can reference displayed
+                // images/PDFs in follow-up questions. These are sent to the LLM but kept
+                // out of the persisted user message — otherwise every later turn would
+                // carry and re-persist another copy of the same artifact (finding F2).
+                let mut extra_llm_contents = Vec::with_capacity(assistant_att_paths.len());
                 for path in &assistant_att_paths {
                     match attachment_to_user_content(path).await {
-                        Ok(content) => contents.push(content),
+                        Ok(content) => extra_llm_contents.push(content),
                         Err(e) => warn!(
                             ?path,
                             error = ?e,
@@ -324,17 +332,21 @@ impl ChattyApp {
                 run_llm_stream(
                     LlmStreamParams {
                         conv_id,
-                        agent,
-                        history,
-                        user_contents: contents,
-                        add_user_message_to_model: true,
-                        reset_agent_task: show_in_transcript,
-                        attachment_paths: attachments,
-                        provider_type,
+                        input: TurnInput {
+                            contents,
+                            llm_only_contents: extra_llm_contents,
+                            attachments,
+                            // Only a human turn resets the todo protocol;
+                            // an injected follow-up keeps its turn's state.
+                            kind: if show_in_transcript {
+                                TurnKind::Human
+                            } else {
+                                TurnKind::ProtocolFollowUp
+                            },
+                        },
                         chat_view,
                         stream_manager,
                         cancel_flag: cancel_flag_for_loop,
-                        invoke_agent_progress_slot,
                         weak_ctrl,
                     },
                     cx,
@@ -420,31 +432,6 @@ impl ChattyApp {
                 let id = id.clone();
                 let name = name.clone();
 
-                // Update Conversation model unconditionally (survives view switches)
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
-                        let text_before = conv.streaming_message().cloned().unwrap_or_default();
-                        let display_name = friendly_tool_name(&name);
-                        let tool_call = ToolCallBlock {
-                            id: id.clone(),
-                            tool_name: name.clone(),
-                            display_name,
-                            input: String::new(),
-                            output: None,
-                            output_preview: None,
-                            state: ToolCallState::Running,
-                            duration: None,
-                            text_before,
-                            source: classify_tool_source(&name),
-                            execution_engine: chatty_core::models::message_types::classify_initial_execution_engine(&name),
-                        };
-                        let trace = conv.ensure_streaming_trace();
-                        let index = trace.items.len();
-                        trace.add_tool_call(tool_call);
-                        trace.set_active_tool(index);
-                    }
-                });
-
                 if name == "invoke_agent" || name == "sub_agent" {
                     // Suppress ToolCallBlock in the UI — the sub-agent progress
                     // system will handle visualisation via the progress channel.
@@ -466,26 +453,6 @@ impl ChattyApp {
                 let id = id.clone();
                 let arguments = arguments.clone();
 
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let args = arguments.clone();
-                        if !trace.update_tool_call(&id, |tc| {
-                            tc.execution_engine =
-                                chatty_core::models::message_types::predict_execution_engine(
-                                    &tc.tool_name,
-                                    &args,
-                                )
-                                .or(tc.execution_engine);
-                            tc.input = args;
-                        }) {
-                            warn!(tool_id = %id, "ToolCallInput: tool call not found in model trace");
-                        }
-                    }
-                });
-
                 if !self.active_invoke_agent_ids.contains(&id) {
                     chat_view.update(cx, |view, cx| {
                         if view.conversation_id() == Some(conversation_id) {
@@ -501,32 +468,6 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let result = result.clone();
-
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let res = result.clone();
-                        let is_denied = is_denial_result(&res);
-                        if !trace.update_tool_call(&id, |tc| {
-                            tc.execution_engine =
-                                chatty_core::models::message_types::detect_execution_engine(
-                                    &tc.tool_name,
-                                    &res,
-                                );
-                            tc.output = Some(res.clone());
-                            tc.state = if is_denied {
-                                ToolCallState::Error("Denied by user".to_string())
-                            } else {
-                                ToolCallState::Success
-                            };
-                        }) {
-                            warn!(tool_id = %id, "ToolCallResult: tool call not found in model trace");
-                        }
-                        trace.clear_active_tool();
-                    }
-                });
 
                 if self.active_invoke_agent_ids.remove(&id) {
                     // invoke_agent / sub_agent result — sub-agent progress already
@@ -546,21 +487,6 @@ impl ChattyApp {
             } => {
                 let id = id.clone();
                 let error = error.clone();
-
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let err = error.clone();
-                        if !trace.update_tool_call(&id, |tc| {
-                            tc.state = ToolCallState::Error(err);
-                        }) {
-                            warn!(tool_id = %id, "ToolCallError: tool call not found in model trace");
-                        }
-                        trace.clear_active_tool();
-                    }
-                });
 
                 if self.active_invoke_agent_ids.remove(&id) {
                     // invoke_agent / sub_agent error — sub-agent progress handles error
@@ -584,23 +510,6 @@ impl ChattyApp {
                 let command = command.clone();
                 let is_sandboxed = *is_sandboxed;
 
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
-                        let approval = ApprovalBlock {
-                            id: id.clone(),
-                            command: command.clone(),
-                            is_sandboxed,
-                            state: ApprovalState::Pending,
-                            created_at: std::time::SystemTime::now(),
-                        };
-                        let trace = conv.ensure_streaming_trace();
-                        let index = trace.items.len();
-                        trace.add_approval(approval);
-                        trace.set_active_tool(index);
-                    }
-                });
-
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_approval_requested(id, command, is_sandboxed, cx);
@@ -616,24 +525,6 @@ impl ChattyApp {
                 let id = id.clone();
                 let questions = questions.clone();
 
-                // Update Conversation model unconditionally so the questions
-                // survive a conversation switch mid-stream.
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id) {
-                        let clarification = ClarificationBlock {
-                            id: id.clone(),
-                            questions: questions.clone(),
-                            answers: Vec::new(),
-                            state: ClarificationState::Pending,
-                            created_at: std::time::SystemTime::now(),
-                        };
-                        let trace = conv.ensure_streaming_trace();
-                        let index = trace.items.len();
-                        trace.add_clarification(clarification);
-                        trace.set_active_tool(index);
-                    }
-                });
-
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
                         view.handle_clarification_requested(id, questions, cx);
@@ -648,21 +539,6 @@ impl ChattyApp {
                 debug!(id = %id, approved = approved, "StreamManager: approval resolved");
                 let id = id.clone();
                 let approved = *approved;
-
-                // Update Conversation model unconditionally
-                cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation_mut(conversation_id)
-                        && let Some(trace) = conv.streaming_trace_mut()
-                    {
-                        let new_state = if approved {
-                            ApprovalState::Approved
-                        } else {
-                            ApprovalState::Denied
-                        };
-                        trace.update_approval_state(&id, new_state);
-                        trace.clear_active_tool();
-                    }
-                });
 
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
@@ -770,9 +646,21 @@ impl ChattyApp {
                             });
                         }
                     }
-                    StreamStatus::Cancelled if conversation_id != "__pending__" => {
-                        // Pending streams have no conversation yet — only UI reset (done above)
-                        self.finalize_stopped_stream(conversation_id, trace_json.clone(), cx);
+                    StreamStatus::Cancelled | StreamStatus::Error(_)
+                        if conversation_id != "__pending__" =>
+                    {
+                        // Pending streams have no conversation yet — only UI
+                        // reset (done above). An errored turn is committed or
+                        // rolled back under the same rule as a stopped one, so
+                        // the session's turn is closed and no user message is
+                        // left dangling.
+                        self.finalize_stopped_stream(
+                            conversation_id,
+                            status,
+                            token_usage.clone(),
+                            trace_json.clone(),
+                            cx,
+                        );
                     }
                     _ => {}
                 }
@@ -802,8 +690,8 @@ impl ChattyApp {
 
         // Unblock any `ask_user` call still waiting on an answer, so cancelling
         // cannot leave a tool parked until its timeout.
-        if let Some(store) = cx.try_global::<chatty_core::models::ClarificationStore>() {
-            store.cancel_all();
+        if let Some(session) = cx.global::<ConversationsStore>().get_session(&conv_id) {
+            session.clarifications().cancel_all();
         }
         self.chat_view.update(cx, |view, cx| {
             view.clear_pending_clarification(cx);
@@ -875,51 +763,61 @@ impl ChattyApp {
             }
         });
 
-        // 2. Read response text from ConversationsStore (single source of truth),
-        //    finalize in conversation model, check if title gen needed, and
-        //    extract model_id for pricing lookup (avoids a second global access later).
-        let (should_generate_title, assistant_history_index, model_id_opt) =
+        // 2. Price the turn's usage, hand it to the session, and finish the
+        //    turn there under the one shared empty-turn rule (AGE-243 / D4).
+        let token_usage = token_usage.map(|usage| price_usage(&conv_id, usage, cx));
+        let (should_generate_title, assistant_history_index, rolled_back_text) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                    let response_text = conv
-                        .streaming_message()
-                        .cloned()
-                        .unwrap_or_default();
-                    let has_trace = trace_json.is_some();
-                    let model_id = conv.model_id().to_string();
-
-                    // A turn that produced neither text nor a trace has nothing
-                    // to persist. Committing it wrote an empty assistant
-                    // message into history — the billed-but-empty turn in
-                    // AGE-151 — which is worse than no turn at all: it is
-                    // indistinguishable from a real empty answer and it goes
-                    // back to the provider on the next request.
-                    if response_text.trim().is_empty() && !has_trace {
+                let Some(session) = store.get_session_mut(&conv_id) else {
+                    error!(conv_id = %conv_id, "Could not find conversation to finalize");
+                    return (false, None, None);
+                };
+                if let Some(usage) = token_usage.clone() {
+                    session.record_turn_usage(usage);
+                }
+                let has_trace = trace_json.is_some();
+                match session.finish_turn(trace_json, artifact_paths) {
+                    None => {
+                        warn!(conv_id = %conv_id, "Stream completed with no turn to finish");
+                        (false, None, None)
+                    }
+                    Some(TurnOutcome::DroppedAndRolledBack(text)) => {
+                        // A turn that produced neither text nor a trace has
+                        // nothing to persist. Committing it wrote an empty
+                        // assistant message into history — the
+                        // billed-but-empty turn in AGE-151 — which is worse
+                        // than no turn at all: it is indistinguishable from
+                        // a real empty answer and it goes back to the
+                        // provider on the next request.
                         warn!(
                             conv_id = %conv_id,
                             "Stream completed with no text and no trace; dropping the turn rather than persisting an empty message"
                         );
-                        return (false, None, Some(model_id));
+                        (false, None, Some(text))
                     }
-
-                    conv.finalize_response(response_text, artifact_paths, trace_json);
-                    let msg_count = conv.message_count();
-                    let traces_len = conv.entries().len();
-                    // The assistant message was just pushed; its index is msg_count - 1
-                    let assistant_idx = msg_count.saturating_sub(1);
-                    // Exchanges, not messages: a turn with tool calls persists
-                    // its tool round-trips as well (AGE-247).
-                    let should_gen = chatty_core::services::exchange_count(
-                        conv.entries().iter().map(|e| &e.message),
-                    ) == 1
-                        && conv.title() == "New Chat";
-                    debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
-                    (should_gen, Some(assistant_idx), Some(model_id))
-                } else {
-                    error!(conv_id = %conv_id, "Could not find conversation to finalize");
-                    (false, None, None)
+                    Some(TurnOutcome::Persisted) => {
+                        let should_gen = session.should_generate_title();
+                        let (msg_count, traces_len) = session
+                            .conversation()
+                            .map(|conv| (conv.message_count(), conv.entries().len()))
+                            .unwrap_or((0, 0));
+                        // The assistant message was just pushed; its index is msg_count - 1
+                        let assistant_idx = msg_count.saturating_sub(1);
+                        debug!(conv_id = %conv_id, msg_count, traces_len, has_trace, should_gen, "Response finalized in conversation");
+                        (should_gen, Some(assistant_idx), None)
+                    }
                 }
             });
+
+        // On rollback, put the text back into the composer rather than
+        // silently losing what the user typed (AGE-243).
+        if let Some(text) = rolled_back_text {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+        }
 
         // 2b. Set history_index on the last assistant DisplayMessage so feedback
         //     clicks on freshly-streamed messages are properly persisted.
@@ -931,8 +829,9 @@ impl ChattyApp {
             });
         }
 
-        // 3. Process token usage — always record tokens, optionally calculate cost
-        if let Some(mut usage) = token_usage {
+        // 3. Token usage: recorded on the conversation by the session above;
+        //    overlay the budget and sync the sidebar cost here.
+        if let Some(usage) = token_usage {
             debug!(
                 input_tokens = usage.input_tokens,
                 output_tokens = usage.output_tokens,
@@ -941,34 +840,6 @@ impl ChattyApp {
                 api_turn_count = usage.api_turn_count,
                 "Processing token usage"
             );
-
-            // Calculate cost if pricing is configured for this model
-            if let Some(ref model_id) = model_id_opt {
-                let pricing = cx.update_global::<ModelsModel, _>(|models, _cx| {
-                    models.get_model(model_id).and_then(|model| {
-                        match (
-                            model.cost_per_million_input_tokens,
-                            model.cost_per_million_output_tokens,
-                        ) {
-                            (Some(input_per_million), Some(output_per_million)) => {
-                                Some(TokenPricing {
-                                    input_per_million,
-                                    output_per_million,
-                                    cache_read_per_million: model
-                                        .cost_per_million_cache_read_tokens,
-                                    cache_write_per_million: model
-                                        .cost_per_million_cache_write_tokens,
-                                })
-                            }
-                            _ => None,
-                        }
-                    })
-                });
-
-                if let Some(pricing) = pricing {
-                    usage.calculate_cost(&pricing);
-                }
-            }
 
             // The last request's prompt is the actual context size; the
             // exchange total sums every request in the turn and over-states
@@ -979,9 +850,6 @@ impl ChattyApp {
             };
 
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                    conv.add_token_usage(usage);
-                }
                 // Sync metadata so sidebar cost matches the live conversation cost
                 // after every turn (not just the first turn where title is generated).
                 let cost_and_title = store.get_conversation(&conv_id).map(|c| {
@@ -1078,7 +946,7 @@ impl ChattyApp {
             let conv_id_for_title = conv_id.clone();
             let sidebar_for_title = sidebar.clone();
 
-            cx.spawn(async move |_weak, cx| {
+            cx.spawn(async move |weak, cx| {
                 // Get agent and history for title generation
                 let title_data = cx
                     .update_global::<ConversationsStore, _>(|store, _cx| {
@@ -1112,6 +980,19 @@ impl ChattyApp {
                             .map_err(|e| warn!(error = ?e, "Failed to update conversation title"))
                             .ok();
 
+                            // Persist so the generated title survives a restart — the
+                            // synchronous save later in send_message already ran by the
+                            // time this completes (finding F7, AGE-218).
+                            if let Some(app) = weak.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.persist_conversation(&conv_id_for_title, cx);
+                                })
+                                .map_err(|e| {
+                                    warn!(error = ?e, "Failed to persist conversation after title generation")
+                                })
+                                .ok();
+                            }
+
                             // Update sidebar with new title from metadata
                             sidebar_for_title
                                 .update(cx, |sidebar, cx| {
@@ -1137,26 +1018,19 @@ impl ChattyApp {
             .detach();
         }
 
-        // 6. Persist to disk
-        self.persist_conversation(&conv_id, cx);
-
-        // 7. Auto-export ATIF if enabled in training settings
-        if cx
+        // 6-8. Persist to disk, and — if enabled in training settings — write
+        // the ATIF / JSONL auto-exports from the same ConversationData built
+        // for the save, instead of rebuilding it per export (finding F3,
+        // AGE-220).
+        let export_atif = cx
             .try_global::<TrainingSettingsModel>()
             .map(|s| s.atif_auto_export)
-            .unwrap_or(false)
-        {
-            self.export_conversation_atif(&conv_id, cx);
-        }
-
-        // 8. Auto-export JSONL (SFT + DPO) if enabled in training settings
-        if cx
+            .unwrap_or(false);
+        let export_jsonl = cx
             .try_global::<TrainingSettingsModel>()
             .map(|s| s.jsonl_auto_export)
-            .unwrap_or(false)
-        {
-            self.export_conversation_jsonl(&conv_id, cx);
-        }
+            .unwrap_or(false);
+        self.persist_and_export_conversation(&conv_id, export_atif, export_jsonl, cx);
     }
 
     /// Handle the finalization of a stopped stream (partial response saving).
@@ -1167,50 +1041,75 @@ impl ChattyApp {
     fn finalize_stopped_stream(
         &mut self,
         conversation_id: &str,
+        status: &StreamStatus,
+        token_usage: Option<TokenUsage>,
         trace_json: Option<serde_json::Value>,
         cx: &mut Context<Self>,
     ) {
         let chat_view = self.chat_view.clone();
         let conv_id = conversation_id.to_string();
 
-        // Mark the assistant message as cancelled in UI
+        // Close the assistant message in the UI: marked cancelled after a
+        // Stop, simply finished after an error.
+        let cancelled = matches!(status, StreamStatus::Cancelled);
         chat_view.update(cx, |view, cx| {
             if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
-                view.mark_message_cancelled(cx);
-            }
-        });
-
-        // Read partial response from ConversationsStore (single source of truth)
-        // and save to conversation history — but ONLY if there's actual content.
-        // An empty assistant message would cause LLM API errors (400 Bad Request)
-        // on the next request.
-        let assistant_history_index = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                let partial_text = conv.streaming_message().cloned().unwrap_or_default();
-
-                if partial_text.is_empty() {
-                    // No content was received before cancellation.
-                    // Roll back the user message that triggered this stream to avoid
-                    // a trailing user message with no assistant response, which would
-                    // break the alternating User/Assistant pattern expected by LLM APIs.
-                    let removed = conv.remove_last_user_message();
-                    debug!(
-                        conv_id = %conv_id,
-                        user_msg_removed = removed,
-                        "Stream cancelled with no content — skipped empty assistant message"
-                    );
-                    None
+                if cancelled {
+                    view.mark_message_cancelled(cx);
                 } else {
-                    conv.finalize_response(partial_text, Vec::new(), trace_json);
-                    conv.set_streaming_message(None);
-                    let idx = conv.message_count().saturating_sub(1);
-                    debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
-                    Some(idx)
+                    view.finalize_assistant_message(cx);
                 }
-            } else {
-                None
             }
         });
+
+        // Finish the turn on the session under the one shared empty-turn
+        // rule (AGE-243 / D4) — an empty assistant message would cause LLM
+        // API errors (400 Bad Request) on the next request.
+        let token_usage = token_usage.map(|usage| price_usage(&conv_id, usage, cx));
+        let (assistant_history_index, rolled_back_text) =
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                let Some(session) = store.get_session_mut(&conv_id) else {
+                    return (None, None);
+                };
+                if let Some(usage) = token_usage {
+                    session.record_turn_usage(usage);
+                }
+                match session.finish_turn(trace_json, Vec::new()) {
+                    None => (None, None),
+                    Some(TurnOutcome::DroppedAndRolledBack(text)) => {
+                        // No content was received before the turn ended. The
+                        // user message that triggered this stream was rolled
+                        // back to avoid a trailing user message with no
+                        // assistant response, which would break the
+                        // alternating User/Assistant pattern expected by LLM
+                        // APIs.
+                        debug!(
+                            conv_id = %conv_id,
+                            "Stream ended with no content — skipped empty assistant message"
+                        );
+                        (None, Some(text))
+                    }
+                    Some(TurnOutcome::Persisted) => {
+                        let idx = session
+                            .conversation()
+                            .map(|conv| conv.message_count())
+                            .unwrap_or(0)
+                            .saturating_sub(1);
+                        debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
+                        (Some(idx), None)
+                    }
+                }
+            });
+
+        // On rollback, put the text back into the composer rather than
+        // silently losing what the user typed (AGE-243).
+        if let Some(text) = rolled_back_text {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+        }
 
         // Set history_index on the cancelled assistant message for feedback persistence
         if let Some(h_idx) = assistant_history_index {
@@ -1342,65 +1241,24 @@ impl ChattyApp {
                 .map_err(|e| warn!(error = ?e, "Failed to refresh sidebar"))
                 .ok();
 
-            // Extract agent and history (ends with the user message after removal)
-            let (agent, history, provider_type, invoke_agent_progress_slot) = cx
-                .update_global::<ConversationsStore, _>(|store, _cx| {
-                    if let Some(conv) = store.get_conversation(&conv_id) {
-                        let model_id = conv.model_id().to_string();
-                        let provider_type = _cx
-                            .global::<ModelsModel>()
-                            .get_model(&model_id)
-                            .map(|m| m.provider_type.clone())
-                            .unwrap_or(
-                                chatty_core::settings::models::providers_store::ProviderType::OpenRouter,
-                            );
-                        if let Ok(mut artifacts) = conv.pending_artifacts().lock() {
-                            artifacts.clear();
-                        }
-                        Ok((
-                            conv.agent().clone(),
-                            conv.messages(),
-                            provider_type,
-                            conv.invoke_agent_progress_slot(),
-                        ))
-                    } else {
-                        Err(anyhow::anyhow!("Conversation not found for regeneration"))
-                    }
-                })
-                .map_err(|e| anyhow::anyhow!(e.to_string()))??;
-
-            // Split history: context (all but last) + user content (last message)
-            let len = history.len();
-            if len == 0 {
-                return Err(anyhow::anyhow!("Empty history during regeneration"));
-            }
-            let history_context = history[..len - 1].to_vec();
-            let user_contents = match &history[len - 1] {
-                rig_core::completion::Message::User { content, .. } => {
-                    content.to_vec()
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                if let Some(conv) = store.get_conversation(&conv_id)
+                    && let Ok(mut artifacts) = conv.pending_artifacts().lock()
+                {
+                    artifacts.clear();
                 }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Last message in history is not a user message"
-                    ));
-                }
-            };
+            })
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            // Run shared LLM stream (do NOT add user message — it's already in history)
+            // Re-run the user message at the tail of history: the session
+            // takes it from there rather than adding it again.
             run_llm_stream(
                 LlmStreamParams {
                     conv_id,
-                    agent,
-                    history: history_context,
-                    user_contents,
-                    add_user_message_to_model: false,
-                    reset_agent_task: true,
-                    attachment_paths: vec![],
-                    provider_type,
+                    input: TurnInput::regenerate(),
                     chat_view,
                     stream_manager,
                     cancel_flag: cancel_flag_for_loop,
-                    invoke_agent_progress_slot,
                     weak_ctrl,
                 },
                 cx,
@@ -1417,4 +1275,35 @@ impl ChattyApp {
             error!("StreamManager not available for regeneration stream");
         }
     }
+}
+
+/// Attach the model's configured cost to a turn's usage, when pricing is
+/// configured for it.
+fn price_usage(conv_id: &str, mut usage: TokenUsage, cx: &mut App) -> TokenUsage {
+    let model_id = cx
+        .global::<ConversationsStore>()
+        .get_conversation(conv_id)
+        .map(|conv| conv.model_id().to_string());
+    let pricing = model_id.and_then(|model_id| {
+        cx.global::<ModelsModel>()
+            .get_model(&model_id)
+            .and_then(|model| {
+                match (
+                    model.cost_per_million_input_tokens,
+                    model.cost_per_million_output_tokens,
+                ) {
+                    (Some(input_per_million), Some(output_per_million)) => Some(TokenPricing {
+                        input_per_million,
+                        output_per_million,
+                        cache_read_per_million: model.cost_per_million_cache_read_tokens,
+                        cache_write_per_million: model.cost_per_million_cache_write_tokens,
+                    }),
+                    _ => None,
+                }
+            })
+    });
+    if let Some(pricing) = pricing {
+        usage.calculate_cost(&pricing);
+    }
+    usage
 }

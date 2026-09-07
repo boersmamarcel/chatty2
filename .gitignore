@@ -6,6 +6,10 @@ crates/chatty-module-sdk/Cargo.lock
 *.db
 **/libs/
 
+# Local cargo target-dir overrides (machine-specific, never commit)
+/.cargo/
+**/.cargo/config.toml
+
 # WASM module build outputs (built by CI)
 modules/**/*.wasm
 

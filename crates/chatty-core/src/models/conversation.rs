@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::trace;
 
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, Text};
+use rig_core::completion::message::{AssistantContent, Text, UserContent};
 
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;
@@ -24,6 +25,20 @@ use crate::tools::PendingArtifacts;
 pub enum MessageFeedback {
     ThumbsUp,
     ThumbsDown,
+}
+
+/// Outcome of `Conversation::finalize_turn` (AGE-243 / D4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnOutcome {
+    /// The turn produced response text or a trace and was persisted to
+    /// history, along with its tool round-trips when rig recorded any
+    /// (AGE-247).
+    Persisted,
+    /// The turn produced neither, so it was dropped: the pending user message
+    /// that triggered it was rolled back rather than left dangling with no
+    /// response. Carries that message's text so the caller can put it back
+    /// into the composer/input.
+    DroppedAndRolledBack(String),
 }
 
 /// Record of a regenerated assistant response, capturing the original text
@@ -61,7 +76,7 @@ pub struct Conversation {
     id: String,
     title: String,
     model_id: String,
-    agent: AgentClient,
+    agent: Arc<AgentClient>,
     /// All messages with their metadata, in chronological order.
     entries: Vec<MessageEntry>,
     /// Regeneration records capturing original responses before replacement (DPO preference pairs)
@@ -131,10 +146,9 @@ impl Conversation {
             shell_session: None, // Factory creates session on-demand when execution is enabled
             ..ctx
         };
-        let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
-                .await
-                .context("Failed to create agent from config")?;
+        let built = AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+            .await
+            .context("Failed to create agent from config")?;
 
         let now = SystemTime::now();
 
@@ -142,7 +156,7 @@ impl Conversation {
             id,
             title,
             model_id: model_config.id.clone(),
-            agent,
+            agent: Arc::new(built.client),
             entries: Vec::new(),
             regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
@@ -153,11 +167,11 @@ impl Conversation {
             streaming_sub_agent_trace: None,
             streaming_turn_messages: None,
             pending_artifacts,
-            shell_session,
+            shell_session: built.shell_session,
             working_dir: None,
             agent_task_snapshot: None,
             agent_workspace_dir,
-            invoke_agent_progress_slot,
+            invoke_agent_progress_slot: built.invoke_agent_progress_slot,
         })
     }
 
@@ -193,10 +207,9 @@ impl Conversation {
             shell_session: None, // Factory creates session on-demand
             ..ctx
         };
-        let (agent, shell_session, invoke_agent_progress_slot) =
-            AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
-                .await
-                .context("Failed to create agent from config")?;
+        let built = AgentClient::from_model_config_with_tools(model_config, provider_config, ctx)
+            .await
+            .context("Failed to create agent from config")?;
 
         // Deserialize message history
         let history = Self::deserialize_history(&data.message_history)
@@ -256,7 +269,7 @@ impl Conversation {
             id: data.id,
             title: data.title,
             model_id: data.model_id,
-            agent,
+            agent: Arc::new(built.client),
             entries,
             regeneration_records,
             token_usage,
@@ -267,11 +280,11 @@ impl Conversation {
             streaming_sub_agent_trace: None,
             streaming_turn_messages: None,
             pending_artifacts,
-            shell_session,
+            shell_session: built.shell_session,
             working_dir: data.working_dir.map(PathBuf::from),
             agent_task_snapshot,
             agent_workspace_dir,
-            invoke_agent_progress_slot,
+            invoke_agent_progress_slot: built.invoke_agent_progress_slot,
         })
     }
 
@@ -341,7 +354,38 @@ impl Conversation {
         self.updated_at = now;
     }
 
-    /// Keep rig's record of the turn in flight until `finalize_response`.
+    /// Finalize a turn's response using the one shared empty-turn rule
+    /// (AGE-243 / D4): persist when the response carries text or a trace,
+    /// otherwise treat the turn as empty and roll back the pending user
+    /// message that triggered it — a dangling unanswered user message would
+    /// be rejected by the provider on the next request. Both frontends'
+    /// finalizers (desktop's `finalize_completed_stream` /
+    /// `finalize_stopped_stream`, TUI's `finalize_partial_response`) call
+    /// this instead of each implementing their own drop-vs-persist rule.
+    ///
+    /// A persisted turn also persists rig's record of its tool round-trips
+    /// ahead of the final text, when the stream delivered one
+    /// (`set_streaming_turn_messages`, AGE-247). The record is taken on both
+    /// outcomes, so a dropped turn discards it rather than leaking it into
+    /// the next one.
+    pub fn finalize_turn(
+        &mut self,
+        text: String,
+        artifacts: Vec<PathBuf>,
+        trace: Option<serde_json::Value>,
+    ) -> TurnOutcome {
+        let outcome = finalize_turn_state(
+            &mut self.entries,
+            self.streaming_turn_messages.take(),
+            text,
+            artifacts,
+            trace,
+        );
+        self.updated_at = SystemTime::now();
+        outcome
+    }
+
+    /// Keep rig's record of the turn in flight until the turn is finalized.
     pub fn set_streaming_turn_messages(&mut self, messages: Option<Vec<Message>>) {
         self.streaming_turn_messages = messages;
     }
@@ -397,8 +441,7 @@ impl Conversation {
 
     /// Serialize message history to JSON string
     pub fn serialize_history(&self) -> Result<String> {
-        let messages: Vec<&Message> = self.entries.iter().map(|e| &e.message).collect();
-        serde_json::to_string(&messages).context("Failed to serialize message history")
+        serialize_history_of(&self.entries)
     }
 
     /// Deserialize message history from JSON string
@@ -408,12 +451,7 @@ impl Conversation {
 
     /// Serialize system traces to JSON string
     pub fn serialize_traces(&self) -> Result<String> {
-        let traces: Vec<Option<&serde_json::Value>> = self
-            .entries
-            .iter()
-            .map(|e| e.system_trace.as_ref())
-            .collect();
-        serde_json::to_string(&traces).context("Failed to serialize system traces")
+        serialize_traces_of(&self.entries)
     }
 
     /// Deserialize system traces from JSON string
@@ -423,8 +461,7 @@ impl Conversation {
 
     /// Serialize attachment paths to JSON string
     pub fn serialize_attachment_paths(&self) -> Result<String> {
-        let paths: Vec<&Vec<PathBuf>> = self.entries.iter().map(|e| &e.attachment_paths).collect();
-        serde_json::to_string(&paths).context("Failed to serialize attachment paths")
+        serialize_attachment_paths_of(&self.entries)
     }
 
     /// Deserialize attachment paths from JSON string
@@ -434,8 +471,7 @@ impl Conversation {
 
     /// Serialize message timestamps to JSON string
     pub fn serialize_message_timestamps(&self) -> Result<String> {
-        let timestamps: Vec<Option<i64>> = self.entries.iter().map(|e| e.timestamp).collect();
-        serde_json::to_string(&timestamps).context("Failed to serialize message timestamps")
+        serialize_message_timestamps_of(&self.entries)
     }
 
     /// Deserialize message timestamps from JSON string
@@ -466,9 +502,7 @@ impl Conversation {
 
     /// Serialize message feedback to JSON string
     pub fn serialize_message_feedback(&self) -> Result<String> {
-        let feedback: Vec<Option<&MessageFeedback>> =
-            self.entries.iter().map(|e| e.feedback.as_ref()).collect();
-        serde_json::to_string(&feedback).context("Failed to serialize message feedback")
+        serialize_message_feedback_of(&self.entries)
     }
 
     /// Deserialize message feedback from JSON string
@@ -491,7 +525,6 @@ impl Conversation {
     }
 
     /// Get regeneration records for this conversation
-    #[allow(dead_code)]
     pub fn regeneration_records(&self) -> &[RegenerationRecord] {
         &self.regeneration_records
     }
@@ -528,6 +561,36 @@ impl Conversation {
     /// Deserialize regeneration records from JSON string
     pub fn deserialize_regeneration_records(json: &str) -> Result<Vec<RegenerationRecord>> {
         serde_json::from_str(json).context("Failed to deserialize regeneration records")
+    }
+
+    /// A cheap owned copy of everything [`ConversationData`] is built from.
+    ///
+    /// Clones entries and metadata; runs no serde. Take this on the thread
+    /// that owns the conversation, then call
+    /// [`ConversationSnapshot::to_data`] wherever the CPU is cheaper — which
+    /// is what the desktop does to keep `serde_json` off the UI thread
+    /// (AGE-220, finding F3).
+    pub fn snapshot(&self) -> ConversationSnapshot {
+        ConversationSnapshot {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            model_id: self.model_id.clone(),
+            entries: self.entries.clone(),
+            token_usage: self.token_usage.clone(),
+            regeneration_records: self.regeneration_records.clone(),
+            created_at: self.created_at,
+            working_dir: self.working_dir.clone(),
+            agent_task_snapshot: self.agent_task_snapshot.clone(),
+        }
+    }
+
+    /// Serialize straight into the repository's row shape.
+    ///
+    /// Convenience for callers that are not on a latency-sensitive thread;
+    /// [`snapshot`](Self::snapshot) plus
+    /// [`to_data`](ConversationSnapshot::to_data) is the two-phase form.
+    pub fn to_conversation_data(&self) -> Result<ConversationData> {
+        self.snapshot().to_data()
     }
 
     /// Remove the last assistant message and its metadata, together with the
@@ -582,9 +645,10 @@ impl Conversation {
         self.updated_at = SystemTime::now();
     }
 
-    /// Get the agent
-    pub fn agent(&self) -> &AgentClient {
-        &self.agent
+    /// Get the agent. Returns a cheap `Arc` clone rather than a deep copy of
+    /// rig's `AgentConfig` (finding B1, AGE-219).
+    pub fn agent(&self) -> Arc<AgentClient> {
+        self.agent.clone()
     }
 
     /// Get the pending artifacts handle for this conversation's tools
@@ -648,7 +712,7 @@ impl Conversation {
     /// Set the agent and model ID synchronously (for model switching without blocking)
     pub fn set_agent(
         &mut self,
-        agent: AgentClient,
+        agent: Arc<AgentClient>,
         model_id: String,
         agent_workspace_dir: Option<PathBuf>,
     ) {
@@ -739,6 +803,97 @@ impl Conversation {
             self.streaming_message = Some(s);
         }
     }
+}
+
+// ── Snapshot → ConversationData ──────────────────────────────────────────────
+
+/// Everything [`ConversationData`] is built from, owned and detached from the
+/// live [`Conversation`].
+///
+/// This exists so the projection lives in one place. Before it, chatty-gpui
+/// assembled `ConversationData` two different ways in two files and
+/// chatty-server a third; a field added to `ConversationData` was silently
+/// dropped by whichever copy the author did not open (AGE-293).
+#[derive(Clone, Debug)]
+pub struct ConversationSnapshot {
+    pub id: String,
+    pub title: String,
+    pub model_id: String,
+    pub entries: Vec<MessageEntry>,
+    pub token_usage: ConversationTokenUsage,
+    pub regeneration_records: Vec<RegenerationRecord>,
+    pub created_at: SystemTime,
+    pub working_dir: Option<PathBuf>,
+    pub agent_task_snapshot: Option<AgentTaskSnapshot>,
+}
+
+impl ConversationSnapshot {
+    /// Serialize into the repository's row shape.
+    ///
+    /// Pure CPU over owned data: safe to call from a background task.
+    /// `updated_at` is stamped here, at the moment the row is built.
+    pub fn to_data(&self) -> Result<ConversationData> {
+        Ok(ConversationData {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            model_id: self.model_id.clone(),
+            message_history: serialize_history_of(&self.entries)?,
+            system_traces: serialize_traces_of(&self.entries)?,
+            token_usage: serde_json::to_string(&self.token_usage)
+                .context("Failed to serialize token usage")?,
+            attachment_paths: serialize_attachment_paths_of(&self.entries)?,
+            message_timestamps: serialize_message_timestamps_of(&self.entries)?,
+            message_feedback: serialize_message_feedback_of(&self.entries)?,
+            regeneration_records: serde_json::to_string(&self.regeneration_records)
+                .context("Failed to serialize regeneration records")?,
+            created_at: unix_seconds(self.created_at),
+            updated_at: unix_seconds(SystemTime::now()),
+            working_dir: self
+                .working_dir
+                .as_ref()
+                .map(|dir| dir.to_string_lossy().into_owned()),
+            agent_task_snapshot: self
+                .agent_task_snapshot
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .context("Failed to serialize agent task snapshot")?,
+        })
+    }
+}
+
+fn unix_seconds(at: SystemTime) -> i64 {
+    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+}
+
+// The per-field projections, shared by `Conversation`'s `serialize_*` methods
+// and by `ConversationSnapshot::to_data` so there is exactly one of each.
+
+fn serialize_history_of(entries: &[MessageEntry]) -> Result<String> {
+    let messages: Vec<&Message> = entries.iter().map(|e| &e.message).collect();
+    serde_json::to_string(&messages).context("Failed to serialize message history")
+}
+
+fn serialize_traces_of(entries: &[MessageEntry]) -> Result<String> {
+    let traces: Vec<Option<&serde_json::Value>> =
+        entries.iter().map(|e| e.system_trace.as_ref()).collect();
+    serde_json::to_string(&traces).context("Failed to serialize system traces")
+}
+
+fn serialize_attachment_paths_of(entries: &[MessageEntry]) -> Result<String> {
+    let paths: Vec<&Vec<PathBuf>> = entries.iter().map(|e| &e.attachment_paths).collect();
+    serde_json::to_string(&paths).context("Failed to serialize attachment paths")
+}
+
+fn serialize_message_timestamps_of(entries: &[MessageEntry]) -> Result<String> {
+    let timestamps: Vec<Option<i64>> = entries.iter().map(|e| e.timestamp).collect();
+    serde_json::to_string(&timestamps).context("Failed to serialize message timestamps")
+}
+
+fn serialize_message_feedback_of(entries: &[MessageEntry]) -> Result<String> {
+    let feedback: Vec<Option<&MessageFeedback>> =
+        entries.iter().map(|e| e.feedback.as_ref()).collect();
+    serde_json::to_string(&feedback).context("Failed to serialize message feedback")
 }
 
 /// A user message that a human (or a summary) wrote, as opposed to tool results.
@@ -895,10 +1050,181 @@ fn finalize_sub_agent_progress_state(
     }
 }
 
+/// The logic behind `Conversation::finalize_turn`, extracted for direct unit
+/// testing (mirrors `append_trace_item_state` et al.): persist an assistant
+/// entry when there's text or a trace, otherwise pop the last (user) entry
+/// and return its text so the caller can restore it to the composer/input.
+fn finalize_turn_state(
+    entries: &mut Vec<MessageEntry>,
+    turn_messages: Option<Vec<Message>>,
+    text: String,
+    artifacts: Vec<PathBuf>,
+    trace: Option<serde_json::Value>,
+) -> TurnOutcome {
+    if !text.trim().is_empty() || trace.is_some() {
+        let now = SystemTime::now();
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        // Delegate to the same helper `finalize_response` uses, so the turn's
+        // tool round-trips are persisted ahead of the final text entry
+        // (AGE-247) by exactly one code path rather than two that can drift.
+        finalize_response_state(entries, turn_messages, text, artifacts, trace, timestamp);
+        return TurnOutcome::Persisted;
+    }
+
+    let rolled_back_text = entries
+        .last()
+        .map(|e| user_message_text(&e.message))
+        .unwrap_or_default();
+    if matches!(
+        entries.last().map(|e| &e.message),
+        Some(Message::User { .. })
+    ) {
+        entries.pop();
+    }
+    TurnOutcome::DroppedAndRolledBack(rolled_back_text)
+}
+
+/// The plain-text parts of a user message, joined with blank lines between
+/// parts. Non-text content (images, documents, tool results) is dropped —
+/// used to restore what the user typed into the composer/input, not what
+/// they attached.
+fn user_message_text(message: &Message) -> String {
+    match message {
+        Message::User { content } => content
+            .iter()
+            .filter_map(|c| match c {
+                UserContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::message_types::TraceItem;
+
+    /// A snapshot with every field distinguishable, so a projection wired to
+    /// the wrong column shows up rather than passing on shape alone.
+    fn populated_snapshot() -> ConversationSnapshot {
+        let entries = vec![
+            MessageEntry {
+                message: Message::user("first"),
+                system_trace: Some(serde_json::json!({ "trace": 1 })),
+                attachment_paths: vec![PathBuf::from("/tmp/a.png")],
+                timestamp: Some(1_700_000_000),
+                feedback: Some(MessageFeedback::ThumbsUp),
+            },
+            MessageEntry {
+                message: Message::assistant("second"),
+                system_trace: None,
+                attachment_paths: Vec::new(),
+                timestamp: Some(1_700_000_100),
+                feedback: None,
+            },
+        ];
+        let mut token_usage = ConversationTokenUsage::new();
+        token_usage.add_usage(TokenUsage::new(11, 22));
+
+        ConversationSnapshot {
+            id: "conv-1".to_string(),
+            title: "A title".to_string(),
+            model_id: "model-1".to_string(),
+            entries,
+            token_usage,
+            regeneration_records: vec![RegenerationRecord {
+                message_index: 1,
+                original_text: "before".to_string(),
+                original_timestamp: 1_700_000_050,
+                regeneration_timestamp: 1_700_000_060,
+            }],
+            created_at: UNIX_EPOCH + Duration::from_secs(1_699_999_000),
+            working_dir: Some(PathBuf::from("/tmp/workspace")),
+            agent_task_snapshot: None,
+        }
+    }
+
+    /// The one construction site has to put each projection in its own
+    /// column. Two adjacent `Vec<Option<…>>` fields (traces and feedback)
+    /// serialize to the same shape, so a transposition is invisible to the
+    /// type system and is exactly what a hand-written copy gets wrong
+    /// (AGE-293).
+    #[test]
+    fn to_data_puts_every_projection_in_its_own_column() {
+        let snapshot = populated_snapshot();
+        let data = snapshot.to_data().expect("the row serializes");
+
+        assert_eq!(data.id, "conv-1");
+        assert_eq!(data.title, "A title");
+        assert_eq!(data.model_id, "model-1");
+        assert_eq!(data.created_at, 1_699_999_000);
+        assert_eq!(data.working_dir.as_deref(), Some("/tmp/workspace"));
+        assert!(data.agent_task_snapshot.is_none());
+
+        assert_eq!(
+            data.message_history,
+            serialize_history_of(&snapshot.entries).unwrap()
+        );
+        assert_eq!(data.system_traces, r#"[{"trace":1},null]"#);
+        assert_eq!(data.attachment_paths, r#"[["/tmp/a.png"],[]]"#);
+        assert_eq!(data.message_timestamps, "[1700000000,1700000100]");
+        assert_eq!(data.message_feedback, r#"["ThumbsUp",null]"#);
+        assert!(data.regeneration_records.contains("before"));
+        assert!(data.token_usage.contains("\"total_input_tokens\":11"));
+
+        // Stamped at build time, not copied from `created_at`.
+        assert!(data.updated_at >= data.created_at);
+    }
+
+    /// `Conversation`'s long-standing per-field `serialize_*` methods and the
+    /// new one-shot constructor must agree, since both are public and callers
+    /// use each. They share the projections; this pins that they still do.
+    #[test]
+    fn the_constructor_agrees_with_the_per_field_helpers() {
+        let snapshot = populated_snapshot();
+        let data = snapshot.to_data().unwrap();
+        let entries = &snapshot.entries;
+
+        assert_eq!(data.message_history, serialize_history_of(entries).unwrap());
+        assert_eq!(data.system_traces, serialize_traces_of(entries).unwrap());
+        assert_eq!(
+            data.attachment_paths,
+            serialize_attachment_paths_of(entries).unwrap()
+        );
+        assert_eq!(
+            data.message_timestamps,
+            serialize_message_timestamps_of(entries).unwrap()
+        );
+        assert_eq!(
+            data.message_feedback,
+            serialize_message_feedback_of(entries).unwrap()
+        );
+    }
+
+    /// An empty conversation still produces the empty-array forms the
+    /// repository's serde defaults expect, not `null` or a missing field.
+    #[test]
+    fn an_empty_conversation_serializes_to_empty_arrays() {
+        let data = ConversationSnapshot {
+            entries: Vec::new(),
+            regeneration_records: Vec::new(),
+            working_dir: None,
+            ..populated_snapshot()
+        }
+        .to_data()
+        .unwrap();
+
+        assert_eq!(data.message_history, "[]");
+        assert_eq!(data.system_traces, "[]");
+        assert_eq!(data.attachment_paths, "[]");
+        assert_eq!(data.message_timestamps, "[]");
+        assert_eq!(data.message_feedback, "[]");
+        assert_eq!(data.regeneration_records, "[]");
+        assert!(data.working_dir.is_none());
+    }
 
     #[test]
     fn test_regeneration_record_serialize_roundtrip() {
@@ -1112,6 +1438,97 @@ mod tests {
         assert!(entries[0].system_trace.is_none());
     }
 
+    // AGE-243 / D4: one shared empty-turn rule, exercised on the four
+    // combinations of empty/non-empty text and trace.
+
+    #[test]
+    fn finalize_turn_persists_non_empty_text_with_no_trace() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            None,
+            "hello there".to_string(),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(outcome, TurnOutcome::Persisted);
+        assert_eq!(entries.len(), 2);
+        match &entries[1].message {
+            Message::Assistant { content, .. } => match &content[0] {
+                AssistantContent::Text(t) => assert_eq!(t.text, "hello there"),
+                other => panic!("expected Text, got {other:?}"),
+            },
+            other => panic!("expected Assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_turn_persists_empty_text_with_a_trace() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+        let trace = serde_json::to_value(SystemTrace::new()).unwrap();
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            None,
+            String::new(),
+            Vec::new(),
+            Some(trace.clone()),
+        );
+
+        assert_eq!(outcome, TurnOutcome::Persisted);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].system_trace, Some(trace));
+    }
+
+    #[test]
+    fn finalize_turn_persists_non_empty_text_with_a_trace() {
+        let mut entries = vec![entry(Message::user("hi"), None)];
+        let trace = serde_json::to_value(SystemTrace::new()).unwrap();
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            None,
+            "hello".to_string(),
+            Vec::new(),
+            Some(trace),
+        );
+
+        assert_eq!(outcome, TurnOutcome::Persisted);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn finalize_turn_drops_and_rolls_back_empty_text_with_no_trace() {
+        let mut entries = vec![entry(Message::user("what happened?"), None)];
+
+        let outcome = finalize_turn_state(&mut entries, None, String::new(), Vec::new(), None);
+
+        assert_eq!(
+            outcome,
+            TurnOutcome::DroppedAndRolledBack("what happened?".to_string())
+        );
+        assert!(
+            entries.is_empty(),
+            "pending user message must be rolled back"
+        );
+    }
+
+    #[test]
+    fn finalize_turn_drops_whitespace_only_text_with_no_trace() {
+        let mut entries = vec![entry(Message::user("still there?"), None)];
+
+        let outcome =
+            finalize_turn_state(&mut entries, None, "   \n".to_string(), Vec::new(), None);
+
+        assert_eq!(
+            outcome,
+            TurnOutcome::DroppedAndRolledBack("still there?".to_string())
+        );
+        assert!(entries.is_empty());
+    }
+
     // -------------------------------------------------------------------
     // Tool turns persisted with the answer (AGE-247)
     // -------------------------------------------------------------------
@@ -1227,6 +1644,66 @@ mod tests {
         let history: Vec<Message> = messages(&entries).into_iter().cloned().collect();
         assert!(history.iter().any(crate::services::is_tool_call_message));
         assert!(history.iter().any(is_tool_result_message));
+    }
+
+    /// Both frontends finalize a streamed turn through `finalize_turn`, not
+    /// `finalize_response` — so the ordering tests above, which drive
+    /// `finalize_response_state` directly, do not by themselves prove the
+    /// shipping path persists anything. This pins that wiring: the record
+    /// parked by `StreamChunk::TurnMessages` must survive `finalize_turn_state`.
+    ///
+    /// Without it, the delegation could be dropped in a later refactor and
+    /// every test here would still pass while tool turns silently stopped
+    /// being persisted — which is exactly how AGE-247 arrived broken in the
+    /// merge that introduced this path.
+    #[test]
+    fn finalize_turn_persists_tool_round_trips_on_the_live_path() {
+        let mut entries = vec![entry(Message::user("read both"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            Some(two_tool_turn()),
+            "Let me look.\n\nBoth read.".to_string(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(outcome, TurnOutcome::Persisted));
+
+        let shape: Vec<&str> = messages(&entries)
+            .iter()
+            .map(|m| match m {
+                Message::User { .. } if is_tool_result_message(m) => "result",
+                Message::User { .. } => "user",
+                Message::Assistant { .. } if crate::services::is_tool_call_message(m) => "call",
+                Message::Assistant { .. } => "text",
+                Message::System { .. } => "system",
+            })
+            .collect();
+        assert_eq!(shape, ["user", "call", "result", "call", "result", "text"]);
+        assert_pairs_intact(&entries);
+    }
+
+    /// A turn that produced neither text nor a trace is rolled back, and its
+    /// tool messages go with it: a dropped turn must not persist half a turn
+    /// (tool calls with no answer behind them).
+    #[test]
+    fn a_dropped_turn_persists_none_of_its_tool_messages() {
+        let mut entries = vec![entry(Message::user("read both"), None)];
+
+        let outcome = finalize_turn_state(
+            &mut entries,
+            Some(two_tool_turn()),
+            String::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(outcome, TurnOutcome::DroppedAndRolledBack(_)));
+        assert!(
+            entries.is_empty(),
+            "the pending user entry is rolled back and no tool message is left behind"
+        );
     }
 
     #[test]

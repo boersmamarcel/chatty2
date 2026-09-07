@@ -12,24 +12,28 @@
 //! # What lives here
 //!
 //! - `run_headless`, `run_pipe` — the two entry functions called from `main`.
-//! - Helpers that wire `ChatEngine` events into stdout-only output (tool
+//! - `HeadlessRunner` (`runner.rs`) — the conversation, driven from an
+//!   `AgentSession` directly with no terminal state (AGE-196).
+//! - Helpers that wire the runner's events into stdout-only output (tool
 //!   call summaries, token usage, errors).
 //!
 //! # What does NOT live here
 //!
 //! - The interactive Ratatui UI — `ui/`.
-//! - The shared chat engine — `engine.rs`.
+//! - The interactive engine — `engine/`.
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
-use chatty_core::services::AgentLoopGuard;
+use chatty_core::services::{AgentLoopGuard, RecoveryAction};
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatEngine, ToolCallState};
+use crate::engine::ToolCallState;
 use crate::events::AppEvent;
 
-const MAX_STREAM_ERROR_RECOVERY_ATTEMPTS: usize = 5;
-const MAX_MALFORMED_JSON_RECOVERY_ATTEMPTS: usize = 2;
+mod runner;
+pub use runner::HeadlessRunner;
+
+const MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS: usize = 5;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
 const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 3;
@@ -43,7 +47,7 @@ const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted 
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
 pub async fn run_headless(
-    mut engine: ChatEngine,
+    mut engine: HeadlessRunner,
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
     message: String,
 ) -> Result<()> {
@@ -54,7 +58,7 @@ pub async fn run_headless(
 
     // Collect response
     let mut response = String::new();
-    let mut recovery_attempts = 0usize;
+    let mut text_overflow_attempts = 0usize;
     let mut finalization_attempts = 0usize;
     let mut tool_results_since_finalization = 0usize;
     let mut failed_tool_results_since_finalization = 0usize;
@@ -62,9 +66,17 @@ pub async fn run_headless(
     let mut failure_budget_stop_requested = false;
     let mut compact_file_finalization_sent = false;
     let mut last_compact_file_prompt: Option<String> = None;
+    // `stop_stream()` only sets the cancel flag; `send_message()` right after
+    // it is refused because `is_streaming` is still true (T3/AGE-242 — the
+    // deferred-flag pattern used by `finalization_pending_after_cancel` and
+    // `recovery_pending_after_error` below). These two hold the prompt until
+    // `StreamCompleted` confirms the cancellation actually went through.
+    let mut pending_compact_file_prompt: Option<String> = None;
+    let mut pending_loop_pivot_prompt: Option<String> = None;
     let mut finalization_pending_after_cancel = false;
-    let mut recovery_pending_after_error = false;
-    let mut pending_recovery_attempt_limit = MAX_STREAM_ERROR_RECOVERY_ATTEMPTS;
+    // The session decides whether a stream error is retried and after how
+    // long (AGE-273); the delay is held here until the turn has ended.
+    let mut recovery_pending_after_error: Option<std::time::Duration> = None;
     let mut infer_missing_answer = should_infer_missing_answer(&message);
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.
@@ -79,8 +91,9 @@ pub async fn run_headless(
         match event {
             AppEvent::TextChunk(text) => {
                 engine.handle_event(AppEvent::TextChunk(text.clone()));
-                // Do not eprint assistant tokens: parent UIs want tool activity
-                // only (`CHATTY_PROGRESS`). The final answer still goes to stdout.
+                // Do not eprint assistant tokens: a parent follows the turn
+                // through the runner's `CHATTY_EVENT` lines, and the final
+                // answer still goes to stdout.
                 response.push_str(&text);
                 text_bytes_this_turn += text.len();
                 if answer_file_required
@@ -112,14 +125,7 @@ pub async fn run_headless(
                 text_bytes_this_turn = 0;
                 let name_str = name.clone();
                 engine.handle_event(event);
-                eprintln!("{}", format_progress_line("tool_started", &name_str, None));
-                if let Some(tc) = engine
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|m| m.tool_calls())
-                    .find(|tc| tc.name == name_str)
-                {
+                if let Some(tc) = engine.transcript.tool_call_named(&name_str) {
                     eprintln!("\n{}", format_tool_call_header(tc));
                 } else {
                     eprintln!("\n  \u{27f3} {}", name_str);
@@ -132,13 +138,7 @@ pub async fn run_headless(
                 let mut pivot_msg: Option<String> = None;
                 let mut tool_failed = false;
                 let mut compact_file_extracted = false;
-                if let Some(tc) = engine
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|m| m.tool_calls())
-                    .find(|tc| tc.id == id_str)
-                {
+                if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
@@ -148,10 +148,6 @@ pub async fn run_headless(
                     } else {
                         "ok"
                     };
-                    eprintln!(
-                        "{}",
-                        format_progress_line("tool_finished", &tc.name, Some(status))
-                    );
                     if tc.name == "final_answer" && answer_file_exists(&engine) {
                         if let Err(error) =
                             normalize_existing_answer_file_for_prompt(&engine, &message)
@@ -187,8 +183,10 @@ pub async fn run_headless(
                     eprintln!(
                         "Complete compact file extraction captured; requesting answer from evidence."
                     );
+                    // Deferred: send once StreamCompleted confirms the
+                    // cancellation went through (AGE-242 / D3).
+                    pending_compact_file_prompt = Some(compact_prompt);
                     engine.stop_stream();
-                    send_compact_file_answer_prompt(&mut engine, compact_prompt);
                     continue;
                 } else if let Some(pivot) = pivot_msg {
                     eprintln!(
@@ -196,8 +194,10 @@ pub async fn run_headless(
                         loop_guard.loop_pivot_count(),
                         3
                     );
+                    // Deferred: send once StreamCompleted confirms the
+                    // cancellation went through (AGE-242 / D3).
+                    pending_loop_pivot_prompt = Some(pivot);
                     engine.stop_stream();
-                    engine.send_message(pivot);
                     tool_results_since_finalization = 0;
                     continue;
                 }
@@ -234,21 +234,11 @@ pub async fn run_headless(
             AppEvent::ToolCallError { ref id, .. } => {
                 let id_str = id.clone();
                 engine.handle_event(event);
-                if let Some(tc) = engine
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|m| m.tool_calls())
-                    .find(|tc| tc.id == id_str)
-                {
+                if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
-                    eprintln!(
-                        "{}",
-                        format_progress_line("tool_finished", &tc.name, Some("err"))
-                    );
                 }
                 tool_results_since_finalization += 1;
                 failed_tool_results_since_finalization += 1;
@@ -281,47 +271,54 @@ pub async fn run_headless(
             AppEvent::StreamCompleted => {
                 engine.handle_event(AppEvent::StreamCompleted);
                 // Update loop guard: resets per-turn counters and checks for late-game deadline.
-                let turns_used = engine
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m.role, crate::engine::MessageRole::Assistant))
-                    .count();
+                let turns_used = engine.transcript.assistant_turns();
                 loop_guard.on_turn_complete(turns_used, answer_file_exists(&engine));
                 let was_text_overflow = text_overflow_stop_requested;
                 text_overflow_stop_requested = false;
                 text_hard_stop_requested = false;
                 text_bytes_this_turn = 0;
-                if recovery_pending_after_error {
-                    recovery_pending_after_error = false;
+                // The stop that led here was requested specifically to send
+                // one of these; the cancellation has now gone through, so
+                // send_message() will actually take (AGE-242 / D3).
+                if let Some(compact_prompt) = pending_compact_file_prompt.take() {
+                    send_compact_file_answer_prompt(&mut engine, compact_prompt);
+                    continue;
+                }
+                if let Some(pivot) = pending_loop_pivot_prompt.take() {
+                    engine.send_message(pivot);
+                    continue;
+                }
+                if let Some(delay) = recovery_pending_after_error.take() {
                     tool_results_since_finalization = 0;
                     failed_tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
                     failure_budget_stop_requested = false;
-                    let delay_secs = 10u64 * recovery_attempts as u64;
                     eprintln!(
-                        "Retrying after stream error ({}/{}) in {}s with a compact continuation prompt.",
-                        recovery_attempts, pending_recovery_attempt_limit, delay_secs
+                        "Retrying after stream error in {}s with a compact continuation prompt.",
+                        delay.as_secs()
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                    tokio::time::sleep(delay).await;
                     if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
-                        engine.send_message(build_compact_file_recovery_prompt(compact_prompt));
+                        engine.send_recovery_prompt(build_compact_file_recovery_prompt(
+                            compact_prompt,
+                        ));
                     } else {
-                        engine.send_message(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                        engine.send_recovery_prompt(STREAM_ERROR_RECOVERY_PROMPT.to_string());
                     }
                     continue;
                 }
                 if was_text_overflow {
                     // Model generated too much text without calling a tool (response completed naturally).
                     // Inject a focused action prompt to redirect toward a tool call.
-                    if recovery_attempts < MAX_STREAM_ERROR_RECOVERY_ATTEMPTS {
-                        recovery_attempts += 1;
+                    if text_overflow_attempts < MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS {
+                        text_overflow_attempts += 1;
                         tool_results_since_finalization = 0;
                         failed_tool_results_since_finalization = 0;
                         tool_budget_stop_requested = false;
                         failure_budget_stop_requested = false;
                         eprintln!(
                             "Text overflow (no tool call after 4KB): injecting action prompt ({}/{}).",
-                            recovery_attempts, MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
+                            text_overflow_attempts, MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS
                         );
                         engine.send_message(TEXT_OVERFLOW_RECOVERY_PROMPT.to_string());
                         continue;
@@ -391,11 +388,14 @@ pub async fn run_headless(
                     break;
                 }
 
-                let max_recovery_attempts = recovery_attempt_limit_for_error(Some(&error));
-                if is_retryable_stream_error(&error) && recovery_attempts < max_recovery_attempts {
-                    recovery_attempts += 1;
-                    pending_recovery_attempt_limit = max_recovery_attempts;
-                    recovery_pending_after_error = true;
+                let retry_after = match engine.session.recovery_action(&error) {
+                    RecoveryAction::Retry { after } => Some(after),
+                    // A protocol nudge: re-prompt right away.
+                    RecoveryAction::Nudge => Some(std::time::Duration::ZERO),
+                    RecoveryAction::Stop => None,
+                };
+                if let Some(after) = retry_after {
+                    recovery_pending_after_error = Some(after);
                     continue;
                 }
 
@@ -474,7 +474,7 @@ fn prompt_has_strict_answer_format(original_prompt: &str) -> bool {
 
 /// Run in pipe mode: read stdin, send as message, print response to stdout.
 pub async fn run_pipe(
-    engine: ChatEngine,
+    engine: HeadlessRunner,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
     use std::io::Read;
