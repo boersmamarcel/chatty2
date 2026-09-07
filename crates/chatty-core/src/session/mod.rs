@@ -388,6 +388,47 @@ impl AgentSession {
         Ok(turn.run(emit))
     }
 
+    /// Record that a turn is running *elsewhere* (AGE-298): the local half
+    /// of [`transport::begin_turn`] for a hosted conversation.
+    ///
+    /// Does to the session and its conversation exactly what
+    /// [`prepare_turn`](Self::prepare_turn) does — commits the user message,
+    /// resets the per-task protocol state, arms the cancel flag — and none of
+    /// what it does for the stream, which the server opens. That leaves the
+    /// session turn-active, so [`apply`](Self::apply) and
+    /// [`finish_turn`](Self::finish_turn) treat the server's events exactly
+    /// like a local turn's and the conversation's own row records the turn.
+    /// Without this, `finish_turn` finds no turn to finish and the reply the
+    /// wire carried back is dropped on the floor.
+    pub fn open_hosted_turn(
+        &mut self,
+        input: &TurnInput,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<()> {
+        if self.is_turn_active() {
+            bail!("a turn is already running");
+        }
+        let Some(conversation) = self.conversation.as_mut() else {
+            bail!("no conversation");
+        };
+        // A regenerate resends the tail user message; it is already there.
+        if input.kind != TurnKind::Regenerate {
+            conversation.add_user_message_with_attachments(
+                Message::User {
+                    content: input.contents.clone(),
+                },
+                input.attachments.clone(),
+            );
+        }
+        if input.kind != TurnKind::ProtocolFollowUp {
+            conversation.agent().task_controller().reset();
+            self.recovery_attempts.clear();
+        }
+        self.cancel_flag = Some(cancel_flag);
+        self.pending_tool_names.clear();
+        Ok(())
+    }
+
     /// Everything `begin_turn` does before the stream is opened, kept apart
     /// so a test can run the same preparation against a scripted stream.
     fn prepare_turn(

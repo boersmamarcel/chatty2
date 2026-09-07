@@ -100,7 +100,7 @@ impl HostedSession {
     /// refuses is still a well-formed pair with an `Error` between them.
     pub fn begin_turn<F: FnMut(SessionEvent)>(
         &mut self,
-        input: TurnInput,
+        input: &TurnInput,
         emit: F,
     ) -> Result<impl Future<Output = ()> + use<F>> {
         self.begin_turn_with_flag(input, Arc::new(AtomicBool::new(false)), emit)
@@ -111,7 +111,7 @@ impl HostedSession {
     /// desktop's `StreamManager`).
     pub fn begin_turn_with_flag<F: FnMut(SessionEvent)>(
         &mut self,
-        input: TurnInput,
+        input: &TurnInput,
         cancel_flag: Arc<AtomicBool>,
         mut emit: F,
     ) -> Result<impl Future<Output = ()> + use<F>> {
@@ -477,7 +477,7 @@ mod tests {
         assert!(!session.is_turn_active(), "a fresh session is idle");
 
         let turn = session
-            .begin_turn(TurnInput::text("hello"), |_| {})
+            .begin_turn(&TurnInput::text("hello"), |_| {})
             .expect("the first turn starts");
         assert!(
             session.is_turn_active(),
@@ -487,7 +487,9 @@ mod tests {
 
         assert!(!session.is_turn_active(), "a finished turn releases");
         assert!(
-            session.begin_turn(TurnInput::text("again"), |_| {}).is_ok(),
+            session
+                .begin_turn(&TurnInput::text("again"), |_| {})
+                .is_ok(),
             "the next turn must not be refused by the last one"
         );
     }
@@ -501,7 +503,7 @@ mod tests {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = seen.clone();
         session
-            .begin_turn(TurnInput::text("hello"), move |event| {
+            .begin_turn(&TurnInput::text("hello"), move |event| {
                 sink.borrow_mut().push(event_name_of(&event))
             })
             .expect("the turn starts")

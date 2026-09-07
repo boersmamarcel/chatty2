@@ -51,7 +51,17 @@ pub fn begin_turn<F: FnMut(SessionEvent)>(
     emit: F,
 ) -> Result<impl Future<Output = ()> + use<F>> {
     Ok(match hosted {
-        Some(remote) => Either::Right(remote.begin_turn_with_flag(input, cancel_flag, emit)?),
+        Some(remote) => {
+            // The server runs the stream, but the local session still has to
+            // know a turn is running: it commits the user message now and
+            // finalizes the reply later, so the conversation's own row
+            // records the turn. The remote goes first because its refusals
+            // (a turn already running there, attachments with no text) leave
+            // nothing behind, whereas an opened local turn would.
+            let turn = remote.begin_turn_with_flag(&input, cancel_flag.clone(), emit)?;
+            session.open_hosted_turn(&input, cancel_flag)?;
+            Either::Right(turn)
+        }
         None => Either::Left(session.begin_turn_with_flag(input, cancel_flag, emit)?),
     })
 }
