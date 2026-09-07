@@ -74,13 +74,17 @@ The bar follows **Enable Git Integration** in Settings → Code Execution. Priva
 
 ## Conversations, cost and search
 
-- Conversations are stored in a local database on your machine; there is no hosted sync.
+- Conversations are stored in a local database on your machine by default.
 - Titles are generated automatically. The search icon in the title bar opens **Search conversations…**, which filters the sidebar as you type.
-- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, and **Delete**.
+- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, **Take online…**, and **Delete**.
 - The sidebar shows the running cost per conversation; each reply shows its input and output tokens and cost. Pricing uses the per-million-token rates on the model, which the OpenRouter catalogue fills in for you.
 - **Regenerate** under a reply asks for a fresh answer. Chatty keeps both versions, which is what makes preference-pair export possible ([Advanced](./advanced.md)).
 
 ![Token and cost tracking](../assets/animations/advanced_token_tracking.gif)
+
+## Taking a conversation online
+
+**Take online…** in a conversation's **⋯** menu uploads its history to a `chatty-server` you name and continues it there — useful for a long-running task you want to keep going after you close the laptop. A globe icon badges the conversation in the sidebar while it runs remotely, and the same menu offers **Bring back here** to return it. The confirmation dialog lists exactly what moves (message history, traces, the model id) and what never does (workspace files, attachments, MCP servers, memory, skills, and provider API keys — those stay on this machine). The conversation's local copy is kept either way, so bringing it back does not lose anything, and a move mid-turn is refused until the turn finishes.
 
 ## Themes and text
 
