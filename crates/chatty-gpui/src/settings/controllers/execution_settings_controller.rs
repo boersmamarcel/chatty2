@@ -223,6 +223,31 @@ pub fn toggle_browser(cx: &mut App) {
     .detach();
 }
 
+/// Toggle the per-conversation move between local and hosted, and persist to
+/// disk (AGE-308).
+///
+/// Developer-only: with it off — the default — the sidebar offers no move and
+/// the TUI's `/online` refuses. It changes no tool, so the tool set is not
+/// notified.
+pub fn toggle_hosted_conversations(cx: &mut App) {
+    let new_enabled = !cx
+        .global::<ExecutionSettingsModel>()
+        .hosted_conversations_enabled;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .hosted_conversations_enabled = new_enabled;
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle Docker code execution enabled/disabled and persist to disk.
 pub fn toggle_execute_code(cx: &mut App) {
     let new_enabled = !cx.global::<ExecutionSettingsModel>().execute_code_enabled;

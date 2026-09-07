@@ -156,6 +156,14 @@ pub async fn fetch_hosted(server_url: &str, remote_id: &str) -> Result<RemoteCon
         .context("the server's conversation was not in the expected shape")
 }
 
+/// What every frontend says when a move is asked for while hosted
+/// conversations are off (AGE-308).
+///
+/// The move is developer-only until online mode is account-scoped: today it
+/// carries the transcript and nothing else, and the server does not import
+/// history, so a moved conversation cannot answer "what did we discuss".
+pub const HOSTED_DISABLED: &str = "Hosted conversations are not enabled.";
+
 /// Why a move cannot happen right now, in words the UI can show as-is.
 pub fn refuse_reason(
     turn_active: bool,
