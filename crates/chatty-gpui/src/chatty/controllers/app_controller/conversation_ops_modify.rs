@@ -429,11 +429,19 @@ impl ChattyApp {
         }
 
         cx.defer(move |cx| {
-            if let Some(window) = cx.windows().first().and_then(|w| w.downcast::<ChattyApp>()) {
-                let _ = window.update(cx, |_, window, cx| {
+            // The main window's root view is gpui-component's `Root`, not
+            // `ChattyApp`, so the handle is used untyped: a downcast to the
+            // app would return `None` and the click would do nothing.
+            let Some(window) = cx.windows().first().copied() else {
+                warn!(conv_id = %conv_id, "No window to open the move dialog in");
+                return;
+            };
+            window
+                .update(cx, |_, window, cx| {
                     MoveConversationDialog::open(conv_id.clone(), going_online, window, cx);
-                });
-            }
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to open the move dialog"))
+                .ok();
         });
     }
 
