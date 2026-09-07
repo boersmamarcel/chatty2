@@ -441,8 +441,7 @@ impl Conversation {
 
     /// Serialize message history to JSON string
     pub fn serialize_history(&self) -> Result<String> {
-        let messages: Vec<&Message> = self.entries.iter().map(|e| &e.message).collect();
-        serde_json::to_string(&messages).context("Failed to serialize message history")
+        serialize_history_of(&self.entries)
     }
 
     /// Deserialize message history from JSON string
@@ -452,12 +451,7 @@ impl Conversation {
 
     /// Serialize system traces to JSON string
     pub fn serialize_traces(&self) -> Result<String> {
-        let traces: Vec<Option<&serde_json::Value>> = self
-            .entries
-            .iter()
-            .map(|e| e.system_trace.as_ref())
-            .collect();
-        serde_json::to_string(&traces).context("Failed to serialize system traces")
+        serialize_traces_of(&self.entries)
     }
 
     /// Deserialize system traces from JSON string
@@ -467,8 +461,7 @@ impl Conversation {
 
     /// Serialize attachment paths to JSON string
     pub fn serialize_attachment_paths(&self) -> Result<String> {
-        let paths: Vec<&Vec<PathBuf>> = self.entries.iter().map(|e| &e.attachment_paths).collect();
-        serde_json::to_string(&paths).context("Failed to serialize attachment paths")
+        serialize_attachment_paths_of(&self.entries)
     }
 
     /// Deserialize attachment paths from JSON string
@@ -478,8 +471,7 @@ impl Conversation {
 
     /// Serialize message timestamps to JSON string
     pub fn serialize_message_timestamps(&self) -> Result<String> {
-        let timestamps: Vec<Option<i64>> = self.entries.iter().map(|e| e.timestamp).collect();
-        serde_json::to_string(&timestamps).context("Failed to serialize message timestamps")
+        serialize_message_timestamps_of(&self.entries)
     }
 
     /// Deserialize message timestamps from JSON string
@@ -510,9 +502,7 @@ impl Conversation {
 
     /// Serialize message feedback to JSON string
     pub fn serialize_message_feedback(&self) -> Result<String> {
-        let feedback: Vec<Option<&MessageFeedback>> =
-            self.entries.iter().map(|e| e.feedback.as_ref()).collect();
-        serde_json::to_string(&feedback).context("Failed to serialize message feedback")
+        serialize_message_feedback_of(&self.entries)
     }
 
     /// Deserialize message feedback from JSON string
@@ -571,6 +561,36 @@ impl Conversation {
     /// Deserialize regeneration records from JSON string
     pub fn deserialize_regeneration_records(json: &str) -> Result<Vec<RegenerationRecord>> {
         serde_json::from_str(json).context("Failed to deserialize regeneration records")
+    }
+
+    /// A cheap owned copy of everything [`ConversationData`] is built from.
+    ///
+    /// Clones entries and metadata; runs no serde. Take this on the thread
+    /// that owns the conversation, then call
+    /// [`ConversationSnapshot::to_data`] wherever the CPU is cheaper — which
+    /// is what the desktop does to keep `serde_json` off the UI thread
+    /// (AGE-220, finding F3).
+    pub fn snapshot(&self) -> ConversationSnapshot {
+        ConversationSnapshot {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            model_id: self.model_id.clone(),
+            entries: self.entries.clone(),
+            token_usage: self.token_usage.clone(),
+            regeneration_records: self.regeneration_records.clone(),
+            created_at: self.created_at,
+            working_dir: self.working_dir.clone(),
+            agent_task_snapshot: self.agent_task_snapshot.clone(),
+        }
+    }
+
+    /// Serialize straight into the repository's row shape.
+    ///
+    /// Convenience for callers that are not on a latency-sensitive thread;
+    /// [`snapshot`](Self::snapshot) plus
+    /// [`to_data`](ConversationSnapshot::to_data) is the two-phase form.
+    pub fn to_conversation_data(&self) -> Result<ConversationData> {
+        self.snapshot().to_data()
     }
 
     /// Remove the last assistant message and its metadata, together with the
@@ -785,6 +805,97 @@ impl Conversation {
     }
 }
 
+// ── Snapshot → ConversationData ──────────────────────────────────────────────
+
+/// Everything [`ConversationData`] is built from, owned and detached from the
+/// live [`Conversation`].
+///
+/// This exists so the projection lives in one place. Before it, chatty-gpui
+/// assembled `ConversationData` two different ways in two files and
+/// chatty-server a third; a field added to `ConversationData` was silently
+/// dropped by whichever copy the author did not open (AGE-293).
+#[derive(Clone, Debug)]
+pub struct ConversationSnapshot {
+    pub id: String,
+    pub title: String,
+    pub model_id: String,
+    pub entries: Vec<MessageEntry>,
+    pub token_usage: ConversationTokenUsage,
+    pub regeneration_records: Vec<RegenerationRecord>,
+    pub created_at: SystemTime,
+    pub working_dir: Option<PathBuf>,
+    pub agent_task_snapshot: Option<AgentTaskSnapshot>,
+}
+
+impl ConversationSnapshot {
+    /// Serialize into the repository's row shape.
+    ///
+    /// Pure CPU over owned data: safe to call from a background task.
+    /// `updated_at` is stamped here, at the moment the row is built.
+    pub fn to_data(&self) -> Result<ConversationData> {
+        Ok(ConversationData {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            model_id: self.model_id.clone(),
+            message_history: serialize_history_of(&self.entries)?,
+            system_traces: serialize_traces_of(&self.entries)?,
+            token_usage: serde_json::to_string(&self.token_usage)
+                .context("Failed to serialize token usage")?,
+            attachment_paths: serialize_attachment_paths_of(&self.entries)?,
+            message_timestamps: serialize_message_timestamps_of(&self.entries)?,
+            message_feedback: serialize_message_feedback_of(&self.entries)?,
+            regeneration_records: serde_json::to_string(&self.regeneration_records)
+                .context("Failed to serialize regeneration records")?,
+            created_at: unix_seconds(self.created_at),
+            updated_at: unix_seconds(SystemTime::now()),
+            working_dir: self
+                .working_dir
+                .as_ref()
+                .map(|dir| dir.to_string_lossy().into_owned()),
+            agent_task_snapshot: self
+                .agent_task_snapshot
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .context("Failed to serialize agent task snapshot")?,
+        })
+    }
+}
+
+fn unix_seconds(at: SystemTime) -> i64 {
+    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+}
+
+// The per-field projections, shared by `Conversation`'s `serialize_*` methods
+// and by `ConversationSnapshot::to_data` so there is exactly one of each.
+
+fn serialize_history_of(entries: &[MessageEntry]) -> Result<String> {
+    let messages: Vec<&Message> = entries.iter().map(|e| &e.message).collect();
+    serde_json::to_string(&messages).context("Failed to serialize message history")
+}
+
+fn serialize_traces_of(entries: &[MessageEntry]) -> Result<String> {
+    let traces: Vec<Option<&serde_json::Value>> =
+        entries.iter().map(|e| e.system_trace.as_ref()).collect();
+    serde_json::to_string(&traces).context("Failed to serialize system traces")
+}
+
+fn serialize_attachment_paths_of(entries: &[MessageEntry]) -> Result<String> {
+    let paths: Vec<&Vec<PathBuf>> = entries.iter().map(|e| &e.attachment_paths).collect();
+    serde_json::to_string(&paths).context("Failed to serialize attachment paths")
+}
+
+fn serialize_message_timestamps_of(entries: &[MessageEntry]) -> Result<String> {
+    let timestamps: Vec<Option<i64>> = entries.iter().map(|e| e.timestamp).collect();
+    serde_json::to_string(&timestamps).context("Failed to serialize message timestamps")
+}
+
+fn serialize_message_feedback_of(entries: &[MessageEntry]) -> Result<String> {
+    let feedback: Vec<Option<&MessageFeedback>> =
+        entries.iter().map(|e| e.feedback.as_ref()).collect();
+    serde_json::to_string(&feedback).context("Failed to serialize message feedback")
+}
+
 /// A user message that a human (or a summary) wrote, as opposed to tool results.
 fn is_user_text_message(message: &Message) -> bool {
     matches!(message, Message::User { .. }) && !is_tool_result_message(message)
@@ -995,6 +1106,125 @@ fn user_message_text(message: &Message) -> String {
 mod tests {
     use super::*;
     use crate::models::message_types::TraceItem;
+
+    /// A snapshot with every field distinguishable, so a projection wired to
+    /// the wrong column shows up rather than passing on shape alone.
+    fn populated_snapshot() -> ConversationSnapshot {
+        let entries = vec![
+            MessageEntry {
+                message: Message::user("first"),
+                system_trace: Some(serde_json::json!({ "trace": 1 })),
+                attachment_paths: vec![PathBuf::from("/tmp/a.png")],
+                timestamp: Some(1_700_000_000),
+                feedback: Some(MessageFeedback::ThumbsUp),
+            },
+            MessageEntry {
+                message: Message::assistant("second"),
+                system_trace: None,
+                attachment_paths: Vec::new(),
+                timestamp: Some(1_700_000_100),
+                feedback: None,
+            },
+        ];
+        let mut token_usage = ConversationTokenUsage::new();
+        token_usage.add_usage(TokenUsage::new(11, 22));
+
+        ConversationSnapshot {
+            id: "conv-1".to_string(),
+            title: "A title".to_string(),
+            model_id: "model-1".to_string(),
+            entries,
+            token_usage,
+            regeneration_records: vec![RegenerationRecord {
+                message_index: 1,
+                original_text: "before".to_string(),
+                original_timestamp: 1_700_000_050,
+                regeneration_timestamp: 1_700_000_060,
+            }],
+            created_at: UNIX_EPOCH + Duration::from_secs(1_699_999_000),
+            working_dir: Some(PathBuf::from("/tmp/workspace")),
+            agent_task_snapshot: None,
+        }
+    }
+
+    /// The one construction site has to put each projection in its own
+    /// column. Two adjacent `Vec<Option<…>>` fields (traces and feedback)
+    /// serialize to the same shape, so a transposition is invisible to the
+    /// type system and is exactly what a hand-written copy gets wrong
+    /// (AGE-293).
+    #[test]
+    fn to_data_puts_every_projection_in_its_own_column() {
+        let snapshot = populated_snapshot();
+        let data = snapshot.to_data().expect("the row serializes");
+
+        assert_eq!(data.id, "conv-1");
+        assert_eq!(data.title, "A title");
+        assert_eq!(data.model_id, "model-1");
+        assert_eq!(data.created_at, 1_699_999_000);
+        assert_eq!(data.working_dir.as_deref(), Some("/tmp/workspace"));
+        assert!(data.agent_task_snapshot.is_none());
+
+        assert_eq!(
+            data.message_history,
+            serialize_history_of(&snapshot.entries).unwrap()
+        );
+        assert_eq!(data.system_traces, r#"[{"trace":1},null]"#);
+        assert_eq!(data.attachment_paths, r#"[["/tmp/a.png"],[]]"#);
+        assert_eq!(data.message_timestamps, "[1700000000,1700000100]");
+        assert_eq!(data.message_feedback, r#"["ThumbsUp",null]"#);
+        assert!(data.regeneration_records.contains("before"));
+        assert!(data.token_usage.contains("\"total_input_tokens\":11"));
+
+        // Stamped at build time, not copied from `created_at`.
+        assert!(data.updated_at >= data.created_at);
+    }
+
+    /// `Conversation`'s long-standing per-field `serialize_*` methods and the
+    /// new one-shot constructor must agree, since both are public and callers
+    /// use each. They share the projections; this pins that they still do.
+    #[test]
+    fn the_constructor_agrees_with_the_per_field_helpers() {
+        let snapshot = populated_snapshot();
+        let data = snapshot.to_data().unwrap();
+        let entries = &snapshot.entries;
+
+        assert_eq!(data.message_history, serialize_history_of(entries).unwrap());
+        assert_eq!(data.system_traces, serialize_traces_of(entries).unwrap());
+        assert_eq!(
+            data.attachment_paths,
+            serialize_attachment_paths_of(entries).unwrap()
+        );
+        assert_eq!(
+            data.message_timestamps,
+            serialize_message_timestamps_of(entries).unwrap()
+        );
+        assert_eq!(
+            data.message_feedback,
+            serialize_message_feedback_of(entries).unwrap()
+        );
+    }
+
+    /// An empty conversation still produces the empty-array forms the
+    /// repository's serde defaults expect, not `null` or a missing field.
+    #[test]
+    fn an_empty_conversation_serializes_to_empty_arrays() {
+        let data = ConversationSnapshot {
+            entries: Vec::new(),
+            regeneration_records: Vec::new(),
+            working_dir: None,
+            ..populated_snapshot()
+        }
+        .to_data()
+        .unwrap();
+
+        assert_eq!(data.message_history, "[]");
+        assert_eq!(data.system_traces, "[]");
+        assert_eq!(data.attachment_paths, "[]");
+        assert_eq!(data.message_timestamps, "[]");
+        assert_eq!(data.message_feedback, "[]");
+        assert_eq!(data.regeneration_records, "[]");
+        assert!(data.working_dir.is_none());
+    }
 
     #[test]
     fn test_regeneration_record_serialize_roundtrip() {

@@ -7,10 +7,10 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
+use crate::chatty::models::token_usage::{TokenPricing, TokenUsage};
 use crate::chatty::models::{
-    Conversation, ConversationsStore, GlobalStreamManager, MessageEntry, MessageFeedback,
-    RegenerationRecord, StreamManagerEvent, StreamStatus, TurnOutcome,
+    Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
+    StreamStatus, TurnOutcome,
 };
 use crate::chatty::services::{AgentTaskSnapshot, generate_title};
 use crate::chatty::token_budget::{
@@ -764,8 +764,6 @@ impl ChattyApp {
     }
 }
 
-/// Serialize a `Conversation` into a `ConversationData` snapshot suitable for persistence
-/// or export. Returns `None` if history or traces cannot be serialized.
 /// Extract the current theme's chart colors as hex strings.
 ///
 /// These are captured at agent-creation time so that charts saved to disk by the
@@ -786,121 +784,6 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
             (r.g * 255.0) as u8,
             (r.b * 255.0) as u8
         )
-    })
-}
-
-/// Cheap, cloneable snapshot of the `Conversation` fields `build_conversation_data`
-/// needs. Cloning this (entries included) is inexpensive relative to
-/// JSON-serializing it, so it can be captured synchronously on the UI thread
-/// and then moved into a spawned task that does the actual
-/// `serde_json::to_string` work off the UI thread (finding F3, AGE-220).
-struct ConversationSnapshot {
-    id: String,
-    title: String,
-    model_id: String,
-    entries: Vec<MessageEntry>,
-    token_usage: ConversationTokenUsage,
-    regeneration_records: Vec<RegenerationRecord>,
-    created_at: SystemTime,
-    working_dir: Option<PathBuf>,
-    agent_task_snapshot: Option<AgentTaskSnapshot>,
-}
-
-impl ConversationSnapshot {
-    fn from_conversation(conv: &Conversation) -> Self {
-        Self {
-            id: conv.id().to_string(),
-            title: conv.title().to_string(),
-            model_id: conv.model_id().to_string(),
-            entries: conv.entries().to_vec(),
-            token_usage: conv.token_usage().clone(),
-            regeneration_records: conv.regeneration_records().to_vec(),
-            created_at: conv.created_at(),
-            working_dir: conv.working_dir().cloned(),
-            agent_task_snapshot: conv.agent_task_snapshot().cloned(),
-        }
-    }
-}
-
-///
-/// Sets `updated_at` to the current time; all other timestamps are taken from the
-/// conversation itself.
-///
-/// Pure CPU work over an owned snapshot — no globals, no GPUI context — so
-/// it is safe to call from a spawned task, off the UI thread (finding F3,
-/// AGE-220).
-fn build_conversation_data(snapshot: &ConversationSnapshot) -> Option<ConversationData> {
-    let messages: Vec<&rig_core::completion::Message> =
-        snapshot.entries.iter().map(|e| &e.message).collect();
-    let history = match serde_json::to_string(&messages) {
-        Ok(h) => h,
-        Err(e) => {
-            error!(conv_id = %snapshot.id, error = ?e, "Failed to serialize history in build_conversation_data");
-            return None;
-        }
-    };
-    let traces: Vec<Option<&serde_json::Value>> = snapshot
-        .entries
-        .iter()
-        .map(|e| e.system_trace.as_ref())
-        .collect();
-    let traces = match serde_json::to_string(&traces) {
-        Ok(t) => t,
-        Err(e) => {
-            error!(conv_id = %snapshot.id, error = ?e, "Failed to serialize traces in build_conversation_data");
-            return None;
-        }
-    };
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    let attachment_paths: Vec<&Vec<PathBuf>> = snapshot
-        .entries
-        .iter()
-        .map(|e| &e.attachment_paths)
-        .collect();
-    let message_timestamps: Vec<Option<i64>> =
-        snapshot.entries.iter().map(|e| e.timestamp).collect();
-    let message_feedback: Vec<Option<&MessageFeedback>> = snapshot
-        .entries
-        .iter()
-        .map(|e| e.feedback.as_ref())
-        .collect();
-
-    Some(ConversationData {
-        id: snapshot.id.clone(),
-        title: snapshot.title.clone(),
-        model_id: snapshot.model_id.clone(),
-        message_history: history,
-        system_traces: traces,
-        token_usage: serde_json::to_string(&snapshot.token_usage)
-            .unwrap_or_else(|_| "{}".to_string()),
-        attachment_paths: serde_json::to_string(&attachment_paths)
-            .unwrap_or_else(|_| "[]".to_string()),
-        message_timestamps: serde_json::to_string(&message_timestamps)
-            .unwrap_or_else(|_| "[]".to_string()),
-        message_feedback: serde_json::to_string(&message_feedback)
-            .unwrap_or_else(|_| "[]".to_string()),
-        regeneration_records: serde_json::to_string(&snapshot.regeneration_records)
-            .unwrap_or_else(|_| "[]".to_string()),
-        created_at: snapshot
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-        updated_at: now,
-        working_dir: snapshot
-            .working_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        agent_task_snapshot: snapshot
-            .agent_task_snapshot
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .unwrap_or(None),
     })
 }
 
