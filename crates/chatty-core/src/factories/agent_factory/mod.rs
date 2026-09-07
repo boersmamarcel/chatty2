@@ -3,6 +3,8 @@ mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
+#[cfg(test)]
+mod tool_block_determinism;
 mod tool_collector;
 mod tool_registry;
 
