@@ -75,7 +75,9 @@ fn filler(words: usize, seed: u64) -> String {
     const POOL: &str = "the lease restores a warm snapshot and rehydrates from the store \
                         before first token while every turn is a fresh process with no cache";
     let pool: Vec<&str> = POOL.split_whitespace().collect();
-    let mut state = seed | 1;
+    // The additive constant is odd, so the LCG needs no odd seed; forcing
+    // one collapsed adjacent seeds onto the same stream.
+    let mut state = seed;
     let mut out = String::with_capacity(words * 7);
     for index in 0..words {
         state = state
