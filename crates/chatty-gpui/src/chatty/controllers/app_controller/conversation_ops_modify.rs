@@ -17,6 +17,21 @@
 use super::export_ops::{write_atif_export, write_jsonl_export};
 use super::*;
 
+use chatty_core::models::conversation::ConversationMode;
+use chatty_core::session::{fetch_hosted, refuse_reason, take_online};
+use rig_core::completion::Message;
+
+use crate::chatty::views::MoveConversationDialog;
+
+/// What a completed transfer produced, so the store update happens in one
+/// place with the conversation borrowed once (AGE-298).
+enum MoveOutcome {
+    /// The server accepted the history and named it; this is where it lives now.
+    WentOnline(ConversationMode),
+    /// The server's copy of the history, to reconcile against the local one.
+    CameBack(Vec<Message>),
+}
+
 impl ChattyApp {
     /// Navigate to the next or previous conversation in the sidebar list.
     /// `direction`: -1 for previous (up in sidebar), +1 for next (down in sidebar).
@@ -367,6 +382,158 @@ impl ChattyApp {
 
         // Refresh skills for the new working directory
         self.refresh_chat_input_skills(dir.as_deref(), cx);
+    }
+
+    /// Open the confirmation for moving a conversation between this machine
+    /// and a server (AGE-298).
+    ///
+    /// Refused mid-turn: a turn can be blocked on an approval or a
+    /// clarification that lives in the stores of the session that raised it,
+    /// and moving would leave it with no address any answer could name. The
+    /// direction is read from the conversation's current mode, so the dialog
+    /// and the menu entry cannot disagree about which way it goes.
+    pub(super) fn confirm_conversation_move(&mut self, id: &str, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+        let store = cx.global::<ConversationsStore>();
+        let mode = store
+            .get_conversation(&conv_id)
+            .map(|conversation| conversation.mode().clone())
+            .unwrap_or_else(|| {
+                if store.is_hosted(&conv_id) {
+                    // Not loaded, but the row says it is hosted. The dialog
+                    // only needs the direction; the address is read again when
+                    // the move runs, off the loaded conversation.
+                    ConversationMode::Hosted {
+                        server_url: String::new(),
+                        remote_id: String::new(),
+                    }
+                } else {
+                    ConversationMode::Local
+                }
+            });
+        let going_online = !mode.is_hosted();
+        let turn_active = store.is_streaming(&conv_id);
+
+        if let Some(reason) = refuse_reason(turn_active, &mode, going_online) {
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(reason.to_string(), cx);
+            });
+            return;
+        }
+
+        cx.defer(move |cx| {
+            if let Some(window) = cx.windows().first().and_then(|w| w.downcast::<ChattyApp>()) {
+                let _ = window.update(cx, |_, window, cx| {
+                    MoveConversationDialog::open(conv_id.clone(), going_online, window, cx);
+                });
+            }
+        });
+    }
+
+    /// Carry out a confirmed move.
+    ///
+    /// `target` is the server URL when going online and `None` when bringing
+    /// the conversation home. The ordering is the safety property AGE-298
+    /// asks for: the history transfer happens first and *nothing* local
+    /// changes until it has succeeded, so a client killed part-way through
+    /// leaves the conversation exactly as it was and the hosted copy it never
+    /// learned the id of is unreachable rather than half-adopted.
+    pub fn move_conversation(&mut self, id: &str, target: Option<String>, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+        let store = cx.global::<ConversationsStore>();
+        let Some(conversation) = store.get_conversation(&conv_id) else {
+            warn!(conv_id = %conv_id, "Cannot move a conversation that is not loaded");
+            return;
+        };
+        let title = conversation.title().to_string();
+        let messages = conversation.messages();
+        let mode = conversation.mode().clone();
+
+        cx.spawn(async move |weak, cx| {
+            let outcome = match &target {
+                Some(server_url) => take_online(server_url, &title, &messages)
+                    .await
+                    .map(MoveOutcome::WentOnline),
+                None => {
+                    let Some((server_url, remote_id)) = mode.hosted_on() else {
+                        return Ok(());
+                    };
+                    fetch_hosted(server_url, remote_id)
+                        .await
+                        .map(|remote| MoveOutcome::CameBack(remote.messages))
+                }
+            };
+
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // Nothing local was touched, so there is nothing to undo.
+                    warn!(conv_id = %conv_id, error = ?error, "The conversation move failed");
+                    weak.update(cx, |app, cx| {
+                        app.chat_view.update(cx, |view, cx| {
+                            view.add_info_message(
+                                format!("Could not move this conversation: {error:#}"),
+                                cx,
+                            );
+                        });
+                    })
+                    .ok();
+                    return Ok(());
+                }
+            };
+
+            weak.update(cx, |app, cx| {
+                let notice = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    match outcome {
+                        MoveOutcome::WentOnline(new_mode) => {
+                            let where_to = new_mode
+                                .hosted_on()
+                                .map(|(url, _)| url.to_string())
+                                .unwrap_or_default();
+                            store.set_conversation_mode(&conv_id, new_mode);
+                            format!("This conversation now runs on {where_to}.")
+                        }
+                        MoveOutcome::CameBack(messages) => {
+                            // The local side applied every event of every
+                            // hosted turn it was present for, so its history is
+                            // usually already complete *and* richer — it has
+                            // the traces the wire does not carry. The server's
+                            // copy is taken only when it is longer, which is
+                            // the case it exists for: turns this client missed.
+                            let local_len = store
+                                .get_conversation(&conv_id)
+                                .map(|conversation| conversation.messages().len())
+                                .unwrap_or(0);
+                            let missed = messages.len().saturating_sub(local_len);
+                            if missed > 0 && let Some(conversation) =
+                                store.get_conversation_mut(&conv_id)
+                            {
+                                conversation.import_history(messages);
+                            }
+                            store.set_conversation_mode(&conv_id, ConversationMode::Local);
+                            match missed {
+                                0 => "This conversation runs on this machine again.".to_string(),
+                                n => format!(
+                                    "This conversation runs on this machine again, with {n} message(s) it ran without you."
+                                ),
+                            }
+                        }
+                    }
+                });
+
+                app.persist_conversation(&conv_id, cx);
+                app.refresh_sidebar(cx);
+                // Reload so the transcript reflects a bring-back that adopted
+                // turns this client missed, and the sidebar re-badges the row.
+                app.load_conversation(&conv_id, cx);
+                app.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(notice, cx);
+                });
+            })
+            .ok();
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     /// Delete a conversation

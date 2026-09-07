@@ -4,10 +4,33 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
+use rig_core::completion::Message;
+use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
+
+use chatty_core::models::conversation::ConversationMode;
+use chatty_core::session::{
+    BRING_BACK_SUMMARY, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
+    refuse_reason, take_online,
+};
 
 use super::{ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker, ToolPickerItem};
 use crate::events::AppEvent;
+
+/// Render a move's "what travels and what does not" table for a terminal.
+///
+/// The strings come from chatty-core, so the TUI prompt and the desktop
+/// dialog say the same thing and neither can drift from what the code does.
+fn push_move_summary(out: &mut String, summary: &MoveSummary) {
+    out.push_str("Moves:\n");
+    for item in summary.moves {
+        out.push_str(&format!("  + {item}\n"));
+    }
+    out.push_str("Does not move:\n");
+    for (what, why) in summary.does_not_move {
+        out.push_str(&format!("  - {what} ({why})\n"));
+    }
+}
 
 /// Parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +57,9 @@ pub enum Command {
     Update,
     /// /cwd, /cd [directory] — show or change working directory
     Cwd(Option<String>),
+    /// /online [url|off] — show where this conversation runs, take it online,
+    /// or bring it back (AGE-298)
+    Online(Option<String>),
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -66,6 +92,7 @@ impl ChatEngine {
             "/copy" => Some(Command::Copy),
             "/update" => Some(Command::Update),
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
+            "/online" => Some(Command::Online(arg)),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }
@@ -213,6 +240,168 @@ impl ChatEngine {
             workspace_str
         ));
         Ok(workspace_str)
+    }
+
+    /// `/online` with no argument: where this conversation runs, and what a
+    /// move would and would not carry.
+    ///
+    /// The table is printed *before* anything moves, because taking a
+    /// conversation online is a data egress and AGE-298 asks that the user see
+    /// what leaves this machine before they agree to it. `/online <url>` is
+    /// the confirmation — there is no second prompt, because typing the URL is
+    /// already a deliberate act and the terminal has just shown the table.
+    pub fn online_status(&self) -> String {
+        let mut out = String::new();
+        match self.conversation_mode() {
+            ConversationMode::Local => {
+                out.push_str("This conversation runs locally.\n");
+                out.push_str("  /online <server-url>  take it online\n\n");
+                push_move_summary(&mut out, &TAKE_ONLINE_SUMMARY);
+            }
+            ConversationMode::Hosted {
+                server_url,
+                remote_id,
+            } => {
+                out.push_str(&format!(
+                    "This conversation runs on {server_url} (as {remote_id}).\n"
+                ));
+                out.push_str("  /online off  bring it back to this machine\n\n");
+                push_move_summary(&mut out, &BRING_BACK_SUMMARY);
+            }
+        }
+        out
+    }
+
+    /// Where this conversation's turns run.
+    pub fn conversation_mode(&self) -> ConversationMode {
+        self.session
+            .conversation()
+            .map(|conv| conv.mode().clone())
+            .unwrap_or_default()
+    }
+
+    /// `/online <url>` — upload this conversation's history and continue it
+    /// there. `/online off` brings it back.
+    ///
+    /// Ordering is the safety property: the history goes up first, and only a
+    /// server that has accepted it and named it causes anything local to
+    /// change. A client killed part-way through leaves the local conversation
+    /// exactly as it was, and the hosted conversation it never learned the id
+    /// of is unreachable rather than half-adopted.
+    pub async fn set_online(&mut self, target: Option<String>) -> Result<()> {
+        let going_online = target.is_some();
+        let mode = self.conversation_mode();
+        if let Some(reason) = refuse_reason(self.is_streaming, &mode, going_online) {
+            self.add_system_message(reason.to_string());
+            return Ok(());
+        }
+        let Some(conversation) = self.session.conversation() else {
+            self.add_system_message("No active conversation to move.".to_string());
+            return Ok(());
+        };
+
+        match target {
+            Some(server_url) => {
+                let new_mode =
+                    take_online(&server_url, conversation.title(), &conversation.messages())
+                        .await
+                        .context("Failed to take the conversation online")?;
+                let (url, remote_id) = new_mode
+                    .hosted_on()
+                    .map(|(url, id)| (url.to_string(), id.to_string()))
+                    .expect("take_online returns a hosted mode");
+
+                self.hosted = Some(HostedSession::new(&url, &remote_id));
+                if let Some(conv) = self.session.conversation_mut() {
+                    conv.set_mode(new_mode);
+                }
+                self.add_system_message(format!(
+                    "This conversation now runs on {url}. Its history stays on this machine too — /online off brings it back."
+                ));
+            }
+            None => {
+                let (server_url, remote_id) = mode
+                    .hosted_on()
+                    .map(|(url, id)| (url.to_string(), id.to_string()))
+                    .expect("refuse_reason rejected a local conversation already");
+                let remote = fetch_hosted(&server_url, &remote_id)
+                    .await
+                    .context("Failed to read the hosted conversation back")?;
+
+                // This client applied every event of every hosted turn it was
+                // present for, so its local history is usually already
+                // complete *and richer* — it has the per-message traces the
+                // wire does not carry. Adopting the server's copy wholesale
+                // would throw those away. So the server's history is only
+                // taken when it is longer, which is exactly the case it exists
+                // to cover: turns that happened while this client was closed.
+                let local_len = self
+                    .session
+                    .conversation()
+                    .map(|conv| conv.messages().len())
+                    .unwrap_or(0);
+                let missed = remote.messages.len().saturating_sub(local_len);
+                if missed > 0 {
+                    for message in remote.messages.iter().skip(local_len) {
+                        self.append_missed_message(message);
+                    }
+                    if let Some(conv) = self.session.conversation_mut() {
+                        conv.import_history(remote.messages);
+                    }
+                }
+                if let Some(conv) = self.session.conversation_mut() {
+                    conv.set_mode(ConversationMode::Local);
+                }
+                self.hosted = None;
+                self.add_system_message(match missed {
+                    0 => "This conversation runs locally again.".to_string(),
+                    1 => "This conversation runs locally again, with 1 turn it ran without you."
+                        .to_string(),
+                    n => format!(
+                        "This conversation runs locally again, with {n} messages it ran without you."
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Put a message the hosted run recorded while this client was away into
+    /// the transcript, so bringing the conversation back shows what happened
+    /// rather than jumping silently forward.
+    ///
+    /// Tool round-trips are skipped for the same reason every other reader
+    /// skips them: they are history for the model, not lines for a person.
+    fn append_missed_message(&mut self, message: &Message) {
+        if chatty_core::services::is_tool_message(message) {
+            return;
+        }
+        match message {
+            Message::User { content } => {
+                let text = chatty_core::services::extract_user_text(content);
+                if !text.trim().is_empty() {
+                    self.transcript.push_user(text);
+                }
+            }
+            Message::Assistant { content, .. } => {
+                let text = content
+                    .iter()
+                    .filter_map(|item| match item {
+                        AssistantContent::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.trim().is_empty() {
+                    self.transcript.start_assistant();
+                    self.transcript.push_text(&text);
+                    self.transcript.finish_streaming();
+                }
+            }
+            // A system message is context the agent was given, not a line
+            // anyone said; the transcript has never shown one.
+            Message::System { .. } => {}
+        }
     }
 
     /// Summarize older conversation history to reduce context usage.

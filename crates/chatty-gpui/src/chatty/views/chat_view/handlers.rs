@@ -695,9 +695,14 @@ impl ChatView {
             let id = pending.id.clone();
 
             // The request was raised on the stores of the conversation whose
-            // agent is waiting (AGE-195), execution or write.
-            if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>() {
-                store.resolve_approval(&id, approved);
+            // agent is waiting (AGE-195), execution or write. For a
+            // conversation running online those stores are on the server, so
+            // an id no local store knows goes over the wire instead (AGE-298).
+            if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>()
+                && !store.resolve_approval(&id, approved)
+            {
+                let send = store.resolve_approval_remotely(&id, approved);
+                cx.background_spawn(send).detach();
             }
 
             // Immediately clear pending approval to hide the bar
@@ -851,8 +856,11 @@ impl ChatView {
 
         match cx.try_global::<crate::chatty::models::ConversationsStore>() {
             Some(store) => {
+                // No local store holding the id means the question came from a
+                // conversation running online; its answers go over the wire.
                 if !store.resolve_clarification(&id, answers.clone()) {
-                    warn!(clarification_id = %id, "No pending clarification to resolve");
+                    let send = store.resolve_clarification_remotely(&id, answers.clone());
+                    cx.background_spawn(send).detach();
                 }
             }
             None => {

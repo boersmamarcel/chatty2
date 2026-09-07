@@ -38,6 +38,10 @@
 
 mod event;
 mod handler;
+mod hosted;
+mod move_conversation;
+/// Dispatching a turn to wherever its conversation runs (AGE-298).
+pub mod transport;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,6 +82,12 @@ pub use handler::{
     BREVITY_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler, TurnPolicy,
     is_agent_todo_tool,
 };
+pub use hosted::HostedSession;
+pub use move_conversation::{
+    BRING_BACK_SUMMARY, MoveSummary, RemoteConversation, TAKE_ONLINE_SUMMARY, fetch_hosted,
+    refuse_reason, take_online,
+};
+pub use transport as turn_transport;
 
 /// Everything a session needs from settings, by value. Loading is the
 /// frontend's job; the session never reaches for a repository.

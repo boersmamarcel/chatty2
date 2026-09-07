@@ -38,6 +38,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
         3,
         "ALTER TABLE conversations ADD COLUMN agent_task_snapshot TEXT;",
     ),
+    // AGE-298: where the conversation's turns run. NULL means local, so every
+    // row that predates the column keeps its meaning without a backfill.
+    (4, "ALTER TABLE conversations ADD COLUMN mode TEXT;"),
 ];
 
 /// SQLite-backed repository for conversations.
@@ -151,7 +154,7 @@ impl ConversationRepository for ConversationSqliteRepository {
         let pool = self.pool.clone();
         Box::pin(async move {
             let rows = sqlx::query(
-                "SELECT id, title, total_cost, updated_at
+                "SELECT id, title, total_cost, updated_at, mode
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -165,6 +168,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                     title: row.get("title"),
                     total_cost: row.get("total_cost"),
                     updated_at: row.get("updated_at"),
+                    mode: row.get("mode"),
                 })
                 .collect();
 
@@ -179,7 +183,8 @@ impl ConversationRepository for ConversationSqliteRepository {
             let row = sqlx::query(
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
-                        regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot
+                        regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot,
+                        mode
                  FROM conversations
                  WHERE id = ?",
             )
@@ -202,6 +207,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                 updated_at: r.get("updated_at"),
                 working_dir: r.get("working_dir"),
                 agent_task_snapshot: r.get("agent_task_snapshot"),
+                mode: r.get("mode"),
             }))
         })
     }
@@ -212,7 +218,8 @@ impl ConversationRepository for ConversationSqliteRepository {
             let rows = sqlx::query(
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
-                        regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot
+                        regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot,
+                        mode
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -236,6 +243,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                     updated_at: r.get("updated_at"),
                     working_dir: r.get("working_dir"),
                     agent_task_snapshot: r.get("agent_task_snapshot"),
+                    mode: r.get("mode"),
                 })
                 .collect())
         })
@@ -249,8 +257,9 @@ impl ConversationRepository for ConversationSqliteRepository {
                 "INSERT INTO conversations
                     (id, title, model_id, message_history, system_traces, token_usage,
                      attachment_paths, message_timestamps, message_feedback,
-                     regeneration_records, total_cost, created_at, updated_at, working_dir, agent_task_snapshot)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                     regeneration_records, total_cost, created_at, updated_at, working_dir, agent_task_snapshot,
+                     mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(id) DO UPDATE SET
                     title                = excluded.title,
                     model_id             = excluded.model_id,
@@ -264,7 +273,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                     total_cost           = excluded.total_cost,
                     updated_at           = excluded.updated_at,
                     working_dir          = excluded.working_dir,
-                    agent_task_snapshot  = excluded.agent_task_snapshot",
+                    agent_task_snapshot  = excluded.agent_task_snapshot,
+                    mode                 = excluded.mode",
             )
             .bind(&data.id)
             .bind(&data.title)
@@ -281,6 +291,7 @@ impl ConversationRepository for ConversationSqliteRepository {
             .bind(data.updated_at)
             .bind(&data.working_dir)
             .bind(&data.agent_task_snapshot)
+            .bind(&data.mode)
             .execute(&pool)
             .await?;
 
