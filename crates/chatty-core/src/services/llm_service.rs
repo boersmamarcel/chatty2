@@ -477,6 +477,45 @@ mod tests {
         assert_eq!(a.turn, 2);
     }
 
+    /// The wire field the hit rate actually comes from. The two tests above
+    /// start from an already-parsed `Usage`, so neither would notice
+    /// OpenRouter (or rig's mapping of it) moving `cached_tokens` — and a
+    /// silently-zero cache read is indistinguishable from a cache that is not
+    /// working, which is the thing ADR-0010's threshold is measured against
+    /// (AGE-278).
+    #[test]
+    fn openrouter_cached_tokens_reach_the_normalised_record() {
+        let reported: rig_core::providers::openrouter::Usage = serde_json::from_str(
+            r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120,
+                "prompt_tokens_details":{"cached_tokens":1200,"cache_write_tokens":300}}"#,
+        )
+        .expect("an OpenRouter usage block deserializes");
+        let call = normalize_usage(
+            UsageSemantics::InputIncludesCache,
+            1,
+            &rig_core::completion::Usage::from(&reported),
+        );
+        assert_eq!(call.cache_read_tokens, 1_200);
+        assert_eq!(call.cache_write_tokens, 300);
+        // OpenRouter counts both inside `prompt_tokens`; chatty stores the
+        // uncached share, so the three still add back to the whole prompt.
+        assert_eq!(call.input_tokens, 3_500);
+        assert_eq!(call.prompt_tokens(), 5_000);
+
+        let uncached: rig_core::providers::openrouter::Usage = serde_json::from_str(
+            r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120}"#,
+        )
+        .expect("usage without a details block deserializes");
+        let call = normalize_usage(
+            UsageSemantics::InputIncludesCache,
+            1,
+            &rig_core::completion::Usage::from(&uncached),
+        );
+        assert_eq!(call.cache_read_tokens, 0);
+        assert_eq!(call.input_tokens, 5_000);
+        assert_eq!(call.cache_hit_rate(), Some(0.0));
+    }
+
     #[test]
     fn usage_normalisation_never_underflows_on_inconsistent_counts() {
         let mut odd = rig_core::completion::Usage::new();

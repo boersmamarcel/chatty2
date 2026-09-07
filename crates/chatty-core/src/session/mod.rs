@@ -932,4 +932,6 @@ pub async fn replay_scenario(
 }
 
 #[cfg(test)]
+mod append_only_prefix;
+#[cfg(test)]
 mod tests;
