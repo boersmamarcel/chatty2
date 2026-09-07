@@ -15,6 +15,17 @@
 //! (AGE-205), which is a deliberate mutation of the last message and would
 //! mask the one this test is looking for.
 //!
+//! The OpenRouter path is recorded too (AGE-291), against a fake
+//! chat-completions daemon, because that is the production path and the
+//! moving breakpoint is a rewrite by design: the message that was last in
+//! turn N carries `cache_control` there and does not in turn N+1. On those
+//! bytes the append-only property fails at exactly that message and holds
+//! again once the markers are stripped — see
+//! [`openrouter_moving_breakpoint_rewrites_the_previously_last_message`].
+//! Whether the provider hashes the marker into the cached prefix is the
+//! measurement AGE-291 owes; `factories::agent_factory::cache_breakpoint_probe`
+//! is the harness for it.
+//!
 //! Two variants — a small tool result and one over the context shaper's 8 KB
 //! per-tool cap. Both hold on `main` today. AGE-277 expected the second to
 //! fail; it does not, and the reason is worth knowing before AGE-279 touches
@@ -38,20 +49,24 @@ use crate::factories::agent_factory::AgentBuildContext;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 
-// ── Fake Ollama daemon ───────────────────────────────────────────────────────
+// ── Fake provider daemons ────────────────────────────────────────────────────
 
-/// A localhost daemon that records request bodies and replays canned NDJSON.
+/// A localhost daemon that records request bodies and replays canned
+/// responses, one per connection, in order.
 ///
 /// Blocking, on its own OS thread: the workspace's tokio does not carry the
-/// `net` feature, and a socket server is not what this test is about.
-struct FakeOllama {
+/// `net` feature, and a socket server is not what this test is about. The
+/// same daemon plays Ollama (`/api/chat`, NDJSON) and an OpenAI-compatible
+/// endpoint (`/chat/completions`, SSE): rig only reads the body, so the
+/// content type is the whole difference.
+struct FakeDaemon {
     port: u16,
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
-impl FakeOllama {
-    /// Serve `responses` in order, one per `POST /api/chat`.
-    fn start(responses: Vec<String>) -> Self {
+impl FakeDaemon {
+    /// Serve `responses` in order, one per request, as `content_type`.
+    fn start(content_type: &'static str, responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port is available");
         let port = listener.local_addr().expect("bound address").port();
         let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
@@ -67,7 +82,7 @@ impl FakeOllama {
                     None => break,
                 }
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n\
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n",
                     response.len()
                 );
@@ -78,6 +93,17 @@ impl FakeOllama {
         });
 
         Self { port, bodies }
+    }
+
+    /// An Ollama daemon: one NDJSON record per `POST /api/chat`.
+    fn ollama(responses: Vec<String>) -> Self {
+        Self::start("application/x-ndjson", responses)
+    }
+
+    /// An OpenAI-compatible daemon, as OpenRouter's client sees it: one SSE
+    /// stream per `POST /chat/completions`.
+    fn openai_compatible(responses: Vec<String>) -> Self {
+        Self::start("text/event-stream", responses)
     }
 
     fn base_url(&self) -> String {
@@ -169,6 +195,61 @@ fn text_response(text: &str) -> String {
         + "\n"
 }
 
+/// The SSE frames rig's OpenAI-compatible decoder reads, one `data:` event
+/// per line plus the `[DONE]` sentinel.
+fn sse_stream(frames: &[serde_json::Value]) -> String {
+    frames
+        .iter()
+        .map(|frame| format!("data: {frame}\n\n"))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
+        .collect()
+}
+
+fn sse_usage() -> serde_json::Value {
+    serde_json::json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "total_tokens": 110,
+        "prompt_tokens_details": { "cached_tokens": 0 }
+    })
+}
+
+/// One chat-completions stream whose assistant turn calls `list_directory`.
+fn sse_tool_call_response(path: &str) -> String {
+    let arguments = serde_json::json!({ "path": path }).to_string();
+    sse_stream(&[
+        serde_json::json!({
+            "id": "gen-1", "model": "anthropic/claude-haiku-4.5",
+            "choices": [{ "index": 0, "delta": {
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "index": 0, "id": "call_1", "type": "function",
+                    "function": { "name": "list_directory", "arguments": arguments } }]
+            }, "finish_reason": null }]
+        }),
+        serde_json::json!({
+            "id": "gen-1", "model": "anthropic/claude-haiku-4.5",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+            "usage": sse_usage()
+        }),
+    ])
+}
+
+/// One chat-completions stream that ends the provider turn with plain text.
+fn sse_text_response(text: &str) -> String {
+    sse_stream(&[
+        serde_json::json!({
+            "id": "gen-2", "model": "anthropic/claude-haiku-4.5",
+            "choices": [{ "index": 0, "delta": { "role": "assistant", "content": text },
+                "finish_reason": null }]
+        }),
+        serde_json::json!({
+            "id": "gen-2", "model": "anthropic/claude-haiku-4.5",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+            "usage": sse_usage()
+        }),
+    ])
+}
+
 // ── Workspace fixture ────────────────────────────────────────────────────────
 
 /// A workspace whose `payload` directory holds `files` empty files with long
@@ -201,7 +282,39 @@ fn execution_settings(workspace: &Path) -> ExecutionSettingsModel {
     }
 }
 
-async fn session_against(daemon: &FakeOllama, workspace: &Path) -> AgentSession {
+/// The Ollama fixture: rig sends the body unmodified.
+async fn session_against(daemon: &FakeDaemon, workspace: &Path) -> AgentSession {
+    let model_config = ModelConfig::new(
+        "age-277".to_string(),
+        "Prefix Fixture".to_string(),
+        ProviderType::Ollama,
+        "llama3.2".to_string(),
+    );
+    let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
+        .with_base_url(daemon.base_url());
+    session_with(&model_config, &provider_config, workspace).await
+}
+
+/// The OpenRouter fixture: the production path, whose client is built on
+/// `PromptCachingHttpClient` and rewrites every chat-completions body.
+async fn session_against_openrouter(daemon: &FakeDaemon, workspace: &Path) -> AgentSession {
+    let model_config = ModelConfig::new(
+        "age-291".to_string(),
+        "Breakpoint Fixture".to_string(),
+        ProviderType::OpenRouter,
+        "anthropic/claude-haiku-4.5".to_string(),
+    );
+    let provider_config = ProviderConfig::new("OpenRouter".to_string(), ProviderType::OpenRouter)
+        .with_api_key("age-291-fixture-key".to_string())
+        .with_base_url(daemon.base_url());
+    session_with(&model_config, &provider_config, workspace).await
+}
+
+async fn session_with(
+    model_config: &ModelConfig,
+    provider_config: &ProviderConfig,
+    workspace: &Path,
+) -> AgentSession {
     let _ = crate::init_repositories();
 
     let settings = execution_settings(workspace);
@@ -211,21 +324,12 @@ async fn session_against(daemon: &FakeOllama, workspace: &Path) -> AgentSession 
         loop_guard: false,
     });
 
-    let model_config = ModelConfig::new(
-        "age-277".to_string(),
-        "Prefix Fixture".to_string(),
-        ProviderType::Ollama,
-        "llama3.2".to_string(),
-    );
-    let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
-        .with_base_url(daemon.base_url());
-
     session
         .create_conversation(
             "c1".to_string(),
             "New Chat".to_string(),
-            &model_config,
-            &provider_config,
+            model_config,
+            provider_config,
             AgentBuildContext {
                 mcp_tools: None,
                 exec_settings: Some(settings),
@@ -284,25 +388,45 @@ fn assert_no_stream_error(events: &[SessionEvent], label: &str) {
 
 // ── The prefix assertion ─────────────────────────────────────────────────────
 
-/// The `messages` array of `body`, one serialized element per message.
+/// The `messages` array of `body`, one element per message, as the bytes rig
+/// sent them.
 ///
-/// `serde_json` is built with `preserve_order` in this workspace, so
-/// re-serializing a parsed element reproduces the body's own key order and
-/// compact spacing: this is a byte comparison of each message, not a
-/// structural one.
+/// Each element is sliced out of the body with `RawValue` rather than parsed
+/// and re-serialized: this workspace's `serde_json` has no `preserve_order`,
+/// so a round trip would sort keys and turn this into a structural comparison.
+/// Prefix caching is byte-level, and so is this.
 fn message_elements(body: &[u8]) -> Vec<String> {
-    let request: serde_json::Value =
-        serde_json::from_slice(body).expect("the request body is JSON");
-    request["messages"]
-        .as_array()
-        .expect("the request body carries a messages array")
+    #[derive(serde::Deserialize)]
+    struct Body<'a> {
+        #[serde(borrow)]
+        messages: Vec<&'a serde_json::value::RawValue>,
+    }
+    let request: Body<'_> = serde_json::from_slice(body).expect("the request body is JSON");
+    request
+        .messages
         .iter()
-        .map(|message| serde_json::to_string(message).expect("a message re-serializes"))
+        .map(|message| message.get().to_string())
         .collect()
 }
 
 /// `later` must contain `earlier`'s messages as an exact leading run.
 fn assert_append_only(earlier: &[u8], later: &[u8]) {
+    if let Some(Rewrite { index, diff }) = first_rewritten_message(earlier, later) {
+        panic!(
+            "message {index} was rewritten between turns, so every cache \
+             block after it is invalidated:\n{diff}"
+        );
+    }
+}
+
+/// The first message of `earlier` that `later` does not carry byte for byte.
+struct Rewrite {
+    index: usize,
+    diff: String,
+}
+
+/// The first message `later` rewrote, or `None` when `later` extends `earlier`.
+fn first_rewritten_message(earlier: &[u8], later: &[u8]) -> Option<Rewrite> {
     let earlier = message_elements(earlier);
     let later = message_elements(later);
 
@@ -313,15 +437,60 @@ fn assert_append_only(earlier: &[u8], later: &[u8]) {
         earlier.len()
     );
 
-    for (index, (before, after)) in earlier.iter().zip(later.iter()).enumerate() {
-        if before != after {
-            panic!(
-                "message {index} was rewritten between turns, so every cache \
-                 block after it is invalidated:\n{}",
-                message_diff(before, after)
-            );
+    earlier
+        .iter()
+        .zip(later.iter())
+        .enumerate()
+        .find(|(_, (before, after))| before != after)
+        .map(|(index, (before, after))| Rewrite {
+            index,
+            diff: message_diff(before, after),
+        })
+}
+
+/// Indexes of the messages carrying a `cache_control` marker on any content
+/// block: rig's system breakpoint and this layer's moving one (AGE-205).
+fn breakpoint_indexes(body: &[u8]) -> Vec<usize> {
+    let request: serde_json::Value = serde_json::from_slice(body).expect("JSON body");
+    request["messages"]
+        .as_array()
+        .expect("a messages array")
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            message["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|b| b.get("cache_control").is_some()))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// `body` with every `cache_control` marker removed and a one-block text
+/// content folded back to the string it was before the marker was added, so
+/// two requests can be compared on the content the provider bills for.
+fn without_breakpoints(body: &[u8]) -> Vec<u8> {
+    let mut request: serde_json::Value = serde_json::from_slice(body).expect("JSON body");
+    for message in request["messages"]
+        .as_array_mut()
+        .expect("a messages array")
+    {
+        let Some(blocks) = message["content"].as_array_mut() else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            if let Some(block) = block.as_object_mut() {
+                block.remove("cache_control");
+            }
+        }
+        if let [block] = blocks.as_slice()
+            && block["type"] == "text"
+            && let Some(text) = block["text"].as_str()
+        {
+            message["content"] = serde_json::Value::String(text.to_string());
         }
     }
+    serde_json::to_vec(&request).expect("the body re-serializes")
 }
 
 /// A unified diff of one rewritten message. Split on `,` as well as newlines so
@@ -341,7 +510,7 @@ fn message_diff(before: &str, after: &str) -> String {
 #[tokio::test]
 async fn append_only_prefix_holds_for_a_small_tool_result() {
     let workspace = workspace_with_payload(3);
-    let daemon = FakeOllama::start(vec![
+    let daemon = FakeDaemon::ollama(vec![
         tool_call_response("payload"),
         text_response("Three files."),
         text_response("Still three."),
@@ -385,7 +554,7 @@ async fn append_only_prefix_holds_for_a_small_tool_result() {
 #[tokio::test]
 async fn append_only_prefix_survives_a_large_tool_result() {
     let workspace = workspace_with_payload(150);
-    let daemon = FakeOllama::start(vec![
+    let daemon = FakeDaemon::ollama(vec![
         tool_call_response("payload"),
         text_response("A lot of files."),
         text_response("Still a lot."),
@@ -411,6 +580,70 @@ async fn append_only_prefix_survives_a_large_tool_result() {
     );
 
     assert_append_only(&bodies[1], &bodies[2]);
+}
+
+/// The same two turns on the production path (AGE-291): the bodies are the
+/// ones `PromptCachingHttpClient` emits, after the rewrite.
+///
+/// Each request carries two breakpoints — rig's on the system message and the
+/// moving one on the latest user/assistant message. Between turn 1's last
+/// request and turn 2's first, the moving one leaves the message it was on, so
+/// on the literal bytes the append-only property fails at exactly that message
+/// and at no other; with the markers stripped it holds. Whether the provider
+/// counts the marker as content is what
+/// `factories::agent_factory::cache_breakpoint_probe` measures.
+#[tokio::test]
+async fn openrouter_moving_breakpoint_rewrites_the_previously_last_message() {
+    let workspace = workspace_with_payload(3);
+    let daemon = FakeDaemon::openai_compatible(vec![
+        sse_tool_call_response("payload"),
+        sse_text_response("Three files."),
+        sse_text_response("Still three."),
+    ]);
+    let mut session = session_against_openrouter(&daemon, workspace.path()).await;
+
+    let first = run_and_commit_turn(&mut session, "what is in payload?").await;
+    assert_no_stream_error(&first, "turn 1");
+    let second = run_and_commit_turn(&mut session, "and now?").await;
+    assert_no_stream_error(&second, "turn 2");
+
+    let bodies = daemon.bodies();
+    assert_eq!(bodies.len(), 3, "expected three provider requests");
+
+    let turn_1 = breakpoint_indexes(&bodies[1]);
+    let turn_2 = breakpoint_indexes(&bodies[2]);
+    assert_eq!(turn_1.len(), 2, "turn 1 breakpoints: {turn_1:?}");
+    assert_eq!(turn_2.len(), 2, "turn 2 breakpoints: {turn_2:?}");
+    assert_eq!(
+        (turn_1[0], turn_2[0]),
+        (0, 0),
+        "rig's system breakpoint stays put"
+    );
+    let previously_last = turn_1[1];
+    assert!(
+        turn_2[1] > previously_last,
+        "the moving breakpoint advanced from message {previously_last} to {}",
+        turn_2[1]
+    );
+
+    let rewrite = first_rewritten_message(&bodies[1], &bodies[2])
+        .expect("moving the breakpoint rewrites the message it left");
+    assert_eq!(
+        rewrite.index, previously_last,
+        "the first rewritten message is the one the breakpoint left:\n{}",
+        rewrite.diff
+    );
+    eprintln!(
+        "AGE-291: on the OpenRouter path message {} is rewritten between turns:\n{}",
+        rewrite.index, rewrite.diff
+    );
+
+    // The marker is the only difference: on the content the provider bills
+    // for, turn 2 still extends turn 1.
+    assert_append_only(
+        &without_breakpoints(&bodies[1]),
+        &without_breakpoints(&bodies[2]),
+    );
 }
 
 /// Why the test above passes today, in the shaper's own terms.
