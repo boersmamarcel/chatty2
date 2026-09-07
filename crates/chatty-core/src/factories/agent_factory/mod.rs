@@ -1,4 +1,6 @@
 mod azure_auth_http;
+#[cfg(test)]
+mod cache_breakpoint_probe;
 mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
