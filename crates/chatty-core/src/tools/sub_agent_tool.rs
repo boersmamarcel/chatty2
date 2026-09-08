@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use crate::models::message_types::ToolSource;
+use crate::services::git_service::GitService;
 use crate::session::SessionEvent;
 use crate::tools::ToolError;
-use crate::services::git_service::GitService;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
 /// Prefix for a headless child's turn events on stderr: one
@@ -651,7 +651,14 @@ mod tests {
             receivers.push((task, install_progress_channel(&slot)));
             let script = script.clone();
             children.push(std::thread::spawn(move || {
-                run_sub_agent_with_progress(script, "model-1".into(), task.into(), false, None, slot)
+                run_sub_agent_with_progress(
+                    script,
+                    "model-1".into(),
+                    task.into(),
+                    false,
+                    None,
+                    slot,
+                )
             }));
         }
         let outputs: Vec<String> = children
