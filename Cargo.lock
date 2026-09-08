@@ -1995,6 +1995,7 @@ dependencies = [
  "crossterm 0.29.0",
  "dirs 6.0.0",
  "futures",
+ "parking_lot",
  "ratatui",
  "rig-agent",
  "rig-core",

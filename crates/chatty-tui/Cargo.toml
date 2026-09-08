@@ -47,6 +47,7 @@ chatty-core = { path = "../chatty-core", features = ["test-support"] }
 # gateway's own dependencies rather than a stand-in for them.
 axum = "0.8"
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
+parking_lot.workspace = true
 
 [features]
 default = ["mcp"]

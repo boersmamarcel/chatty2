@@ -29,11 +29,14 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 use super::protocol::{ParticipantCard, ParticipantSkill};
@@ -83,6 +86,14 @@ const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often the runner checks whether the child has registered yet.
 const REGISTRATION_POLL: Duration = Duration::from_millis(5);
+
+/// How much of a worker's stderr to keep for an error message.
+///
+/// A tail, not a head: when a worker dies, the last thing it said is the
+/// reason. It is drained *continuously* rather than read on failure — a piped
+/// stream nobody reads fills its buffer and blocks the writer, which for a
+/// chatty child that logs every tool call is a deadlock, not a slow path.
+const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 /// Spawns chatty children and exposes them under one agent name.
 pub struct LocalRunner {
@@ -204,7 +215,9 @@ impl LocalRunner {
             None => None,
         };
 
-        let child = self.spawn(&name, workspace.as_ref())?;
+        let mut child = self.spawn(&name, workspace.as_ref())?;
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
+        let stderr_drain = drain_stderr(&mut child, stderr_tail.clone());
         let mut worker = Worker {
             name: name.clone(),
             child: Some(child),
@@ -212,6 +225,8 @@ impl LocalRunner {
             registry: self.registry.clone(),
             task_id: None,
             succeeded: false,
+            stderr_tail,
+            stderr_drain,
         };
 
         self.await_registration(&mut worker).await?;
@@ -234,9 +249,10 @@ impl LocalRunner {
             .arg("--participant-name")
             .arg(name)
             .stdin(std::process::Stdio::null())
-            // A worker's answer comes back over the socket, so its stdout is
-            // only its log. Inherited, it would interleave with the broker's.
-            .stdout(std::process::Stdio::piped())
+            // The answer comes back over the socket, so the child's stdout is
+            // redundant; discarded rather than piped, so there is one less
+            // stream that could fill and block it.
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
@@ -269,7 +285,7 @@ impl LocalRunner {
             if let Some(child) = worker.child.as_mut()
                 && let Some(status) = child.try_wait()?
             {
-                let stderr = worker.drain_stderr().await;
+                let stderr = worker.stderr_tail().await;
                 bail!(
                     "worker '{}' exited before registering ({status}){}",
                     worker.name,
@@ -306,6 +322,9 @@ pub struct Worker {
     registry: ParticipantRegistry,
     task_id: Option<String>,
     succeeded: bool,
+    /// The tail of the child's stderr, kept for error messages.
+    stderr_tail: Arc<Mutex<String>>,
+    stderr_drain: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -331,22 +350,25 @@ impl Worker {
         self.succeeded = succeeded;
     }
 
-    /// Whatever the child wrote to stderr, for an error message.
-    async fn drain_stderr(&mut self) -> String {
-        use tokio::io::AsyncReadExt;
-        let Some(child) = self.child.as_mut() else {
-            return String::new();
-        };
-        let Some(mut stderr) = child.stderr.take() else {
-            return String::new();
-        };
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        String::from_utf8_lossy(&buf)
-            .trim()
-            .chars()
-            .take(500)
-            .collect()
+    /// The last thing the child said, for an error message.
+    ///
+    /// Awaits the drain task first: the child has exited by the time this is
+    /// called, so its stderr is closed and the task is about to finish — and
+    /// without the await, the report would race the reason.
+    async fn stderr_tail(&mut self) -> String {
+        if let Some(drain) = self.stderr_drain.take() {
+            let _ = drain.await;
+        }
+        let tail = self
+            .stderr_tail
+            .lock()
+            .map(|t| t.clone())
+            .unwrap_or_default();
+        let tail = tail.trim();
+        match tail.char_indices().nth_back(499) {
+            Some((at, _)) => tail[at..].to_string(),
+            None => tail.to_string(),
+        }
     }
 }
 
@@ -375,6 +397,27 @@ fn warn_if_still_registered(registry: &ParticipantRegistry, name: &str) {
             "Worker still registered at reap; its socket close will deregister it"
         );
     }
+}
+
+/// Keep reading the child's stderr so it can never block on a full pipe,
+/// retaining only the tail.
+fn drain_stderr(child: &mut Child, tail: Arc<Mutex<String>>) -> Option<JoinHandle<()>> {
+    let stderr = child.stderr.take()?;
+    Some(tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(mut tail) = tail.lock() else { return };
+            tail.push_str(&line);
+            tail.push('\n');
+            if tail.len() > STDERR_TAIL_BYTES {
+                let cut = tail.len() - STDERR_TAIL_BYTES;
+                let cut = (cut..tail.len())
+                    .find(|i| tail.is_char_boundary(*i))
+                    .unwrap_or(tail.len());
+                tail.drain(..cut);
+            }
+        }
+    }))
 }
 
 #[cfg(test)]
