@@ -624,15 +624,15 @@ fn describe(event: &SessionEvent) -> String {
             u.calls.len()
         ),
         SessionEvent::TurnMessages(messages) => format!("TurnMessages(len={})", messages.len()),
-        SessionEvent::SubAgent(progress) => match progress {
+        SessionEvent::Delegation(progress) => match progress {
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => {
-                format!("SubAgent(Started {agent_name:?}, {prompt:?})")
+                format!("Delegation(Started {agent_name:?}, {prompt:?})")
             }
-            InvokeAgentProgress::Text(text) => format!("SubAgent(Text {text:?})"),
+            InvokeAgentProgress::Text(text) => format!("Delegation(Text {text:?})"),
             InvokeAgentProgress::Finished { success, result } => {
-                format!("SubAgent(Finished success={success}, {result:?})")
+                format!("Delegation(Finished success={success}, {result:?})")
             }
         },
         SessionEvent::Error(error) => format!("Error(kind={:?}, {:?})", error.kind, error.message),

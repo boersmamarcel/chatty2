@@ -275,8 +275,8 @@ pub struct ChatEngine {
     /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
     pub remote_agents: Vec<A2aAgentConfig>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
-    /// When `true`, this engine is running as a sub-agent and must not expose
-    /// the sub_agent tool (preventing recursive sub-agent spawning).
+    /// When `true`, this engine is itself a delegated worker: `/agent` is
+    /// refused, so a worker cannot fan out further from the chat box.
     pub is_sub_agent: bool,
 
     // Display state
@@ -641,7 +641,7 @@ impl ChatEngine {
 
         // Reset scroll to bottom when sending
         self.pin_to_bottom();
-        self.transcript.reset_sub_agent_row();
+        self.transcript.reset_delegation_row();
 
         // Add user message to display, unless this is a protocol follow-up
         // that already rendered its own system line (AGE-242 / D3).
@@ -839,33 +839,33 @@ impl ChatEngine {
                 self.pull_request = pull_request.map(|pr| *pr);
                 EngineAction::Redraw
             }
-            AppEvent::SubAgentProgress(line) => {
+            AppEvent::DelegationProgress(line) => {
                 let line = sanitize_progress_line(&line);
                 if line.is_empty() {
                     return EngineAction::None;
                 }
-                self.transcript.sub_agent_progress(line);
+                self.transcript.delegation_progress(line);
                 EngineAction::Redraw
             }
-            AppEvent::SubAgent(progress) => {
-                self.session.note_sub_agent(&progress);
-                let line = helpers::sub_agent_line(&progress);
+            AppEvent::Delegation(progress) => {
+                self.session.note_delegation(&progress);
+                let line = helpers::delegation_line(&progress);
                 if matches!(
                     progress,
                     chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
                 ) {
-                    self.transcript.sub_agent_finished(line);
+                    self.transcript.delegation_finished(line);
                 } else {
                     let line = sanitize_progress_line(&line);
                     if line.is_empty() {
                         return EngineAction::None;
                     }
-                    self.transcript.sub_agent_progress(line);
+                    self.transcript.delegation_progress(line);
                 }
                 EngineAction::Redraw
             }
-            AppEvent::SubAgentFinished(message) => {
-                self.transcript.sub_agent_finished(message);
+            AppEvent::DelegationFinished(message) => {
+                self.transcript.delegation_finished(message);
                 EngineAction::Redraw
             }
             AppEvent::TerminalInput(_) | AppEvent::Tick => {

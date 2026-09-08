@@ -342,8 +342,8 @@ flight.
 `invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
 The gateway spawns `chatty-tui --participant-socket … --participant-name …`, the child
 registers, and its turn comes back as A2A status and artifact updates. This is
-ADR-0011's replacement for `sub_agent`: one fan-out path, a public wire format, and a
-place to put discovery, budgets and the ledger.
+One fan-out path, a public wire format, and a place to put discovery, budgets and the
+ledger.
 
 The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
@@ -353,13 +353,12 @@ concept; usage belongs to the ledger). The mapper and the one-task loop around i
 beside the broker's own half of the protocol, not in this crate, because a microVM's
 `chatty-server` is a worker too and the parent must not be able to tell the two apart.
 `crates/chatty-tui/src/participant/equivalence.rs` asserts the
-parent's tool-call trace is identical to the `sub_agent` path's for every scripted
-scenario, which is how ADR-0011's first kill criterion is checked in CI rather than by
-inspection.
+parent's tool-call trace carries every tool call the child reported, for every
+scripted scenario — how ADR-0011's first kill criterion is checked in CI rather than
+by inspection.
 
 Each worker runs in its own `git worktree` under the conversation's workspace
-(ADR-0012), the same isolation `sub_agent` uses — both go through
-`chatty_core::services::worker_tree`.
+(ADR-0012), through `chatty_core::services::worker_tree`.
 
 **Per-endpoint concurrency budget (ADR-0011 C6).** Workers all talk to the same model
 server, so the broker holds a semaphore per *endpoint* — the server's base URL, not a
@@ -376,36 +375,9 @@ from the environment), then `default_endpoint_budget`, which is **1**. Every wai
 `tracing` event carrying the endpoint, its limit and the queue depth at that moment, so
 a budget that is too tight looks like a queue that never empties.
 
-> A cloud endpoint gets the same default of 1 unless it is overridden. That is
-> deliberate for now — `local-agent` replaces `sub_agent`, which was one child per call
-> — but it is the knob to turn first if delegation feels serialised on OpenRouter.
+> A cloud endpoint gets the same default of 1 unless it is overridden. It is the knob
+> to turn first if delegation feels serialised on OpenRouter.
 
 **Known limitation.** The worker's model is its own configured default, not the parent
-conversation's. The retired `sub_agent` tool passed `--model`; the broker cannot,
-because the model would have to ride on the A2A request and A2A has no field for it.
-Carried as an open question on AGE-301.
-
-## Sub-agent tool (retired)
-
-> **Gone as of ADR-0011's C4 (AGE-303).** `invoke_agent` against
-> [`local-agent`](#local-agent--a-chatty-agent-in-its-own-process) is the only
-> delegation path now: one fan-out path, a public wire format, and one place to put
-> discovery, budgets and the ledger.
-
-The `sub_agent` tool spawned `chatty-tui --headless` as a subprocess and followed the
-child by scraping a line protocol off its stderr — the child's `SessionEvent`s, JSON,
-one per line. The kill criterion (AGE-302) compared that path against the broker's and
-the broker carried the turn at the same granularity, so the second path went.
-
-What survives it:
-
-* **The rendering.** `chatty_core::tools::worker_progress::progress_text_for_event`
-  turns a worker's events into the parent's progress lines; the broker's mapper calls
-  it, so a delegated turn reads in the transcript the way it always did.
-* **The transcript row.** A delegated agent's progress still rides on a synthetic
-  `sub_agent` tool call (`SystemTrace::new_sub_agent`), which is what conversations on
-  disk already record. The name is the row's, not the tool's.
-* **`/agent <prompt>`** in the TUI and desktop, which spawns a headless child of its
-  own and shows its stderr. It never used the tool.
-* **`chatty-tui --headless`**, unchanged for scripting; it just has no parent-facing
-  event protocol on stderr any more.
+conversation's: the model would have to ride on the A2A request and A2A has no field
+for it. Carried as an open question on AGE-301.

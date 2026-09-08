@@ -408,7 +408,7 @@ pub struct ChattyApp {
     /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
     _mcp_notifier: Entity<AgentConfigNotifier>,
     /// Tool-call IDs whose ToolCallBlocks are visualised via the sub-agent
-    /// progress channel (`invoke_agent` and `sub_agent`) instead of the main trace.
+    /// progress channel (`invoke_agent`) instead of the main trace.
     active_invoke_agent_ids: std::collections::HashSet<String>,
 }
 
@@ -791,7 +791,7 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
 /// Classify a built-in tool call by name into a [`ToolSource`] for data-egress badges.
 ///
 /// Internet-facing tools are classified here. Module agent calls (invoke_agent /
-/// sub_agent) are classified separately by [`classify_agent_source`].
+/// are classified separately by [`classify_agent_source`].
 pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
     chatty_core::models::message_types::classify_tool_source(tool_name)
 }

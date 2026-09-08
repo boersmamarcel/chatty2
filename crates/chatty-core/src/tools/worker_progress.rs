@@ -1,12 +1,10 @@
 //! What a delegated worker's events look like in the parent's transcript,
 //! and which binary a worker runs in.
 //!
-//! Both halves outlived the tool they were written for. Until ADR-0011's C4
-//! this lived in `sub_agent_tool.rs`, next to a second delegation path that
-//! spawned a child and scraped its events off stderr as text. That path is
-//! gone — `invoke_agent` against the broker is the only one — but the worker
-//! is still a `chatty-tui` process, and the parent still renders its tool
-//! calls as one line each. Only the transport changed.
+//! A worker is a `chatty-tui` process the broker spawns per task
+//! (ADR-0011 C2), and the parent renders each of its tool calls as one line.
+//! Both halves are here because both ends need them: the runner resolves the
+//! binary, the broker's mapper renders the lines.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

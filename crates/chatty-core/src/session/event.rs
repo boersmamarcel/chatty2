@@ -11,7 +11,7 @@
 //! consumed before the session existed (AGE-194), not a superset: each maps
 //! onto something both `AppEvent` and `StreamManagerEvent` already carried, or
 //! that both frontends consumed out-of-band (`ApiCallUsage`, `TurnMessages`,
-//! `SubAgent`, `FollowUp`).
+//! `Delegation`, `FollowUp`).
 //!
 //! # Ordering
 //!
@@ -87,7 +87,7 @@ pub enum SessionEvent {
     /// round-trips behind the final text (AGE-247).
     TurnMessages(Vec<Message>),
     /// Progress from a sub-agent the turn invoked.
-    SubAgent(InvokeAgentProgress),
+    Delegation(InvokeAgentProgress),
     /// The stream ended in an error. `TurnEnded` still follows.
     Error(StreamError),
     /// The cancel flag was seen. `TurnEnded` still follows.

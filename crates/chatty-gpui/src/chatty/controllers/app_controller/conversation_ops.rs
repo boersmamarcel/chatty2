@@ -618,7 +618,7 @@ impl ChattyApp {
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                     conv.streaming_trace().cloned(),
-                    conv.streaming_sub_agent_trace().cloned(),
+                    conv.streaming_delegation_trace().cloned(),
                     conv.working_dir().cloned(),
                     conv.agent_task_snapshot().cloned(),
                 )
@@ -628,7 +628,7 @@ impl ChattyApp {
             model_id,
             streaming_content,
             streaming_trace,
-            streaming_sub_agent_trace,
+            streaming_delegation_trace,
             conversation_working_dir,
             agent_task_snapshot,
         )) = minimal_data
@@ -702,10 +702,10 @@ impl ChattyApp {
                         view.restore_live_trace(trace, cx);
                     }
 
-                    if let Some(trace) = streaming_sub_agent_trace {
+                    if let Some(trace) = streaming_delegation_trace {
                         debug!(conv_id = %conv_id, trace_items = trace.items.len(),
                                "Restoring sub-agent progress trace from Conversation model");
-                        view.restore_sub_agent_progress(trace, cx);
+                        view.restore_delegation_progress(trace, cx);
                     }
                 }
             });

@@ -1,33 +1,25 @@
-//! AGE-301's verification: a delegated task through the broker produces the
-//! same tool-call sequence in the parent's trace as the `sub_agent` path it
-//! replaced.
+//! AGE-301's verification: the parent's trace of a delegated task carries
+//! every tool call the child reported, in order.
 //!
 //! ADR-0011's first kill criterion says A2A's task model must carry a
 //! delegated turn at the granularity the parent already renders. "The same"
 //! is made precise here: for every scripted scenario both frontends are
-//! characterized against, the parent's progress lines are compared between
-//!
-//! * the **reference rendering** — the child's own events put through
-//!   `progress_text_for_event`, which is exactly what the retired `sub_agent`
-//!   tool showed (C4 deleted the tool and the stderr line protocol that
-//!   carried these events; the rendering is the part that mattered and it
-//!   still lives in `chatty_core::tools::worker_progress`);
-//! * the **broker path** — the child maps its events to frames
-//!   ([`TaskMapper`]), the broker turns them into A2A status and artifact
-//!   updates, and the parent's `invoke_agent` tool renders *those*.
+//! characterized against, the parent's progress lines are compared against
+//! the child's own events put through `progress_text_for_event` — the
+//! rendering both ends share.
 //!
 //! The broker path runs end to end: a real `ProtocolGateway` on a real port,
 //! a real `A2aClient` inside a real `InvokeAgentTool`. Only the child's turn
-//! is scripted, because that is the input both paths share.
+//! is scripted, because that is the input both sides share.
 //!
-//! # The one difference, and why it is not a regression
+//! # Text is extra
 //!
-//! The broker path also carries the assistant's **text** as artifact chunks,
-//! so the parent sees the answer stream in. The retired path could not: the
-//! answer only arrived at the end, on the child's stdout. The comparison
+//! The broker also carries the assistant's **text** as artifact chunks, so
+//! the parent sees the answer stream in while the turn runs.
+//! `progress_text_for_event` says nothing about text, so the comparison
 //! subtracts exactly those chunks and asserts the remainder is identical —
-//! the broker path is a superset, never a subset, which is the direction the
-//! kill criterion cares about.
+//! the broker is a superset of what the child reported, never a subset,
+//! which is the direction the kill criterion cares about.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,15 +54,14 @@ fn policy() -> TurnPolicy {
 }
 
 // ---------------------------------------------------------------------------
-// The reference rendering: what the parent showed before the broker
+// The reference rendering: the child's own events, rendered
 // ---------------------------------------------------------------------------
 
-/// The progress lines the parent's `sub_agent` tool used to show.
+/// The progress lines the child's events amount to.
 ///
-/// The transport it read them over is gone; the rendering is not, and the
-/// rendering is what the kill criterion compares. Every event is offered:
-/// `progress_text_for_event` is the filter, and it ignores the events that
-/// never crossed the boundary anyway (`Text`, `TurnMessages`).
+/// Every event is offered: `progress_text_for_event` is the filter, and it
+/// ignores the ones that say nothing about tool activity (`Text`,
+/// `TurnMessages`).
 fn reference_trace(events: &[SessionEvent]) -> Vec<String> {
     let mut names = HashMap::new();
     events
@@ -79,8 +70,8 @@ fn reference_trace(events: &[SessionEvent]) -> Vec<String> {
         .collect()
 }
 
-/// The assistant text of a scripted turn — the answer the retired path
-/// returned on stdout, and what the broker path streams as artifacts.
+/// The assistant text of a scripted turn, which the broker streams as
+/// artifact chunks.
 fn assistant_text(events: &[SessionEvent]) -> Vec<String> {
     events
         .iter()
@@ -203,8 +194,8 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     }
 }
 
-/// Remove the artifact chunks — the text the retired path could not carry —
-/// so what is left is comparable with [`reference_trace`].
+/// Remove the artifact chunks — the assistant's text — so what is left is
+/// comparable with [`reference_trace`].
 fn without_text_chunks(progress: &[String], text: &[String]) -> Vec<String> {
     let mut remaining: Vec<&String> = text.iter().collect();
     progress
@@ -226,7 +217,7 @@ fn without_text_chunks(progress: &[String], text: &[String]) -> Vec<String> {
 
 /// The issue's "Verify", over every scenario both frontends are pinned to.
 #[tokio::test]
-async fn a_delegated_task_renders_the_same_tool_calls_as_the_retired_path() {
+async fn a_delegated_task_renders_every_tool_call_the_child_reported() {
     for scenario in scenarios().into_iter().chain([clarification_scenario()]) {
         let name = scenario.name;
         let events = replay_scenario(scenario, policy()).await;
@@ -237,16 +228,14 @@ async fn a_delegated_task_renders_the_same_tool_calls_as_the_retired_path() {
 
         assert_eq!(
             expected, over_the_broker,
-            "scenario '{name}': the parent's tool-call trace differs between the \
-             rendering the retired path produced and the broker's.\n  expected: \
-             {expected:?}\n  broker: {:?}",
+            "scenario '{name}': the parent's tool-call trace differs from what \
+             the child reported.\n  expected: {expected:?}\n  broker: {:?}",
             run.progress
         );
     }
 }
 
-/// The answer itself survives too — the broker path returns to the model what
-/// `sub_agent` returned on stdout.
+/// The answer itself reaches the parent model, not just the progress lines.
 #[tokio::test]
 async fn the_delegated_answer_reaches_the_parent_model() {
     let scenario = scenarios()

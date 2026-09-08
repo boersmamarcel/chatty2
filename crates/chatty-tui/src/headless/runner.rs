@@ -9,10 +9,8 @@
 //! rectangle stay in the engine.
 //!
 //! A parent that delegated this turn follows it through an
-//! [`EventObserver`] — the broker participant's socket (AGE-301). Until
-//! ADR-0011's C4 there was a second way: a line protocol on stderr that the
-//! parent's `sub_agent` tool scraped. That tool and its protocol are gone,
-//! so stderr is the human-readable log and nothing else.
+//! [`EventObserver`] — the broker participant's socket (AGE-301). Stderr is
+//! the human-readable log and nothing else.
 
 use anyhow::{Context, Result};
 use chatty_core::models::TurnOutcome;
@@ -157,7 +155,7 @@ impl HeadlessRunner {
         } else {
             TurnKind::Human
         };
-        self.transcript.reset_sub_agent_row();
+        self.transcript.reset_delegation_row();
         if show_in_transcript {
             self.transcript.push_user(message.clone());
         }
@@ -250,18 +248,18 @@ impl HeadlessRunner {
             }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
-            AppEvent::SubAgent(progress) => {
-                self.session.note_sub_agent(&progress);
-                let line = crate::engine::helpers::sub_agent_line(&progress);
+            AppEvent::Delegation(progress) => {
+                self.session.note_delegation(&progress);
+                let line = crate::engine::helpers::delegation_line(&progress);
                 if matches!(
                     progress,
                     chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
                 ) {
-                    self.transcript.sub_agent_finished(line);
+                    self.transcript.delegation_finished(line);
                 } else {
                     let line = crate::engine::sanitize_progress_line(&line);
                     if !line.is_empty() {
-                        self.transcript.sub_agent_progress(line);
+                        self.transcript.delegation_progress(line);
                     }
                 }
             }

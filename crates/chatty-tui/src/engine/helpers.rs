@@ -111,7 +111,7 @@ pub(super) fn run_sub_agent_process(
             for line in reader.lines().map_while(Result::ok) {
                 // Every line is the child's human-readable log now: ADR-0011's
                 // C4 removed the machine lines this used to filter out.
-                let _ = event_tx.send(AppEvent::SubAgentProgress(line));
+                let _ = event_tx.send(AppEvent::DelegationProgress(line));
             }
         }
     });
@@ -135,7 +135,7 @@ pub(super) fn run_sub_agent_process(
 }
 
 /// The transcript line for a sub-agent progress event.
-pub(crate) fn sub_agent_line(
+pub(crate) fn delegation_line(
     progress: &chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
 ) -> String {
     use chatty_core::models::message_types::ToolSource;

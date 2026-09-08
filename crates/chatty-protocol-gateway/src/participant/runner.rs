@@ -4,17 +4,15 @@
 //! default — that is not a connected process but a factory: a task addressed
 //! to it spawns a child, waits for that child to register over the
 //! participant socket, and routes the task to it. To the caller it is an A2A
-//! agent like any other, which is the whole point: `invoke_agent` replaces
-//! `sub_agent` without the parent learning a second fan-out path.
+//! agent like any other, which is the whole point: one fan-out path for the
+//! parent, whoever ends up serving the task.
 //!
 //! # Lifetime
 //!
-//! One child per task. The child is capable of serving tasks until its socket
-//! closes, but the runner's policy is one-shot, which keeps the process
-//! lifecycle identical to the `sub_agent` it replaces — that equivalence is
-//! what makes ADR-0011's second kill criterion (AGE-302) a fair comparison
-//! rather than a comparison of process-reuse strategies. Making a worker
-//! persistent is a change to this file and nothing else.
+//! One child per task. The child is capable of serving tasks until its
+//! socket closes, but the runner's policy is one-shot: a task gets a
+//! process, and the process dies with it. Making a worker persistent is a
+//! change to this file and nothing else.
 //!
 //! # Where a worker runs
 //!
@@ -23,7 +21,7 @@
 //! in `chatty-core`, so this crate does not decide: the embedder supplies a
 //! [`WorkspaceFactory`], and the broker only spawns in whatever directory it
 //! is handed. Without a factory the child inherits the broker's own
-//! directory, exactly as `sub_agent` did before AGE-314.
+//! directory.
 
 use std::future::Future;
 use std::path::PathBuf;

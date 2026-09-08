@@ -53,7 +53,7 @@ impl ChatView {
         self.parsed_cache.clear();
 
         // Reset sub-agent tracking (sub-agent progress is UI-only, not in history)
-        self.sub_agent_progress_msg_idx = None;
+        self.delegation_progress_msg_idx = None;
 
         self.messages.clear();
         self.reset_transcript_list();
