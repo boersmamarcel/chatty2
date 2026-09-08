@@ -666,3 +666,47 @@ async fn session_events_match_goldens() {
         assert_golden(&dir, name, &events);
     }
 }
+
+/// A hosted turn is recorded by the local session exactly like a local one
+/// (AGE-298): the user message is committed when the turn opens, and the
+/// reply the wire carries back is finalized into the conversation. Without
+/// `open_hosted_turn` the session never knows a turn ran, `finish_turn` finds
+/// nothing to finish, and the reply is dropped — which is how a conversation
+/// taken online came back with none of the turns it ran there.
+#[tokio::test]
+async fn a_hosted_turn_is_recorded_by_the_local_session() {
+    let mut session = session_with_conversation().await;
+    let flag = Arc::new(AtomicBool::new(false));
+    session
+        .open_hosted_turn(&TurnInput::text("what did we discuss"), flag)
+        .expect("the turn opens");
+    assert!(
+        session.is_turn_active(),
+        "the session knows a turn is running"
+    );
+    assert!(
+        session
+            .open_hosted_turn(&TurnInput::text("again"), Arc::new(AtomicBool::new(false)))
+            .is_err(),
+        "a second turn is refused while one runs"
+    );
+
+    for event in [
+        SessionEvent::TurnStarted,
+        SessionEvent::Text("we talked ".into()),
+        SessionEvent::Text("about the weather".into()),
+        SessionEvent::TurnEnded,
+    ] {
+        session.apply(&event);
+    }
+    assert!(
+        session.finish_turn(None, Vec::new()).is_some(),
+        "the turn finalizes like a local one"
+    );
+    assert!(!session.is_turn_active());
+
+    let messages = session.conversation().unwrap().messages();
+    assert_eq!(messages.len(), 2, "user message and reply: {messages:?}");
+    assert!(matches!(messages[0], Message::User { .. }));
+    assert!(matches!(messages[1], Message::Assistant { .. }));
+}

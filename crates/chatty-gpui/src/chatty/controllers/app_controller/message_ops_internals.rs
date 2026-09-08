@@ -141,10 +141,16 @@ pub(super) async fn run_llm_stream(
     debug!(conv_id = %conv_id, "Beginning turn on the session");
     let turn = cx
         .update_global::<ConversationsStore, _>(|store, _cx| {
-            let session = store
-                .get_session_mut(&conv_id)
+            let (session, hosted) = store
+                .turn_targets(&conv_id)
                 .ok_or_else(|| anyhow::anyhow!("Conversation not found for the turn"))?;
-            session.begin_turn_with_flag(input, cancel_flag, move |event| sink.handle(event))
+            // The one line that differs for a conversation running online:
+            // who opens the stream. The sink below, the `apply` into the local
+            // conversation and the finalize are the same either way, because
+            // the wire is a serialization of `SessionEvent` (AGE-298).
+            turn_transport::begin_turn(session, hosted, input, cancel_flag, move |event| {
+                sink.handle(event)
+            })
         })
         .map_err(|e| anyhow::anyhow!(e.to_string()))??;
     turn.await;

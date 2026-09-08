@@ -27,6 +27,50 @@ pub enum MessageFeedback {
     ThumbsDown,
 }
 
+/// Where a conversation's turns run (AGE-298).
+///
+/// The unit is the conversation, not the app: the conversation is already the
+/// unit of session ownership on both sides — one `AgentSession` per
+/// conversation locally, one per conversation in `chatty-server` — so a local
+/// Ollama chat and a hosted long-running task can sit in the sidebar at once.
+///
+/// A conversation that moves keeps its local row and its history; the mode is
+/// what records that it now runs elsewhere. That is what "marked as moved,
+/// kept, not deleted" means here, and it is what makes the move idempotent:
+/// nothing local changes until the upload has returned a remote id, and then
+/// exactly one field flips.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationMode {
+    /// Turns run in-process against this conversation's own `AgentSession`.
+    #[default]
+    Local,
+    /// Turns run on a `chatty-server`, addressed by `remote_id`.
+    Hosted {
+        /// Base URL of the server, without a trailing slash.
+        server_url: String,
+        /// The conversation's id *on that server*, which is not the local id.
+        remote_id: String,
+    },
+}
+
+impl ConversationMode {
+    /// The server this conversation runs on, if it is hosted.
+    pub fn hosted_on(&self) -> Option<(&str, &str)> {
+        match self {
+            ConversationMode::Local => None,
+            ConversationMode::Hosted {
+                server_url,
+                remote_id,
+            } => Some((server_url.as_str(), remote_id.as_str())),
+        }
+    }
+
+    pub fn is_hosted(&self) -> bool {
+        matches!(self, ConversationMode::Hosted { .. })
+    }
+}
+
 /// Outcome of `Conversation::finalize_turn` (AGE-243 / D4).
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnOutcome {
@@ -104,6 +148,9 @@ pub struct Conversation {
     working_dir: Option<PathBuf>,
     /// Latest persisted agent todo panel snapshot for this conversation.
     agent_task_snapshot: Option<AgentTaskSnapshot>,
+    /// Where this conversation's turns run (AGE-298). `Local` for every
+    /// conversation that predates the mode.
+    mode: ConversationMode,
     /// Effective workspace directory the current agent was built with.
     agent_workspace_dir: Option<PathBuf>,
     /// Progress slot for the invoke_agent tool in this conversation's agent.
@@ -172,6 +219,7 @@ impl Conversation {
             agent_task_snapshot: None,
             agent_workspace_dir,
             invoke_agent_progress_slot: built.invoke_agent_progress_slot,
+            mode: ConversationMode::Local,
         })
     }
 
@@ -260,6 +308,14 @@ impl Conversation {
             .agent_task_snapshot
             .as_deref()
             .and_then(|json| Self::deserialize_agent_task_snapshot(json).ok());
+        // A row written before AGE-298 has no mode, and a row whose mode does
+        // not parse is treated the same way: local. Refusing to load the
+        // conversation over an unreadable mode would lose its history.
+        let mode = data
+            .mode
+            .as_deref()
+            .and_then(|json| Self::deserialize_mode(json).ok())
+            .unwrap_or_default();
 
         // Convert Unix timestamps to SystemTime
         let created_at = UNIX_EPOCH + Duration::from_secs(data.created_at as u64);
@@ -285,6 +341,7 @@ impl Conversation {
             agent_task_snapshot,
             agent_workspace_dir,
             invoke_agent_progress_slot: built.invoke_agent_progress_slot,
+            mode,
         })
     }
 
@@ -524,6 +581,26 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize agent task snapshot")
     }
 
+    /// Where this conversation's turns run (AGE-298).
+    pub fn mode(&self) -> &ConversationMode {
+        &self.mode
+    }
+
+    /// Move this conversation between local and hosted.
+    ///
+    /// The caller owns the transfer of history; this only records where turns
+    /// go from here, and is the last step of a move so a failed transfer
+    /// leaves the conversation exactly as it was.
+    pub fn set_mode(&mut self, mode: ConversationMode) {
+        self.mode = mode;
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Deserialize the persisted mode from JSON.
+    pub fn deserialize_mode(json: &str) -> Result<ConversationMode> {
+        serde_json::from_str(json).context("Failed to deserialize conversation mode")
+    }
+
     /// Get regeneration records for this conversation
     pub fn regeneration_records(&self) -> &[RegenerationRecord] {
         &self.regeneration_records
@@ -581,6 +658,7 @@ impl Conversation {
             created_at: self.created_at,
             working_dir: self.working_dir.clone(),
             agent_task_snapshot: self.agent_task_snapshot.clone(),
+            mode: self.mode.clone(),
         }
     }
 
@@ -642,6 +720,34 @@ impl Conversation {
         }
 
         self.entries = new_entries;
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Adopt a history that came from somewhere else (AGE-298).
+    ///
+    /// Both directions of a local↔hosted move end here: `chatty-server`
+    /// importing a conversation the user took online, and this end rebuilding
+    /// one it brought back. The messages are the whole payload — traces,
+    /// attachments and feedback are per-message metadata that the wire does
+    /// not carry, so they start empty rather than being invented, which is
+    /// what AGE-298's table means by saying attachments do not move.
+    ///
+    /// Distinct from [`replace_history`](Self::replace_history), which is
+    /// summarization: that one treats index 0 as a generated summary and
+    /// carries the surviving tail's metadata across. Importing has no tail to
+    /// carry and no summary to special-case, and conflating the two would put
+    /// the first imported message's metadata on the wrong row.
+    pub fn import_history(&mut self, messages: Vec<Message>) {
+        self.entries = messages
+            .into_iter()
+            .map(|message| MessageEntry {
+                message,
+                system_trace: None,
+                attachment_paths: Vec::new(),
+                timestamp: None,
+                feedback: None,
+            })
+            .collect();
         self.updated_at = SystemTime::now();
     }
 
@@ -825,6 +931,7 @@ pub struct ConversationSnapshot {
     pub created_at: SystemTime,
     pub working_dir: Option<PathBuf>,
     pub agent_task_snapshot: Option<AgentTaskSnapshot>,
+    pub mode: ConversationMode,
 }
 
 impl ConversationSnapshot {
@@ -858,6 +965,15 @@ impl ConversationSnapshot {
                 .map(serde_json::to_string)
                 .transpose()
                 .context("Failed to serialize agent task snapshot")?,
+            // Local is the absent case, so a local conversation's row stays
+            // byte-identical to what it was before the mode existed.
+            mode: match &self.mode {
+                ConversationMode::Local => None,
+                hosted => Some(
+                    serde_json::to_string(hosted)
+                        .context("Failed to serialize conversation mode")?,
+                ),
+            },
         })
     }
 }
@@ -1144,6 +1260,10 @@ mod tests {
             created_at: UNIX_EPOCH + Duration::from_secs(1_699_999_000),
             working_dir: Some(PathBuf::from("/tmp/workspace")),
             agent_task_snapshot: None,
+            mode: ConversationMode::Hosted {
+                server_url: "http://localhost:8081".to_string(),
+                remote_id: "remote-1".to_string(),
+            },
         }
     }
 
@@ -1177,6 +1297,59 @@ mod tests {
 
         // Stamped at build time, not copied from `created_at`.
         assert!(data.updated_at >= data.created_at);
+    }
+
+    /// A hosted conversation's mode has to survive the row, or "bring this
+    /// back" would have no server to ask after a restart (AGE-298).
+    #[test]
+    fn the_mode_round_trips_through_the_row() {
+        let data = populated_snapshot().to_data().unwrap();
+        let mode = Conversation::deserialize_mode(data.mode.as_deref().expect("a hosted row"))
+            .expect("the mode parses");
+        assert_eq!(
+            mode,
+            ConversationMode::Hosted {
+                server_url: "http://localhost:8081".to_string(),
+                remote_id: "remote-1".to_string(),
+            }
+        );
+    }
+
+    /// Local is the absent case, so nothing changes on disk for the
+    /// conversations that never move — which is every conversation that
+    /// predates the mode.
+    #[test]
+    fn a_local_conversation_writes_no_mode_at_all() {
+        let snapshot = ConversationSnapshot {
+            mode: ConversationMode::Local,
+            ..populated_snapshot()
+        };
+        assert!(snapshot.to_data().unwrap().mode.is_none());
+    }
+
+    /// A row written before the mode existed still loads, as Local. This is
+    /// the compatibility guarantee AGE-298 asks for, and it is a property of
+    /// the *deserializer*, so it is tested through serde and not through a
+    /// hand-built struct.
+    #[test]
+    fn a_row_from_before_the_mode_loads_as_local() {
+        let row = serde_json::json!({
+            "id": "old-1",
+            "title": "Old",
+            "model_id": "model-1",
+            "message_history": "[]",
+            "system_traces": "[]",
+            "created_at": 1,
+            "updated_at": 2,
+        });
+        let data: ConversationData = serde_json::from_value(row).expect("an old row still loads");
+        assert!(data.mode.is_none());
+        let mode = data
+            .mode
+            .as_deref()
+            .and_then(|json| Conversation::deserialize_mode(json).ok())
+            .unwrap_or_default();
+        assert_eq!(mode, ConversationMode::Local);
     }
 
     /// `Conversation`'s long-standing per-field `serialize_*` methods and the

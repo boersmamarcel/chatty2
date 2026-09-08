@@ -82,6 +82,14 @@ pub struct ExecutionSettingsModel {
     /// Embedding model identifier (e.g., "text-embedding-3-small").
     #[serde(default)]
     pub embedding_model: Option<String>,
+    /// Offer the per-conversation move between this machine and a hosted
+    /// server (AGE-308). Developer-only until online mode is account-scoped:
+    /// a move carries the transcript and nothing else today — no memory, no
+    /// MCP, no skills — so the default build does not offer it at all.
+    /// Conversations already marked hosted still load and run; this gates
+    /// only the move UI.
+    #[serde(default)]
+    pub hosted_conversations_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -114,6 +122,7 @@ impl Default for ExecutionSettingsModel {
             embedding_enabled: false, // Opt-in: requires embedding provider
             embedding_provider: None,
             embedding_model: None,
+            hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
         }
     }
 }

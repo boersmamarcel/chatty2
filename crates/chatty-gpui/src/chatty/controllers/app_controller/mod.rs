@@ -40,7 +40,9 @@ use chatty_core::exporters::jsonl_exporter::{
 use chatty_core::factories::AgentClient;
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::repositories::{ConversationData, ConversationRepository};
-use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
+use chatty_core::session::{
+    AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind, turn_transport,
+};
 use chatty_core::tools::LocalModuleAgentSummary;
 
 mod conversation_ops;
@@ -49,6 +51,8 @@ mod export_ops;
 mod message_ops;
 mod message_ops_internals;
 mod slash_commands;
+
+pub(crate) use conversation_ops_modify::move_ui_enabled;
 
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
 /// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
@@ -510,6 +514,9 @@ impl ChattyApp {
                 }
                 SidebarEvent::ExportConversation(conv_id) => {
                     app.export_conversation_markdown(conv_id, cx);
+                }
+                SidebarEvent::MoveConversation(conv_id) => {
+                    app.confirm_conversation_move(conv_id, cx);
                 }
                 SidebarEvent::ToggleCollapsed(collapsed) => {
                     // Optional: Could save collapsed state to settings here

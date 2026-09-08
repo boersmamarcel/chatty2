@@ -459,6 +459,9 @@ impl ChattyApp {
                             .as_ref()
                             .map(|path| path.to_string_lossy().to_string()),
                         agent_task_snapshot: None,
+                        // A new conversation is local; taking it online is an
+                        // explicit action on an existing one (AGE-298).
+                        mode: None,
                     };
 
                     repo.save(&conv_id, data)
