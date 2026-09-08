@@ -1,8 +1,13 @@
 # chatty-protocol-gateway
 
-HTTP server that exposes loaded WASM modules through three protocol surfaces
+HTTP server that exposes agents through three protocol surfaces
 simultaneously. All three use **plain HTTP + JSON over TCP** — there is no
 gRPC, no WebSocket (except MCP SSE), and no binary framing.
+
+An agent behind those surfaces is either a **loaded WASM module** or a
+**local participant**: a process that registered over a Unix socket and is
+served at the same `/a2a/{name}` routes (ADR-0011). The participant socket is
+the one thing here that is not HTTP; see [Local participants](#local-participants).
 
 ## Transport
 
@@ -17,6 +22,7 @@ gRPC, no WebSocket (except MCP SSE), and no binary framing.
 | A2A streaming | `POST /a2a/{module}` (method: `message/stream`) | `text/event-stream` |
 | Agent card (per module) | `GET /a2a/{module}/.well-known/agent.json` | `application/json` |
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
+| Participant registration | Unix socket (`with_participant_socket`) | newline-delimited JSON |
 
 ## Protocol summary
 
@@ -37,8 +43,8 @@ output.
 ### 3 · A2A (Agent-to-Agent)
 
 Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `message/stream`,
-`tasks/get`). Like the Completion API, the full agentic loop runs inside the
-WASM module.
+`tasks/get`). Like the Completion API, the agentic loop runs behind the
+gateway — inside the WASM module, or inside the participant process.
 
 **`message/send`** returns a complete JSON-RPC response:
 
@@ -76,11 +82,16 @@ POST /v1/{m}/chat/…  ────►│ openai.rs handler            │
 POST /mcp/{m}        ────►│ mcp.rs handler               ├──► ModuleRegistry
 POST /a2a/{m}        ────►│ a2a.rs handler               │    (wasmtime instances)
 GET  /.well-known/…  ────►│ a2a.rs handler               │
-                          └──────────────────────────────┘
+                          │            │                 │
+                          │            ▼                 │
+                          │ a2a_participant.rs           ├──► ParticipantRegistry
+                          └──────────────────────────────┘         ▲
+                                                                   │ Unix socket
+                                                          child processes
 ```
 
-The gateway holds a single `ModuleRegistry` (behind an `Arc<RwLock<…>>`).
-All three handlers call the same underlying WIT exports:
+The gateway holds a single `ModuleRegistry` (behind an `Arc<RwLock<…>>`) and
+a single `ParticipantRegistry`. The module handlers call the WIT exports:
 
 | Handler | WIT export called |
 |---------|-------------------|
@@ -88,6 +99,61 @@ All three handlers call the same underlying WIT exports:
 | MCP     | `agent::list-tools`, `agent::invoke-tool` |
 | A2A `message/send` | `agent::chat` |
 | A2A `message/stream` | `agent::chat` (SSE wrapper) |
+
+## Local participants
+
+A process that connects to the participant socket, publishes an agent card
+and answers tasks is addressable at `/a2a/{name}` exactly like a module —
+same JSON-RPC methods, same SSE frames, so an A2A client cannot tell the two
+apart. **Participants are looked up first**, so a live process shadows a
+module of the same name.
+
+The socket carries newline-delimited JSON, not A2A: A2A is the gateway's
+public wire format, and a child process is not a public endpoint.
+
+```
+participant → {"type":"register","card":{"name":"worker-1",…}}
+broker      → {"type":"registered","name":"worker-1"}
+broker      → {"type":"task","taskId":"task-…","text":"summarise foo.rs"}
+participant → {"type":"status","taskId":"task-…","state":"working","message":"read_file"}
+participant → {"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
+participant → {"type":"status","taskId":"task-…","state":"completed"}
+```
+
+`status` states are A2A's (`submitted`, `working`, `input-required`,
+`completed`, `failed`, `canceled`); the terminal three end the task.
+
+**The connection is the liveness signal.** There is no heartbeat: when the
+socket closes, for any reason, the participant is deregistered and every task
+it still owed is failed with a `failed` status naming the disconnect. A
+process that has died cannot fail to send a heartbeat, so the socket is the
+only signal that cannot lie.
+
+Opt in with `ProtocolGateway::with_participant_socket(path)`; without it no
+socket is opened. Unix only — the hosted transport is vsock (AGE-307).
+
+### The local runner
+
+`ProtocolGateway::with_local_runner` publishes one *virtual* agent —
+`local-agent` — that is not a connected process but a factory. A task
+addressed to it spawns a `chatty-tui` child, waits for that child to register
+over the socket, routes the task to it, and reaps it. To the caller it is an
+A2A agent like any other, which is the point: `invoke_agent` replaces
+`sub_agent` without the parent learning a second fan-out path.
+
+**One child per task.** The child can serve tasks until its socket closes, but
+the runner's policy is one-shot, keeping the process lifecycle identical to
+the `sub_agent` it replaces — that equivalence is what makes ADR-0011's second
+kill criterion a comparison of the hop rather than of process-reuse
+strategies. Cancellation of a running task is enforced by reaping the child;
+a persistent worker is a change to `runner.rs` and nothing else.
+
+**Where a worker runs** is the embedder's decision, not the gateway's.
+ADR-0012 gives each worker a `git worktree`, and git lives in `chatty-core`,
+so the runner takes a `WorkspaceFactory` and only spawns in whatever directory
+it is handed. Without a factory the child inherits the broker's own directory.
+A factory that is configured and then *fails* fails the task rather than
+silently running the worker unisolated.
 
 ## Running
 

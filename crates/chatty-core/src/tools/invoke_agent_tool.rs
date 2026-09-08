@@ -10,6 +10,15 @@ use crate::services::a2a_client::A2aClient;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
 
+/// The agent name the broker publishes for "a chatty agent in its own
+/// process" (ADR-0011 C2).
+///
+/// Defined here rather than in the gateway because both ends need it and the
+/// gateway cannot depend on this crate; the wiring that starts the broker
+/// passes this constant to `LocalRunner::with_agent_name`, so the two cannot
+/// drift.
+pub const LOCAL_AGENT_NAME: &str = "local-agent";
+
 /// Progress events emitted by the invoke_agent tool during streaming execution.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum InvokeAgentProgress {
@@ -80,6 +89,9 @@ pub struct InvokeAgentTool {
     client: A2aClient,
     /// Shared slot for sending progress events to the UI stream loop.
     progress_slot: InvokeAgentProgressSlot,
+    /// Name of the broker's local-worker agent, when one is published
+    /// (ADR-0011 C2). Resolved after remote agents and before modules.
+    local_agent: Option<String>,
 }
 
 impl InvokeAgentTool {
@@ -95,7 +107,16 @@ impl InvokeAgentTool {
             gateway_base_url,
             client: A2aClient::with_timeout(std::time::Duration::from_secs(300)),
             progress_slot: Arc::new(Mutex::new(None)),
+            local_agent: None,
         }
+    }
+
+    /// Offer the broker's local-worker agent (ADR-0011 C2), which spawns a
+    /// chatty child per task. Only meaningful when the gateway is running,
+    /// since that is what serves it.
+    pub fn with_local_agent(mut self, name: impl Into<String>) -> Self {
+        self.local_agent = Some(name.into());
+        self
     }
 
     /// Returns a clone of the progress slot for the stream loop to install a sender.
@@ -190,7 +211,38 @@ impl Tool for InvokeAgentTool {
             return self.call_streaming(config, &prompt).await;
         }
 
-        // 2. Check local WASM module agents
+        // 2. The broker's local worker: a chatty child in its own process.
+        //    Ahead of modules because it is the replacement for `sub_agent`,
+        //    and a module cannot claim its reserved name by accident.
+        if let Some(local) = self
+            .local_agent
+            .as_deref()
+            .filter(|local| **local == agent_name)
+        {
+            let Some(ref base_url) = self.gateway_base_url else {
+                return Err(InvokeAgentError::InvocationFailed(format!(
+                    "Agent '{local}' needs the protocol gateway. \
+                         Enable it in Settings \u{2192} Modules."
+                )));
+            };
+
+            info!(agent = %local, "Delegating to a local worker through the broker");
+            let config = A2aAgentConfig {
+                name: local.to_string(),
+                url: format!("{}/a2a/{}", base_url, local),
+                api_key: None,
+                enabled: true,
+                skills: vec!["delegate".to_string()],
+            };
+            self.send_progress(InvokeAgentProgress::Started {
+                agent_name: local.to_string(),
+                prompt: prompt.clone(),
+                source: ToolSource::Local,
+            });
+            return self.call_streaming(&config, &prompt).await;
+        }
+
+        // 3. Check local WASM module agents
         if let Some(module) = self.module_agents.iter().find(|m| m.name == agent_name) {
             if !module.supports_a2a {
                 return Err(InvokeAgentError::InvocationFailed(format!(
@@ -227,11 +279,12 @@ impl Tool for InvokeAgentTool {
             return self.call_streaming(&config, &prompt).await;
         }
 
-        // 3. Not found
+        // 4. Not found
         let available: Vec<String> = self
             .remote_agents
             .iter()
             .map(|a| a.name.clone())
+            .chain(self.local_agent.clone())
             .chain(self.module_agents.iter().map(|m| m.name.clone()))
             .collect();
 

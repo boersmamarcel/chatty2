@@ -14,6 +14,10 @@
 //! | `GET`  | `/a2a/{module}/.well-known/agent.json` | Per-module A2A agent card |
 //! | `POST` | `/a2a/{module}` | A2A JSON-RPC (`message/send`, `tasks/get`) |
 //!
+//! `{module}` also resolves a *local participant* — a process registered
+//! over the participant socket (see [`participant`]). Participants are
+//! looked up first, so a live process shadows a module of the same name.
+//!
 //! # Quick start
 //!
 //! ```rust,no_run
@@ -41,5 +45,6 @@
 
 mod gateway;
 mod handlers;
+pub mod participant;
 
 pub use gateway::{GatewayState, ProtocolGateway};

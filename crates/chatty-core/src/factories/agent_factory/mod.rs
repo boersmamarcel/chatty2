@@ -1140,12 +1140,24 @@ impl AgentClient {
         // times out, so the model must not see the tool at all.
         let ask_user_tool = pending_clarifications.map(AskUserTool::new);
 
+        // The broker's local worker exists exactly when the gateway that
+        // serves it does (ADR-0011 C2); the gateway publishes it whenever it
+        // starts, so its port is the whole condition.
+        let local_agent = gateway_port.map(|_| crate::tools::LOCAL_AGENT_NAME);
+
         // Create list_agents tool (always available)
-        let list_agents_tool =
+        let mut list_agents_tool =
             ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
+        if let Some(name) = local_agent {
+            list_agents_tool = list_agents_tool.with_local_worker(name);
+        }
 
         // Create invoke_agent tool (always available)
-        let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        let mut invoke_agent_tool =
+            InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        if let Some(name) = local_agent {
+            invoke_agent_tool = invoke_agent_tool.with_local_agent(name);
+        }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
         let sub_agent_tool: Option<SubAgentTool> = if sub_agent_enabled {

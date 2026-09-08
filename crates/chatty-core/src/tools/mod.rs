@@ -229,8 +229,8 @@ pub use git_tool::{
     GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
     GitSwitchBranchTool,
 };
-pub use invoke_agent_tool::InvokeAgentTool;
-pub use list_agents_tool::{ListAgentsTool, LocalModuleAgentSummary};
+pub use invoke_agent_tool::{InvokeAgentTool, LOCAL_AGENT_NAME};
+pub use list_agents_tool::{ListAgentsTool, LocalModuleAgentSummary, LocalWorkerAgentSummary};
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
 #[cfg(feature = "pdf")]
@@ -253,6 +253,7 @@ pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
 pub use sub_agent_tool::{
     CHATTY_EVENT_PREFIX, SubAgentTool, format_event_line, is_chatty_event_line, parse_event_line,
+    progress_text_for_event, worker_executable,
 };
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
