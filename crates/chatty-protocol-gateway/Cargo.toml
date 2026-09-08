@@ -17,10 +17,18 @@ async-stream = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
+# The participant socket is verified against the client the rest of the app
+# already uses (`A2aClient`), not a stub of it: ADR-0011's first kill
+# criterion is about what a real caller sees. chatty-core does not depend on
+# this crate, so this dev-only edge is acyclic.
+chatty-core = { path = "../chatty-core" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tower = "0.5"
 axum = { version = "0.8", features = ["macros"] }
+futures = { workspace = true }
+tempfile = { workspace = true }

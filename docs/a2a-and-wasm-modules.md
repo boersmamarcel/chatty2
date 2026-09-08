@@ -246,7 +246,7 @@ exposes every loaded module through three protocols at once:
 | Method | Path | Protocol | Description |
 |:-------|:-----|:---------|:------------|
 | `GET` | `/` | — | JSON index of all modules and endpoints |
-| `GET` | `/.well-known/agent.json` | A2A | Aggregated agent card (all modules) |
+| `GET` | `/.well-known/agent.json` | A2A | Aggregated agent card (modules and participants) |
 | `GET` | `/a2a/{module}/.well-known/agent.json` | A2A | Per-module agent card |
 | `POST` | `/a2a/{module}` | A2A | JSON-RPC: `message/send`, `message/stream`, `tasks/get` |
 | `POST` | `/v1/{module}/chat/completions` | OpenAI | Module-specific chat completion |
@@ -272,8 +272,28 @@ The gateway's `message/stream` handler (`handlers/a2a.rs`):
 
 `GET /.well-known/agent.json` returns a gateway-level card
 (`{"schema_version": "0.1", "gateway": true, "agents": [...]}`) listing every loaded
-module agent with its name, `displayName`, description, version, skills and
-`capabilities.streaming`.
+module agent and every registered participant with its name, `displayName`,
+description, version, skills and `capabilities.streaming`.
+
+### Local participants (ADR-0011)
+
+`{module}` in the A2A routes above also resolves a **local participant**: a
+process that connected to the gateway's Unix socket, published an agent card
+and answers tasks over that socket. ADR-0011 routes all fleet coordination —
+local and hosted — through this one broker rather than through a second
+fan-out path, so a child process and a WASM module are the same thing to an
+A2A caller. Participants are looked up **first**, so a live process shadows a
+module of the same name.
+
+The socket carries newline-delimited JSON frames (`register`, `task`,
+`status`, `artifact`, `cancel`), which the gateway maps onto the same A2A
+status and artifact updates a module produces. The connection is the liveness
+signal: closing it deregisters the participant and fails every task it still
+owed. The frames and the mapping are documented in
+[`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
+
+Opening the socket is opt-in (`ProtocolGateway::with_participant_socket`) and
+Unix-only; the hosted transport is vsock (AGE-307).
 
 ## LLM-facing tools
 
@@ -307,13 +327,45 @@ API key values are **never exposed** to the LLM — only `has_api_key: true/fals
 ```
 
 Resolution order: remote A2A agents first (a remote agent shadows a local module with
-the same name), then local module agents, which require `supports_a2a = true` and a
-running gateway (otherwise the tool reports that the gateway is off and points to
-Settings → Modules). Both paths stream through `A2aClient::send_message_stream()`;
-progress (`InvokeAgentProgress`) is forwarded to the UI so the user sees intermediate
-output while the tool call is in flight.
+the same name), then **`local-agent`** — the broker's local worker (below) — then local
+module agents, which require `supports_a2a = true` and a running gateway (otherwise the
+tool reports that the gateway is off and points to Settings → Modules). Every path
+streams through `A2aClient::send_message_stream()`; progress (`InvokeAgentProgress`) is
+forwarded to the UI so the user sees intermediate output while the tool call is in
+flight.
+
+### `local-agent` — a chatty agent in its own process
+
+`invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
+The gateway spawns `chatty-tui --participant-socket … --participant-name …`, the child
+registers, and its turn comes back as A2A status and artifact updates. This is
+ADR-0011's replacement for `sub_agent`: one fan-out path, a public wire format, and a
+place to put discovery, budgets and the ledger.
+
+The child maps its `SessionEvent`s to frames in
+`crates/chatty-tui/src/participant/mapping.rs` — tool starts and finishes become
+`working` status messages, assistant text becomes artifact chunks, and the turn's token
+usage rides in the terminal status's `metadata` (A2A has no usage concept; usage
+belongs to the ledger). `crates/chatty-tui/src/participant/equivalence.rs` asserts the
+parent's tool-call trace is identical to the `sub_agent` path's for every scripted
+scenario, which is how ADR-0011's first kill criterion is checked in CI rather than by
+inspection.
+
+Each worker runs in its own `git worktree` under the conversation's workspace
+(ADR-0012), the same isolation `sub_agent` uses — both go through
+`chatty_core::services::worker_tree`.
+
+**Known limitation.** The worker's model is its own configured default, not the parent
+conversation's. `sub_agent` passes `--model`; the broker cannot, because the model
+would have to ride on the A2A request and A2A has no field for it. Carried as an open
+question on AGE-301.
 
 ## Sub-agent tool (separate mechanism)
+
+> **Being retired.** ADR-0011 replaces this with `invoke_agent` against
+> [`local-agent`](#local-agent--a-chatty-agent-in-its-own-process), so there is one
+> fan-out path rather than two. The `CHATTY_EVENT` scraping described below goes with
+> it (AGE-303). It is still the path in use until then.
 
 The `sub_agent` tool is a **different mechanism** from A2A invocation. It spawns
 `chatty-tui` in headless mode as a subprocess:

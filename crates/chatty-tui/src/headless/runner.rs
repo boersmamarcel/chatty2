@@ -31,6 +31,15 @@ use crate::events::AppEvent;
 /// a test hands in a collector.
 pub type EventLineWriter = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Takes the turn's events instead of the `CHATTY_EVENT` lines.
+///
+/// A child running as a broker participant (AGE-301) reports over its socket,
+/// where the events are frames rather than text. Installing an observer
+/// *replaces* the lines rather than adding to them: ADR-0011 retires the
+/// scraped stdio protocol, and emitting both would leave a second parser
+/// alive that nothing reads.
+pub type EventObserver = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
+
 pub struct HeadlessRunner {
     pub session: AgentSession,
     /// The settings the next turn runs under. Headless recovery narrows
@@ -43,6 +52,7 @@ pub struct HeadlessRunner {
     skill_service: chatty_core::services::SkillService,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_line_writer: EventLineWriter,
+    event_observer: Option<EventObserver>,
     /// An agent-protocol follow-up that arrived while a turn was already
     /// streaming; sent once the turn ends (AGE-242 / D3).
     pending_agent_follow_up: Option<String>,
@@ -69,6 +79,7 @@ impl HeadlessRunner {
             skill_service,
             event_tx,
             event_line_writer: Arc::new(|line| eprintln!("{line}")),
+            event_observer: None,
             pending_agent_follow_up: None,
         }
     }
@@ -77,6 +88,12 @@ impl HeadlessRunner {
     #[cfg(test)]
     pub fn set_event_line_writer(&mut self, writer: EventLineWriter) {
         self.event_line_writer = writer;
+    }
+
+    /// Send the turn's events to `observer` instead of writing
+    /// `CHATTY_EVENT` lines (AGE-301).
+    pub fn set_event_observer(&mut self, observer: EventObserver) {
+        self.event_observer = Some(observer);
     }
 
     /// Build the agent (with the session's store handles) and its conversation.
@@ -185,14 +202,21 @@ impl HeadlessRunner {
         }
     }
 
-    /// The sink a turn emits into: the event goes out to a parent process
-    /// as a `CHATTY_EVENT` line, then to `run_headless` as an `AppEvent`.
+    /// The sink a turn emits into: the event goes out to the parent — as a
+    /// `CHATTY_EVENT` line, or to an observer that has replaced them — then
+    /// to `run_headless` as an `AppEvent`.
     pub(crate) fn event_sink(&self) -> impl FnMut(SessionEvent) + Send + 'static {
         let event_tx = self.event_tx.clone();
         let writer = self.event_line_writer.clone();
+        let observer = self.event_observer.clone();
         move |event| {
-            if let Some(line) = format_event_line(&event) {
-                writer(line);
+            match observer.as_ref() {
+                Some(observer) => observer(&event),
+                None => {
+                    if let Some(line) = format_event_line(&event) {
+                        writer(line);
+                    }
+                }
             }
             let _ = event_tx.send(AppEvent::from(event));
         }

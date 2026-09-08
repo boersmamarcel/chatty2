@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use crate::models::message_types::ToolSource;
-use crate::services::git_service::GitService;
+use crate::services::worker_tree::{self, WorkerTree};
 use crate::session::SessionEvent;
 use crate::tools::ToolError;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
@@ -47,7 +47,13 @@ pub fn parse_event_line(line: &str) -> Option<SessionEvent> {
 /// Compact progress text for the parent UI from a child's event: `name` on
 /// a tool start, `✓ name` / `✗ name` on its result, and the child's stream
 /// error. `names` remembers each tool call's name until its result arrives.
-fn progress_text_for_event(
+///
+/// Public because a child that reports over the broker socket (AGE-301)
+/// renders the same lines from the same events. Two copies of these strings
+/// would make the two delegation paths differ in the parent's transcript for
+/// no reason anyone chose - and ADR-0011's first kill criterion is measured
+/// by diffing exactly that transcript.
+pub fn progress_text_for_event(
     event: &SessionEvent,
     names: &mut HashMap<String, String>,
 ) -> Option<String> {
@@ -65,6 +71,24 @@ fn progress_text_for_event(
         SessionEvent::Error(error) => Some(format!("error: {}", error.message)),
         _ => None,
     }
+}
+
+/// The `chatty-tui` binary a delegated task runs in: next to the current
+/// binary if it is there, otherwise whatever is on `PATH`.
+///
+/// Shared with the broker's local runner (AGE-301), which spawns the same
+/// binary. ADR-0011's second kill criterion compares the two paths, and
+/// resolving the executable differently would put a different build on one
+/// side of that comparison.
+pub fn worker_executable() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("chatty-tui")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
+            warn!("chatty-tui not found next to current binary, falling back to PATH");
+            PathBuf::from("chatty-tui")
+        })
 }
 
 /// Maximum number of characters from stderr to include in error messages.
@@ -241,16 +265,7 @@ impl Tool for SubAgentTool {
             "Launching sub-agent for delegated task"
         );
 
-        // Find the chatty-tui binary: check same directory as current binary first,
-        // then fall back to PATH resolution (may fail at spawn time if not found).
-        let exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("chatty-tui")))
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| {
-                warn!("chatty-tui not found next to current binary, falling back to PATH");
-                PathBuf::from("chatty-tui")
-            });
+        let exe = worker_executable();
 
         let auto_approve = self.auto_approve;
         let progress_slot = self.progress_slot.clone();
@@ -259,7 +274,9 @@ impl Tool for SubAgentTool {
         // editing one file produce a git conflict the leader can see, rather
         // than a last-writer-wins result neither of them reported.
         let worker = self.prepare_worktree().await;
-        let workspace = worker.as_ref().map(|w| w.path.clone());
+        let workspace = worker
+            .as_ref()
+            .map(|w| w.path.to_string_lossy().to_string());
 
         // Run the subprocess in a blocking task to avoid blocking the async runtime.
         let result = tokio::task::spawn_blocking(move || {
@@ -277,19 +294,17 @@ impl Tool for SubAgentTool {
         // The worker's turn is not over until its output is durable on its
         // branch. This runs whether the child succeeded or failed: a failed
         // worker's partial edits are still the only copy that exists.
-        let (branch, worktree) = match &worker {
+        let (branch, worktree, merge_hint) = match &worker {
             Some(w) => {
-                self.commit_worker_output(w, &args.task).await;
-                (Some(w.branch.clone()), Some(w.path.clone()))
+                worker_tree::commit(w, &args.task).await;
+                (
+                    Some(w.branch.clone()),
+                    Some(w.path.to_string_lossy().to_string()),
+                    Some(worker_tree::merge_hint(w)),
+                )
             }
-            None => (None, None),
+            None => (None, None, None),
         };
-
-        let merge_hint = branch.as_ref().map(|b| {
-            format!(
-                "\n\n[Worker output is on branch '{b}'. Merge it to take the changes;                  its worktree is left in place until then.]"
-            )
-        });
 
         match result {
             Ok(stdout) => {
@@ -317,89 +332,22 @@ impl Tool for SubAgentTool {
     }
 }
 
-/// A worker's isolated copy: a `git worktree` on its own branch.
-struct WorkerWorktree {
-    /// Worktree directory name under `WORKTREE_DIR`.
-    name: String,
-    /// Branch created for it, and where its output is committed.
-    branch: String,
-    /// Absolute path handed to the child as `--workspace`.
-    path: String,
-}
-
-/// Monotonic suffix so two workers spawned in the same instant cannot collide.
-static WORKER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 impl SubAgentTool {
-    /// Create this worker's worktree, or `None` to fall back to the shared tree.
+    /// This worker's worktree, or `None` to fall back to the shared tree.
     ///
-    /// Falling back is deliberate but lossy: without a git repository there is
-    /// no branch to hand back and no conflict to surface, so parallel workers
-    /// collide exactly as they did before. AGE-314 carries the open question of
-    /// what a non-git workspace should do instead.
-    async fn prepare_worktree(&self) -> Option<WorkerWorktree> {
+    /// The isolation itself is
+    /// [`worker_tree`](crate::services::worker_tree), shared with the
+    /// broker's local runner (AGE-301) so the two delegation paths ADR-0011
+    /// compares differ in the hop and in nothing else.
+    async fn prepare_worktree(&self) -> Option<WorkerTree> {
         let root = self.workspace_dir.as_deref()?;
-
-        let git = match GitService::new(root).await {
-            Ok(git) => git,
-            Err(e) => {
-                warn!(
-                    workspace = %root,
-                    error = %e,
-                    "No worktree isolation: workspace is not a git repository, \
-                     so parallel sub-agents share one tree"
-                );
-                return None;
-            }
-        };
-
-        let seq = WORKER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let name = format!("w{stamp}-{seq}");
-        let branch = format!("sub-agent/{name}");
-
-        match git.worktree_add(&name, &branch).await {
-            Ok(path) => {
-                info!(worktree = %path.display(), branch = %branch, "Sub-agent isolated in a worktree");
-                Some(WorkerWorktree {
-                    name,
-                    branch,
-                    path: path.to_string_lossy().to_string(),
-                })
-            }
+        let name = worker_tree::next_worker_name("w");
+        match worker_tree::create(root, &name).await {
+            Ok(tree) => tree,
             Err(e) => {
                 warn!(error = %e, "No worktree isolation: falling back to the shared tree");
                 None
             }
-        }
-    }
-
-    /// Commit whatever the worker left behind onto its branch.
-    ///
-    /// Failures are logged, never fatal: the worker's answer is still worth
-    /// returning, and the worktree stays on disk either way, so nothing the
-    /// child wrote is destroyed by a failure here.
-    async fn commit_worker_output(&self, worker: &WorkerWorktree, task: &str) {
-        let git = match GitService::new(&worker.path).await {
-            Ok(git) => git,
-            Err(e) => {
-                warn!(worktree = %worker.name, error = %e, "Cannot open the worker's worktree to commit it");
-                return;
-            }
-        };
-
-        let summary: String = task.chars().take(72).collect();
-        let message = format!("sub-agent {}: {}", worker.name, summary);
-
-        match git.commit_all(&message).await {
-            Ok(Some(commit)) => {
-                info!(branch = %worker.branch, hash = %commit.hash, "Worker output committed")
-            }
-            Ok(None) => info!(branch = %worker.branch, "Worker made no changes"),
-            Err(e) => warn!(branch = %worker.branch, error = %e, "Failed to commit worker output"),
         }
     }
 }

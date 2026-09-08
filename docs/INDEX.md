@@ -78,6 +78,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/harbor-pivot.md`](research/harbor-pivot.md) | Stage B sandboxes | Harbor pivot decision |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
+| [`research/adr-0011-broker-ab-2026-09-08.md`](research/adr-0011-broker-ab-2026-09-08.md) | ADR-0011 kill criteria | `sub_agent` vs the broker, measured (AGE-302) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
 | [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace | Trace contract |
 | [`research/modules/m1-react.md`](research/modules/m1-react.md) | ReAct substrate | M1 strategy variants |
