@@ -26,8 +26,8 @@ use crate::settings::models::user_secrets_store::UserSecretsModel;
 use crate::settings::repositories::{
     A2aRepository, ExecutionSettingsRepository, ExtensionsRepository, GeneralSettingsRepository,
     HiveSettingsRepository, McpRepository, ModelsRepository, ModuleSettingsRepository,
-    ProviderRepository, SearchSettingsRepository, TrainingSettingsRepository,
-    UserSecretsRepository,
+    OAuthCredentialRepository, ProviderRepository, SearchSettingsRepository,
+    TrainingSettingsRepository, UserSecretsRepository,
 };
 
 use super::conversation_repository::{ConversationData, ConversationRepository};
@@ -300,6 +300,128 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
     );
 }
 
+// ── OAuth credentials: keyed per MCP server name ─────────────────────────────
+
+/// Conformance for [`OAuthCredentialRepository`], hand-written because
+/// neither settings macro fits: this repository is keyed per MCP server name
+/// rather than holding one singleton value.
+///
+/// It stores access and refresh tokens, so an implementation that drifts here
+/// drifts on secret material. Exercises: an absent server; a save/load round
+/// trip of the value unchanged; a second save replacing rather than merging;
+/// `clear` removing only the named server; and `has_credentials` agreeing
+/// with `load` in every one of those states.
+///
+/// `has_credentials` is synchronous and returns a bare `bool`, so the suite
+/// can only pin it against a reachable store — see the note on the trait.
+pub async fn conformance_oauth_credentials<R: OAuthCredentialRepository>(make: impl Fn() -> R) {
+    let repo = make();
+
+    assert!(
+        repo.load("absent")
+            .await
+            .expect("load an absent server")
+            .is_none(),
+        "an absent server must load as None"
+    );
+    assert!(
+        !repo.has_credentials("absent"),
+        "has_credentials must agree with load for an absent server"
+    );
+    repo.clear("absent")
+        .await
+        .expect("clearing an absent server is not an error");
+
+    // Tokens as the OAuth flow hands them over: an opaque object the trait
+    // stores whole.
+    let credentials = serde_json::json!({
+        "client_id": "chatty-desktop",
+        "token_response": {
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "expires_in": 3600,
+        },
+        "granted_scopes": ["read", "write"],
+        "nested": {"empty_object": {}, "empty_list": [], "null": null},
+    });
+    repo.save("server-a", credentials.clone())
+        .await
+        .expect("save credentials for server-a");
+
+    let loaded = repo
+        .load("server-a")
+        .await
+        .expect("load server-a")
+        .expect("server-a has credentials");
+    assert_eq!(
+        loaded, credentials,
+        "load after save must return the value unchanged, to the last field"
+    );
+    assert!(
+        repo.has_credentials("server-a"),
+        "has_credentials must agree with load after a save"
+    );
+
+    // A second handle onto the same store sees the same thing: the value is
+    // in the store, not in one repository object.
+    let second_handle = make();
+    assert_eq!(
+        second_handle
+            .load("server-a")
+            .await
+            .expect("load server-a from a second handle")
+            .expect("server-a has credentials"),
+        credentials,
+        "a second handle onto the same store must see what the first saved"
+    );
+
+    // Refreshing tokens replaces the row. A merge would leave the old
+    // refresh token behind, which is a stale secret nothing would clear.
+    let refreshed = serde_json::json!({
+        "client_id": "chatty-desktop",
+        "token_response": {"access_token": "at-2"},
+    });
+    repo.save("server-a", refreshed.clone())
+        .await
+        .expect("save refreshed credentials");
+    assert_eq!(
+        repo.load("server-a")
+            .await
+            .expect("load after the second save")
+            .expect("server-a still has credentials"),
+        refreshed,
+        "a second save must replace the value rather than merge into it"
+    );
+
+    // Each server owns its own row.
+    let other = serde_json::json!({"client_id": "other", "token_response": {"access_token": "b"}});
+    repo.save("server-b", other.clone())
+        .await
+        .expect("save credentials for server-b");
+
+    repo.clear("server-a").await.expect("clear server-a");
+    assert!(
+        repo.load("server-a")
+            .await
+            .expect("load after clear")
+            .is_none(),
+        "clear must remove the named server's credentials"
+    );
+    assert!(
+        !repo.has_credentials("server-a"),
+        "has_credentials must agree with load after a clear"
+    );
+    assert_eq!(
+        repo.load("server-b")
+            .await
+            .expect("load server-b after clearing server-a")
+            .expect("server-b is untouched"),
+        other,
+        "clear must leave other servers' credentials intact"
+    );
+    assert!(repo.has_credentials("server-b"));
+}
+
 // ── Tests: run the suite against this crate's own JSON/SQLite backends ───────
 
 #[cfg(test)]
@@ -316,8 +438,9 @@ mod tests {
     use crate::settings::repositories::{
         A2aJsonRepository, ExecutionSettingsJsonRepository, ExtensionsJsonRepository,
         GeneralSettingsJsonRepository, HiveSettingsJsonRepository, JsonFileRepository,
-        JsonMcpRepository, JsonModelsRepository, ModuleSettingsJsonRepository,
-        SearchSettingsJsonRepository, TrainingSettingsJsonRepository, UserSecretsJsonRepository,
+        JsonMcpRepository, JsonModelsRepository, JsonOAuthCredentialRepository,
+        ModuleSettingsJsonRepository, SearchSettingsJsonRepository, TrainingSettingsJsonRepository,
+        UserSecretsJsonRepository,
     };
 
     /// A fresh temp file path for one test. The `TempDir` guard must be kept
@@ -558,5 +681,15 @@ mod tests {
             .await
             .expect("open sqlite repository");
         conformance_conversation(repo).await;
+    }
+
+    #[tokio::test]
+    async fn oauth_credentials_json_backend() {
+        // A directory rather than a file: this repository writes one file
+        // per server name.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        conformance_oauth_credentials(|| JsonOAuthCredentialRepository::new_with_dir(path.clone()))
+            .await;
     }
 }
