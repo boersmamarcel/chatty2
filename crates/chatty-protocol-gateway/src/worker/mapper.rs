@@ -36,10 +36,11 @@
 //! a response.
 //!
 //! **The progress lines come from `chatty_core`'s
-//! [`progress_text_for_event`], the same function the `CHATTY_EVENT` path
-//! uses.** Rewriting them here would make the two delegation paths differ in
-//! the parent's transcript for no reason anyone chose, and the kill criterion
-//! is measured by diffing that transcript.
+//! [`progress_text_for_event`], the same function the `sub_agent` path used
+//! before ADR-0011's C4 retired it.** Rewriting them here would have made the
+//! two delegation paths differ in the parent's transcript for no reason
+//! anyone chose, and the kill criterion was measured by diffing that
+//! transcript.
 //!
 //! **`TurnEnded` produces nothing.** A terminal status ends the A2A task, and
 //! one delegated task can span several turns — headless recovery and
@@ -119,9 +120,10 @@ impl TaskMapper {
             SessionEvent::Error(error) => {
                 self.state = TaskState::Failed;
                 self.failure = Some(error.message.clone());
-                // Still reported as progress, because the `CHATTY_EVENT` path
-                // shows it in the parent's transcript and the A/A diff would
-                // otherwise blame this mapping for the difference.
+                // Still reported as progress: the retired `sub_agent` path
+                // showed it in the parent's transcript, and the A/A diff
+                // would otherwise have blamed this mapping for the
+                // difference.
                 progress_text_for_event(event, &mut self.tool_names)
                     .map(|text| self.status(TaskState::Working, Some(text)))
             }

@@ -519,9 +519,9 @@ impl ChattyApp {
                     if let Some(stderr) = stderr {
                         let reader = std::io::BufReader::new(stderr);
                         for line in reader.lines().map_while(Result::ok) {
-                            if chatty_core::tools::is_chatty_event_line(&line) {
-                                continue;
-                            }
+                            // Every line is the child's human-readable log
+                            // now: ADR-0011's C4 removed the machine lines
+                            // this used to filter out.
                             let _ = progress_tx.send(line);
                         }
                     }

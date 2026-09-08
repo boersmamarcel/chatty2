@@ -381,39 +381,31 @@ a budget that is too tight looks like a queue that never empties.
 > — but it is the knob to turn first if delegation feels serialised on OpenRouter.
 
 **Known limitation.** The worker's model is its own configured default, not the parent
-conversation's. `sub_agent` passes `--model`; the broker cannot, because the model
-would have to ride on the A2A request and A2A has no field for it. Carried as an open
-question on AGE-301.
+conversation's. The retired `sub_agent` tool passed `--model`; the broker cannot,
+because the model would have to ride on the A2A request and A2A has no field for it.
+Carried as an open question on AGE-301.
 
-## Sub-agent tool (separate mechanism)
+## Sub-agent tool (retired)
 
-> **Being retired.** ADR-0011 replaces this with `invoke_agent` against
-> [`local-agent`](#local-agent--a-chatty-agent-in-its-own-process), so there is one
-> fan-out path rather than two. The `CHATTY_EVENT` scraping described below goes with
-> it (AGE-303). It is still the path in use until then.
+> **Gone as of ADR-0011's C4 (AGE-303).** `invoke_agent` against
+> [`local-agent`](#local-agent--a-chatty-agent-in-its-own-process) is the only
+> delegation path now: one fan-out path, a public wire format, and one place to put
+> discovery, budgets and the ledger.
 
-The `sub_agent` tool is a **different mechanism** from A2A invocation. It spawns
-`chatty-tui` in headless mode as a subprocess:
+The `sub_agent` tool spawned `chatty-tui --headless` as a subprocess and followed the
+child by scraping a line protocol off its stderr — the child's `SessionEvent`s, JSON,
+one per line. The kill criterion (AGE-302) compared that path against the broker's and
+the broker carried the turn at the same granularity, so the second path went.
 
-```
-sub_agent(task, model?) → chatty-tui --headless --model <model> --message <task>
-```
+What survives it:
 
-The child has the **full Chatty tool set** (shell, files, MCP tools, …) but runs in
-its own process with its own conversation context; no A2A protocol is involved.
-
-While the child runs, headless mode writes each `SessionEvent` of its turn to
-stderr as a `CHATTY_EVENT` line (JSON; assistant text and the turn's raw messages
-excepted). `SubAgentTool` parses those into the shared `InvokeAgentProgressSlot`, so
-the parent UI shows compact tool activity in a collapsible `sub_agent` row. Assistant tokens are **not** forwarded; the parent model
-receives only the child's final stdout as the tool result, and the parent turn waits
-on `Tool::call` until the child exits. `/agent` shows the child's human-readable
-stderr minus the protocol lines.
-
-| Feature | `invoke_agent` | `sub_agent` |
-|:--------|:---------------|:------------|
-| Protocol | A2A (JSON-RPC over HTTP) | Process spawning |
-| Target | Named remote/local agents | Another Chatty instance |
-| Tool access | Agent's own tools only | Full Chatty tool set |
-| Model | Agent's own model | Can override parent model |
-| Streaming | SSE with progress events | Live tool activity via the progress slot; stdout on completion |
+* **The rendering.** `chatty_core::tools::worker_progress::progress_text_for_event`
+  turns a worker's events into the parent's progress lines; the broker's mapper calls
+  it, so a delegated turn reads in the transcript the way it always did.
+* **The transcript row.** A delegated agent's progress still rides on a synthetic
+  `sub_agent` tool call (`SystemTrace::new_sub_agent`), which is what conversations on
+  disk already record. The name is the row's, not the tool's.
+* **`/agent <prompt>`** in the TUI and desktop, which spawns a headless child of its
+  own and shows its stderr. It never used the tool.
+* **`chatty-tui --headless`**, unchanged for scripting; it just has no parent-facing
+  event protocol on stderr any more.

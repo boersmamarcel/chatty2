@@ -1,14 +1,17 @@
 //! AGE-301's verification: a delegated task through the broker produces the
 //! same tool-call sequence in the parent's trace as the `sub_agent` path it
-//! replaces.
+//! replaced.
 //!
 //! ADR-0011's first kill criterion says A2A's task model must carry a
 //! delegated turn at the granularity the parent already renders. "The same"
 //! is made precise here: for every scripted scenario both frontends are
 //! characterized against, the parent's progress lines are compared between
 //!
-//! * the **direct path** — the child writes `CHATTY_EVENT` lines and the
-//!   parent's `sub_agent` tool renders them with `progress_text_for_event`;
+//! * the **reference rendering** — the child's own events put through
+//!   `progress_text_for_event`, which is exactly what the retired `sub_agent`
+//!   tool showed (C4 deleted the tool and the stderr line protocol that
+//!   carried these events; the rendering is the part that mattered and it
+//!   still lives in `chatty_core::tools::worker_progress`);
 //! * the **broker path** — the child maps its events to frames
 //!   ([`TaskMapper`]), the broker turns them into A2A status and artifact
 //!   updates, and the parent's `invoke_agent` tool renders *those*.
@@ -20,11 +23,11 @@
 //! # The one difference, and why it is not a regression
 //!
 //! The broker path also carries the assistant's **text** as artifact chunks,
-//! so the parent sees the answer stream in. The `CHATTY_EVENT` path cannot:
-//! `format_event_line` drops `Text`, and the answer only arrives at the end,
-//! on the child's stdout. The comparison subtracts exactly those chunks and
-//! asserts the remainder is identical — the broker path is a superset, never
-//! a subset, which is the direction the kill criterion cares about.
+//! so the parent sees the answer stream in. The retired path could not: the
+//! answer only arrived at the end, on the child's stdout. The comparison
+//! subtracts exactly those chunks and asserts the remainder is identical —
+//! the broker path is a superset, never a subset, which is the direction the
+//! kill criterion cares about.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +39,7 @@ use chatty_core::session::{SessionEvent, TurnPolicy, replay_scenario};
 use chatty_core::tools::invoke_agent_tool::{
     InvokeAgentArgs, InvokeAgentProgress, InvokeAgentTool,
 };
-use chatty_core::tools::{LOCAL_AGENT_NAME, format_event_line, progress_text_for_event};
+use chatty_core::tools::{LOCAL_AGENT_NAME, progress_text_for_event};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
@@ -59,25 +62,25 @@ fn policy() -> TurnPolicy {
 }
 
 // ---------------------------------------------------------------------------
-// The direct path: what `sub_agent` renders today
+// The reference rendering: what the parent showed before the broker
 // ---------------------------------------------------------------------------
 
-/// The progress lines the parent's `sub_agent` tool would show.
+/// The progress lines the parent's `sub_agent` tool used to show.
 ///
-/// Models the real path: only the events that survive `format_event_line`
-/// cross the process boundary, and the parent renders those with
-/// `progress_text_for_event`.
-fn direct_trace(events: &[SessionEvent]) -> Vec<String> {
+/// The transport it read them over is gone; the rendering is not, and the
+/// rendering is what the kill criterion compares. Every event is offered:
+/// `progress_text_for_event` is the filter, and it ignores the events that
+/// never crossed the boundary anyway (`Text`, `TurnMessages`).
+fn reference_trace(events: &[SessionEvent]) -> Vec<String> {
     let mut names = HashMap::new();
     events
         .iter()
-        .filter(|event| format_event_line(event).is_some())
         .filter_map(|event| progress_text_for_event(event, &mut names))
         .collect()
 }
 
-/// The assistant text of a scripted turn — the answer `sub_agent` returns on
-/// stdout, and what the broker path streams as artifacts.
+/// The assistant text of a scripted turn — the answer the retired path
+/// returned on stdout, and what the broker path streams as artifacts.
 fn assistant_text(events: &[SessionEvent]) -> Vec<String> {
     events
         .iter()
@@ -200,8 +203,8 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     }
 }
 
-/// Remove the artifact chunks — the text the direct path cannot carry — so
-/// what is left is comparable with [`direct_trace`].
+/// Remove the artifact chunks — the text the retired path could not carry —
+/// so what is left is comparable with [`reference_trace`].
 fn without_text_chunks(progress: &[String], text: &[String]) -> Vec<String> {
     let mut remaining: Vec<&String> = text.iter().collect();
     progress
@@ -223,19 +226,20 @@ fn without_text_chunks(progress: &[String], text: &[String]) -> Vec<String> {
 
 /// The issue's "Verify", over every scenario both frontends are pinned to.
 #[tokio::test]
-async fn a_delegated_task_renders_the_same_tool_calls_as_the_direct_path() {
+async fn a_delegated_task_renders_the_same_tool_calls_as_the_retired_path() {
     for scenario in scenarios().into_iter().chain([clarification_scenario()]) {
         let name = scenario.name;
         let events = replay_scenario(scenario, policy()).await;
 
-        let direct = direct_trace(&events);
+        let expected = reference_trace(&events);
         let run = broker_run(events.clone()).await;
         let over_the_broker = without_text_chunks(&run.progress, &assistant_text(&events));
 
         assert_eq!(
-            direct, over_the_broker,
+            expected, over_the_broker,
             "scenario '{name}': the parent's tool-call trace differs between the \
-             direct path and the broker.\n  direct: {direct:?}\n  broker: {:?}",
+             rendering the retired path produced and the broker's.\n  expected: \
+             {expected:?}\n  broker: {:?}",
             run.progress
         );
     }
@@ -290,7 +294,7 @@ async fn a_dropped_tool_event_would_be_caught() {
     )
     .await;
 
-    let direct = direct_trace(&events);
+    let expected = reference_trace(&events);
     let mut mapper = TaskMapper::new("task-1");
     let mapped: Vec<String> = events
         .iter()
@@ -307,7 +311,7 @@ async fn a_dropped_tool_event_would_be_caught() {
         .collect();
 
     assert_ne!(
-        direct, mapped,
+        expected, mapped,
         "a mapping that drops tool results must not compare equal"
     );
 }

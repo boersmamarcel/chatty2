@@ -365,19 +365,11 @@ impl ChattyApp {
                         .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                         .ok()
                         .flatten();
-                    let (remote_agents, available_model_ids) = cx
+                    let remote_agents = cx
                         .update(|cx| {
-                            let agents = cx
-                                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                            cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                                 .map(|m| m.a2a_agent_configs())
-                                .unwrap_or_default();
-                            let model_ids = cx
-                                .try_global::<crate::settings::models::ModelsModel>()
-                                .map(|m| {
-                                    m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default();
-                            (agents, model_ids)
+                                .unwrap_or_default()
                         })
                         .unwrap_or_default();
 
@@ -403,11 +395,9 @@ impl ChattyApp {
                             skill_service: Some(skill_service),
                             search_settings,
                             embedding_service,
-                            allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
                             module_agents,
                             gateway_port,
                             remote_agents,
-                            available_model_ids,
                             conversation_id: Some(conv_id.clone()),
                         },
                     )
@@ -520,10 +510,6 @@ impl ChattyApp {
                 .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                 .map(|m| m.a2a_agent_configs())
                 .unwrap_or_default();
-            let available_model_ids = cx
-                .try_global::<crate::settings::models::ModelsModel>()
-                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
-                .unwrap_or_default();
             cx.spawn(async move |weak, cx| {
                 let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
@@ -568,12 +554,10 @@ impl ChattyApp {
                                 skill_service: Some(skill_service),
                                 search_settings,
                                 embedding_service,
-                                allow_sub_agent: true,
                                 module_agents,
                                 gateway_port,
                                 remote_agents,
-                                available_model_ids,
-                                conversation_id: Some(conv_id.clone()),
+                                    conversation_id: Some(conv_id.clone()),
                             },
                         )
                         .await

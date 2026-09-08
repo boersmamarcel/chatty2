@@ -3,7 +3,7 @@
 //! `chatty-tui --participant-socket <PATH> --participant-name <NAME>` is
 //! `--headless` with two things changed: the prompt arrives as a broker
 //! frame instead of `--message`, and the turn's events go back over the
-//! socket instead of onto stderr as `CHATTY_EVENT` lines. Everything between
+//! socket rather than nowhere at all. Everything between
 //! those two ends — the session, the tools, the recovery loop — is the same
 //! code `--headless` runs, which is the point: a worker is not a different
 //! kind of agent.

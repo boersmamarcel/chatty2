@@ -477,7 +477,6 @@ impl ChatEngine {
         build_agent_context(AgentContextInputs {
             execution_settings: &self.execution_settings,
             module_settings: &self.module_settings,
-            models: &self.models,
             user_secrets: &self.user_secrets,
             memory_service: &self.memory_service,
             skill_service: &self.skill_service,
@@ -485,7 +484,6 @@ impl ChatEngine {
             embedding_service: &self.embedding_service,
             remote_agents: &self.remote_agents,
             module_agents: &self.module_agents,
-            is_sub_agent: self.is_sub_agent,
         })
     }
 
@@ -1145,7 +1143,6 @@ fn any_tool_enabled(es: &ExecutionSettingsModel) -> bool {
 pub(crate) struct AgentContextInputs<'a> {
     pub execution_settings: &'a ExecutionSettingsModel,
     pub module_settings: &'a ModuleSettingsModel,
-    pub models: &'a ModelsModel,
     pub user_secrets: &'a [(String, String)],
     pub memory_service: &'a Option<MemoryService>,
     pub skill_service: &'a chatty_core::services::SkillService,
@@ -1154,7 +1151,6 @@ pub(crate) struct AgentContextInputs<'a> {
     pub embedding_service: &'a Option<chatty_core::services::EmbeddingService>,
     pub remote_agents: &'a [A2aAgentConfig],
     pub module_agents: &'a [LocalModuleAgentSummary],
-    pub is_sub_agent: bool,
 }
 
 /// The services part of the `AgentBuildContext` for a TUI-hosted agent. The
@@ -1180,19 +1176,12 @@ pub(crate) fn build_agent_context(inputs: AgentContextInputs<'_>) -> AgentBuildC
         skill_service: Some(inputs.skill_service.clone()),
         search_settings: inputs.search_settings.clone(),
         embedding_service: inputs.embedding_service.clone(),
-        allow_sub_agent: !inputs.is_sub_agent,
         module_agents: inputs.module_agents.to_vec(),
         gateway_port: inputs
             .module_settings
             .enabled
             .then_some(inputs.module_settings.gateway_port),
         remote_agents: inputs.remote_agents.to_vec(),
-        available_model_ids: inputs
-            .models
-            .models()
-            .iter()
-            .map(|m| m.id.clone())
-            .collect(),
         conversation_id: None, // browser feature isn't enabled in the TUI
     }
 }
@@ -1241,11 +1230,9 @@ mod tests {
                 skill_service: None,
                 search_settings: None,
                 embedding_service: None,
-                allow_sub_agent: false,
                 module_agents: Vec::new(),
                 gateway_port: None,
                 remote_agents: Vec::new(),
-                available_model_ids: Vec::new(),
                 conversation_id: None,
             },
         )
