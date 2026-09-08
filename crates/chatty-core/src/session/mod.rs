@@ -84,8 +84,8 @@ pub use handler::{
 };
 pub use hosted::HostedSession;
 pub use move_conversation::{
-    BRING_BACK_SUMMARY, MoveSummary, RemoteConversation, TAKE_ONLINE_SUMMARY, fetch_hosted,
-    refuse_reason, take_online,
+    BRING_BACK_SUMMARY, HOSTED_DISABLED, MoveSummary, RemoteConversation, TAKE_ONLINE_SUMMARY,
+    fetch_hosted, refuse_reason, take_online,
 };
 pub use transport as turn_transport;
 

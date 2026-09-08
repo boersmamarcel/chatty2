@@ -130,6 +130,9 @@ impl Render for SidebarView {
                     .collect()
             })
             .unwrap_or_default();
+        // AGE-308: the move between local and hosted is developer-only until
+        // online mode is account-scoped, so the menu simply does not offer it.
+        let move_enabled = crate::chatty::controllers::app_controller::move_ui_enabled(cx);
 
         let width = if self.is_collapsed { px(0.) } else { px(255.) };
 
@@ -233,14 +236,16 @@ impl Render for SidebarView {
                                                         }
                                                     })
                                                     .hosted(hosted_ids.contains(id))
-                                                    .on_move({
-                                                        let entity = sidebar_entity.clone();
-                                                        let id = id.clone();
-                                                        move |_conv_id, cx| {
-                                                            entity.update(cx, |_, cx| {
-                                                                cx.emit(SidebarEvent::MoveConversation(id.clone()));
-                                                            });
-                                                        }
+                                                    .when(move_enabled, |item| {
+                                                        item.on_move({
+                                                            let entity = sidebar_entity.clone();
+                                                            let id = id.clone();
+                                                            move |_conv_id, cx| {
+                                                                entity.update(cx, |_, cx| {
+                                                                    cx.emit(SidebarEvent::MoveConversation(id.clone()));
+                                                                });
+                                                            }
+                                                        })
                                                     }),
                                                 )
                                                 .when(ix == 0, |this| this.mt_3())
