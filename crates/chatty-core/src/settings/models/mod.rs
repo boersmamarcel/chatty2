@@ -112,6 +112,7 @@ mod schema_docs {
         assert_eq!(exec["network_isolation"], false);
         assert_eq!(exec["max_agent_turns"], 10);
         assert_eq!(exec["memory_enabled"], true);
+        assert_eq!(exec["warn_on_external_agent"], false);
         assert_eq!(exec["embedding_enabled"], false);
         assert!(exec["embedding_provider"].is_null());
         assert!(exec["embedding_model"].is_null());

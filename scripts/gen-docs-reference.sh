@@ -236,6 +236,7 @@ opt-in (`false`) for security.
 | `network_isolation` | `bool` | `false` | Sandbox network isolation when available |
 | `max_agent_turns` | `u32` | `10` | Tool-call rounds per response |
 | `memory_enabled` | `bool` | `true` | `remember` / `search_memory` |
+| `warn_on_external_agent` | `bool` | `false` | say so before `invoke_agent` sends a prompt outside the fleet (ADR-0011 C5) |
 | `embedding_enabled` | `bool` | `false` | Semantic memory search |
 | `embedding_provider` | `Option<ProviderType>` | `null` | Independent of chat provider |
 | `embedding_model` | `Option<String>` | `null` | e.g. `text-embedding-3-small` |

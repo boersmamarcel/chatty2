@@ -74,6 +74,16 @@ pub struct ExecutionSettingsModel {
     /// Requires an embedding provider and model to be configured.
     #[serde(default)]
     pub embedding_enabled: bool,
+    /// Say so before `invoke_agent` hands a prompt to an agent outside this
+    /// user's fleet — a configured third-party URL, or a card learned from
+    /// one (ADR-0011 C5).
+    ///
+    /// Off by default, and deliberately only a warning: whether an external
+    /// agent should need an allowlist, a one-time confirmation, or nothing at
+    /// all is a product decision that has not been made. This is the hook it
+    /// will hang from.
+    #[serde(default)]
+    pub warn_on_external_agent: bool,
     /// Provider to use for computing embeddings.
     /// Independent of the chat model provider — allows e.g. Anthropic users
     /// to use OpenAI for embeddings while chatting with Claude.
@@ -119,6 +129,7 @@ impl Default for ExecutionSettingsModel {
             network_isolation: false,
             max_agent_turns: default_max_agent_turns(),
             memory_enabled: true, // Enabled by default for cross-conversation recall
+            warn_on_external_agent: false,
             embedding_enabled: false, // Opt-in: requires embedding provider
             embedding_provider: None,
             embedding_model: None,
