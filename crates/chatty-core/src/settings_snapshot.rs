@@ -472,6 +472,12 @@ mod tests {
                 enabled: true,
                 module_dir: "/opt/chatty-test-modules".to_string(),
                 gateway_port: 9000,
+                default_endpoint_budget: 4,
+                endpoint_budgets: {
+                    let mut budgets = std::collections::HashMap::new();
+                    budgets.insert("http://localhost:11434".to_string(), 2);
+                    budgets
+                },
             },
             providers: vec![
                 ProviderConfig::new("openrouter".to_string(), ProviderType::OpenRouter)
