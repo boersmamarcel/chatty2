@@ -40,6 +40,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
+use super::budget::{EndpointBudget, EndpointPermit};
 use super::protocol::{ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
 use super::virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
@@ -107,6 +108,9 @@ pub struct LocalRunner {
     args: Vec<String>,
     workspace: Option<WorkspaceFactory>,
     registry: ParticipantRegistry,
+    /// The model endpoint its workers use, and the budget that meters it.
+    /// `None` leaves the runner unmetered.
+    endpoint: Option<(String, EndpointBudget)>,
     seq: AtomicU64,
     registration_timeout: Duration,
 }
@@ -130,6 +134,7 @@ impl LocalRunner {
             args: Vec::new(),
             workspace: None,
             registry,
+            endpoint: None,
             seq: AtomicU64::new(0),
             registration_timeout: REGISTRATION_TIMEOUT,
         }
@@ -157,6 +162,21 @@ impl LocalRunner {
         self
     }
 
+    /// Meter this runner's workers against `endpoint` — the base URL of the
+    /// model server they will all talk to (ADR-0011 C6).
+    ///
+    /// The budget is shared, so two runners naming the same endpoint queue
+    /// against each other, which is the point: the limit belongs to the
+    /// model server, not to the caller.
+    pub fn with_endpoint_budget(
+        mut self,
+        endpoint: impl Into<String>,
+        budget: EndpointBudget,
+    ) -> Self {
+        self.endpoint = Some((endpoint.into(), budget));
+        self
+    }
+
     /// How long a child gets to connect and register before the task fails.
     /// Defaults to [`REGISTRATION_TIMEOUT`].
     pub fn with_registration_timeout(mut self, timeout: Duration) -> Self {
@@ -172,6 +192,20 @@ impl LocalRunner {
     /// serves, so a spawned worker is reachable by name like any other.
     pub fn registry(&self) -> &ParticipantRegistry {
         &self.registry
+    }
+
+    /// The model endpoint its workers are metered against, if any.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_ref().map(|(name, _)| name.as_str())
+    }
+
+    /// How many tasks are waiting for a slot on this runner's endpoint.
+    /// Zero when the runner is unmetered.
+    pub fn queue_depth(&self) -> usize {
+        match self.endpoint.as_ref() {
+            Some((endpoint, budget)) => budget.queue_depth(endpoint),
+            None => 0,
+        }
     }
 
     /// The card served at `/a2a/{agent_name}/.well-known/agent.json`.
@@ -204,6 +238,14 @@ impl LocalRunner {
     /// returned alongside the task's update stream rather than owning it, so
     /// the caller can read updates while still holding the process handle.
     pub async fn run_task(&self, prompt: String) -> Result<(Worker, TaskStream)> {
+        // Before the name, the workspace and the process: a queued task that
+        // had already claimed those would be holding a worktree open for as
+        // long as it waits.
+        let permit = match self.endpoint.as_ref() {
+            Some((endpoint, budget)) => Some(budget.acquire(endpoint).await),
+            None => None,
+        };
+
         let name = format!(
             "{}-{}",
             self.agent_name,
@@ -229,6 +271,7 @@ impl LocalRunner {
             succeeded: false,
             stderr_tail,
             stderr_drain,
+            _permit: permit,
         };
 
         self.await_registration(&mut worker).await?;
@@ -354,6 +397,10 @@ pub struct Worker {
     /// The tail of the child's stderr, kept for error messages.
     stderr_tail: Arc<Mutex<String>>,
     stderr_drain: Option<JoinHandle<()>>,
+    /// This worker's slot on the model endpoint, held until it is reaped
+    /// (ADR-0011 C6). Dropped with the worker, so the next queued task is
+    /// admitted by the same event that frees the process and its workspace.
+    _permit: Option<EndpointPermit>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -635,6 +682,73 @@ mod tests {
         ));
         assert_eq!(registry.open_task_count("local-agent-0"), 0);
         assert!(updates.recv().await.is_none(), "the caller's stream ends");
+    }
+
+    /// AGE-305's verification: a budget of two, three delegated tasks, and
+    /// the third does not get a process until one of the first two is gone.
+    #[tokio::test]
+    async fn a_busy_endpoint_queues_the_third_worker_until_a_slot_frees() {
+        const ENDPOINT: &str = "http://localhost:11434";
+
+        let registry = ParticipantRegistry::new();
+        let budget = EndpointBudget::new(2);
+        let runner = Arc::new(
+            runner(registry.clone(), "sleep 30").with_endpoint_budget(ENDPOINT, budget.clone()),
+        );
+        // Stand-ins for the three children the runner would spawn, named in
+        // the order it allocates names.
+        let _outbound: Vec<_> = (0..3)
+            .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
+            .collect();
+
+        let first = runner.run_task("a".into()).await.unwrap();
+        let second = runner.run_task("b".into()).await.unwrap();
+        assert_eq!(budget.in_flight(ENDPOINT), 2, "the budget is spent");
+
+        let third = tokio::spawn({
+            let runner = Arc::clone(&runner);
+            async move { runner.run_task("c".into()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(!third.is_finished(), "the third task waits for a slot");
+        assert_eq!(runner.queue_depth(), 1, "and the wait is visible");
+        assert_eq!(
+            registry.open_task_count("local-agent-2"),
+            0,
+            "a queued task has no child process yet"
+        );
+
+        // Reaping a worker releases its slot, and the queued task takes it.
+        drop(first);
+        let (worker, _updates) = tokio::time::timeout(Duration::from_secs(5), third)
+            .await
+            .expect("the queued task is admitted once a slot frees")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(worker.name(), "local-agent-2");
+        assert_eq!(runner.queue_depth(), 0);
+        assert_eq!(budget.in_flight(ENDPOINT), 2);
+        drop((second, worker));
+        assert_eq!(budget.in_flight(ENDPOINT), 0, "every slot comes back");
+    }
+
+    #[tokio::test]
+    async fn an_unmetered_runner_spawns_without_waiting() {
+        let registry = ParticipantRegistry::new();
+        let runner = runner(registry.clone(), "sleep 30");
+        let _outbound: Vec<_> = (0..2)
+            .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
+            .collect();
+
+        let _first = runner.run_task("a".into()).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(5), runner.run_task("b".into()))
+            .await
+            .expect("no budget, no queue");
+        assert!(second.is_ok());
+        assert_eq!(runner.queue_depth(), 0);
+        assert!(runner.endpoint().is_none());
     }
 
     #[test]
