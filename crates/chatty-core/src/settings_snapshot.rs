@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::RepositoryRegistry;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::extensions_store::ExtensionsModel;
@@ -52,7 +53,6 @@ use crate::settings::repositories::{
     InMemorySearchSettingsRepository, InMemoryTrainingSettingsRepository,
     InMemoryUserSecretsRepository, RepositoryResult,
 };
-use crate::RepositoryRegistry;
 
 /// Recursively re-sort every JSON object's entries by key, in place. Arrays
 /// are recursed into but left in their original element order.
@@ -243,7 +243,10 @@ impl RepositoryRegistry {
     /// `snapshot`. A hosted guest calls this against its lease-time
     /// `from_snapshot` registry on release, to report back only what
     /// changed during the turn.
-    pub async fn delta_since(&self, snapshot: &SettingsSnapshot) -> RepositoryResult<SettingsDelta> {
+    pub async fn delta_since(
+        &self,
+        snapshot: &SettingsSnapshot,
+    ) -> RepositoryResult<SettingsDelta> {
         let current = self.snapshot().await?;
         Ok(SettingsDelta {
             a2a_agents: changed(&current.a2a_agents, &snapshot.a2a_agents),
@@ -366,7 +369,10 @@ mod tests {
         canonicalize(&mut a);
         canonicalize(&mut b);
 
-        assert_eq!(serde_json::to_vec(&a).unwrap(), serde_json::to_vec(&b).unwrap());
+        assert_eq!(
+            serde_json::to_vec(&a).unwrap(),
+            serde_json::to_vec(&b).unwrap()
+        );
     }
 
     #[test]
@@ -381,14 +387,20 @@ mod tests {
         let (_dir, registry) = temp_registry();
         let snapshot = registry.snapshot().await.expect("snapshot");
         let delta = registry.delta_since(&snapshot).await.expect("delta");
-        assert!(delta.is_empty(), "delta for an unchanged registry must be empty");
+        assert!(
+            delta.is_empty(),
+            "delta for an unchanged registry must be empty"
+        );
     }
 
     #[tokio::test]
     async fn default_snapshot_round_trips_through_from_snapshot() {
         let snapshot = SettingsSnapshot::default();
         let in_memory = RepositoryRegistry::from_snapshot(snapshot.clone());
-        let round_tripped = in_memory.snapshot().await.expect("snapshot in-memory registry");
+        let round_tripped = in_memory
+            .snapshot()
+            .await
+            .expect("snapshot in-memory registry");
         assert_eq!(
             serde_json::to_value(&round_tripped).unwrap(),
             serde_json::to_value(&snapshot).unwrap()
@@ -485,8 +497,7 @@ mod tests {
             ],
             search_settings: SearchSettingsModel {
                 enabled: true,
-                active_provider:
-                    crate::settings::models::search_settings::SearchProvider::Brave,
+                active_provider: crate::settings::models::search_settings::SearchProvider::Brave,
                 tavily_api_key: Some("tvly-key".to_string()),
                 brave_api_key: Some("brave-key".to_string()),
                 max_results: 10,
@@ -594,9 +605,15 @@ mod two_process_determinism {
             "fixture".to_string(),
             crate::settings::models::providers_store::ProviderType::OpenRouter,
         );
-        provider.extra_config.insert("zebra".to_string(), "1".to_string());
-        provider.extra_config.insert("apple".to_string(), "2".to_string());
-        provider.extra_config.insert("mango".to_string(), "3".to_string());
+        provider
+            .extra_config
+            .insert("zebra".to_string(), "1".to_string());
+        provider
+            .extra_config
+            .insert("apple".to_string(), "2".to_string());
+        provider
+            .extra_config
+            .insert("mango".to_string(), "3".to_string());
         snapshot.providers.push(provider);
         snapshot
     }
