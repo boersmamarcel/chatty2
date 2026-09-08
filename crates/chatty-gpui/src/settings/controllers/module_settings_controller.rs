@@ -757,12 +757,13 @@ pub fn refresh_runtime(cx: &mut App) {
                                 (exec.workspace_dir.clone(), auto_approve)
                             })
                             .unwrap_or((None, false));
-                        gateway = gateway.with_local_runner(Arc::new(broker_runner::local_runner(
-                            participants,
-                            socket,
-                            workspace_dir,
-                            auto_approve,
-                        )));
+                        gateway =
+                            gateway.with_virtual_agent(Arc::new(broker_runner::local_runner(
+                                participants,
+                                socket,
+                                workspace_dir,
+                                auto_approve,
+                            )));
                     }
 
                     gateway.start().await.map(|_| gateway)

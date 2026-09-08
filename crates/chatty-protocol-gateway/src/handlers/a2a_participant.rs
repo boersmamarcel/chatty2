@@ -25,7 +25,8 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::participant::{
-    LocalRunner, ParticipantCard, ParticipantRegistry, TaskState, TaskStream, TaskUpdate, Worker,
+    ParticipantCard, ParticipantRegistry, TaskState, TaskStream, TaskUpdate, VirtualAgent,
+    WorkerHandle,
 };
 
 use super::jsonrpc::{INTERNAL_ERROR, json_rpc_error, json_rpc_ok};
@@ -68,17 +69,22 @@ struct RunningTask {
     updates: TaskStream,
     /// Cancels the task if the caller hangs up before it finishes.
     guard: TaskGuard,
-    /// Present only for a runner-spawned worker: the child process, reaped
-    /// when this is dropped.
-    worker: Option<Worker>,
+    /// Present only for a worker a virtual agent started: the process or the
+    /// leased microVM behind it, reaped when this is dropped.
+    worker: Option<Box<dyn WorkerHandle>>,
 }
 
 impl RunningTask {
     /// The task reached a terminal state; nothing is left to cancel.
-    fn finish(&mut self, succeeded: bool) {
+    ///
+    /// `metadata` is the terminal status's, carrying the worker's token
+    /// usage. It is passed on rather than only rendered because a hosted
+    /// worker's ledger row wants it beside the lease-seconds only the worker
+    /// handle knows (AGE-307).
+    fn finish(&mut self, succeeded: bool, metadata: Option<&Value>) {
         self.guard.finished();
         if let Some(worker) = self.worker.as_mut() {
-            worker.set_succeeded(succeeded);
+            worker.finish(succeeded, metadata);
         }
     }
 }
@@ -94,8 +100,8 @@ fn submit(registry: &ParticipantRegistry, name: &str, prompt: String) -> Option<
     })
 }
 
-/// Spawn a worker for `prompt` and submit the task to it.
-async fn spawn(runner: &LocalRunner, prompt: String) -> Result<RunningTask, String> {
+/// Start a worker for `prompt` and submit the task to it.
+async fn spawn(runner: &dyn VirtualAgent, prompt: String) -> Result<RunningTask, String> {
     let (worker, updates) = runner
         .run_task(prompt)
         .await
@@ -138,16 +144,16 @@ pub(crate) async fn message_send(
     }
 }
 
-/// Spawn a worker, run one task on it to completion, and reap it.
+/// Start a worker, run one task on it to completion, and reap it.
 pub(crate) async fn runner_message_send(
-    runner: &LocalRunner,
+    runner: &dyn VirtualAgent,
     id: Option<Value>,
     prompt: String,
 ) -> Response {
     match spawn(runner, prompt).await {
         Ok(task) => send_task(id, task).await,
         Err(reason) => {
-            warn!(agent = runner.agent_name(), %reason, "Could not start a local worker");
+            warn!(agent = runner.agent_name(), %reason, "Could not start a worker");
             json_rpc_error(StatusCode::OK, id, INTERNAL_ERROR, reason)
         }
     }
@@ -184,7 +190,7 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
             }
         }
     }
-    task.finish(state == TaskState::Completed);
+    task.finish(state == TaskState::Completed, metadata.as_ref());
 
     let mut result = json!({
         "id": task.task_id,
@@ -222,16 +228,16 @@ pub(crate) fn message_stream(
     }
 }
 
-/// Spawn a worker and stream its task.
+/// Start a worker and stream its task.
 pub(crate) async fn runner_message_stream(
-    runner: &LocalRunner,
+    runner: &dyn VirtualAgent,
     id: Option<Value>,
     prompt: String,
 ) -> Response {
     match spawn(runner, prompt).await {
         Ok(task) => stream_task(id, task),
         Err(reason) => {
-            warn!(agent = runner.agent_name(), %reason, "Could not start a local worker");
+            warn!(agent = runner.agent_name(), %reason, "Could not start a worker");
             failed_stream(id, "unknown", reason)
         }
     }
@@ -269,11 +275,11 @@ fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
                         &task_id,
                         &state.to_string(),
                         message.as_deref(),
-                        metadata,
+                        metadata.clone(),
                         terminal,
                     ));
                     if terminal {
-                        task.finish(state == TaskState::Completed);
+                        task.finish(state == TaskState::Completed, metadata.as_ref());
                         ended = true;
                         break;
                     }

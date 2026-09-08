@@ -130,16 +130,25 @@ process that has died cannot fail to send a heartbeat, so the socket is the
 only signal that cannot lie.
 
 Opt in with `ProtocolGateway::with_participant_socket(path)`; without it no
-socket is opened. Unix only — the hosted transport is vsock (AGE-307).
+socket is opened. The hosted transport is Firecracker vsock, which reaches
+this crate as a plain stream — `serve_connection` takes any of them, and
+`ParticipantConnection::register_over` is the worker's side of the same
+generalization (AGE-307).
 
-### The local runner
+### Virtual agents and the local runner
 
-`ProtocolGateway::with_local_runner` publishes one *virtual* agent —
-`local-agent` — that is not a connected process but a factory. A task
-addressed to it spawns a `chatty-tui` child, waits for that child to register
-over the socket, routes the task to it, and reaps it. To the caller it is an
-A2A agent like any other, which is the point: `invoke_agent` replaces
-`sub_agent` without the parent learning a second fan-out path.
+`ProtocolGateway::with_virtual_agent` publishes one agent that is not a
+connected process but a factory. A task addressed to it starts a worker, waits
+for that worker to register over the socket, routes the task to it, and reaps
+it. To the caller it is an A2A agent like any other, which is the point:
+`invoke_agent` replaces `sub_agent` without the parent learning a second
+fan-out path.
+
+`LocalRunner` is the implementation that spawns a `chatty-tui` child. It is
+not the only one: hive's `VmRunner` leases a Firecracker microVM per task
+(AGE-307) and fills the same slot, which is why the trait exists rather than
+the gateway naming a concrete runner. Everything past "the worker registered"
+is the same code for both.
 
 **One child per task.** The child can serve tasks until its socket closes, but
 the runner's policy is one-shot, keeping the process lifecycle identical to
@@ -162,3 +171,18 @@ cargo run -p chatty-protocol-gateway -- --modules-dir ~/.local/share/chatty/modu
 ```
 
 The server binds to `http://0.0.0.0:8420` by default.
+
+## Being a worker (`worker` feature)
+
+The `worker` feature adds the other end of the participant socket: `TaskMapper`,
+the `SessionEvent` → A2A table, and `serve_one_task`, the loop a process runs
+when it *is* the worker — register, take one task, run it, send one terminal
+status, exit.
+
+It lives here rather than in `chatty-tui` because two crates run it:
+`chatty-tui` on the desktop and hive's `chatty-server` inside a microVM. The
+frame sequence a parent renders is what ADR-0011's first kill criterion is
+measured on, so a second copy of the mapping would be a second answer to the
+question the ADR asks. The feature is off by default — it is the only thing in
+this crate that needs `chatty-core`, and a broker that never runs an agent
+itself builds without it.

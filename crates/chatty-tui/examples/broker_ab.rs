@@ -183,7 +183,7 @@ async fn start_broker(config: &Config) -> u16 {
         .with_agent_name(LOCAL_AGENT_NAME)
         .with_args(["--model", &config.model, "--auto-approve"]);
 
-    let gateway = gateway.with_local_runner(Arc::new(runner));
+    let gateway = gateway.with_virtual_agent(Arc::new(runner));
 
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
