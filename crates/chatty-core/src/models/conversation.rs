@@ -135,7 +135,7 @@ pub struct Conversation {
     /// Transient sub-agent progress trace shown as a separate in-progress UI message.
     /// This is kept in-memory so switching conversations during an active
     /// sub-agent run can restore the trace and its source badge.
-    streaming_sub_agent_trace: Option<SystemTrace>,
+    streaming_delegation_trace: Option<SystemTrace>,
     /// rig's record of the turn in flight — its tool-call and tool-result
     /// messages are persisted behind the final text (AGE-247). Set from the
     /// stream's `TurnMessages` chunk, consumed by `finalize_response`.
@@ -211,7 +211,7 @@ impl Conversation {
             updated_at: now,
             streaming_message: None,
             streaming_trace: None,
-            streaming_sub_agent_trace: None,
+            streaming_delegation_trace: None,
             streaming_turn_messages: None,
             pending_artifacts,
             shell_session: built.shell_session,
@@ -333,7 +333,7 @@ impl Conversation {
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
             streaming_trace: None,
-            streaming_sub_agent_trace: None,
+            streaming_delegation_trace: None,
             streaming_turn_messages: None,
             pending_artifacts,
             shell_session: built.shell_session,
@@ -874,24 +874,24 @@ impl Conversation {
         self.streaming_trace = trace;
     }
 
-    pub fn streaming_sub_agent_trace(&self) -> Option<&SystemTrace> {
-        self.streaming_sub_agent_trace.as_ref()
+    pub fn streaming_delegation_trace(&self) -> Option<&SystemTrace> {
+        self.streaming_delegation_trace.as_ref()
     }
 
-    pub fn set_streaming_sub_agent_trace(&mut self, trace: Option<SystemTrace>) {
-        self.streaming_sub_agent_trace = trace;
+    pub fn set_streaming_delegation_trace(&mut self, trace: Option<SystemTrace>) {
+        self.streaming_delegation_trace = trace;
     }
 
-    pub fn start_sub_agent_progress(&mut self, prompt: &str, source: ToolSource) {
-        start_sub_agent_progress_state(&mut self.streaming_sub_agent_trace, prompt, source);
+    pub fn start_delegation_progress(&mut self, prompt: &str, source: ToolSource) {
+        start_delegation_progress_state(&mut self.streaming_delegation_trace, prompt, source);
     }
 
-    pub fn append_sub_agent_progress(&mut self, line: &str) {
-        append_sub_agent_progress_state(&mut self.streaming_sub_agent_trace, line);
+    pub fn append_delegation_progress(&mut self, line: &str) {
+        append_delegation_progress_state(&mut self.streaming_delegation_trace, line);
     }
 
-    pub fn finalize_sub_agent_progress(&mut self, success: bool, result: Option<String>) {
-        finalize_sub_agent_progress_state(&mut self.streaming_sub_agent_trace, success, result);
+    pub fn finalize_delegation_progress(&mut self, success: bool, result: Option<String>) {
+        finalize_delegation_progress_state(&mut self.streaming_delegation_trace, success, result);
     }
 
     /// Get or create the streaming trace, returning a mutable reference
@@ -1139,30 +1139,30 @@ fn append_trace_item_state(entries: &mut [MessageEntry], item: TraceItem) -> boo
     }
 }
 
-fn start_sub_agent_progress_state(
-    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+fn start_delegation_progress_state(
+    streaming_delegation_trace: &mut Option<SystemTrace>,
     prompt: &str,
     source: ToolSource,
 ) {
-    *streaming_sub_agent_trace = Some(SystemTrace::new_sub_agent(prompt, source));
+    *streaming_delegation_trace = Some(SystemTrace::new_delegation(prompt, source));
 }
 
-fn append_sub_agent_progress_state(
-    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+fn append_delegation_progress_state(
+    streaming_delegation_trace: &mut Option<SystemTrace>,
     line: &str,
 ) {
-    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
-        trace.append_sub_agent_progress(line);
+    if let Some(trace) = streaming_delegation_trace.as_mut() {
+        trace.append_delegation_progress(line);
     }
 }
 
-fn finalize_sub_agent_progress_state(
-    streaming_sub_agent_trace: &mut Option<SystemTrace>,
+fn finalize_delegation_progress_state(
+    streaming_delegation_trace: &mut Option<SystemTrace>,
     success: bool,
     result: Option<String>,
 ) {
-    if let Some(trace) = streaming_sub_agent_trace.as_mut() {
-        trace.finalize_sub_agent_progress(success, result);
+    if let Some(trace) = streaming_delegation_trace.as_mut() {
+        trace.finalize_delegation_progress(success, result);
     }
 }
 
@@ -1478,9 +1478,9 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_traces_preserves_running_sub_agent_source() {
-        let mut trace = SystemTrace::new_sub_agent("review this thread", ToolSource::HiveCloud);
-        trace.append_sub_agent_progress("Working...");
+    fn deserialize_traces_preserves_running_delegation_source() {
+        let mut trace = SystemTrace::new_delegation("review this thread", ToolSource::HiveCloud);
+        trace.append_delegation_progress("Working...");
 
         let json =
             serde_json::to_string(&vec![Some(serde_json::to_value(&trace).unwrap())]).unwrap();
@@ -1494,24 +1494,24 @@ mod tests {
         };
 
         assert_eq!(tc.source, ToolSource::HiveCloud);
-        assert!(restored.is_running_sub_agent());
+        assert!(restored.is_running_delegation());
         assert_eq!(tc.output.as_deref(), Some("Working..."));
     }
 
     #[test]
-    fn sub_agent_progress_does_not_touch_parent_body() {
+    fn delegation_progress_does_not_touch_parent_body() {
         let streaming_message = Some("assistant body".to_string());
         let streaming_trace = Some(SystemTrace::new());
-        let mut streaming_sub_agent_trace = None;
+        let mut streaming_delegation_trace = None;
 
-        start_sub_agent_progress_state(
-            &mut streaming_sub_agent_trace,
+        start_delegation_progress_state(
+            &mut streaming_delegation_trace,
             "investigate",
             ToolSource::Local,
         );
-        append_sub_agent_progress_state(&mut streaming_sub_agent_trace, "working...");
-        finalize_sub_agent_progress_state(
-            &mut streaming_sub_agent_trace,
+        append_delegation_progress_state(&mut streaming_delegation_trace, "working...");
+        finalize_delegation_progress_state(
+            &mut streaming_delegation_trace,
             true,
             Some("done".to_string()),
         );
@@ -1524,7 +1524,7 @@ mod tests {
             "parent streaming_trace must not be replaced by the sub-agent progress card"
         );
 
-        let trace = streaming_sub_agent_trace
+        let trace = streaming_delegation_trace
             .as_ref()
             .expect("sub-agent trace should persist");
         let tc = match &trace.items[0] {
@@ -1532,7 +1532,7 @@ mod tests {
             _ => panic!("expected ToolCall"),
         };
         assert_eq!(tc.output.as_deref(), Some("working...\n\n---\n\ndone"));
-        assert!(!trace.is_running_sub_agent());
+        assert!(!trace.is_running_delegation());
     }
 
     fn entry(message: Message, system_trace: Option<serde_json::Value>) -> MessageEntry {
@@ -1557,7 +1557,7 @@ mod tests {
     #[test]
     fn append_trace_item_targets_the_last_assistant_entry() {
         let existing =
-            serde_json::to_value(SystemTrace::new_sub_agent("x", ToolSource::Local)).unwrap();
+            serde_json::to_value(SystemTrace::new_delegation("x", ToolSource::Local)).unwrap();
         let mut entries = vec![
             entry(Message::user("hi"), None),
             entry(Message::assistant("first"), Some(existing)),
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn append_trace_item_extends_an_existing_trace() {
         let existing =
-            serde_json::to_value(SystemTrace::new_sub_agent("x", ToolSource::Local)).unwrap();
+            serde_json::to_value(SystemTrace::new_delegation("x", ToolSource::Local)).unwrap();
         let mut entries = vec![entry(Message::assistant("a"), Some(existing))];
 
         assert!(append_trace_item_state(&mut entries, handoff_item()));

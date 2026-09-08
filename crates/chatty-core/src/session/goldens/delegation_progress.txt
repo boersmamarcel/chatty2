@@ -1,0 +1,7 @@
+TurnStarted
+Delegation(Started "researcher", "Summarize the changelog")
+Delegation(Text "Reading CHANGELOG.md")
+Delegation(Finished success=true, Some("Three releases since 0.3.45."))
+ToolCallStarted(id="call-1", "invoke_agent")
+ToolCallResult(id="call-1", "Three releases since 0.3.45.")
+TurnEnded

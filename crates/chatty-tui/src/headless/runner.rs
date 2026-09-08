@@ -8,18 +8,15 @@
 //! event channel `run_headless` drains. Pickers, scroll state and the chat
 //! rectangle stay in the engine.
 //!
-//! Every `SessionEvent` the turn produces is also written to stderr as a
-//! `CHATTY_EVENT` line (see `chatty_core::tools::format_event_line`), which
-//! is how a parent `sub_agent` tool follows this process: the session's own
-//! contract crossing the process boundary. Everything else on stderr is
-//! the human-readable log.
+//! A parent that delegated this turn follows it through an
+//! [`EventObserver`] — the broker participant's socket (AGE-301). Stderr is
+//! the human-readable log and nothing else.
 
 use anyhow::{Context, Result};
 use chatty_core::models::TurnOutcome;
 use chatty_core::services::StreamSurface;
 use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
 use chatty_core::settings::models::ExecutionSettingsModel;
-use chatty_core::tools::format_event_line;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -27,17 +24,12 @@ use tracing::warn;
 use crate::engine::{AgentContextInputs, ChatEngineConfig, Transcript, build_agent_context};
 use crate::events::AppEvent;
 
-/// Where the runner writes its `CHATTY_EVENT` lines. Stderr in production;
-/// a test hands in a collector.
-pub type EventLineWriter = Arc<dyn Fn(String) + Send + Sync>;
-
-/// Takes the turn's events instead of the `CHATTY_EVENT` lines.
+/// Takes the turn's events as they happen.
 ///
-/// A child running as a broker participant (AGE-301) reports over its socket,
-/// where the events are frames rather than text. Installing an observer
-/// *replaces* the lines rather than adding to them: ADR-0011 retires the
-/// scraped stdio protocol, and emitting both would leave a second parser
-/// alive that nothing reads.
+/// A child running as a broker participant (AGE-301) reports over its
+/// socket, where the events are frames rather than text. Without an observer
+/// the turn is silent to anyone outside this process — which is what plain
+/// `--headless` is: an answer on stdout and a log on stderr.
 pub type EventObserver = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
 
 pub struct HeadlessRunner {
@@ -51,7 +43,6 @@ pub struct HeadlessRunner {
     config: ChatEngineConfig,
     skill_service: chatty_core::services::SkillService,
     event_tx: mpsc::UnboundedSender<AppEvent>,
-    event_line_writer: EventLineWriter,
     event_observer: Option<EventObserver>,
     /// An agent-protocol follow-up that arrived while a turn was already
     /// streaming; sent once the turn ends (AGE-242 / D3).
@@ -78,20 +69,12 @@ impl HeadlessRunner {
             config,
             skill_service,
             event_tx,
-            event_line_writer: Arc::new(|line| eprintln!("{line}")),
             event_observer: None,
             pending_agent_follow_up: None,
         }
     }
 
-    /// Redirect the `CHATTY_EVENT` lines (tests).
-    #[cfg(test)]
-    pub fn set_event_line_writer(&mut self, writer: EventLineWriter) {
-        self.event_line_writer = writer;
-    }
-
-    /// Send the turn's events to `observer` instead of writing
-    /// `CHATTY_EVENT` lines (AGE-301).
+    /// Send the turn's events to `observer` as they happen (AGE-301).
     pub fn set_event_observer(&mut self, observer: EventObserver) {
         self.event_observer = Some(observer);
     }
@@ -105,7 +88,6 @@ impl HeadlessRunner {
         let mut ctx = build_agent_context(AgentContextInputs {
             execution_settings: &self.execution_settings,
             module_settings: &self.config.module_settings,
-            models: &self.config.models,
             user_secrets: &self.config.user_secrets,
             memory_service: &self.config.memory_service,
             skill_service: &self.skill_service,
@@ -113,7 +95,6 @@ impl HeadlessRunner {
             embedding_service: &self.config.embedding_service,
             remote_agents: &self.config.remote_agents,
             module_agents: &self.config.module_agents,
-            is_sub_agent: self.config.is_sub_agent,
         });
         ctx.mcp_tools = mcp_tools;
 
@@ -174,7 +155,7 @@ impl HeadlessRunner {
         } else {
             TurnKind::Human
         };
-        self.transcript.reset_sub_agent_row();
+        self.transcript.reset_delegation_row();
         if show_in_transcript {
             self.transcript.push_user(message.clone());
         }
@@ -202,21 +183,14 @@ impl HeadlessRunner {
         }
     }
 
-    /// The sink a turn emits into: the event goes out to the parent — as a
-    /// `CHATTY_EVENT` line, or to an observer that has replaced them — then
-    /// to `run_headless` as an `AppEvent`.
+    /// The sink a turn emits into: the event goes to the observer, if a
+    /// parent installed one, and then to `run_headless` as an `AppEvent`.
     pub(crate) fn event_sink(&self) -> impl FnMut(SessionEvent) + Send + 'static {
         let event_tx = self.event_tx.clone();
-        let writer = self.event_line_writer.clone();
         let observer = self.event_observer.clone();
         move |event| {
-            match observer.as_ref() {
-                Some(observer) => observer(&event),
-                None => {
-                    if let Some(line) = format_event_line(&event) {
-                        writer(line);
-                    }
-                }
+            if let Some(observer) = observer.as_ref() {
+                observer(&event);
             }
             let _ = event_tx.send(AppEvent::from(event));
         }
@@ -274,18 +248,18 @@ impl HeadlessRunner {
             }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
-            AppEvent::SubAgent(progress) => {
-                self.session.note_sub_agent(&progress);
-                let line = crate::engine::helpers::sub_agent_line(&progress);
+            AppEvent::Delegation(progress) => {
+                self.session.note_delegation(&progress);
+                let line = crate::engine::helpers::delegation_line(&progress);
                 if matches!(
                     progress,
                     chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
                 ) {
-                    self.transcript.sub_agent_finished(line);
+                    self.transcript.delegation_finished(line);
                 } else {
                     let line = crate::engine::sanitize_progress_line(&line);
                     if !line.is_empty() {
-                        self.transcript.sub_agent_progress(line);
+                        self.transcript.delegation_progress(line);
                     }
                 }
             }

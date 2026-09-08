@@ -551,7 +551,7 @@ impl AgentSession {
             SessionEvent::ClarificationRequested { id, questions } => {
                 self.note_clarification_requested(id, questions)
             }
-            SessionEvent::SubAgent(progress) => self.note_sub_agent(progress),
+            SessionEvent::Delegation(progress) => self.note_delegation(progress),
             SessionEvent::TurnMessages(messages) => self.set_turn_messages(messages.clone()),
             SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
             _ => {}
@@ -715,8 +715,8 @@ impl AgentSession {
         }
     }
 
-    /// `SessionEvent::SubAgent`: the sub-agent's row on the conversation.
-    pub fn note_sub_agent(&mut self, progress: &InvokeAgentProgress) {
+    /// `SessionEvent::Delegation`: the sub-agent's row on the conversation.
+    pub fn note_delegation(&mut self, progress: &InvokeAgentProgress) {
         let Some(conversation) = self.conversation.as_mut() else {
             return;
         };
@@ -726,14 +726,14 @@ impl AgentSession {
                 prompt,
                 source,
             } => {
-                conversation.start_sub_agent_progress(
+                conversation.start_delegation_progress(
                     &format!("[Agent: {agent_name}] {prompt}"),
                     source.clone(),
                 );
             }
-            InvokeAgentProgress::Text(text) => conversation.append_sub_agent_progress(text),
+            InvokeAgentProgress::Text(text) => conversation.append_delegation_progress(text),
             InvokeAgentProgress::Finished { success, result } => {
-                conversation.finalize_sub_agent_progress(*success, result.clone());
+                conversation.finalize_delegation_progress(*success, result.clone());
             }
         }
     }
@@ -797,7 +797,7 @@ impl AgentSession {
         let outcome = conversation.finalize_turn(response, artifacts, trace);
         conversation.set_streaming_message(None);
         conversation.set_streaming_trace(None);
-        conversation.set_streaming_sub_agent_trace(None);
+        conversation.set_streaming_delegation_trace(None);
 
         if let Some(usage) = self.last_turn_usage.take() {
             conversation.add_token_usage(usage);

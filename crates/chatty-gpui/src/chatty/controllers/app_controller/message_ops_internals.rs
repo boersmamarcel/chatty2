@@ -191,7 +191,7 @@ impl DesktopSink {
         }
 
         match event {
-            SessionEvent::SubAgent(progress) => self.on_progress(progress),
+            SessionEvent::Delegation(progress) => self.on_progress(progress),
             SessionEvent::FollowUp(prompt) => self.inject_follow_up(prompt),
             SessionEvent::Error(_) => {
                 // The manager drops the stream on an error, so the trace has
@@ -321,7 +321,7 @@ impl DesktopSink {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.start_sub_agent_progress(&label, source, cx);
+                            view.start_delegation_progress(&label, source, cx);
                         }
                     })
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent start"))
@@ -331,7 +331,7 @@ impl DesktopSink {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.append_sub_agent_progress(&text, cx);
+                            view.append_delegation_progress(&text, cx);
                         }
                     })
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent progress"))
@@ -341,7 +341,7 @@ impl DesktopSink {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.finalize_sub_agent_progress(success, result, cx);
+                            view.finalize_delegation_progress(success, result, cx);
                         }
                     })
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent finish"))

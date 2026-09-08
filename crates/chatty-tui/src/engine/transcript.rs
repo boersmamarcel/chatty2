@@ -23,8 +23,8 @@ pub struct Transcript {
     pub messages: Vec<DisplayMessage>,
     /// Index into `messages` of the system message showing sub-agent progress.
     /// `None` when no sub-agent is running.
-    pub sub_agent_msg_idx: Option<usize>,
-    /// Tracks `invoke_agent` / `sub_agent` tool call IDs to suppress their
+    pub delegation_msg_idx: Option<usize>,
+    /// Tracks `invoke_agent` tool call IDs to suppress their
     /// ToolCallBlock rendering (progress goes through the sub-agent channel).
     active_invoke_agent_ids: HashSet<String>,
 }
@@ -36,7 +36,7 @@ impl Transcript {
 
     pub fn clear(&mut self) {
         self.messages.clear();
-        self.sub_agent_msg_idx = None;
+        self.delegation_msg_idx = None;
         self.active_invoke_agent_ids.clear();
     }
 
@@ -57,12 +57,12 @@ impl Transcript {
     }
 
     /// Route sub-agent progress into the last row from now on.
-    pub fn mark_last_as_sub_agent_row(&mut self) {
-        self.sub_agent_msg_idx = self.messages.len().checked_sub(1);
+    pub fn mark_last_as_delegation_row(&mut self) {
+        self.delegation_msg_idx = self.messages.len().checked_sub(1);
     }
 
-    pub fn reset_sub_agent_row(&mut self) {
-        self.sub_agent_msg_idx = None;
+    pub fn reset_delegation_row(&mut self) {
+        self.delegation_msg_idx = None;
     }
 
     /// Number of assistant rows, streaming or not.
@@ -92,17 +92,17 @@ impl Transcript {
     }
 
     fn streaming_assistant_mut(&mut self) -> Option<&mut DisplayMessage> {
-        let idx = streaming_assistant_index(&self.messages, self.sub_agent_msg_idx)?;
+        let idx = streaming_assistant_index(&self.messages, self.delegation_msg_idx)?;
         self.messages.get_mut(idx)
     }
 
     /// The streaming row, opening a continuation row after a sub-agent's
     /// progress row if the turn carries on past it.
     fn streaming_assistant_or_continuation(&mut self) -> Option<&mut DisplayMessage> {
-        if let Some(idx) = streaming_assistant_index(&self.messages, self.sub_agent_msg_idx) {
+        if let Some(idx) = streaming_assistant_index(&self.messages, self.delegation_msg_idx) {
             return self.messages.get_mut(idx);
         }
-        if self.sub_agent_msg_idx.is_some() {
+        if self.delegation_msg_idx.is_some() {
             self.start_assistant();
             return self.messages.last_mut();
         }
@@ -116,7 +116,7 @@ impl Transcript {
     }
 
     pub fn tool_started(&mut self, id: String, name: String) {
-        if name == "invoke_agent" || name == "sub_agent" {
+        if name == "invoke_agent" {
             self.active_invoke_agent_ids.insert(id);
             return;
         }
@@ -151,7 +151,7 @@ impl Transcript {
 
     pub fn tool_result(&mut self, id: &str, result: String) {
         if self.active_invoke_agent_ids.remove(id) {
-            // invoke_agent / sub_agent result — sub-agent progress already handled
+            // invoke_agent result — the delegation progress already handled
             return;
         }
         if let Some(last) = self.streaming_assistant_mut()
@@ -177,12 +177,12 @@ impl Transcript {
 
     /// A (sanitized, non-empty) line of sub-agent progress: the first opens
     /// the sub-agent row, later ones append to it.
-    pub fn sub_agent_progress(&mut self, line: String) {
-        if self.sub_agent_msg_idx.is_none() {
-            self.seal_parent_before_sub_agent_progress();
+    pub fn delegation_progress(&mut self, line: String) {
+        if self.delegation_msg_idx.is_none() {
+            self.seal_parent_before_delegation_progress();
             self.add_system(line);
-            self.mark_last_as_sub_agent_row();
-        } else if let Some(idx) = self.sub_agent_msg_idx
+            self.mark_last_as_delegation_row();
+        } else if let Some(idx) = self.delegation_msg_idx
             && let Some(msg) = self.messages.get_mut(idx)
         {
             msg.push_text("\n");
@@ -190,15 +190,15 @@ impl Transcript {
         }
     }
 
-    pub fn sub_agent_finished(&mut self, message: String) {
-        if let Some(idx) = self.sub_agent_msg_idx
+    pub fn delegation_finished(&mut self, message: String) {
+        if let Some(idx) = self.delegation_msg_idx
             && let Some(msg) = self.messages.get_mut(idx)
         {
             msg.push_text("\n");
             msg.push_text(&message);
         } else {
             self.add_system(message);
-            self.mark_last_as_sub_agent_row();
+            self.mark_last_as_delegation_row();
         }
     }
 
@@ -224,7 +224,7 @@ impl Transcript {
         }
     }
 
-    fn seal_parent_before_sub_agent_progress(&mut self) {
+    fn seal_parent_before_delegation_progress(&mut self) {
         let Some(idx) = streaming_assistant_index(&self.messages, None) else {
             return;
         };
@@ -302,14 +302,14 @@ mod tests {
     fn invoke_agent_rows_are_suppressed_in_favour_of_the_progress_row() {
         let mut transcript = Transcript::new();
         transcript.start_assistant();
-        transcript.tool_started("c1".into(), "sub_agent".into());
-        transcript.sub_agent_progress("[local agent] task".into());
-        transcript.sub_agent_progress("reading".into());
+        transcript.tool_started("c1".into(), "invoke_agent".into());
+        transcript.delegation_progress("[local agent] task".into());
+        transcript.delegation_progress("reading".into());
         transcript.tool_result("c1", "answer".into());
-        transcript.sub_agent_finished("answer".into());
+        transcript.delegation_finished("answer".into());
 
         assert!(transcript.tool_call("c1").is_none());
-        let row = &transcript.messages[transcript.sub_agent_msg_idx.unwrap()];
+        let row = &transcript.messages[transcript.delegation_msg_idx.unwrap()];
         assert_eq!(row.text(), "[local agent] task\nreading\nanswer");
     }
 }

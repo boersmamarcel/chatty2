@@ -94,7 +94,7 @@ impl ListAgentsTool {
     }
 
     /// Advertise the broker's local worker: a chatty agent in its own
-    /// process, which is what replaces `sub_agent` (ADR-0011 C2).
+    /// process (ADR-0011 C2).
     pub fn with_local_worker(mut self, name: impl Into<String>) -> Self {
         self.local_worker = Some(LocalWorkerAgentSummary {
             name: name.into(),
