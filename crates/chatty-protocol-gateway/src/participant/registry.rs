@@ -23,7 +23,9 @@ use tracing::{debug, info, warn};
 use serde_json::Value;
 
 use super::origin::AgentOrigin;
-use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
+use super::protocol::{
+    BrokerFrame, InputRequest, ParticipantCard, ParticipantFrame, TaskInput, TaskState,
+};
 
 /// One update on an open task, as the HTTP side consumes it.
 ///
@@ -37,6 +39,9 @@ pub enum TaskUpdate {
         /// Opaque, forwarded to the A2A status's `metadata` (see
         /// [`ParticipantFrame::Status`](super::protocol::ParticipantFrame)).
         metadata: Option<Value>,
+        /// What an `input-required` task is waiting for; answered through
+        /// [`ParticipantRegistry::answer_task`].
+        input: Option<InputRequest>,
     },
     Artifact {
         text: String,
@@ -51,6 +56,15 @@ pub enum TaskUpdate {
 /// before dropping the sender, so a caller is never left waiting on a
 /// process that has gone away.
 pub type TaskStream = mpsc::UnboundedReceiver<TaskUpdate>;
+
+/// Why an answer could not be delivered.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AnswerError {
+    #[error("task '{0}' is not open on any participant")]
+    UnknownTask(String),
+    #[error("the participant owning task '{0}' is disconnecting")]
+    ParticipantGone(String),
+}
 
 /// Why a registration was refused.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -157,6 +171,7 @@ impl ParticipantRegistry {
                 state: TaskState::Failed,
                 message: Some(format!("participant '{name}' disconnected")),
                 metadata: None,
+                input: None,
             });
         }
 
@@ -250,6 +265,49 @@ impl ParticipantRegistry {
         }
     }
 
+    /// Whether `task_id` is open on some participant.
+    ///
+    /// The A2A handler asks this to tell a `message/send` that answers a
+    /// parked task from one that starts a new task: only an id the broker
+    /// itself minted, and has not closed, can be the former.
+    pub fn owns_task(&self, task_id: &str) -> bool {
+        self.lock()
+            .participants
+            .values()
+            .any(|p| p.tasks.contains_key(task_id))
+    }
+
+    /// Deliver the answer to a task parked in `input-required`.
+    ///
+    /// Addressed by task id alone: the caller answered on the A2A task it
+    /// was streaming, and a runner's task is served by a worker whose
+    /// participant name the caller never learned. The task stays open — the
+    /// participant's next status un-parks it.
+    pub fn answer_task(&self, task_id: &str, input: TaskInput) -> Result<(), AnswerError> {
+        let mut inner = self.lock();
+        let Some((name, participant)) = inner
+            .participants
+            .iter_mut()
+            .find(|(_, p)| p.tasks.contains_key(task_id))
+        else {
+            return Err(AnswerError::UnknownTask(task_id.to_string()));
+        };
+        let name = name.clone();
+        if participant
+            .outbound
+            .send(BrokerFrame::Input {
+                task_id: task_id.to_string(),
+                input,
+            })
+            .is_err()
+        {
+            return Err(AnswerError::ParticipantGone(task_id.to_string()));
+        }
+        drop(inner);
+        debug!(participant = %name, task = %task_id, "Answer delivered to a parked task");
+        Ok(())
+    }
+
     /// Route one frame from `name`'s socket to the task it names.
     ///
     /// A frame for an unknown task is dropped with a log line rather than
@@ -270,12 +328,14 @@ impl ParticipantRegistry {
                 state,
                 message,
                 metadata,
+                input,
             } => (
                 task_id,
                 TaskUpdate::Status {
                     state,
                     message,
                     metadata,
+                    input,
                 },
                 state.is_terminal(),
             ),
@@ -428,6 +488,7 @@ mod tests {
                 state: TaskState::Working,
                 message: Some("read_file".into()),
                 metadata: None,
+                input: None,
             },
         );
         reg.on_frame(
@@ -445,6 +506,7 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
+                input: None,
             },
         );
 
@@ -530,8 +592,74 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
+                input: None,
             },
         ));
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaches_the_participant_that_owns_the_task() {
+        use super::super::protocol::{InputAnswer, InputQuestion};
+
+        let reg = ParticipantRegistry::new();
+        let mut outbound = register(&reg, "worker-1");
+        let (task_id, mut updates) = reg.submit_task("worker-1", "a".into()).unwrap();
+        let _ = outbound.recv().await;
+
+        // The worker parks the task and says what it is waiting for.
+        reg.on_frame(
+            "worker-1",
+            ParticipantFrame::Status {
+                task_id: task_id.clone(),
+                state: TaskState::InputRequired,
+                message: Some("Which database?".into()),
+                metadata: None,
+                input: Some(InputRequest {
+                    id: "req-1".into(),
+                    questions: vec![InputQuestion {
+                        id: "q1".into(),
+                        question: "Which database?".into(),
+                        options: vec!["Postgres".into(), "SQLite".into()],
+                    }],
+                }),
+            },
+        );
+        let Some(TaskUpdate::Status {
+            state: TaskState::InputRequired,
+            input: Some(request),
+            ..
+        }) = updates.recv().await
+        else {
+            panic!("the caller sees the request behind the parked state");
+        };
+        assert_eq!(request.id, "req-1");
+        assert!(reg.owns_task(&task_id), "a parked task is still open");
+
+        // The answer is addressed by task id alone.
+        let input = TaskInput {
+            request_id: request.id,
+            answers: vec![InputAnswer {
+                id: "q1".into(),
+                answer: "Postgres".into(),
+                custom: false,
+            }],
+        };
+        reg.answer_task(&task_id, input.clone()).unwrap();
+        assert!(matches!(
+            outbound.recv().await,
+            Some(BrokerFrame::Input { task_id: t, input: i }) if t == task_id && i == input
+        ));
+        assert_eq!(
+            reg.open_task_count("worker-1"),
+            1,
+            "answering does not close the task"
+        );
+
+        assert_eq!(
+            reg.answer_task("task-nobody", input).unwrap_err(),
+            AnswerError::UnknownTask("task-nobody".into())
+        );
+        assert!(!reg.owns_task("task-nobody"));
     }
 
     #[test]

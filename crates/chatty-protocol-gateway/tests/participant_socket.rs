@@ -253,6 +253,147 @@ async fn a_registered_participant_round_trips_a_task_with_progress_and_an_artifa
     assert_eq!(final_state.as_deref(), Some("completed"));
 }
 
+/// AGE-306 on the wire: a parked task's question reaches the A2A caller in
+/// the status's `metadata.clarification`, the caller's `message/send` on the
+/// same task id becomes an `input` frame on the socket, and the task goes on.
+#[tokio::test]
+async fn a_parked_tasks_question_is_served_and_its_answer_comes_back_as_an_input_frame() {
+    use chatty_core::models::clarification_store::ClarificationAnswer;
+    use chatty_core::services::a2a_client::A2aClarificationRequest;
+
+    let harness = Harness::start().await;
+    let mut stub = StubParticipant::register(&harness.socket, "asking-worker").await;
+
+    let stub_task = tokio::spawn(async move {
+        let task = stub.next_frame().await;
+        let task_id = task["taskId"].as_str().unwrap().to_string();
+        stub.send(json!({
+            "type": "status",
+            "taskId": task_id,
+            "state": "input-required",
+            "message": "Which database?",
+            "input": {
+                "id": "req-1",
+                "questions": [{
+                    "id": "q1",
+                    "question": "Which database?",
+                    "options": ["Postgres", "SQLite"],
+                }],
+            },
+        }))
+        .await;
+
+        // The answer arrives on the socket, addressed to this task.
+        let input = stub.next_frame().await;
+        assert_eq!(input["type"], "input");
+        assert_eq!(input["taskId"], task_id);
+        assert_eq!(input["input"]["requestId"], "req-1");
+        let chosen = input["input"]["answers"][0]["answer"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        stub.send(json!({
+            "type": "status",
+            "taskId": task_id,
+            "state": "working",
+            "message": "\u{2713} ask_user",
+        }))
+        .await;
+        stub.send(json!({
+            "type": "artifact",
+            "taskId": task_id,
+            "text": format!("Using {chosen}."),
+            "lastChunk": true,
+        }))
+        .await;
+        stub.send(json!({
+            "type": "status",
+            "taskId": task_id,
+            "state": "completed",
+        }))
+        .await;
+        stub
+    });
+
+    let client = A2aClient::new();
+    let agent = harness.agent("asking-worker");
+    let mut stream = client
+        .send_message_stream(&agent, "set up the database")
+        .await
+        .expect("the gateway accepts message/stream for a participant");
+
+    let mut answered = false;
+    let mut progress: Vec<String> = Vec::new();
+    let mut artifacts: Vec<String> = Vec::new();
+    let mut final_state = None;
+    while let Some(event) = stream.next().await {
+        match event.expect("no stream error") {
+            A2aStreamEvent::StatusUpdate {
+                task_id,
+                state,
+                message,
+                metadata,
+                is_final,
+            } => {
+                if state == "input-required" {
+                    let request = A2aClarificationRequest::from_status_metadata(metadata.as_ref())
+                        .expect("the parked status carries the request");
+                    assert_eq!(request.id, "req-1");
+                    assert_eq!(request.questions[0].options, vec!["Postgres", "SQLite"]);
+                    assert_eq!(message.as_deref(), Some("Which database?"));
+                    assert!(
+                        harness.participants.owns_task(&task_id),
+                        "parked, still open"
+                    );
+
+                    client
+                        .send_task_input(
+                            &agent,
+                            &task_id,
+                            &request.id,
+                            &[ClarificationAnswer {
+                                id: "q1".into(),
+                                answer: "SQLite".into(),
+                                custom: false,
+                            }],
+                        )
+                        .await
+                        .expect("the gateway accepts the answer on the parked task");
+                    answered = true;
+                } else if let Some(message) = message {
+                    progress.push(message);
+                }
+                if is_final {
+                    final_state = Some(state);
+                    break;
+                }
+            }
+            A2aStreamEvent::ArtifactUpdate { text, .. } => artifacts.push(text),
+        }
+    }
+
+    let stub = stub_task.await.unwrap();
+    assert!(answered, "the caller saw the parked state");
+    assert_eq!(progress, vec!["\u{2713} ask_user".to_string()]);
+    assert_eq!(artifacts, vec!["Using SQLite.".to_string()]);
+    assert_eq!(final_state.as_deref(), Some("completed"));
+
+    // A message on a task the broker does not hold open is a fresh task,
+    // as every client that puts its own id on a new message relies on: with
+    // the participant gone it is refused as one, not as a missing answer.
+    drop(stub);
+    harness.await_deregistration("asking-worker").await;
+    let err = client
+        .send_task_input(&agent, "task-nobody", "req-1", &[])
+        .await
+        .expect_err("an id the broker never minted is not a parked task");
+    assert!(
+        !err.to_string().contains("waiting for input"),
+        "it was routed as a new task, not as an answer: {err}"
+    );
+}
+
 /// `message/send` — the non-streaming method — returns the participant's
 /// output where `A2aClient::send_message` looks for it.
 #[tokio::test]

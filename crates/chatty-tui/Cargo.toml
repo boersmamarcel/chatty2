@@ -48,6 +48,8 @@ chatty-core = { path = "../chatty-core", features = ["test-support"] }
 axum = "0.8"
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 parking_lot.workspace = true
+# AGE-306's chain test puts the participant socket in a temp dir.
+tempfile.workspace = true
 
 [features]
 default = ["mcp"]
