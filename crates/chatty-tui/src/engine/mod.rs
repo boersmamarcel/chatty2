@@ -1,17 +1,19 @@
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
-use chatty_core::models::execution_approval_store::ApprovalDecision;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
-use chatty_core::models::write_approval_store::WriteApprovalDecision;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
 use chatty_core::services::{McpService, MemoryService, StreamSurface};
-use chatty_core::session::{AgentSession, AgentSessionConfig, TurnInput, TurnKind};
+use chatty_core::session::{
+    AgentSession, AgentSessionConfig, HostedSession, TurnInput, TurnKind, turn_transport,
+};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -252,6 +254,11 @@ pub enum EngineAction {
 /// events into display updates. Used by the TUI and by the headless runner.
 pub struct ChatEngine {
     pub session: AgentSession,
+    /// Set when this conversation's turns run on a `chatty-server` (AGE-298).
+    /// The session above stays either way: it owns the local conversation,
+    /// applies every event to it and finishes the turn, so a hosted
+    /// conversation keeps a local row to bring back.
+    pub hosted: Option<HostedSession>,
     pub model_config: ModelConfig,
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
@@ -360,6 +367,7 @@ impl ChatEngine {
         });
         Self {
             session,
+            hosted: None,
             model_config: config.model_config,
             provider_config: config.provider_config,
             execution_settings: config.execution_settings,
@@ -594,9 +602,19 @@ impl ChatEngine {
             return;
         };
         let event_tx = self.event_tx.clone();
-        match self.session.begin_turn(input, move |event| {
-            let _ = event_tx.send(AppEvent::from(event));
-        }) {
+        // The one line that differs between a local and a hosted conversation:
+        // who opens the stream. Everything downstream — the events, the
+        // display, the finalize — is identical, because the wire is a
+        // serialization of `SessionEvent` and nothing else (AGE-298).
+        match turn_transport::begin_turn(
+            &mut self.session,
+            self.hosted.as_mut(),
+            input,
+            Arc::new(AtomicBool::new(false)),
+            move |event| {
+                let _ = event_tx.send(AppEvent::from(event));
+            },
+        ) {
             Ok(turn) => {
                 tokio::spawn(turn);
             }
@@ -861,7 +879,9 @@ impl ChatEngine {
 
     /// Stop the active stream
     pub fn stop_stream(&mut self) {
-        self.session.cancel();
+        // A hosted turn is stopped by a POST, so the cancel has to be spawned;
+        // the local flag is already set by the time this returns either way.
+        tokio::spawn(turn_transport::cancel(&self.session, self.hosted.as_ref()));
         // A blocked `ask_user` call never reaches the stream loop's cancel-flag
         // check, so drop the pending request too. Without this, stopping does
         // nothing visible until the tool's five-minute timeout expires.
@@ -871,30 +891,27 @@ impl ChatEngine {
 
     /// Approve a pending tool execution (checks both execution and write stores)
     pub fn approve(&mut self) {
-        if let Some(approval) = self.pending_approval.take()
-            && !self
-                .session
-                .execution_approvals()
-                .resolve(&approval.id, ApprovalDecision::Approved)
-        {
-            self.session
-                .write_approvals()
-                .resolve(&approval.id, WriteApprovalDecision::Approved);
-        }
+        self.resolve_pending_approval(true);
     }
 
     /// Deny a pending tool execution (checks both execution and write stores)
     pub fn deny(&mut self) {
-        if let Some(approval) = self.pending_approval.take()
-            && !self
-                .session
-                .execution_approvals()
-                .resolve(&approval.id, ApprovalDecision::Denied)
-        {
-            self.session
-                .write_approvals()
-                .resolve(&approval.id, WriteApprovalDecision::Denied);
-        }
+        self.resolve_pending_approval(false);
+    }
+
+    /// Both answers take the same route: to this session's stores, or over the
+    /// wire to the stores of the server session that raised the request. The
+    /// id space is shared between execution and write approvals on both sides.
+    fn resolve_pending_approval(&mut self, approved: bool) {
+        let Some(approval) = self.pending_approval.take() else {
+            return;
+        };
+        tokio::spawn(turn_transport::resolve_approval(
+            &self.session,
+            self.hosted.as_ref(),
+            &approval.id,
+            approved,
+        ));
     }
 
     /// Record the user's pick for the current clarifying question and move on.
@@ -986,9 +1003,12 @@ impl ChatEngine {
             return;
         }
         if let Some(pending) = self.pending_clarification.take() {
-            self.session
-                .clarifications()
-                .resolve(&pending.id, pending.answers);
+            tokio::spawn(turn_transport::resolve_clarification(
+                &self.session,
+                self.hosted.as_ref(),
+                &pending.id,
+                pending.answers,
+            ));
         }
     }
 

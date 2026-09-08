@@ -242,6 +242,18 @@ mod tests {
         assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
         assert_eq!(ChatEngine::parse_command("/cwd"), Some(Command::Cwd(None)));
         assert_eq!(
+            ChatEngine::parse_command("/online"),
+            Some(Command::Online(None))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/online http://localhost:8081"),
+            Some(Command::Online(Some("http://localhost:8081".to_string())))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/online off"),
+            Some(Command::Online(Some("off".to_string())))
+        );
+        assert_eq!(
             ChatEngine::parse_command("/cd ../workspace"),
             Some(Command::Cwd(Some("../workspace".to_string())))
         );

@@ -41,6 +41,7 @@ fn make_conversation_data(
         updated_at: 1700000100,
         working_dir: None,
         agent_task_snapshot: None,
+        mode: None,
     }
 }
 
@@ -873,6 +874,7 @@ fn malformed_token_usage_defaults_to_zero() {
         updated_at: 0,
         working_dir: None,
         agent_task_snapshot: None,
+        mode: None,
     };
     let result = conversation_to_atif(&conv, None).unwrap();
     assert_eq!(result["final_metrics"]["total_prompt_tokens"], 0);
@@ -897,6 +899,7 @@ fn malformed_message_history_returns_err() {
         updated_at: 0,
         working_dir: None,
         agent_task_snapshot: None,
+        mode: None,
     };
     assert!(conversation_to_atif(&conv, None).is_err());
 }
