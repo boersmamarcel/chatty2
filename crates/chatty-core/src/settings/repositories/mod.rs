@@ -5,6 +5,7 @@
 //! separate modules with hand-written implementations.
 
 pub mod generic_json_repository;
+pub mod in_memory_repository;
 pub mod module_settings_json_repository;
 pub mod module_settings_repository;
 pub mod oauth_credential_json_repository;
@@ -19,6 +20,15 @@ pub use module_settings_json_repository::ModuleSettingsJsonRepository;
 pub use module_settings_repository::ModuleSettingsRepository;
 pub use oauth_credential_json_repository::JsonOAuthCredentialRepository;
 pub use oauth_credential_repository::OAuthCredentialRepository;
+
+// Re-export in-memory repository types (AGE-283 lease-time snapshot boot).
+pub use in_memory_repository::{
+    InMemoryA2aRepository, InMemoryExecutionSettingsRepository, InMemoryExtensionsRepository,
+    InMemoryGeneralSettingsRepository, InMemoryHiveSettingsRepository, InMemoryMcpRepository,
+    InMemoryModelsRepository, InMemoryModuleSettingsRepository, InMemoryProviderRepository,
+    InMemorySearchSettingsRepository, InMemoryTrainingSettingsRepository,
+    InMemoryUserSecretsRepository,
+};
 
 // ── Macros for generating repository boilerplate ─────────────────────────────
 
