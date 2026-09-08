@@ -9,6 +9,8 @@
 //! than `PartialEq`/`Debug` so this suite needs no changes to the settings
 //! model structs.
 
+use std::collections::BTreeMap;
+
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::extensions_store::ExtensionsModel;
@@ -29,6 +31,18 @@ use crate::settings::repositories::{
 };
 
 use super::conversation_repository::{ConversationData, ConversationRepository};
+
+/// `load_all` by id.
+///
+/// The trait documents `load_all` as "kept for compatibility/export use
+/// cases" and promises no order, so the suite compares it as a set. The
+/// SQLite backend happens to `ORDER BY updated_at DESC`, but asserting that
+/// here would encode one store's incidental behaviour as the trait's
+/// contract — exactly what this suite exists to avoid. Newest-first
+/// ordering *is* contractual for `load_metadata`, and is asserted there.
+fn by_id(all: &[ConversationData]) -> BTreeMap<&str, &ConversationData> {
+    all.iter().map(|data| (data.id.as_str(), data)).collect()
+}
 
 // ── Single-object settings conformance (load / save) ─────────────────────────
 
@@ -242,11 +256,9 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
 
     let all = repo.load_all().await.expect("load_all");
     assert_eq!(all.len(), 2);
-    assert_eq!(
-        all[0].id, "conv-b",
-        "load_all must sort newest-updated first"
-    );
-    assert_eq!(all[1].id, "conv-a");
+    let all = by_id(&all);
+    assert!(all.contains_key("conv-a"), "load_all must return conv-a");
+    assert!(all.contains_key("conv-b"), "load_all must return conv-b");
 
     let metadata = repo.load_metadata().await.expect("load_metadata");
     assert_eq!(metadata.len(), 2);
@@ -270,8 +282,11 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
         2,
         "saving an existing id must update it, not add a duplicate"
     );
-    assert_eq!(after_update[0].id, "conv-a");
-    assert_eq!(after_update[0].title, "First (edited)");
+    assert_eq!(
+        by_id(&after_update)["conv-a"].title,
+        "First (edited)",
+        "an updated conversation must come back with the new value"
+    );
 
     repo.delete("conv-b").await.expect("delete conv-b");
     let remaining = repo.load_all().await.expect("load_all after delete");
