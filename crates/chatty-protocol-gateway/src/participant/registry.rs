@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use serde_json::Value;
+
 use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
 
 /// One update on an open task, as the HTTP side consumes it.
@@ -31,6 +33,9 @@ pub enum TaskUpdate {
     Status {
         state: TaskState,
         message: Option<String>,
+        /// Opaque, forwarded to the A2A status's `metadata` (see
+        /// [`ParticipantFrame::Status`](super::protocol::ParticipantFrame)).
+        metadata: Option<Value>,
     },
     Artifact {
         text: String,
@@ -133,6 +138,7 @@ impl ParticipantRegistry {
             let _ = sink.send(TaskUpdate::Status {
                 state: TaskState::Failed,
                 message: Some(format!("participant '{name}' disconnected")),
+                metadata: None,
             });
         }
 
@@ -237,9 +243,14 @@ impl ParticipantRegistry {
                 task_id,
                 state,
                 message,
+                metadata,
             } => (
                 task_id,
-                TaskUpdate::Status { state, message },
+                TaskUpdate::Status {
+                    state,
+                    message,
+                    metadata,
+                },
                 state.is_terminal(),
             ),
             ParticipantFrame::Artifact {
@@ -379,6 +390,7 @@ mod tests {
                 task_id: task_id.clone(),
                 state: TaskState::Working,
                 message: Some("read_file".into()),
+                metadata: None,
             },
         );
         reg.on_frame(
@@ -395,12 +407,13 @@ mod tests {
                 task_id: task_id.clone(),
                 state: TaskState::Completed,
                 message: None,
+                metadata: None,
             },
         );
 
         assert!(matches!(
             updates.recv().await,
-            Some(TaskUpdate::Status { state: TaskState::Working, message: Some(m) }) if m == "read_file"
+            Some(TaskUpdate::Status { state: TaskState::Working, message: Some(m), .. }) if m == "read_file"
         ));
         assert!(matches!(
             updates.recv().await,
@@ -441,7 +454,7 @@ mod tests {
                 .expect("an open task is told why it died");
             assert!(matches!(
                 update,
-                TaskUpdate::Status { state: TaskState::Failed, message: Some(ref m) }
+                TaskUpdate::Status { state: TaskState::Failed, message: Some(ref m), .. }
                     if m.contains("disconnected")
             ));
             assert!(stream.recv().await.is_none(), "then the stream ends");
@@ -479,6 +492,7 @@ mod tests {
                 task_id,
                 state: TaskState::Completed,
                 message: None,
+                metadata: None,
             },
         ));
     }

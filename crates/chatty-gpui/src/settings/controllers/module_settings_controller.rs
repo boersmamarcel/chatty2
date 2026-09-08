@@ -1,3 +1,4 @@
+use crate::chatty::services::broker_runner;
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::{
@@ -6,6 +7,7 @@ use crate::settings::models::{
 };
 use anyhow::{Context, Result};
 use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
+use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel,
 };
@@ -736,6 +738,31 @@ pub fn refresh_runtime(cx: &mut App) {
                             .with_credit_guard(credit_guard)
                             .with_usage_collector(usage_collector)
                             .with_paid_modules(paid_modules);
+                    }
+
+                    // ADR-0011 C2: the gateway is also the fleet broker.
+                    // Children register on a socket beside its HTTP port, and
+                    // `local-agent` spawns one per delegated task.
+                    let participants = gateway.participants();
+                    let socket = broker_runner::socket_path();
+                    if broker_runner::serve_socket(participants.clone(), &socket) {
+                        let (workspace_dir, auto_approve) = cx
+                            .update(|cx| {
+                                let exec = cx.global::<ExecutionSettingsModel>();
+                                // The same condition `sub_agent` uses for its
+                                // children, so both delegation paths hand a
+                                // worker the same approval policy.
+                                let auto_approve =
+                                    matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
+                                (exec.workspace_dir.clone(), auto_approve)
+                            })
+                            .unwrap_or((None, false));
+                        gateway = gateway.with_local_runner(Arc::new(broker_runner::local_runner(
+                            participants,
+                            socket,
+                            workspace_dir,
+                            auto_approve,
+                        )));
                     }
 
                     gateway.start().await.map(|_| gateway)

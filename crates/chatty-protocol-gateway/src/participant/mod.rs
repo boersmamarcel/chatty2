@@ -14,6 +14,9 @@
 //! * [`registry`] — who is registered and where each open task's updates go.
 //! * [`listener`] — the accept loop, and the rule that a closed socket
 //!   deregisters its participant and fails its open tasks.
+//! * [`client`] — the other end of the socket, which a chatty child speaks.
+//! * [`runner`] — spawning a chatty child and exposing it as a participant
+//!   (ADR-0011 C2).
 
 mod protocol;
 mod registry;
@@ -25,7 +28,15 @@ pub use registry::{ParticipantRegistry, RegisterError, TaskStream, TaskUpdate};
 // registry and the frames still compile (and are still tested) elsewhere;
 // only the transport is gated. The hosted transport is vsock (AGE-307).
 #[cfg(unix)]
+mod client;
+#[cfg(unix)]
 mod listener;
+#[cfg(unix)]
+mod runner;
 
 #[cfg(unix)]
+pub use client::ParticipantConnection;
+#[cfg(unix)]
 pub use listener::{bind, serve, serve_connection, unbind};
+#[cfg(unix)]
+pub use runner::{LocalRunner, Worker, WorkerWorkspace, WorkspaceFactory};

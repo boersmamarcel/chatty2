@@ -2,6 +2,7 @@ mod app;
 mod engine;
 mod events;
 mod headless;
+mod participant;
 mod ui;
 
 use anyhow::{Context, Result, bail};
@@ -186,6 +187,25 @@ struct Cli {
     /// Example: --workspace /repo/.chatty/worktrees/w1
     #[arg(long, value_name = "DIR")]
     workspace: Option<String>,
+
+    /// Run as a participant of the broker listening on this Unix socket.
+    ///
+    /// The process registers, waits for one delegated task, runs it, and
+    /// reports its progress and result over the socket rather than as
+    /// `CHATTY_EVENT` lines on stderr (ADR-0011 / AGE-301). Implies the
+    /// headless turn loop; `--message` is not used, the prompt arrives from
+    /// the broker.
+    ///
+    /// Example: --participant-socket ~/.local/state/chatty/participants.sock
+    #[arg(long, value_name = "PATH")]
+    participant_socket: Option<std::path::PathBuf>,
+
+    /// The name to register under, which is how callers address this worker.
+    ///
+    /// Required with --participant-socket: the broker allocated it before
+    /// spawning this process and is already routing a task to it.
+    #[arg(long, value_name = "NAME", requires = "participant_socket")]
+    participant_name: Option<String>,
 }
 
 #[tokio::main]
@@ -193,7 +213,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
-    if cli.headless || cli.pipe {
+    if cli.headless || cli.pipe || cli.participant_socket.is_some() {
         // Headless/pipe: suppress all logging to keep stdout clean
     } else {
         // Interactive TUI: log to file to avoid corrupting the terminal
@@ -355,8 +375,9 @@ async fn main() -> Result<()> {
     // Route based on mode — headless/pipe load all services eagerly (latency
     // doesn't matter for non-interactive use), while the interactive TUI defers
     // heavy services to a background task so the UI appears instantly.
-    if cli.pipe || cli.headless {
-        // ── Headless / pipe mode: load everything before running ─────────
+    let participant_mode = cli.participant_socket.is_some();
+    if cli.pipe || cli.headless || participant_mode {
+        // ── Headless / pipe / participant: load everything before running ──
         let (user_secrets, mcp_service, memory_service, search_settings) =
             load_deferred_services(&execution_settings).await;
 
@@ -388,7 +409,13 @@ async fn main() -> Result<()> {
         );
 
         engine.init_conversation().await?;
-        if cli.pipe {
+        if let Some(socket) = cli.participant_socket.as_deref() {
+            let name = cli
+                .participant_name
+                .as_deref()
+                .context("--participant-name is required with --participant-socket")?;
+            participant::run_participant(engine, event_rx, socket, name).await
+        } else if cli.pipe {
             headless::run_pipe(engine, event_rx).await
         } else {
             let message = cli

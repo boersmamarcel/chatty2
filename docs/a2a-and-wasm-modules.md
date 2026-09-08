@@ -327,13 +327,45 @@ API key values are **never exposed** to the LLM — only `has_api_key: true/fals
 ```
 
 Resolution order: remote A2A agents first (a remote agent shadows a local module with
-the same name), then local module agents, which require `supports_a2a = true` and a
-running gateway (otherwise the tool reports that the gateway is off and points to
-Settings → Modules). Both paths stream through `A2aClient::send_message_stream()`;
-progress (`InvokeAgentProgress`) is forwarded to the UI so the user sees intermediate
-output while the tool call is in flight.
+the same name), then **`local-agent`** — the broker's local worker (below) — then local
+module agents, which require `supports_a2a = true` and a running gateway (otherwise the
+tool reports that the gateway is off and points to Settings → Modules). Every path
+streams through `A2aClient::send_message_stream()`; progress (`InvokeAgentProgress`) is
+forwarded to the UI so the user sees intermediate output while the tool call is in
+flight.
+
+### `local-agent` — a chatty agent in its own process
+
+`invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
+The gateway spawns `chatty-tui --participant-socket … --participant-name …`, the child
+registers, and its turn comes back as A2A status and artifact updates. This is
+ADR-0011's replacement for `sub_agent`: one fan-out path, a public wire format, and a
+place to put discovery, budgets and the ledger.
+
+The child maps its `SessionEvent`s to frames in
+`crates/chatty-tui/src/participant/mapping.rs` — tool starts and finishes become
+`working` status messages, assistant text becomes artifact chunks, and the turn's token
+usage rides in the terminal status's `metadata` (A2A has no usage concept; usage
+belongs to the ledger). `crates/chatty-tui/src/participant/equivalence.rs` asserts the
+parent's tool-call trace is identical to the `sub_agent` path's for every scripted
+scenario, which is how ADR-0011's first kill criterion is checked in CI rather than by
+inspection.
+
+Each worker runs in its own `git worktree` under the conversation's workspace
+(ADR-0012), the same isolation `sub_agent` uses — both go through
+`chatty_core::services::worker_tree`.
+
+**Known limitation.** The worker's model is its own configured default, not the parent
+conversation's. `sub_agent` passes `--model`; the broker cannot, because the model
+would have to ride on the A2A request and A2A has no field for it. Carried as an open
+question on AGE-301.
 
 ## Sub-agent tool (separate mechanism)
+
+> **Being retired.** ADR-0011 replaces this with `invoke_agent` against
+> [`local-agent`](#local-agent--a-chatty-agent-in-its-own-process), so there is one
+> fan-out path rather than two. The `CHATTY_EVENT` scraping described below goes with
+> it (AGE-303). It is still the path in use until then.
 
 The `sub_agent` tool is a **different mechanism** from A2A invocation. It spawns
 `chatty-tui` in headless mode as a subprocess:

@@ -1986,8 +1986,11 @@ name = "chatty-tui"
 version = "0.3.61"
 dependencies = [
  "anyhow",
+ "axum",
  "chatty-core",
  "chatty-module-registry",
+ "chatty-protocol-gateway",
+ "chatty-wasm-runtime",
  "clap",
  "crossterm 0.29.0",
  "dirs 6.0.0",
