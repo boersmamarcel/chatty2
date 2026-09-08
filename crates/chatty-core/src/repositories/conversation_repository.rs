@@ -104,12 +104,20 @@ impl ConversationData {
 /// Repository trait for conversation persistence
 pub trait ConversationRepository: Send + Sync + 'static {
     /// Load lightweight metadata for all conversations (fast — no message deserialization)
+    ///
+    /// Ordered newest-`updated_at` first. This layer renders the sidebar, so
+    /// the order is part of the contract and every implementation must honour
+    /// it; the conformance suite asserts it. `load_all` carries no such
+    /// promise.
     fn load_metadata(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationMetadata>>>;
 
     /// Load full data for a single conversation by ID
     fn load_one(&self, id: &str) -> BoxFuture<'static, RepositoryResult<Option<ConversationData>>>;
 
     /// Load all conversations from storage (kept for compatibility/export use cases)
+    ///
+    /// No ordering is promised. Callers that need conversations newest-first
+    /// want `load_metadata`, or must sort for themselves.
     #[allow(dead_code)]
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationData>>>;
 

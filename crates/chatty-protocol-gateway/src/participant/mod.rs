@@ -7,22 +7,29 @@
 //! a module — same JSON-RPC methods, same SSE shape, so the existing
 //! `A2aClient` reaches it unchanged.
 //!
-//! The three pieces:
+//! The pieces:
 //!
+//! * [`budget`] — how many workers may hold one model endpoint at a time.
 //! * [`protocol`] — the frames on the socket. Newline-delimited JSON, not
 //!   A2A: A2A is the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go.
 //! * [`listener`] — the accept loop, and the rule that a closed socket
 //!   deregisters its participant and fails its open tasks.
 //! * [`client`] — the other end of the socket, which a chatty child speaks.
+//! * [`virtual_agent`] — the interface a runner implements: an agent with no
+//!   participant until a task arrives.
 //! * [`runner`] — spawning a chatty child and exposing it as a participant
 //!   (ADR-0011 C2).
 
+mod budget;
 mod protocol;
 mod registry;
+mod virtual_agent;
 
+pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
 pub use protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantSkill, TaskState};
 pub use registry::{ParticipantRegistry, RegisterError, TaskStream, TaskUpdate};
+pub use virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
 
 // The socket itself is Unix-only. Everything above it is not, so the
 // registry and the frames still compile (and are still tested) elsewhere;

@@ -323,7 +323,8 @@ impl SystemTraceView {
             .child(
                 div()
                     .map(|this| {
-                        if tool_call.tool_name != "sub_agent" && !is_code_execution_tool(tool_call)
+                        if tool_call.tool_name != "invoke_agent"
+                            && !is_code_execution_tool(tool_call)
                         {
                             if let Some(engine) = tool_call.execution_engine {
                                 let (badge_text, badge_color) = execution_engine_badge(engine);

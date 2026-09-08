@@ -262,11 +262,9 @@ mod runner {
                     skill_service: None,
                     search_settings: None,
                     embedding_service: None,
-                    allow_sub_agent: false,
                     module_agents: Vec::new(),
                     gateway_port: None,
                     remote_agents: Vec::new(),
-                    available_model_ids: Vec::new(),
                     conversation_id: None,
                 },
             )
@@ -278,13 +276,16 @@ mod runner {
 
     /// AGE-196 acceptance: a headless turn runs on the session directly —
     /// no `ChatEngine`, no terminal state — and every event of it reaches
-    /// a parent process as a `CHATTY_EVENT` line.
+    /// the parent that delegated it, which since ADR-0011's C4 means the
+    /// event observer a broker participant installs.
     #[tokio::test]
     async fn a_headless_turn_runs_on_the_session_and_reports_to_the_parent() {
         let (mut runner, mut event_rx) = test_runner().await;
-        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
-        let sink = lines.clone();
-        runner.set_event_line_writer(Arc::new(move |line| sink.lock().unwrap().push(line)));
+        let observed: Arc<Mutex<Vec<chatty_core::session::SessionEvent>>> = Arc::default();
+        let sink = observed.clone();
+        runner.set_event_observer(Arc::new(move |event| {
+            sink.lock().unwrap().push(event.clone())
+        }));
 
         let input = runner
             .prepare_send("what is this?".to_string(), true)
@@ -310,11 +311,7 @@ mod runner {
         assert!(runner.transcript.tool_call("call-1").is_some());
         assert_eq!(runner.session.conversation().unwrap().messages().len(), 2);
 
-        let lines = lines.lock().unwrap();
-        let events: Vec<chatty_core::session::SessionEvent> = lines
-            .iter()
-            .map(|line| chatty_core::tools::parse_event_line(line).expect("every line parses"))
-            .collect();
+        let events = observed.lock().unwrap();
         assert!(matches!(
             events.first(),
             Some(chatty_core::session::SessionEvent::TurnStarted)
@@ -329,10 +326,10 @@ mod runner {
                 .any(|e| matches!(e, chatty_core::session::SessionEvent::ToolCallResult { id, .. } if id == "call-1"))
         );
         assert!(
-            !events
+            events
                 .iter()
                 .any(|e| matches!(e, chatty_core::session::SessionEvent::Text(_))),
-            "the answer is the child's stdout, not an event line"
+            "the observer sees the answer too — the broker maps it to artifact              chunks, which is what lets a parent stream a delegated answer"
         );
     }
 

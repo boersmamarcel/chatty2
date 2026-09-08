@@ -84,11 +84,11 @@ pub enum AppEvent {
     /// GitHub pull request lookup for the workspace branch completed.
     PullRequestDetected(Option<Box<PullRequestSummary>>),
     TitleGenerated(String),
-    SubAgentProgress(String),
-    SubAgentFinished(String),
+    DelegationProgress(String),
+    DelegationFinished(String),
     /// A turn's sub-agent progress, typed: the session records it in the
     /// trace and the transcript renders it as a line (AGE-274).
-    SubAgent(chatty_core::tools::invoke_agent_tool::InvokeAgentProgress),
+    Delegation(chatty_core::tools::invoke_agent_tool::InvokeAgentProgress),
 
     // ── Terminal events ──────────────────────────────────────────────────
     TerminalInput(CrosstermEvent),
@@ -166,9 +166,9 @@ impl std::fmt::Debug for AppEvent {
                 f.debug_tuple("PullRequestDetected").field(pr).finish()
             }
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
-            Self::SubAgentProgress(s) => f.debug_tuple("SubAgentProgress").field(s).finish(),
-            Self::SubAgentFinished(s) => f.debug_tuple("SubAgentFinished").field(s).finish(),
-            Self::SubAgent(p) => f.debug_tuple("SubAgent").field(p).finish(),
+            Self::DelegationProgress(s) => f.debug_tuple("DelegationProgress").field(s).finish(),
+            Self::DelegationFinished(s) => f.debug_tuple("DelegationFinished").field(s).finish(),
+            Self::Delegation(p) => f.debug_tuple("Delegation").field(p).finish(),
             Self::TerminalInput(e) => f.debug_tuple("TerminalInput").field(e).finish(),
             Self::Tick => write!(f, "Tick"),
         }
@@ -216,7 +216,7 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
             SessionEvent::ApiCallUsage(call) => AppEvent::ApiCallUsage(call),
             SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage(usage),
             SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
-            SessionEvent::SubAgent(progress) => AppEvent::SubAgent(progress),
+            SessionEvent::Delegation(progress) => AppEvent::Delegation(progress),
             SessionEvent::Error(error) => AppEvent::StreamError(error),
             SessionEvent::Cancelled => AppEvent::StreamCancelled,
             SessionEvent::TurnEnded => AppEvent::StreamCompleted,

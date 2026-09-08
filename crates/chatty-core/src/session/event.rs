@@ -11,7 +11,7 @@
 //! consumed before the session existed (AGE-194), not a superset: each maps
 //! onto something both `AppEvent` and `StreamManagerEvent` already carried, or
 //! that both frontends consumed out-of-band (`ApiCallUsage`, `TurnMessages`,
-//! `SubAgent`, `FollowUp`).
+//! `Delegation`, `FollowUp`).
 //!
 //! # Ordering
 //!
@@ -35,9 +35,9 @@ use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// One observable step of a turn. See the module docs for ordering.
 ///
-/// Serializable so a turn can cross a process boundary: a headless child
-/// writes its events as `CHATTY_EVENT` lines and the parent's `sub_agent`
-/// tool reads them back (AGE-196).
+/// Serializable so a turn can cross a process boundary: a delegated worker
+/// reports its events to the broker, which turns them into A2A status and
+/// artifact updates for the parent (AGE-196, ADR-0011).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SessionEvent {
     /// The turn's stream loop is running.
@@ -87,7 +87,7 @@ pub enum SessionEvent {
     /// round-trips behind the final text (AGE-247).
     TurnMessages(Vec<Message>),
     /// Progress from a sub-agent the turn invoked.
-    SubAgent(InvokeAgentProgress),
+    Delegation(InvokeAgentProgress),
     /// The stream ended in an error. `TurnEnded` still follows.
     Error(StreamError),
     /// The cancel flag was seen. `TurnEnded` still follows.

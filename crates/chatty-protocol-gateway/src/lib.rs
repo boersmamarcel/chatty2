@@ -47,4 +47,10 @@ mod gateway;
 mod handlers;
 pub mod participant;
 
+/// The other end of the participant socket: what a process runs when it *is*
+/// a worker. Behind the `worker` feature, which is the only thing here that
+/// needs `chatty-core`.
+#[cfg(feature = "worker")]
+pub mod worker;
+
 pub use gateway::{GatewayState, ProtocolGateway};

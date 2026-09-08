@@ -69,7 +69,7 @@ fn default_true() -> bool {
 // ── Store ──────────────────────────────────────────────────────────────────
 
 /// Global store for all installed extensions (MCP, WASM, A2A).
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExtensionsModel {
     #[serde(default)]
     pub extensions: Vec<InstalledExtension>,

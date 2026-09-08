@@ -598,7 +598,7 @@ impl StreamManager {
                 });
             }
             // The conversation's (`AgentSession::apply`), not the manager's.
-            SessionEvent::TurnMessages(_) | SessionEvent::SubAgent(_) => {}
+            SessionEvent::TurnMessages(_) | SessionEvent::Delegation(_) => {}
             SessionEvent::Error(error) => self.handle_chunk(conv_id, StreamChunk::Error(error), cx),
             // A cancelled turn still ends; `stop_stream` already reported a
             // user-pressed Stop, and a flag-only cancel ends as completed.

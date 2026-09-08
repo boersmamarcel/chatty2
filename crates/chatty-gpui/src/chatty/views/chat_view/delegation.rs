@@ -2,8 +2,8 @@
 //!
 //! # What lives here
 //!
-//! - `start_sub_agent_progress` / `restore_sub_agent_progress` /
-//!   `append_sub_agent_progress` / `finalize_sub_agent_progress` —
+//! - `start_delegation_progress` / `restore_delegation_progress` /
+//!   `append_delegation_progress` / `finalize_delegation_progress` —
 //!   manage a single in-flight sub-agent's collapsible progress trace.
 //! - `add_info_message` — used by slash commands like `/cwd`, `/context`.
 //! - `remove_last_assistant_message` — used by the regenerate flow.
@@ -39,7 +39,7 @@ impl ChatView {
         self.reset_transcript_list();
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
-        self.sub_agent_progress_msg_idx = None;
+        self.delegation_progress_msg_idx = None;
         self.pending_approval = None;
         self.pending_clarification = None;
         self.agent_task_snapshot = None;
@@ -48,24 +48,24 @@ impl ChatView {
     }
 
     /// Add the "Sub-agent" collapsible trace and record its index so that
-    /// subsequent `append_sub_agent_progress` calls update it in-place.
+    /// subsequent `append_delegation_progress` calls update it in-place.
     ///
     /// The progress is shown as a collapsible `ToolCallBlock` (Running state) so
     /// the user can expand it to see live stderr output while the sub-agent runs.
-    pub fn start_sub_agent_progress(
+    pub fn start_delegation_progress(
         &mut self,
         prompt: &str,
         source: ToolSource,
         cx: &mut Context<Self>,
     ) {
-        let trace = SystemTrace::new_sub_agent(prompt, source);
-        self.restore_sub_agent_progress(trace, cx);
+        let trace = SystemTrace::new_delegation(prompt, source);
+        self.restore_delegation_progress(trace, cx);
     }
 
-    pub fn restore_sub_agent_progress(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
+    pub fn restore_delegation_progress(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
         // Freeze or drop the pre-tool parent so follow-up tokens land in a
         // new bubble *below* this progress row, not above it.
-        self.seal_parent_before_sub_agent_progress();
+        self.seal_parent_before_delegation_progress();
 
         let is_streaming = trace.active_tool_index.is_some();
 
@@ -84,7 +84,7 @@ impl ChatView {
         });
 
         let idx = self.messages.len() - 1;
-        self.sub_agent_progress_msg_idx = is_streaming.then_some(idx);
+        self.delegation_progress_msg_idx = is_streaming.then_some(idx);
 
         // Start expanded so live progress output is visible while the sub-agent runs.
         self.collapsed_tool_calls.insert((idx, 0), false);
@@ -98,8 +98,8 @@ impl ChatView {
     /// Called repeatedly while a sub-agent subprocess runs to accumulate live
     /// tool-call activity (e.g. "⟳ web_search", "✓ web_search") in the
     /// collapsible trace so the user can expand it to follow along.
-    pub fn append_sub_agent_progress(&mut self, line: &str, cx: &mut Context<Self>) {
-        let Some(idx) = self.sub_agent_progress_msg_idx else {
+    pub fn append_delegation_progress(&mut self, line: &str, cx: &mut Context<Self>) {
+        let Some(idx) = self.delegation_progress_msg_idx else {
             return;
         };
         let Some(msg) = self.messages.get_mut(idx) else {
@@ -107,7 +107,7 @@ impl ChatView {
         };
 
         if let Some(ref mut trace) = msg.live_trace {
-            trace.append_sub_agent_progress(line);
+            trace.append_delegation_progress(line);
         }
 
         // Update the SystemTraceView entity so interleaved rendering picks up the change.
@@ -128,19 +128,19 @@ impl ChatView {
     ///
     /// `result` is placed in the ToolCallBlock's `output` field so it appears
     /// in the expanded trace body instead of as a separate message.
-    pub fn finalize_sub_agent_progress(
+    pub fn finalize_delegation_progress(
         &mut self,
         success: bool,
         result: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(idx) = self.sub_agent_progress_msg_idx else {
+        let Some(idx) = self.delegation_progress_msg_idx else {
             return;
         };
 
         if let Some(msg) = self.messages.get_mut(idx) {
             if let Some(ref mut trace) = msg.live_trace {
-                trace.finalize_sub_agent_progress(success, result);
+                trace.finalize_delegation_progress(success, result);
             }
 
             // Push final trace state to the view entity.
@@ -162,7 +162,7 @@ impl ChatView {
             cx.notify();
         }
 
-        // Keep `sub_agent_progress_msg_idx` so parent-stream updates skip this
+        // Keep `delegation_progress_msg_idx` so parent-stream updates skip this
         // row. If the parent LLM stream is still active, open a continuation
         // bubble below the trace for follow-up text.
         if self.chat_input_state.read(cx).is_streaming()
@@ -174,7 +174,7 @@ impl ChatView {
 
     /// Freeze pre-tool assistant text (or drop an empty placeholder) before
     /// inserting the sub-agent progress row.
-    fn seal_parent_before_sub_agent_progress(&mut self) {
+    fn seal_parent_before_delegation_progress(&mut self) {
         let Some(idx) = self.messages.iter().enumerate().rev().find_map(|(i, m)| {
             (matches!(m.role, MessageRole::Assistant) && m.is_streaming).then_some(i)
         }) else {

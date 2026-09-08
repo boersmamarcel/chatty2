@@ -14,7 +14,7 @@ pub enum ApprovalMode {
 }
 
 /// Settings for code execution tool
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionSettingsModel {
     /// Master toggle for code execution feature
     pub enabled: bool,

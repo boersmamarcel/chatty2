@@ -212,8 +212,8 @@ impl Tool for InvokeAgentTool {
         }
 
         // 2. The broker's local worker: a chatty child in its own process.
-        //    Ahead of modules because it is the replacement for `sub_agent`,
-        //    and a module cannot claim its reserved name by accident.
+        //    Ahead of modules, so a module cannot claim its reserved name
+        //    by accident.
         if let Some(local) = self
             .local_agent
             .as_deref()

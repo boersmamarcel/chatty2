@@ -77,7 +77,6 @@ tools = [
     ("save_skill", "memory", "save_skill_tool.rs", "memory enabled"),
     ("search_memory", "memory", "search_memory_tool.rs", "memory enabled"),
     ("search_web", "web", "search_web_tool.rs", ""),
-    ("sub_agent", "agents", "sub_agent_tool.rs", "spawns chatty-tui"),
     ("browser_use", "web", "browser_use_tool.rs", ""),
     ("daytona_run", "sandbox", "daytona_tool/", "Daytona cloud sandbox"),
     ("publish_wasm_module", "modules", "publish_module_tool.rs", ""),

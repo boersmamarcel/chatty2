@@ -32,7 +32,7 @@
 //!
 //! - [`handlers`] — stream-event handlers (tool calls, approvals,
 //!   thinking blocks, floating-approval keyboard shortcuts).
-//! - [`sub_agent`] — sub-agent progress trace and `add_info_message`.
+//! - [`delegation`] — the delegated-agent progress trace and `add_info_message`.
 //! - [`parent_stream`] — locate the parent assistant bubble when a
 //!   sub-agent progress row is last.
 //! - [`history`] — `load_history` (conversation switching).
@@ -40,12 +40,12 @@
 
 #![allow(clippy::collapsible_if)]
 
+mod delegation;
 mod handlers;
 mod history;
 mod parent_stream;
 mod scroll;
 mod start_screen;
-mod sub_agent;
 
 use chatty_core::models::clarification_store::{ClarifyingQuestion, MAX_CLARIFYING_QUESTIONS};
 use chatty_core::services::{AgentTaskSnapshot, AgentTodoStatus};
@@ -158,7 +158,7 @@ pub struct ChatView {
     /// Index into `messages` of the sub-agent progress row. Retained after
     /// the row is finalized so parent-stream updates skip it. `None` when
     /// this conversation has no progress row.
-    sub_agent_progress_msg_idx: Option<usize>,
+    delegation_progress_msg_idx: Option<usize>,
     /// Animated "Thinking…" indicator entity. Owns its own rotation
     /// timer so the spinner + label keep updating even when no stream
     /// events are arriving (typical while a tool runs silently).
@@ -454,7 +454,7 @@ impl ChatView {
             streaming_parse_cache: None,
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
-            sub_agent_progress_msg_idx: None,
+            delegation_progress_msg_idx: None,
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
@@ -669,7 +669,7 @@ impl ChatView {
     pub fn append_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let idx = match self.parent_streaming_assistant_index() {
             Some(idx) => idx,
-            None if self.sub_agent_progress_msg_idx.is_some() => {
+            None if self.delegation_progress_msg_idx.is_some() => {
                 // Progress row is last; open a continuation bubble below it.
                 self.start_assistant_message(cx);
                 self.messages.len() - 1
@@ -873,7 +873,7 @@ impl ChatView {
         // not hide the pre-tool parent's tool calls (or the Conversation
         // model's streaming_trace fallback).
         for i in (0..self.messages.len()).rev() {
-            if Some(i) == self.sub_agent_progress_msg_idx {
+            if Some(i) == self.delegation_progress_msg_idx {
                 continue;
             }
             if let Some(ref mut trace) = self.messages[i].live_trace {
@@ -1010,14 +1010,14 @@ impl ChatView {
     pub(super) fn parent_streaming_assistant_index(&self) -> Option<usize> {
         parent_stream::index_of_parent_streaming_assistant(
             &self.messages,
-            self.sub_agent_progress_msg_idx,
+            self.delegation_progress_msg_idx,
         )
     }
 
     /// Last assistant bubble that is not the sub-agent progress row.
     /// Used after the parent stream has already been finalized.
     pub(super) fn parent_assistant_index(&self) -> Option<usize> {
-        parent_stream::index_of_parent_assistant(&self.messages, self.sub_agent_progress_msg_idx)
+        parent_stream::index_of_parent_assistant(&self.messages, self.delegation_progress_msg_idx)
     }
 
     pub(super) fn parent_streaming_message_mut(&mut self) -> Option<&mut DisplayMessage> {

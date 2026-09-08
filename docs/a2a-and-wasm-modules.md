@@ -293,7 +293,10 @@ owed. The frames and the mapping are documented in
 [`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
 
 Opening the socket is opt-in (`ProtocolGateway::with_participant_socket`) and
-Unix-only; the hosted transport is vsock (AGE-307).
+Unix-only. The hosted transport is Firecracker vsock, which arrives here as an
+ordinary stream: both `serve_connection` and `ParticipantConnection` take any
+`AsyncRead + AsyncWrite`, so the frames, the registration and the liveness rule
+are shared rather than reimplemented (AGE-307, in `boersmamarcel/hive`).
 
 ## LLM-facing tools
 
@@ -339,56 +342,42 @@ flight.
 `invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
 The gateway spawns `chatty-tui --participant-socket … --participant-name …`, the child
 registers, and its turn comes back as A2A status and artifact updates. This is
-ADR-0011's replacement for `sub_agent`: one fan-out path, a public wire format, and a
-place to put discovery, budgets and the ledger.
+One fan-out path, a public wire format, and a place to put discovery, budgets and the
+ledger.
 
-The child maps its `SessionEvent`s to frames in
-`crates/chatty-tui/src/participant/mapping.rs` — tool starts and finishes become
-`working` status messages, assistant text becomes artifact chunks, and the turn's token
-usage rides in the terminal status's `metadata` (A2A has no usage concept; usage
-belongs to the ledger). `crates/chatty-tui/src/participant/equivalence.rs` asserts the
-parent's tool-call trace is identical to the `sub_agent` path's for every scripted
-scenario, which is how ADR-0011's first kill criterion is checked in CI rather than by
-inspection.
+The child maps its `SessionEvent`s to frames with
+`chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
+finishes become `working` status messages, assistant text becomes artifact chunks, and
+the turn's token usage rides in the terminal status's `metadata` (A2A has no usage
+concept; usage belongs to the ledger). The mapper and the one-task loop around it live
+beside the broker's own half of the protocol, not in this crate, because a microVM's
+`chatty-server` is a worker too and the parent must not be able to tell the two apart.
+`crates/chatty-tui/src/participant/equivalence.rs` asserts the
+parent's tool-call trace carries every tool call the child reported, for every
+scripted scenario — how ADR-0011's first kill criterion is checked in CI rather than
+by inspection.
 
 Each worker runs in its own `git worktree` under the conversation's workspace
-(ADR-0012), the same isolation `sub_agent` uses — both go through
-`chatty_core::services::worker_tree`.
+(ADR-0012), through `chatty_core::services::worker_tree`.
+
+**Per-endpoint concurrency budget (ADR-0011 C6).** Workers all talk to the same model
+server, so the broker holds a semaphore per *endpoint* — the server's base URL, not a
+model and not a worker — and a task waits for a slot before a child is spawned. On a
+local Ollama, three concurrent workers on one loaded model is not three times the
+throughput; it is the fourth request evicting the weights the first three are using.
+The slot is held from just before the spawn until the worker is reaped, so the same
+event that frees the process and its worktree admits the next queued task.
+
+The size, in order: an explicit override in `endpoint_budgets` in `module_settings.json`
+(keyed by base URL, e.g. `http://localhost:11434`; no UI yet), then what the provider
+reports about itself (`num_parallel` in its `extra_config`, or a local Ollama's `OLLAMA_NUM_PARALLEL`
+from the environment), then `default_endpoint_budget`, which is **1**. Every wait is a
+`tracing` event carrying the endpoint, its limit and the queue depth at that moment, so
+a budget that is too tight looks like a queue that never empties.
+
+> A cloud endpoint gets the same default of 1 unless it is overridden. It is the knob
+> to turn first if delegation feels serialised on OpenRouter.
 
 **Known limitation.** The worker's model is its own configured default, not the parent
-conversation's. `sub_agent` passes `--model`; the broker cannot, because the model
-would have to ride on the A2A request and A2A has no field for it. Carried as an open
-question on AGE-301.
-
-## Sub-agent tool (separate mechanism)
-
-> **Being retired.** ADR-0011 replaces this with `invoke_agent` against
-> [`local-agent`](#local-agent--a-chatty-agent-in-its-own-process), so there is one
-> fan-out path rather than two. The `CHATTY_EVENT` scraping described below goes with
-> it (AGE-303). It is still the path in use until then.
-
-The `sub_agent` tool is a **different mechanism** from A2A invocation. It spawns
-`chatty-tui` in headless mode as a subprocess:
-
-```
-sub_agent(task, model?) → chatty-tui --headless --model <model> --message <task>
-```
-
-The child has the **full Chatty tool set** (shell, files, MCP tools, …) but runs in
-its own process with its own conversation context; no A2A protocol is involved.
-
-While the child runs, headless mode writes each `SessionEvent` of its turn to
-stderr as a `CHATTY_EVENT` line (JSON; assistant text and the turn's raw messages
-excepted). `SubAgentTool` parses those into the shared `InvokeAgentProgressSlot`, so
-the parent UI shows compact tool activity in a collapsible `sub_agent` row. Assistant tokens are **not** forwarded; the parent model
-receives only the child's final stdout as the tool result, and the parent turn waits
-on `Tool::call` until the child exits. `/agent` shows the child's human-readable
-stderr minus the protocol lines.
-
-| Feature | `invoke_agent` | `sub_agent` |
-|:--------|:---------------|:------------|
-| Protocol | A2A (JSON-RPC over HTTP) | Process spawning |
-| Target | Named remote/local agents | Another Chatty instance |
-| Tool access | Agent's own tools only | Full Chatty tool set |
-| Model | Agent's own model | Can override parent model |
-| Streaming | SSE with progress events | Live tool activity via the progress slot; stdout on completion |
+conversation's: the model would have to ride on the A2A request and A2A has no field
+for it. Carried as an open question on AGE-301.

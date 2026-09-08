@@ -368,7 +368,7 @@ impl SystemTrace {
         false
     }
 
-    pub fn new_sub_agent(prompt: &str, source: ToolSource) -> Self {
+    pub fn new_delegation(prompt: &str, source: ToolSource) -> Self {
         let tool_call = ToolCallBlock {
             id: format!(
                 "sub-agent-{}",
@@ -377,7 +377,7 @@ impl SystemTrace {
                     .unwrap_or_default()
                     .as_millis()
             ),
-            tool_name: "sub_agent".to_string(),
+            tool_name: "invoke_agent".to_string(),
             display_name: "Sub-agent".to_string(),
             input: json!({ "task": prompt }).to_string(),
             output: None,
@@ -395,20 +395,20 @@ impl SystemTrace {
         trace
     }
 
-    pub fn is_running_sub_agent(&self) -> bool {
+    pub fn is_running_delegation(&self) -> bool {
         self.active_tool_index.is_some_and(|idx| {
             matches!(
                 self.items.get(idx),
                 Some(TraceItem::ToolCall(tc))
-                    if tc.tool_name == "sub_agent" && matches!(tc.state, ToolCallState::Running)
+                    if tc.tool_name == "invoke_agent" && matches!(tc.state, ToolCallState::Running)
             )
         })
     }
 
-    pub fn append_sub_agent_progress(&mut self, line: &str) {
+    pub fn append_delegation_progress(&mut self, line: &str) {
         for item in self.items.iter_mut() {
             if let TraceItem::ToolCall(tc) = item
-                && tc.tool_name == "sub_agent"
+                && tc.tool_name == "invoke_agent"
             {
                 let new_output = if let Some(ref existing) = tc.output {
                     format!("{existing}\n{line}")
@@ -421,10 +421,10 @@ impl SystemTrace {
         }
     }
 
-    pub fn finalize_sub_agent_progress(&mut self, success: bool, result: Option<String>) {
+    pub fn finalize_delegation_progress(&mut self, success: bool, result: Option<String>) {
         for item in self.items.iter_mut() {
             if let TraceItem::ToolCall(tc) = item
-                && tc.tool_name == "sub_agent"
+                && tc.tool_name == "invoke_agent"
             {
                 let error_text = (!success).then(|| {
                     result
@@ -599,7 +599,6 @@ pub fn friendly_tool_name(name: &str) -> String {
         // Agents
         "list_agents" => "Listing agents".to_string(),
         "invoke_agent" => "Calling agent".to_string(),
-        "sub_agent" => "Delegating to sub-agent".to_string(),
         // Browser
         "browser_use" => "Browsing web".to_string(),
         // MCP & modules
@@ -619,8 +618,8 @@ impl ToolCallBlock {
     /// (`taken`) or handing it back. Not a real tool call — the user did
     /// this from the artifact panel — but it lives in the activity trail
     /// as one so the transcript shows *when* the agent lost and regained
-    /// the browser between its own actions, the same way sub-agent
-    /// progress rides on a synthetic `sub_agent` call.
+    /// the browser between its own actions, the same way a delegated
+    /// agent's progress rides on a synthetic `invoke_agent` call.
     pub fn browser_control_handoff(taken: bool, url: &str) -> Self {
         let (tool_name, display_name) = if taken {
             ("browser_take_control", "Taking control of the browser")
@@ -726,38 +725,38 @@ mod tests {
 
     #[test]
     fn update_tool_call_fifo_with_duplicate_ids() {
-        // Simulates the bug: multiple sub_agent calls all sharing the same ID
+        // Simulates the bug: multiple delegation calls all sharing one ID
         let mut trace = SystemTrace::new();
         trace.add_tool_call(make_tool_call(
-            "sub_agent",
-            "sub_agent",
+            "invoke_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
         trace.add_tool_call(make_tool_call(
-            "sub_agent",
-            "sub_agent",
+            "invoke_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
         trace.add_tool_call(make_tool_call(
-            "sub_agent",
-            "sub_agent",
+            "invoke_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
 
         // First result should update the FIRST Running entry (FIFO)
-        assert!(trace.update_tool_call("sub_agent", |tc| {
+        assert!(trace.update_tool_call("invoke_agent", |tc| {
             tc.output = Some("joke1".to_string());
             tc.state = ToolCallState::Success;
         }));
 
         // Second result should update the SECOND Running entry
-        assert!(trace.update_tool_call("sub_agent", |tc| {
+        assert!(trace.update_tool_call("invoke_agent", |tc| {
             tc.output = Some("joke2".to_string());
             tc.state = ToolCallState::Success;
         }));
 
         // Third result should update the THIRD Running entry
-        assert!(trace.update_tool_call("sub_agent", |tc| {
+        assert!(trace.update_tool_call("invoke_agent", |tc| {
             tc.output = Some("joke3".to_string());
             tc.state = ToolCallState::Success;
         }));
@@ -785,12 +784,12 @@ mod tests {
         let mut trace = SystemTrace::new();
         trace.add_tool_call(make_tool_call(
             "call_1",
-            "sub_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
         trace.add_tool_call(make_tool_call(
             "call_2",
-            "sub_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
 
@@ -850,17 +849,17 @@ mod tests {
         let mut trace = SystemTrace::new();
         trace.add_tool_call(make_tool_call(
             "call_1",
-            "sub_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
         trace.add_tool_call(make_tool_call(
             "call_2",
-            "sub_agent",
+            "invoke_agent",
             ToolCallState::Success,
         ));
         trace.add_tool_call(make_tool_call(
             "call_3",
-            "sub_agent",
+            "invoke_agent",
             ToolCallState::Running,
         ));
 
@@ -907,19 +906,19 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_helpers_preserve_source_progress_and_result() {
-        let mut trace = SystemTrace::new_sub_agent("audit these values", ToolSource::HiveCloud);
+    fn delegation_helpers_preserve_source_progress_and_result() {
+        let mut trace = SystemTrace::new_delegation("audit these values", ToolSource::HiveCloud);
 
-        trace.append_sub_agent_progress("Preparing remote module...");
-        trace.append_sub_agent_progress("Running analysis...");
-        trace.finalize_sub_agent_progress(true, Some("Analysis complete".to_string()));
+        trace.append_delegation_progress("Preparing remote module...");
+        trace.append_delegation_progress("Running analysis...");
+        trace.finalize_delegation_progress(true, Some("Analysis complete".to_string()));
 
         let tc = match &trace.items[0] {
             TraceItem::ToolCall(tc) => tc,
             _ => panic!("expected ToolCall"),
         };
 
-        assert_eq!(tc.tool_name, "sub_agent");
+        assert_eq!(tc.tool_name, "invoke_agent");
         assert_eq!(tc.source, ToolSource::HiveCloud);
         assert!(matches!(&tc.state, ToolCallState::Success));
 
@@ -945,24 +944,24 @@ mod tests {
     }
 
     #[test]
-    fn running_sub_agent_detection_uses_active_trace_item() {
-        let mut trace = SystemTrace::new_sub_agent("audit these values", ToolSource::Local);
-        assert!(trace.is_running_sub_agent());
+    fn running_delegation_detection_uses_active_trace_item() {
+        let mut trace = SystemTrace::new_delegation("audit these values", ToolSource::Local);
+        assert!(trace.is_running_delegation());
 
-        trace.finalize_sub_agent_progress(true, None);
-        assert!(!trace.is_running_sub_agent());
+        trace.finalize_delegation_progress(true, None);
+        assert!(!trace.is_running_delegation());
     }
 
     #[test]
-    fn sub_agent_trace_roundtrip_preserves_source_and_running_state() {
-        let mut trace = SystemTrace::new_sub_agent(
+    fn delegation_trace_roundtrip_preserves_source_and_running_state() {
+        let mut trace = SystemTrace::new_delegation(
             "audit these values",
             ToolSource::ExternalService {
                 name: "team-a2a".to_string(),
             },
         );
 
-        trace.append_sub_agent_progress("Checking inputs...");
+        trace.append_delegation_progress("Checking inputs...");
 
         let json = serde_json::to_string(&trace).unwrap();
         let restored: SystemTrace = serde_json::from_str(&json).unwrap();
@@ -978,7 +977,7 @@ mod tests {
                 name: "team-a2a".to_string()
             }
         );
-        assert!(restored.is_running_sub_agent());
+        assert!(restored.is_running_delegation());
         assert_eq!(tc.output.as_deref(), Some("Checking inputs..."));
     }
 
