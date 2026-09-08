@@ -414,9 +414,9 @@ impl GitService {
             return Ok(());
         }
 
-        tokio::fs::create_dir_all(&info_dir).await.map_err(|e| {
-            anyhow!("Failed to create {}: {}", info_dir.display(), e)
-        })?;
+        tokio::fs::create_dir_all(&info_dir)
+            .await
+            .map_err(|e| anyhow!("Failed to create {}: {}", info_dir.display(), e))?;
 
         let mut next = current;
         if !next.is_empty() && !next.ends_with('\n') {
@@ -727,7 +727,10 @@ mod tests {
         );
 
         git.run_git(&["add", "-A"]).await.unwrap();
-        let staged = git.run_git(&["diff", "--cached", "--name-only"]).await.unwrap();
+        let staged = git
+            .run_git(&["diff", "--cached", "--name-only"])
+            .await
+            .unwrap();
         assert!(
             staged.trim().is_empty(),
             "`git add -A` must not stage the worktree, got: {staged:?}"
