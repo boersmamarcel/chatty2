@@ -750,9 +750,8 @@ pub fn refresh_runtime(cx: &mut App) {
                         let (workspace_dir, auto_approve, endpoint) = cx
                             .update(|cx| {
                                 let exec = cx.global::<ExecutionSettingsModel>();
-                                // The same condition `sub_agent` uses for its
-                                // children, so both delegation paths hand a
-                                // worker the same approval policy.
+                                // A worker inherits the desktop's approval
+                                // policy; it has no user to ask.
                                 let auto_approve =
                                     matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
                                 // The endpoint every worker will share, and

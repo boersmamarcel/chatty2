@@ -321,17 +321,11 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         })
         .ok()
         .flatten();
-    let (remote_agents, available_model_ids) = cx
+    let remote_agents = cx
         .update(|cx| {
-            let agents = cx
-                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+            cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                 .map(|m| m.a2a_agent_configs())
-                .unwrap_or_default();
-            let model_ids = cx
-                .try_global::<crate::settings::models::ModelsModel>()
-                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
-                .unwrap_or_default();
-            (agents, model_ids)
+                .unwrap_or_default()
         })
         .unwrap_or_default();
 
@@ -351,11 +345,9 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         skill_service: Some(skill_service),
         search_settings,
         embedding_service,
-        allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
         module_agents,
         gateway_port,
         remote_agents,
-        available_model_ids,
         conversation_id: Some(conv_id.clone()),
     };
     let Some(ctx) = cx
@@ -416,7 +408,7 @@ pub struct ChattyApp {
     /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
     _mcp_notifier: Entity<AgentConfigNotifier>,
     /// Tool-call IDs whose ToolCallBlocks are visualised via the sub-agent
-    /// progress channel (`invoke_agent` and `sub_agent`) instead of the main trace.
+    /// progress channel (`invoke_agent`) instead of the main trace.
     active_invoke_agent_ids: std::collections::HashSet<String>,
 }
 
@@ -799,7 +791,7 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
 /// Classify a built-in tool call by name into a [`ToolSource`] for data-egress badges.
 ///
 /// Internet-facing tools are classified here. Module agent calls (invoke_agent /
-/// sub_agent) are classified separately by [`classify_agent_source`].
+/// are classified separately by [`classify_agent_source`].
 pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
     chatty_core::models::message_types::classify_tool_source(tool_name)
 }

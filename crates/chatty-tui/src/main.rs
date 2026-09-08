@@ -191,8 +191,8 @@ struct Cli {
     /// Run as a participant of the broker listening on this Unix socket.
     ///
     /// The process registers, waits for one delegated task, runs it, and
-    /// reports its progress and result over the socket rather than as
-    /// `CHATTY_EVENT` lines on stderr (ADR-0011 / AGE-301). Implies the
+    /// reports its progress and result over the socket rather than on
+    /// stderr (ADR-0011 / AGE-301). Implies the
     /// headless turn loop; `--message` is not used, the prompt arrives from
     /// the broker.
     ///

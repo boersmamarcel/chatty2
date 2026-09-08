@@ -1,10 +1,8 @@
 //! ADR-0012's worker isolation on the desktop: a `git worktree` per worker.
 //!
-//! Two delegation paths need this — `sub_agent`, which spawns a child
-//! directly (AGE-314), and the broker's local runner, which spawns one behind
-//! an A2A endpoint (AGE-301). ADR-0011's second kill criterion compares those
-//! two paths' end-to-end latency, so they have to differ in the hop and in
-//! nothing else. One implementation is the only way to promise that.
+//! The broker's local runner spawns each worker behind an A2A endpoint
+//! (AGE-301) and gives it a tree of its own, so two workers on one
+//! conversation cannot overwrite each other's edits (AGE-314).
 //!
 //! # What a worker gets
 //!
