@@ -175,6 +175,17 @@ struct Cli {
     /// For servers that don't need auth, this can be omitted.
     #[arg(long, value_name = "KEY")]
     api_key: Option<String>,
+
+    /// Workspace root for this session, overriding the persisted setting.
+    ///
+    /// Every filesystem, shell and git tool resolves paths against this root.
+    /// Without it a process falls back to the shared `execution_settings.json`
+    /// value, which is why parallel sub-agents all wrote one tree (AGE-314);
+    /// a worker is given its own `git worktree` through this flag.
+    ///
+    /// Example: --workspace /repo/.chatty/worktrees/w1
+    #[arg(long, value_name = "DIR")]
+    workspace: Option<String>,
 }
 
 #[tokio::main]
@@ -269,6 +280,20 @@ async fn main() -> Result<()> {
             Some(compat_url.clone()),
             Some(api_key),
         );
+    }
+
+    // `--workspace` overrides the persisted setting, at the same precedence as
+    // `--enable` / `--disable` / `--auto-approve`. AGE-314: a sub-agent needs a
+    // root of its own, and the settings file is shared with the parent that
+    // spawned it, so the flag is the only seam that can separate them.
+    if let Some(workspace) = cli.workspace.as_deref() {
+        let path = std::path::Path::new(workspace);
+        if !path.is_dir() {
+            anyhow::bail!("--workspace '{workspace}' is not an existing directory");
+        }
+        let root = std::fs::canonicalize(path)
+            .with_context(|| format!("Failed to resolve --workspace '{workspace}'"))?;
+        execution_settings.workspace_dir = Some(root.to_string_lossy().to_string());
     }
 
     // Default workspace_dir to CWD at launch so tools have an explicit root
