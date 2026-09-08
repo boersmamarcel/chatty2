@@ -98,18 +98,6 @@ fn openrouter_curated_json_path() -> PathBuf {
     base.join("chatty").join("openrouter_curated.json")
 }
 
-/// Write a given curated list to disk if the user wants to save custom overrides.
-#[allow(dead_code)]
-pub fn save_curated_models(list: &[CuratedModel]) -> anyhow::Result<()> {
-    let path = openrouter_curated_json_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let text = serde_json::to_string_pretty(list)?;
-    std::fs::write(&path, text)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
