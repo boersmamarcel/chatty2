@@ -351,7 +351,8 @@ impl GitService {
             ));
         }
 
-        self.run_git(&["worktree", "add", "-b", branch, &rel]).await?;
+        self.run_git(&["worktree", "add", "-b", branch, &rel])
+            .await?;
 
         info!(worktree = %path.display(), branch = %branch, "Worktree created");
         Ok(path)
@@ -492,7 +493,10 @@ impl GitService {
         for line in output.lines() {
             if let Some(rest) = line.strip_prefix("worktree ") {
                 if let Some(p) = path.take() {
-                    out.push(GitWorktree { path: p, branch: branch.take() });
+                    out.push(GitWorktree {
+                        path: p,
+                        branch: branch.take(),
+                    });
                 }
                 path = Some(rest.trim().to_string());
             } else if let Some(rest) = line.strip_prefix("branch ") {
@@ -693,11 +697,16 @@ mod tests {
         let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
 
         assert!(path.exists(), "worktree directory should exist");
-        assert!(path.starts_with(tmp.path()), "worktree stays inside the workspace root");
+        assert!(
+            path.starts_with(tmp.path()),
+            "worktree stays inside the workspace root"
+        );
 
         let listed = git.worktree_list().await.unwrap();
         assert!(
-            listed.iter().any(|w| w.branch.as_deref() == Some("sub-agent/w1")),
+            listed
+                .iter()
+                .any(|w| w.branch.as_deref() == Some("sub-agent/w1")),
             "new worktree should be listed: {listed:?}"
         );
     }
@@ -775,7 +784,10 @@ mod tests {
             .run_git(&["log", "--oneline", "sub-agent/w1"])
             .await
             .unwrap();
-        assert!(log.contains("sub-agent w1"), "branch keeps the output: {log}");
+        assert!(
+            log.contains("sub-agent w1"),
+            "branch keeps the output: {log}"
+        );
     }
 
     #[tokio::test]

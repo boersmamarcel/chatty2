@@ -1,11 +1,18 @@
-//! Serving a registered local participant over the gateway's A2A surface.
+//! Serving a local participant — registered or spawned — over the gateway's
+//! A2A surface.
 //!
-//! A participant's task updates ([`TaskUpdate`]) become the same JSON-RPC
-//! and SSE frames a WASM module's do, so `A2aClient` — and anything else
-//! speaking A2A — cannot tell the two apart. That equivalence is the point:
-//! ADR-0011's first kill criterion asks whether a delegated turn survives
-//! the round trip at the granularity the parent already renders, and it can
-//! only be answered if the wire shape is the one the parent already reads.
+//! A participant's task updates ([`TaskUpdate`]) become the same JSON-RPC and
+//! SSE frames a WASM module's do, so `A2aClient` — and anything else speaking
+//! A2A — cannot tell the two apart. That equivalence is the point: ADR-0011's
+//! first kill criterion asks whether a delegated turn survives the round trip
+//! at the granularity the parent already renders, and it can only be answered
+//! if the wire shape is the one the parent already reads.
+//!
+//! Two things arrive here. A **registered participant** is a process that
+//! connected on its own; a task is submitted straight to it. A **runner
+//! agent** (ADR-0011 C2) has no process yet: the task spawns one, waits for
+//! it to register, and reaps it afterwards. Past the first step the two are
+//! the same code, which is why a caller cannot tell those apart either.
 
 use axum::{
     http::StatusCode,
@@ -15,9 +22,11 @@ use axum::{
     },
 };
 use serde_json::{Value, json};
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::participant::{ParticipantCard, ParticipantRegistry, TaskState, TaskStream, TaskUpdate};
+use crate::participant::{
+    LocalRunner, ParticipantCard, ParticipantRegistry, TaskState, TaskStream, TaskUpdate, Worker,
+};
 
 use super::jsonrpc::{INTERNAL_ERROR, json_rpc_error, json_rpc_ok};
 
@@ -50,115 +59,194 @@ pub(crate) fn card_to_json(card: &ParticipantCard) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// One task in flight
+// ---------------------------------------------------------------------------
+
+/// A submitted task and everything that has to be cleaned up after it.
+struct RunningTask {
+    task_id: String,
+    updates: TaskStream,
+    /// Cancels the task if the caller hangs up before it finishes.
+    guard: TaskGuard,
+    /// Present only for a runner-spawned worker: the child process, reaped
+    /// when this is dropped.
+    worker: Option<Worker>,
+}
+
+impl RunningTask {
+    /// The task reached a terminal state; nothing is left to cancel.
+    fn finish(&mut self, succeeded: bool) {
+        self.guard.finished();
+        if let Some(worker) = self.worker.as_mut() {
+            worker.set_succeeded(succeeded);
+        }
+    }
+}
+
+/// Submit `prompt` to an already-registered participant.
+fn submit(registry: &ParticipantRegistry, name: &str, prompt: String) -> Option<RunningTask> {
+    let (task_id, updates) = registry.submit_task(name, prompt)?;
+    Some(RunningTask {
+        guard: TaskGuard::new(registry.clone(), name.to_string(), task_id.clone()),
+        task_id,
+        updates,
+        worker: None,
+    })
+}
+
+/// Spawn a worker for `prompt` and submit the task to it.
+async fn spawn(runner: &LocalRunner, prompt: String) -> Result<RunningTask, String> {
+    let (worker, updates) = runner
+        .run_task(prompt)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let task_id = worker
+        .task_id()
+        .expect("run_task sets the task id before returning")
+        .to_string();
+    Ok(RunningTask {
+        guard: TaskGuard::new(
+            runner.registry().clone(),
+            worker.name().to_string(),
+            task_id.clone(),
+        ),
+        task_id,
+        updates,
+        worker: Some(worker),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // message/send
 // ---------------------------------------------------------------------------
 
-/// Run one task to completion and answer with the finished A2A task.
-///
-/// No timeout here on purpose: a task is over when the participant says so
-/// or when its socket closes, and the socket close is guaranteed to arrive
-/// because the listener deregisters on it. A caller that wants a deadline
-/// has one — `A2aClient` sets an HTTP timeout — and enforcing a second one
-/// here would cut off long turns that are working fine.
+/// Run one task on a registered participant to completion.
 pub(crate) async fn message_send(
     registry: &ParticipantRegistry,
     name: &str,
     id: Option<Value>,
     prompt: String,
 ) -> Response {
-    let Some((task_id, updates)) = registry.submit_task(name, prompt) else {
-        return json_rpc_error(
+    match submit(registry, name, prompt) {
+        Some(task) => send_task(id, task).await,
+        None => json_rpc_error(
             StatusCode::OK,
             id,
             INTERNAL_ERROR,
             format!("participant '{name}' is no longer connected"),
-        );
-    };
-
-    let guard = TaskGuard::new(registry.clone(), name.to_string(), task_id.clone());
-    let outcome = collect(updates).await;
-    guard.finished();
-
-    let mut result = json!({
-        "id": task_id,
-        "status": { "state": outcome.state.to_string() },
-        "artifacts": [{
-            "parts": [{ "type": "text", "text": outcome.text }]
-        }],
-    });
-    if let Some(message) = outcome.message {
-        result["status"]["message"] = json!({ "parts": [{ "type": "text", "text": message }] });
+        ),
     }
-
-    json_rpc_ok(id, result)
 }
 
-struct Outcome {
-    state: TaskState,
-    message: Option<String>,
-    text: String,
+/// Spawn a worker, run one task on it to completion, and reap it.
+pub(crate) async fn runner_message_send(
+    runner: &LocalRunner,
+    id: Option<Value>,
+    prompt: String,
+) -> Response {
+    match spawn(runner, prompt).await {
+        Ok(task) => send_task(id, task).await,
+        Err(reason) => {
+            warn!(agent = runner.agent_name(), %reason, "Could not start a local worker");
+            json_rpc_error(StatusCode::OK, id, INTERNAL_ERROR, reason)
+        }
+    }
 }
 
-/// Drain a task's updates into one finished result.
-async fn collect(mut updates: TaskStream) -> Outcome {
+/// Drain a task and answer with the finished A2A task object.
+///
+/// No timeout here on purpose: a task is over when the participant says so or
+/// when its socket closes, and the socket close is guaranteed to arrive
+/// because the listener deregisters on it. A caller that wants a deadline has
+/// one — `A2aClient` sets an HTTP timeout — and a second one here would cut
+/// off long turns that are working fine.
+async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     let mut text = String::new();
     let mut state = TaskState::Failed;
     let mut message = Some("the participant ended the task without a final status".to_string());
+    let mut metadata = None;
 
-    while let Some(update) = updates.recv().await {
+    while let Some(update) = task.updates.recv().await {
         match update {
             TaskUpdate::Artifact { text: chunk, .. } => text.push_str(&chunk),
+            // Non-terminal progress has nowhere to go in a non-streaming
+            // reply; `message/stream` is the method that carries it.
             TaskUpdate::Status {
                 state: s,
                 message: m,
+                metadata: d,
             } => {
                 if s.is_terminal() {
                     state = s;
                     message = m;
+                    metadata = d;
                 }
-                // Non-terminal progress has nowhere to go in a non-streaming
-                // reply; `message/stream` is the method that carries it.
             }
         }
     }
+    task.finish(state == TaskState::Completed);
 
-    Outcome {
-        state,
-        message,
-        text,
+    let mut result = json!({
+        "id": task.task_id,
+        "status": { "state": state.to_string() },
+        "artifacts": [{ "parts": [{ "type": "text", "text": text }] }],
+    });
+    if let Some(message) = message {
+        result["status"]["message"] = json!({ "parts": [{ "type": "text", "text": message }] });
     }
+    if let Some(metadata) = metadata {
+        result["status"]["metadata"] = metadata;
+    }
+
+    json_rpc_ok(id, result)
 }
 
 // ---------------------------------------------------------------------------
 // message/stream
 // ---------------------------------------------------------------------------
 
-/// Stream a task's updates as A2A SSE events.
-///
-/// The frames are byte-identical in shape to the module path's, which is
-/// what lets `A2aClient::send_message_stream` parse them with no branch on
-/// what is behind the endpoint.
+/// Stream a registered participant's task as A2A SSE events.
 pub(crate) fn message_stream(
     registry: &ParticipantRegistry,
     name: &str,
     id: Option<Value>,
     prompt: String,
 ) -> Response {
-    let Some((task_id, mut updates)) = registry.submit_task(name, prompt) else {
-        return failed_stream(
+    match submit(registry, name, prompt) {
+        Some(task) => stream_task(id, task),
+        None => failed_stream(
             id,
             "unknown",
             format!("participant '{name}' is no longer connected"),
-        );
-    };
+        ),
+    }
+}
 
-    let guard = TaskGuard::new(registry.clone(), name.to_string(), task_id.clone());
+/// Spawn a worker and stream its task.
+pub(crate) async fn runner_message_stream(
+    runner: &LocalRunner,
+    id: Option<Value>,
+    prompt: String,
+) -> Response {
+    match spawn(runner, prompt).await {
+        Ok(task) => stream_task(id, task),
+        Err(reason) => {
+            warn!(agent = runner.agent_name(), %reason, "Could not start a local worker");
+            failed_stream(id, "unknown", reason)
+        }
+    }
+}
 
+/// The frames are byte-identical in shape to the module path's, which is what
+/// lets `A2aClient::send_message_stream` parse them with no branch on what is
+/// behind the endpoint.
+fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
     let stream = async_stream::stream! {
-        yield sse(&status_event(&id, &task_id, "working", None, false));
+        let task_id = task.task_id.clone();
+        yield sse(&status_event(&id, &task_id, "working", None, None, false));
 
         let mut ended = false;
-        while let Some(update) = updates.recv().await {
+        while let Some(update) = task.updates.recv().await {
             match update {
                 TaskUpdate::Artifact { text, last_chunk } => {
                     yield sse(&json!({
@@ -174,16 +262,18 @@ pub(crate) fn message_stream(
                         }
                     }));
                 }
-                TaskUpdate::Status { state, message } => {
+                TaskUpdate::Status { state, message, metadata } => {
                     let terminal = state.is_terminal();
                     yield sse(&status_event(
                         &id,
                         &task_id,
                         &state.to_string(),
                         message.as_deref(),
+                        metadata,
                         terminal,
                     ));
                     if terminal {
+                        task.finish(state == TaskState::Completed);
                         ended = true;
                         break;
                     }
@@ -193,8 +283,8 @@ pub(crate) fn message_stream(
 
         // The stream can only end without a terminal status if the
         // participant's sender was dropped without one. `deregister` sends a
-        // `failed` before dropping, so this is the belt to that braces —
-        // a caller must never be left without a final event.
+        // `failed` before dropping, so this is the belt to that braces — a
+        // caller must never be left without a final event.
         if !ended {
             debug!(task = %task_id, "Participant task ended with no final status");
             yield sse(&status_event(
@@ -202,10 +292,13 @@ pub(crate) fn message_stream(
                 &task_id,
                 "failed",
                 Some("the participant ended the task without a final status"),
+                None,
                 true,
             ));
         }
-        guard.finished();
+        // `task` is dropped here, which reaps a spawned worker and runs its
+        // workspace's `on_exit`.
+        drop(task);
     };
 
     Sse::new(stream)
@@ -217,7 +310,7 @@ pub(crate) fn message_stream(
 /// existed. Same shape as a mid-stream failure so callers need no special
 /// case.
 fn failed_stream(id: Option<Value>, task_id: &str, reason: String) -> Response {
-    let event = status_event(&id, task_id, "failed", Some(&reason), true);
+    let event = status_event(&id, task_id, "failed", Some(&reason), None, true);
     let stream = async_stream::stream! { yield sse(&event); };
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
@@ -229,11 +322,15 @@ fn status_event(
     task_id: &str,
     state: &str,
     message: Option<&str>,
+    metadata: Option<Value>,
     is_final: bool,
 ) -> Value {
     let mut status = json!({ "state": state });
     if let Some(message) = message {
         status["message"] = json!({ "parts": [{ "type": "text", "text": message }] });
+    }
+    if let Some(metadata) = metadata {
+        status["metadata"] = metadata;
     }
     json!({
         "jsonrpc": "2.0",
@@ -277,8 +374,7 @@ impl TaskGuard {
         }
     }
 
-    /// The task reached a terminal state on its own; nothing to cancel.
-    fn finished(mut self) {
+    fn finished(&mut self) {
         self.done = true;
     }
 }

@@ -10,6 +10,10 @@ path = "src/main.rs"
 [dependencies]
 chatty-core = { path = "../chatty-core", features = ["excel", "pdf", "duckdb"] }
 chatty-module-registry = { path = "../chatty-module-registry" }
+# Participant mode (AGE-301): the broker socket's frames and its client half.
+# Already in the graph via chatty-module-registry / chatty-wasm-runtime; this
+# adds axum and tower-http, not wasmtime.
+chatty-protocol-gateway = { path = "../chatty-protocol-gateway" }
 
 # LLM framework (needed for rig types used in chatty-core's API)
 rig-core.workspace = true
@@ -39,6 +43,10 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 # Scripted stream fixtures shared with chatty-gpui's characterization tests.
 chatty-core = { path = "../chatty-core", features = ["test-support"] }
+# AGE-301's A/A check runs a real gateway on a real port, so it needs the
+# gateway's own dependencies rather than a stand-in for them.
+axum = "0.8"
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 
 [features]
 default = ["mcp"]

@@ -35,6 +35,13 @@ pub struct LocalModuleAgentSummary {
     pub execution_mode: String,
 }
 
+/// The broker's local-worker agent, when the gateway publishes one.
+#[derive(Debug, Serialize, Clone)]
+pub struct LocalWorkerAgentSummary {
+    pub name: String,
+    pub description: String,
+}
+
 /// Output from the list_agents tool
 #[derive(Debug, Serialize)]
 pub struct ListAgentsToolOutput {
@@ -42,6 +49,9 @@ pub struct ListAgentsToolOutput {
     pub remote_agents: Vec<A2aAgentSummary>,
     /// Locally installed WASM module agents discoverable via the modules directory.
     pub local_agents: Vec<LocalModuleAgentSummary>,
+    /// The broker's local worker (ADR-0011 C2), if the gateway is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_worker: Option<LocalWorkerAgentSummary>,
     pub total: usize,
     pub note: String,
 }
@@ -58,6 +68,8 @@ pub struct ListAgentsTool {
     remote_agents: Vec<A2aAgentConfig>,
     /// Locally installed WASM module agents with `agent = true`.
     module_agents: Vec<LocalModuleAgentSummary>,
+    /// The broker's local worker (ADR-0011 C2), if the gateway is running.
+    local_worker: Option<LocalWorkerAgentSummary>,
 }
 
 impl ListAgentsTool {
@@ -65,6 +77,7 @@ impl ListAgentsTool {
         Self {
             remote_agents,
             module_agents: Vec::new(),
+            local_worker: None,
         }
     }
 
@@ -76,7 +89,21 @@ impl ListAgentsTool {
         Self {
             remote_agents,
             module_agents,
+            local_worker: None,
         }
+    }
+
+    /// Advertise the broker's local worker: a chatty agent in its own
+    /// process, which is what replaces `sub_agent` (ADR-0011 C2).
+    pub fn with_local_worker(mut self, name: impl Into<String>) -> Self {
+        self.local_worker = Some(LocalWorkerAgentSummary {
+            name: name.into(),
+            description: "A chatty agent in its own process and its own \
+                          workspace, with the same tool set. Delegate a \
+                          self-contained task to it."
+                .to_string(),
+        });
+        self
     }
 }
 
@@ -136,7 +163,8 @@ impl Tool for ListAgentsTool {
             })
             .collect();
 
-        let total = remote_summaries.len() + self.module_agents.len();
+        let total =
+            remote_summaries.len() + self.module_agents.len() + self.local_worker.iter().count();
         let note = if total == 0 {
             "No agents are available. Remote agents can be added via Settings → A2A Agents. \
              Local WASM module agents are installed in the modules directory."
@@ -152,6 +180,7 @@ impl Tool for ListAgentsTool {
         Ok(ListAgentsToolOutput {
             remote_agents: remote_summaries,
             local_agents: self.module_agents.clone(),
+            local_worker: self.local_worker.clone(),
             total,
             note,
         })

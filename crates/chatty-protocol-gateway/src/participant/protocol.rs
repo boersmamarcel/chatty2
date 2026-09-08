@@ -23,6 +23,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The state of one task, in A2A's vocabulary.
 ///
@@ -100,12 +101,20 @@ pub enum ParticipantFrame {
     Register { card: ParticipantCard },
     /// A task moved, optionally with progress text. The broker turns this
     /// into an A2A `TaskStatusUpdateEvent`.
+    ///
+    /// `metadata` is copied verbatim into the A2A status's `metadata` field.
+    /// It is where a turn's token usage rides back: A2A has no usage concept
+    /// — usage belongs to the ledger, not to the task protocol — and
+    /// inventing a frame for it would put accounting in the wire format.
+    /// The broker's ledger (AGE-307) reads it from there.
     #[serde(rename_all = "camelCase")]
     Status {
         task_id: String,
         state: TaskState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
     },
     /// A chunk of the task's output, in stream order. The broker turns this
     /// into an A2A `TaskArtifactUpdateEvent`.
@@ -147,12 +156,28 @@ mod tests {
             task_id: "task-1".into(),
             state: TaskState::InputRequired,
             message: Some("which file?".into()),
+            metadata: None,
         };
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "status");
         assert_eq!(json["taskId"], "task-1");
         assert_eq!(json["state"], "input-required");
         assert_eq!(json["message"], "which file?");
+        assert!(
+            json.get("metadata").is_none(),
+            "an absent metadata field stays off the wire"
+        );
+    }
+
+    #[test]
+    fn status_metadata_round_trips() {
+        let line = r#"{"type":"status","taskId":"t","state":"completed",
+                       "metadata":{"usage":{"inputTokens":12}}}"#;
+        let frame: ParticipantFrame = serde_json::from_str(line).unwrap();
+        let ParticipantFrame::Status { metadata, .. } = frame else {
+            panic!("expected a status frame");
+        };
+        assert_eq!(metadata.unwrap()["usage"]["inputTokens"], 12);
     }
 
     #[test]

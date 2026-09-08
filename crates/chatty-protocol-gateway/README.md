@@ -132,6 +132,29 @@ only signal that cannot lie.
 Opt in with `ProtocolGateway::with_participant_socket(path)`; without it no
 socket is opened. Unix only — the hosted transport is vsock (AGE-307).
 
+### The local runner
+
+`ProtocolGateway::with_local_runner` publishes one *virtual* agent —
+`local-agent` — that is not a connected process but a factory. A task
+addressed to it spawns a `chatty-tui` child, waits for that child to register
+over the socket, routes the task to it, and reaps it. To the caller it is an
+A2A agent like any other, which is the point: `invoke_agent` replaces
+`sub_agent` without the parent learning a second fan-out path.
+
+**One child per task.** The child can serve tasks until its socket closes, but
+the runner's policy is one-shot, keeping the process lifecycle identical to
+the `sub_agent` it replaces — that equivalence is what makes ADR-0011's second
+kill criterion a comparison of the hop rather than of process-reuse
+strategies. Cancellation of a running task is enforced by reaping the child;
+a persistent worker is a change to `runner.rs` and nothing else.
+
+**Where a worker runs** is the embedder's decision, not the gateway's.
+ADR-0012 gives each worker a `git worktree`, and git lives in `chatty-core`,
+so the runner takes a `WorkspaceFactory` and only spawns in whatever directory
+it is handed. Without a factory the child inherits the broker's own directory.
+A factory that is configured and then *fails* fails the task rather than
+silently running the worker unisolated.
+
 ## Running
 
 ```sh
