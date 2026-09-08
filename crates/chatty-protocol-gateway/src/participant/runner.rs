@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
@@ -41,6 +42,7 @@ use tracing::{debug, info};
 
 use super::protocol::{ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
+use super::virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
 
 /// A worker's directory, and what to do with it once the worker is gone.
 pub struct WorkerWorkspace {
@@ -309,6 +311,33 @@ impl LocalRunner {
     }
 }
 
+/// The broker's view of the runner: a card, and a worker per task.
+///
+/// The inherent methods stay because they return the concrete [`Worker`],
+/// which the A/A benchmark and the tests drive directly; the trait is what
+/// the gateway holds, so a hosted runner that leases a microVM (AGE-307) can
+/// take the same slot without the handlers learning a second shape.
+impl VirtualAgent for LocalRunner {
+    fn agent_name(&self) -> &str {
+        LocalRunner::agent_name(self)
+    }
+
+    fn agent_card(&self) -> ParticipantCard {
+        LocalRunner::agent_card(self)
+    }
+
+    fn registry(&self) -> &ParticipantRegistry {
+        LocalRunner::registry(self)
+    }
+
+    fn run_task(&self, prompt: String) -> WorkerFuture<'_> {
+        Box::pin(async move {
+            let (worker, updates) = LocalRunner::run_task(self, prompt).await?;
+            Ok((Box::new(worker) as Box<dyn WorkerHandle>, updates))
+        })
+    }
+}
+
 /// A spawned worker and its task.
 ///
 /// Dropping it kills and reaps the child and runs the workspace's `on_exit`.
@@ -369,6 +398,23 @@ impl Worker {
             Some((at, _)) => tail[at..].to_string(),
             None => tail.to_string(),
         }
+    }
+}
+
+impl WorkerHandle for Worker {
+    fn name(&self) -> &str {
+        Worker::name(self)
+    }
+
+    fn task_id(&self) -> Option<&str> {
+        Worker::task_id(self)
+    }
+
+    /// A local worker has no second line item: the tokens in `metadata` are
+    /// the whole cost of a child process, and the ledger that would record
+    /// them is the hosted one (AGE-307).
+    fn finish(&mut self, succeeded: bool, _metadata: Option<&Value>) {
+        Worker::set_succeeded(self, succeeded)
     }
 }
 

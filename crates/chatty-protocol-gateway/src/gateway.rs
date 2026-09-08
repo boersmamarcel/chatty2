@@ -17,9 +17,7 @@ use chatty_module_registry::ModuleRegistry;
 use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 
 use crate::handlers::{a2a, index, mcp, openai};
-#[cfg(unix)]
-use crate::participant::LocalRunner;
-use crate::participant::ParticipantRegistry;
+use crate::participant::{ParticipantRegistry, VirtualAgent};
 
 // ---------------------------------------------------------------------------
 // GatewayState
@@ -40,9 +38,10 @@ pub struct GatewayState {
     /// Processes registered over the participant socket (ADR-0011). Shares
     /// the `/a2a/{name}` namespace with modules and is consulted first.
     pub participants: ParticipantRegistry,
-    /// The virtual agent that spawns a chatty child per task (ADR-0011 C2).
-    #[cfg(unix)]
-    pub runner: Option<Arc<LocalRunner>>,
+    /// The agent that has no participant until a task arrives: it starts
+    /// one, routes the task to it, and reaps it (ADR-0011 C2 locally, C8
+    /// hosted).
+    pub runner: Option<Arc<dyn VirtualAgent>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,8 +93,7 @@ pub struct ProtocolGateway {
     /// it should open one.
     participant_socket: Option<PathBuf>,
     participant_task: Option<tokio::task::JoinHandle<()>>,
-    #[cfg(unix)]
-    runner: Option<Arc<LocalRunner>>,
+    runner: Option<Arc<dyn VirtualAgent>>,
 }
 
 impl ProtocolGateway {
@@ -116,7 +114,6 @@ impl ProtocolGateway {
             participants: ParticipantRegistry::new(),
             participant_socket: None,
             participant_task: None,
-            #[cfg(unix)]
             runner: None,
         }
     }
@@ -166,12 +163,13 @@ impl ProtocolGateway {
         self
     }
 
-    /// Publish a [`LocalRunner`] as a virtual agent: a task addressed to it
-    /// spawns a chatty child, routes the task to it, and reaps it (ADR-0011
-    /// C2). The runner must be built on this gateway's participant registry
-    /// and socket path.
-    #[cfg(unix)]
-    pub fn with_local_runner(mut self, runner: Arc<LocalRunner>) -> Self {
+    /// Publish a [`VirtualAgent`]: a task addressed to it starts a worker,
+    /// routes the task to that worker, and reaps it. On the desktop the
+    /// worker is a chatty child ([`LocalRunner`](crate::participant::LocalRunner),
+    /// ADR-0011 C2); hosted it is a leased microVM (AGE-307). Either way the
+    /// agent must be built on this gateway's participant registry, since that
+    /// is where its workers register.
+    pub fn with_virtual_agent(mut self, runner: Arc<dyn VirtualAgent>) -> Self {
         self.runner = Some(runner);
         self
     }
@@ -197,7 +195,6 @@ impl ProtocolGateway {
             runner_url: self.runner_url.clone(),
             paid_modules: Arc::new(self.paid_modules.clone()),
             participants: self.participants.clone(),
-            #[cfg(unix)]
             runner: self.runner.clone(),
         };
 

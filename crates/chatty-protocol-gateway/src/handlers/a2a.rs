@@ -42,7 +42,6 @@ pub(crate) async fn module_agent_card(
         return (StatusCode::OK, Json(a2a_participant::card_to_json(&card))).into_response();
     }
 
-    #[cfg(unix)]
     if let Some(runner) = state.runner.as_ref()
         && runner.agent_name() == module_name
     {
@@ -101,7 +100,6 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
 
     // The runner has no process until a task arrives, but it is the agent a
     // caller addresses to get one, so it belongs on the card.
-    #[cfg(unix)]
     if let Some(runner) = state.runner.as_ref() {
         agents.push(a2a_participant::card_to_json(&runner.agent_card()));
     }
@@ -252,12 +250,11 @@ async fn handle_message_send(
         return a2a_participant::message_send(&state.participants, module_name, id, content).await;
     }
 
-    #[cfg(unix)]
     if let Some(runner) = state.runner.as_ref()
         && runner.agent_name() == module_name
     {
-        tracing::info!(agent = module_name, "A2A: spawning a local worker");
-        return a2a_participant::runner_message_send(runner, id, content).await;
+        tracing::info!(agent = module_name, "A2A: starting a worker");
+        return a2a_participant::runner_message_send(runner.as_ref(), id, content).await;
     }
 
     let req = ChatRequest {
@@ -398,12 +395,11 @@ async fn handle_message_stream(
         return a2a_participant::message_stream(&state.participants, module_name, id, content);
     }
 
-    #[cfg(unix)]
     if let Some(runner) = state.runner.as_ref()
         && runner.agent_name() == module_name
     {
-        tracing::info!(agent = module_name, "A2A stream: spawning a local worker");
-        return a2a_participant::runner_message_stream(runner, id, content).await;
+        tracing::info!(agent = module_name, "A2A stream: starting a worker");
+        return a2a_participant::runner_message_stream(runner.as_ref(), id, content).await;
     }
 
     let task_id = format!("task-{}", crate::gateway::new_id());
