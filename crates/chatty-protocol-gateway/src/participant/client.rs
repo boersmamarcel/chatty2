@@ -1,25 +1,34 @@
-//! The participant side of the socket: what a child process talks.
+//! The participant side of the socket: what a worker talks.
 //!
 //! It lives next to the listener so the two halves of the protocol cannot
-//! drift. A child (`chatty-tui --participant-socket …`) owns one of these for
-//! its whole life: connect, register, then answer tasks until the broker
+//! drift. A worker (`chatty-tui --participant-socket …`) owns one of these
+//! for its whole life: connect, register, then answer tasks until the broker
 //! closes the socket or the process exits.
+//!
+//! The transport is the caller's, not this type's. It is a Unix socket on
+//! the desktop and an `AF_VSOCK` stream from inside a microVM (AGE-307), and
+//! the frames are identical over both — which is the whole reason C1's
+//! contract could be reused for the hosted half. The halves are boxed rather
+//! than the type being generic so that the shared worker loop stays one
+//! concrete type regardless of what it is speaking over.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::debug;
 
 use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
 
+type BoxedRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxedWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
 /// A registered connection to the broker.
 pub struct ParticipantConnection {
-    lines: Lines<BufReader<OwnedReadHalf>>,
-    write: OwnedWriteHalf,
+    lines: Lines<BufReader<BoxedRead>>,
+    write: BoxedWrite,
     name: String,
 }
 
@@ -35,11 +44,22 @@ impl ParticipantConnection {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("failed to reach the broker at {}", socket.display()))?;
-        let (read, write) = stream.into_split();
+        Self::register_over(stream, card).await
+    }
+
+    /// Register `card` over an already-connected stream.
+    ///
+    /// The general form: a microVM's worker reaches the broker over vsock,
+    /// which is not a path (AGE-307).
+    pub async fn register_over<S>(stream: S, card: ParticipantCard) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (read, write) = tokio::io::split(stream);
 
         let mut conn = Self {
-            lines: BufReader::new(read).lines(),
-            write,
+            lines: BufReader::new(Box::new(read) as BoxedRead).lines(),
+            write: Box::new(write) as BoxedWrite,
             name: card.name.clone(),
         };
         conn.send(ParticipantFrame::Register { card }).await?;

@@ -46,7 +46,7 @@ use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimi
 use rig_agent::tool::{Tool, ToolContext};
 use tokio::sync::{RwLock, mpsc};
 
-use super::TaskMapper;
+use chatty_protocol_gateway::worker::TaskMapper;
 
 /// The policy a delegated child runs its turn under.
 fn policy() -> TurnPolicy {

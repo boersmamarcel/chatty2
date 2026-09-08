@@ -293,7 +293,10 @@ owed. The frames and the mapping are documented in
 [`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
 
 Opening the socket is opt-in (`ProtocolGateway::with_participant_socket`) and
-Unix-only; the hosted transport is vsock (AGE-307).
+Unix-only. The hosted transport is Firecracker vsock, which arrives here as an
+ordinary stream: both `serve_connection` and `ParticipantConnection` take any
+`AsyncRead + AsyncWrite`, so the frames, the registration and the liveness rule
+are shared rather than reimplemented (AGE-307, in `boersmamarcel/hive`).
 
 ## LLM-facing tools
 
@@ -342,11 +345,14 @@ registers, and its turn comes back as A2A status and artifact updates. This is
 ADR-0011's replacement for `sub_agent`: one fan-out path, a public wire format, and a
 place to put discovery, budgets and the ledger.
 
-The child maps its `SessionEvent`s to frames in
-`crates/chatty-tui/src/participant/mapping.rs` — tool starts and finishes become
-`working` status messages, assistant text becomes artifact chunks, and the turn's token
-usage rides in the terminal status's `metadata` (A2A has no usage concept; usage
-belongs to the ledger). `crates/chatty-tui/src/participant/equivalence.rs` asserts the
+The child maps its `SessionEvent`s to frames with
+`chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
+finishes become `working` status messages, assistant text becomes artifact chunks, and
+the turn's token usage rides in the terminal status's `metadata` (A2A has no usage
+concept; usage belongs to the ledger). The mapper and the one-task loop around it live
+beside the broker's own half of the protocol, not in this crate, because a microVM's
+`chatty-server` is a worker too and the parent must not be able to tell the two apart.
+`crates/chatty-tui/src/participant/equivalence.rs` asserts the
 parent's tool-call trace is identical to the `sub_agent` path's for every scripted
 scenario, which is how ADR-0011's first kill criterion is checked in CI rather than by
 inspection.

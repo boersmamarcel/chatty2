@@ -6,6 +6,11 @@
 //! second can carry the first at the granularity the parent already renders,
 //! and this table is the answer being tested.
 //!
+//! There is one table because there is one question. A worker is a child
+//! process on the desktop and a microVM when hosted (AGE-307), and a parent
+//! must not be able to tell which it delegated to from the transcript; two
+//! copies of this file would make that a coincidence rather than a property.
+//!
 //! | `SessionEvent` | frame |
 //! |---|---|
 //! | `TurnStarted` | `status: working` |
@@ -48,10 +53,10 @@
 //! accounting into the task protocol. It rides in the terminal status's
 //! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it.
 
+use crate::participant::{ParticipantFrame, TaskState};
 use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::progress_text_for_event;
-use chatty_protocol_gateway::participant::{ParticipantFrame, TaskState};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
