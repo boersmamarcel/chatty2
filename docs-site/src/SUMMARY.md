@@ -55,6 +55,7 @@
     - [Harbor pivot](./dev/adrs/harbor-pivot.md)
     - [Cost model](./dev/adrs/cost-model.md)
     - [AppWorld decision](./dev/adrs/appworld-decision.md)
+    - [ADR-0011 kill criteria: sub_agent vs the broker](./dev/adrs/adr-0011-broker-ab-2026-09-08.md)
     - [Modules M0–M4](./dev/research/modules/index.md)
       - [M0 Trace contract](./dev/research/modules/m0-trace.md)
       - [M1 ReAct](./dev/research/modules/m1-react.md)
