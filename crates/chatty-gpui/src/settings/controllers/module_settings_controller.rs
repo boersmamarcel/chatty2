@@ -12,7 +12,8 @@ use chatty_core::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel,
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
-use chatty_core::settings::models::providers_store::ProviderType;
+use chatty_core::settings::models::models_store::ModelsModel;
+use chatty_core::settings::models::providers_store::{ProviderModel, ProviderType};
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_wasm_runtime::{
@@ -746,7 +747,7 @@ pub fn refresh_runtime(cx: &mut App) {
                     let participants = gateway.participants();
                     let socket = broker_runner::socket_path();
                     if broker_runner::serve_socket(participants.clone(), &socket) {
-                        let (workspace_dir, auto_approve) = cx
+                        let (workspace_dir, auto_approve, endpoint) = cx
                             .update(|cx| {
                                 let exec = cx.global::<ExecutionSettingsModel>();
                                 // The same condition `sub_agent` uses for its
@@ -754,15 +755,27 @@ pub fn refresh_runtime(cx: &mut App) {
                                 // worker the same approval policy.
                                 let auto_approve =
                                     matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
-                                (exec.workspace_dir.clone(), auto_approve)
+                                // The endpoint every worker will share, and
+                                // how many may hold it at once (ADR-0011 C6).
+                                let endpoint = match (
+                                    cx.try_global::<ModelsModel>(),
+                                    cx.try_global::<ProviderModel>(),
+                                ) {
+                                    (Some(models), Some(providers)) => {
+                                        broker_runner::worker_endpoint(models, providers, &settings)
+                                    }
+                                    _ => None,
+                                };
+                                (exec.workspace_dir.clone(), auto_approve, endpoint)
                             })
-                            .unwrap_or((None, false));
+                            .unwrap_or((None, false, None));
                         gateway =
                             gateway.with_virtual_agent(Arc::new(broker_runner::local_runner(
                                 participants,
                                 socket,
                                 workspace_dir,
                                 auto_approve,
+                                endpoint,
                             )));
                     }
 

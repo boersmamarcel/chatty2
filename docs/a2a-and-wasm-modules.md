@@ -361,6 +361,25 @@ Each worker runs in its own `git worktree` under the conversation's workspace
 (ADR-0012), the same isolation `sub_agent` uses — both go through
 `chatty_core::services::worker_tree`.
 
+**Per-endpoint concurrency budget (ADR-0011 C6).** Workers all talk to the same model
+server, so the broker holds a semaphore per *endpoint* — the server's base URL, not a
+model and not a worker — and a task waits for a slot before a child is spawned. On a
+local Ollama, three concurrent workers on one loaded model is not three times the
+throughput; it is the fourth request evicting the weights the first three are using.
+The slot is held from just before the spawn until the worker is reaped, so the same
+event that frees the process and its worktree admits the next queued task.
+
+The size, in order: an explicit override in `endpoint_budgets` in `module_settings.json`
+(keyed by base URL, e.g. `http://localhost:11434`; no UI yet), then what the provider
+reports about itself (`num_parallel` in its `extra_config`, or a local Ollama's `OLLAMA_NUM_PARALLEL`
+from the environment), then `default_endpoint_budget`, which is **1**. Every wait is a
+`tracing` event carrying the endpoint, its limit and the queue depth at that moment, so
+a budget that is too tight looks like a queue that never empties.
+
+> A cloud endpoint gets the same default of 1 unless it is overridden. That is
+> deliberate for now — `local-agent` replaces `sub_agent`, which was one child per call
+> — but it is the knob to turn first if delegation feels serialised on OpenRouter.
+
 **Known limitation.** The worker's model is its own configured default, not the parent
 conversation's. `sub_agent` passes `--model`; the broker cannot, because the model
 would have to ride on the A2A request and A2A has no field for it. Carried as an open

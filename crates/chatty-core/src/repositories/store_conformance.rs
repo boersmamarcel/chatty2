@@ -463,6 +463,7 @@ mod tests {
                 enabled: true,
                 module_dir: "/opt/chatty-test-modules".to_string(),
                 gateway_port: 9000,
+                ..ModuleSettingsModel::default()
             },
         )
         .await;
