@@ -7,17 +7,21 @@
 //!
 //! Nothing here decides *what* a worker does — the child is `chatty-tui` in
 //! participant mode, running the same session the desktop does. The only
-//! decisions are where the socket lives and where a worker runs.
+//! decisions are where the socket lives, where a worker runs, and how many
+//! of them may run at once against one model server (ADR-0011 C6).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use chatty_core::services::worker_tree;
+use chatty_core::settings::models::ModuleSettingsModel;
+use chatty_core::settings::models::models_store::ModelsModel;
+use chatty_core::settings::models::providers_store::ProviderModel;
 use chatty_core::tools::{LOCAL_AGENT_NAME, worker_executable};
 use chatty_protocol_gateway::participant::{
-    LocalRunner, ParticipantRegistry, WorkerWorkspace, WorkspaceFactory,
+    EndpointBudget, LocalRunner, ParticipantRegistry, WorkerWorkspace, WorkspaceFactory,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Where children register.
 ///
@@ -32,16 +36,55 @@ pub fn socket_path() -> PathBuf {
         .join("participants.sock")
 }
 
+/// The model endpoint every worker will share, and the budget that meters it
+/// (ADR-0011 C6).
+///
+/// A worker resolves its own model exactly as `chatty-tui` does when it is
+/// spawned without `--model`: the first model in the roster. So the endpoint
+/// to meter is that model's provider's, and a desktop with no model
+/// configured has nothing to meter — the delegation would fail in the child
+/// anyway.
+///
+/// The size is the provider's own parallel-request setting where it is
+/// known, an explicit per-endpoint override where there is one, and
+/// otherwise the configured default of one.
+pub fn worker_endpoint(
+    models: &ModelsModel,
+    providers: &ProviderModel,
+    module_settings: &ModuleSettingsModel,
+) -> Option<(String, EndpointBudget)> {
+    let model = models.models().first()?;
+    let provider = providers
+        .providers()
+        .iter()
+        .find(|p| p.provider_type == model.provider_type)?;
+
+    let endpoint = provider.endpoint_key();
+    let limit = module_settings.endpoint_budget(&endpoint, provider.parallel_requests());
+    info!(
+        endpoint = %endpoint,
+        limit,
+        "Metering the broker's workers on their model endpoint"
+    );
+
+    let budget = EndpointBudget::new(module_settings.default_endpoint_budget)
+        .with_endpoint(&endpoint, limit);
+    Some((endpoint, budget))
+}
+
 /// The runner the gateway publishes as `local-agent`.
 ///
 /// `workspace_dir` is the conversation's workspace root; each worker gets a
 /// `git worktree` under it (ADR-0012). Without one — or when it is not a git
 /// repository — workers share the desktop's tree, as they did before AGE-314.
+/// `endpoint` is [`worker_endpoint`]'s answer: without one the runner spawns
+/// as many workers at once as it is asked to.
 pub fn local_runner(
     registry: ParticipantRegistry,
     socket: PathBuf,
     workspace_dir: Option<String>,
     auto_approve: bool,
+    endpoint: Option<(String, EndpointBudget)>,
 ) -> LocalRunner {
     let mut args: Vec<String> = Vec::new();
     if auto_approve {
@@ -54,6 +97,9 @@ pub fn local_runner(
 
     if let Some(root) = workspace_dir {
         runner = runner.with_workspace_factory(worktree_factory(root));
+    }
+    if let Some((endpoint, budget)) = endpoint {
+        runner = runner.with_endpoint_budget(endpoint, budget);
     }
     runner
 }
