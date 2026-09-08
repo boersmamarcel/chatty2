@@ -339,6 +339,8 @@ impl GitService {
         Self::validate_worktree_name(name)?;
         Self::validate_branch_name(branch)?;
 
+        self.exclude_worktree_dir_locally().await?;
+
         let rel = format!("{WORKTREE_DIR}/{name}");
         let path = self.workspace_root.join(&rel);
         if path.exists() {
@@ -376,6 +378,59 @@ impl GitService {
 
         info!(worktree = %name, force, "Worktree removed");
         Ok(format!("Worktree '{}' removed", name))
+    }
+
+    /// Keep the harness's own worktrees out of the user's repository.
+    ///
+    /// [`WORKTREE_DIR`] sits inside the workspace so every worker path stays
+    /// within the `PathValidator` root (ADR-0017). The cost is borne by the
+    /// user's repo: `git status` reports `?? .chatty/`, and `git add -A`
+    /// stages a worktree as an *embedded git repository*, dropping a gitlink
+    /// into their history. `commit_all` is itself a `git add -A`, so this is
+    /// reachable from the harness and not only from the user.
+    ///
+    /// `.git/info/exclude` is the right lever: it is git's per-clone ignore
+    /// list, so the fix never touches the `.gitignore` the user tracks and
+    /// owns. Written to the *common* git dir, which linked worktrees share.
+    async fn exclude_worktree_dir_locally(&self) -> Result<()> {
+        let entry = format!("/{}/", WORKTREE_DIR.trim_end_matches('/'));
+
+        let common = self.run_git(&["rev-parse", "--git-common-dir"]).await?;
+        let common = common.trim();
+        let git_dir = if std::path::Path::new(common).is_absolute() {
+            PathBuf::from(common)
+        } else {
+            self.workspace_root.join(common)
+        };
+
+        let info_dir = git_dir.join("info");
+        let exclude = info_dir.join("exclude");
+
+        let current = tokio::fs::read_to_string(&exclude)
+            .await
+            .unwrap_or_default();
+        if current.lines().any(|line| line.trim() == entry) {
+            return Ok(());
+        }
+
+        tokio::fs::create_dir_all(&info_dir).await.map_err(|e| {
+            anyhow!("Failed to create {}: {}", info_dir.display(), e)
+        })?;
+
+        let mut next = current;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str("# chatty sub-agent worktrees (ADR-0017); local-only, not your .gitignore\n");
+        next.push_str(&entry);
+        next.push('\n');
+
+        tokio::fs::write(&exclude, next)
+            .await
+            .map_err(|e| anyhow!("Failed to write {}: {}", exclude.display(), e))?;
+
+        debug!(exclude = %exclude.display(), entry = %entry, "Excluded worktree dir locally");
+        Ok(())
     }
 
     /// Stage everything and commit it, returning `None` when the tree is clean.
@@ -644,6 +699,29 @@ mod tests {
         assert!(
             listed.iter().any(|w| w.branch.as_deref() == Some("sub-agent/w1")),
             "new worktree should be listed: {listed:?}"
+        );
+    }
+
+    /// A worker's worktree lives inside the user's repository, so it must be
+    /// invisible to the user's own git. Without the local exclude, `git status`
+    /// reports `?? .chatty/` and `git add -A` stages the worktree as an
+    /// embedded repository — a gitlink in their history.
+    #[tokio::test]
+    async fn worktree_add_leaves_the_parent_repo_status_clean() {
+        let (_tmp, git) = create_test_repo().await;
+        git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+
+        let status = git.run_git(&["status", "--porcelain"]).await.unwrap();
+        assert!(
+            status.trim().is_empty(),
+            "worktrees must not show up in the user's status, got: {status:?}"
+        );
+
+        git.run_git(&["add", "-A"]).await.unwrap();
+        let staged = git.run_git(&["diff", "--cached", "--name-only"]).await.unwrap();
+        assert!(
+            staged.trim().is_empty(),
+            "`git add -A` must not stage the worktree, got: {staged:?}"
         );
     }
 
