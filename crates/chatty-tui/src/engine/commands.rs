@@ -514,7 +514,7 @@ impl ChatEngine {
 
         let label = format!("[remote agent: {}] {}", config.name, prompt);
         self.add_system_message(label);
-        self.transcript.mark_last_as_sub_agent_row();
+        self.transcript.mark_last_as_delegation_row();
 
         let event_tx = self.event_tx.clone();
 
@@ -544,7 +544,8 @@ impl ChatEngine {
                                 } else if state == "working"
                                     && let Some(ref msg) = message
                                 {
-                                    let _ = event_tx.send(AppEvent::SubAgentProgress(msg.clone()));
+                                    let _ =
+                                        event_tx.send(AppEvent::DelegationProgress(msg.clone()));
                                 }
                             }
                             Ok(
@@ -576,7 +577,7 @@ impl ChatEngine {
                 Err(e) => format!("\u{26a0}\u{fe0f} A2A error: {e:#}"),
             };
 
-            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver A2A agent completion event");
             }
         });
@@ -596,7 +597,7 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching local sub-agent...".to_string());
-        self.transcript.mark_last_as_sub_agent_row();
+        self.transcript.mark_last_as_delegation_row();
 
         tokio::task::spawn_blocking(move || {
             let message = match super::helpers::run_sub_agent_process(
@@ -617,7 +618,7 @@ impl ChatEngine {
                 Err(e) => format!("Sub-agent failed: {}", e),
             };
 
-            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver sub-agent completion event");
             }
         });

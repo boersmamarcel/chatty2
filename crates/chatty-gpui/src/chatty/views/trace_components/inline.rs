@@ -273,7 +273,7 @@ pub(super) fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
     let detail = extract_command_display(tool_call);
 
     match tool_call.tool_name.as_str() {
-        "sub_agent" => format!("{}: {}", tool_call.display_name, detail),
+        "invoke_agent" => format!("{}: {}", tool_call.display_name, detail),
         "remember" | "search_memory" | "search_web" | "fetch" | "daytona_run" | "browser_use" => {
             // Use the friendly display_name as prefix with the detail
             format!("{}: {}", tool_call.display_name, detail)
@@ -355,8 +355,8 @@ pub(super) fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             }
         }
 
-        // For sub_agent: extract the task prompt
-        if tool_call.tool_name == "sub_agent" {
+        // For a delegated agent: extract the task prompt
+        if tool_call.tool_name == "invoke_agent" {
             if let Some(task) = json.get("task").and_then(|v| v.as_str()) {
                 return task.to_string();
             }

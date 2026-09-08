@@ -197,11 +197,11 @@ pub mod search_memory_tool;
 pub mod search_tool;
 pub mod search_web_tool;
 pub mod shell_tool;
-pub mod sub_agent_tool;
 #[cfg(test)]
 pub mod test_helpers;
 #[cfg(feature = "math-render")]
 pub mod typst_tool;
+pub mod worker_progress;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
@@ -251,12 +251,9 @@ pub use search_memory_tool::{
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
-pub use sub_agent_tool::{
-    CHATTY_EVENT_PREFIX, SubAgentTool, format_event_line, is_chatty_event_line, parse_event_line,
-    progress_text_for_event, worker_executable,
-};
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
+pub use worker_progress::{progress_text_for_event, worker_executable};
 
 /// Guard tests: every built-in tool's parameter schema must convert to a valid
 /// Gemini `Schema` without any empty `type` strings.

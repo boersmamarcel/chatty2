@@ -22,7 +22,7 @@
 //!
 //! * **Sub-agent progress.** The desktop routes it to `ConversationsStore` and
 //!   `ChatView` rather than through `StreamManager`, so none of it appears
-//!   here — `sub_agent_progress.txt` records only that scenario's chunks.
+//!   here — `delegation_progress.txt` records only that scenario's chunks.
 //! * **User-pressed Stop.** `cancelled_mid_stream` sets the cancel flag
 //!   directly, which is the loop-guard and todo-protocol path. A user Stop
 //!   goes through `StreamManager::stop_stream`, which reports the turn

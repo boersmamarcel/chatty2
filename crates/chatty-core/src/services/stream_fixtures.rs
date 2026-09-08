@@ -224,7 +224,7 @@ pub fn scenarios() -> Vec<Scenario> {
         // 7. A sub-agent reporting progress through the invoke_agent channel
         //    rather than through the stream.
         Scenario {
-            name: "sub_agent_progress",
+            name: "delegation_progress",
             progress: vec![
                 InvokeAgentProgress::Started {
                     agent_name: "researcher".into(),
