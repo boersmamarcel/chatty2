@@ -246,7 +246,7 @@ exposes every loaded module through three protocols at once:
 | Method | Path | Protocol | Description |
 |:-------|:-----|:---------|:------------|
 | `GET` | `/` | — | JSON index of all modules and endpoints |
-| `GET` | `/.well-known/agent.json` | A2A | Aggregated agent card (all modules) |
+| `GET` | `/.well-known/agent.json` | A2A | Aggregated agent card (modules and participants) |
 | `GET` | `/a2a/{module}/.well-known/agent.json` | A2A | Per-module agent card |
 | `POST` | `/a2a/{module}` | A2A | JSON-RPC: `message/send`, `message/stream`, `tasks/get` |
 | `POST` | `/v1/{module}/chat/completions` | OpenAI | Module-specific chat completion |
@@ -272,8 +272,28 @@ The gateway's `message/stream` handler (`handlers/a2a.rs`):
 
 `GET /.well-known/agent.json` returns a gateway-level card
 (`{"schema_version": "0.1", "gateway": true, "agents": [...]}`) listing every loaded
-module agent with its name, `displayName`, description, version, skills and
-`capabilities.streaming`.
+module agent and every registered participant with its name, `displayName`,
+description, version, skills and `capabilities.streaming`.
+
+### Local participants (ADR-0011)
+
+`{module}` in the A2A routes above also resolves a **local participant**: a
+process that connected to the gateway's Unix socket, published an agent card
+and answers tasks over that socket. ADR-0011 routes all fleet coordination —
+local and hosted — through this one broker rather than through a second
+fan-out path, so a child process and a WASM module are the same thing to an
+A2A caller. Participants are looked up **first**, so a live process shadows a
+module of the same name.
+
+The socket carries newline-delimited JSON frames (`register`, `task`,
+`status`, `artifact`, `cancel`), which the gateway maps onto the same A2A
+status and artifact updates a module produces. The connection is the liveness
+signal: closing it deregisters the participant and fails every task it still
+owed. The frames and the mapping are documented in
+[`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
+
+Opening the socket is opt-in (`ProtocolGateway::with_participant_socket`) and
+Unix-only; the hosted transport is vsock (AGE-307).
 
 ## LLM-facing tools
 
