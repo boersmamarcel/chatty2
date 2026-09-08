@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use crate::models::message_types::ToolSource;
+use crate::services::git_service::GitService;
 use crate::session::SessionEvent;
 use crate::tools::ToolError;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
@@ -88,6 +89,13 @@ pub struct SubAgentOutput {
     pub response: String,
     /// Whether the sub-agent completed successfully.
     pub success: bool,
+    /// Branch holding the worker's committed output, when it ran in its own
+    /// worktree. The leader merges this; it is not merged automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Path of the worker's worktree, left in place for inspection and merge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 /// Tool that spawns a sub-agent (chatty-tui in headless mode) to handle a
@@ -109,6 +117,10 @@ pub struct SubAgentTool {
     available_model_ids: Vec<String>,
     /// Shared slot with `InvokeAgentTool` for compact live progress in the parent UI.
     progress_slot: InvokeAgentProgressSlot,
+    /// Workspace root the parent is confined to. A worker gets a `git worktree`
+    /// branched from it (AGE-314); without it, or when it is not a git
+    /// repository, workers share the parent's tree as they did before.
+    workspace_dir: Option<String>,
 }
 
 impl SubAgentTool {
@@ -117,12 +129,14 @@ impl SubAgentTool {
         auto_approve: bool,
         available_model_ids: Vec<String>,
         progress_slot: InvokeAgentProgressSlot,
+        workspace_dir: Option<String>,
     ) -> Self {
         Self {
             model_id,
             auto_approve,
             available_model_ids,
             progress_slot,
+            workspace_dir,
         }
     }
 
@@ -241,9 +255,15 @@ impl Tool for SubAgentTool {
         let auto_approve = self.auto_approve;
         let progress_slot = self.progress_slot.clone();
 
+        // AGE-314 / ADR-0012: give the worker its own worktree so two workers
+        // editing one file produce a git conflict the leader can see, rather
+        // than a last-writer-wins result neither of them reported.
+        let worker = self.prepare_worktree().await;
+        let workspace = worker.as_ref().map(|w| w.path.clone());
+
         // Run the subprocess in a blocking task to avoid blocking the async runtime.
         let result = tokio::task::spawn_blocking(move || {
-            run_sub_agent_with_progress(exe, model_id, task, auto_approve, progress_slot)
+            run_sub_agent_with_progress(exe, model_id, task, auto_approve, workspace, progress_slot)
         })
         .await
         .map_err(|e| {
@@ -254,25 +274,132 @@ impl Tool for SubAgentTool {
             ToolError::OperationFailed(format!("Sub-agent task failed to complete: {e}"))
         })?;
 
+        // The worker's turn is not over until its output is durable on its
+        // branch. This runs whether the child succeeded or failed: a failed
+        // worker's partial edits are still the only copy that exists.
+        let (branch, worktree) = match &worker {
+            Some(w) => {
+                self.commit_worker_output(w, &args.task).await;
+                (Some(w.branch.clone()), Some(w.path.clone()))
+            }
+            None => (None, None),
+        };
+
+        let merge_hint = branch.as_ref().map(|b| {
+            format!(
+                "\n\n[Worker output is on branch '{b}'. Merge it to take the changes;                  its worktree is left in place until then.]"
+            )
+        });
+
         match result {
             Ok(stdout) => {
-                let response = stdout.trim().to_string();
+                let mut response = stdout.trim().to_string();
                 if response.is_empty() {
-                    Ok(SubAgentOutput {
-                        response: "Sub-agent completed with no output.".to_string(),
-                        success: true,
-                    })
-                } else {
-                    Ok(SubAgentOutput {
-                        response,
-                        success: true,
-                    })
+                    response = "Sub-agent completed with no output.".to_string();
                 }
+                if let Some(hint) = merge_hint {
+                    response.push_str(&hint);
+                }
+                Ok(SubAgentOutput {
+                    response,
+                    success: true,
+                    branch,
+                    worktree,
+                })
             }
             Err(e) => Ok(SubAgentOutput {
                 response: format!("Sub-agent failed: {e}"),
                 success: false,
+                branch,
+                worktree,
             }),
+        }
+    }
+}
+
+/// A worker's isolated copy: a `git worktree` on its own branch.
+struct WorkerWorktree {
+    /// Worktree directory name under `WORKTREE_DIR`.
+    name: String,
+    /// Branch created for it, and where its output is committed.
+    branch: String,
+    /// Absolute path handed to the child as `--workspace`.
+    path: String,
+}
+
+/// Monotonic suffix so two workers spawned in the same instant cannot collide.
+static WORKER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl SubAgentTool {
+    /// Create this worker's worktree, or `None` to fall back to the shared tree.
+    ///
+    /// Falling back is deliberate but lossy: without a git repository there is
+    /// no branch to hand back and no conflict to surface, so parallel workers
+    /// collide exactly as they did before. AGE-314 carries the open question of
+    /// what a non-git workspace should do instead.
+    async fn prepare_worktree(&self) -> Option<WorkerWorktree> {
+        let root = self.workspace_dir.as_deref()?;
+
+        let git = match GitService::new(root).await {
+            Ok(git) => git,
+            Err(e) => {
+                warn!(
+                    workspace = %root,
+                    error = %e,
+                    "No worktree isolation: workspace is not a git repository, \
+                     so parallel sub-agents share one tree"
+                );
+                return None;
+            }
+        };
+
+        let seq = WORKER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name = format!("w{stamp}-{seq}");
+        let branch = format!("sub-agent/{name}");
+
+        match git.worktree_add(&name, &branch).await {
+            Ok(path) => {
+                info!(worktree = %path.display(), branch = %branch, "Sub-agent isolated in a worktree");
+                Some(WorkerWorktree {
+                    name,
+                    branch,
+                    path: path.to_string_lossy().to_string(),
+                })
+            }
+            Err(e) => {
+                warn!(error = %e, "No worktree isolation: falling back to the shared tree");
+                None
+            }
+        }
+    }
+
+    /// Commit whatever the worker left behind onto its branch.
+    ///
+    /// Failures are logged, never fatal: the worker's answer is still worth
+    /// returning, and the worktree stays on disk either way, so nothing the
+    /// child wrote is destroyed by a failure here.
+    async fn commit_worker_output(&self, worker: &WorkerWorktree, task: &str) {
+        let git = match GitService::new(&worker.path).await {
+            Ok(git) => git,
+            Err(e) => {
+                warn!(worktree = %worker.name, error = %e, "Cannot open the worker's worktree to commit it");
+                return;
+            }
+        };
+
+        let summary: String = task.chars().take(72).collect();
+        let message = format!("sub-agent {}: {}", worker.name, summary);
+
+        match git.commit_all(&message).await {
+            Ok(Some(commit)) => {
+                info!(branch = %worker.branch, hash = %commit.hash, "Worker output committed")
+            }
+            Ok(None) => info!(branch = %worker.branch, "Worker made no changes"),
+            Err(e) => warn!(branch = %worker.branch, error = %e, "Failed to commit worker output"),
         }
     }
 }
@@ -284,6 +411,7 @@ fn run_sub_agent_with_progress(
     model_id: String,
     task: String,
     auto_approve: bool,
+    workspace: Option<String>,
     progress_slot: InvokeAgentProgressSlot,
 ) -> Result<String, String> {
     send_progress(
@@ -299,6 +427,7 @@ fn run_sub_agent_with_progress(
         model_id,
         task,
         auto_approve,
+        workspace,
         progress_slot.clone(),
     );
     match &result {
@@ -330,6 +459,7 @@ fn run_sub_agent(
     model_id: String,
     task: String,
     auto_approve: bool,
+    workspace: Option<String>,
     progress_slot: InvokeAgentProgressSlot,
 ) -> Result<String, String> {
     use std::process::{Command, Stdio};
@@ -353,6 +483,12 @@ fn run_sub_agent(
 
     if auto_approve {
         cmd.arg("--auto-approve");
+    }
+
+    // Without this the child reads workspace_dir from the settings file it
+    // shares with its parent, so every worker resolves to the same tree.
+    if let Some(workspace) = &workspace {
+        cmd.arg("--workspace").arg(workspace);
     }
 
     info!(exe = ?executable, "Launching headless sub-agent");
@@ -515,7 +651,14 @@ mod tests {
             receivers.push((task, install_progress_channel(&slot)));
             let script = script.clone();
             children.push(std::thread::spawn(move || {
-                run_sub_agent_with_progress(script, "model-1".into(), task.into(), false, slot)
+                run_sub_agent_with_progress(
+                    script,
+                    "model-1".into(),
+                    task.into(),
+                    false,
+                    None,
+                    slot,
+                )
             }));
         }
         let outputs: Vec<String> = children
@@ -585,6 +728,7 @@ mod tests {
             "model-1".into(),
             "do the task".into(),
             false,
+            None,
             slot,
         )
         .expect("fixture should succeed");

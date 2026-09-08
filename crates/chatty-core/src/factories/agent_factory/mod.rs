@@ -1154,6 +1154,7 @@ impl AgentClient {
                 sub_auto_approve,
                 available_model_ids,
                 invoke_agent_progress_slot.clone(),
+                exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
             ))
         } else {
             None
