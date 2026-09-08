@@ -240,6 +240,7 @@ opt-in (`false`) for security.
 | `embedding_enabled` | `bool` | `false` | Semantic memory search |
 | `embedding_provider` | `Option<ProviderType>` | `null` | Independent of chat provider |
 | `embedding_model` | `Option<String>` | `null` | e.g. `text-embedding-3-small` |
+| `hosted_conversations_enabled` | `bool` | `false` | Developer-only: offers the per-conversation move between local and hosted (AGE-308) |
 
 `ApprovalMode` has no `rename_all` — JSON uses the Rust variant names above.
 
