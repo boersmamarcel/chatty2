@@ -1,0 +1,4 @@
+TurnStarted
+Text("Partial ")
+Error(kind=Other, "connection reset by peer")
+TurnEnded

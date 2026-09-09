@@ -40,8 +40,9 @@ where
         })
     }
 
-    /// Create a repository with a custom file path (useful for testing).
-    #[cfg(test)]
+    /// Create a repository with a custom file path (useful for testing, and
+    /// for the `store_conformance` suite exported behind `test-support`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_path(file_path: PathBuf) -> Self {
         Self {
             file_path,
@@ -126,6 +127,16 @@ where
             file_path,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Create a repository with a custom file path (useful for testing, and
+    /// for the `store_conformance` suite exported behind `test-support`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_path(file_path: PathBuf) -> Self {
+        Self {
+            file_path,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Load all items from disk, returning an empty `Vec` if the file is missing.

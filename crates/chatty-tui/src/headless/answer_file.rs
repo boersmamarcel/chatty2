@@ -13,7 +13,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::engine::{ChatEngine, ToolCallInfo};
+use crate::engine::ToolCallInfo;
 
 pub(super) fn parse_json_number_field(output: &str, field: &str) -> Option<i64> {
     let marker = format!("\"{field}\"");
@@ -48,7 +48,7 @@ pub(super) fn prompt_requires_answer_file(prompt: &str) -> bool {
 pub(super) fn should_request_answer_file_finalization(
     answer_file_required: bool,
     finalization_attempts: usize,
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
 ) -> bool {
     answer_file_required
         && finalization_attempts < MAX_FINALIZATION_ATTEMPTS
@@ -60,7 +60,7 @@ pub(super) fn should_stop_for_answer_file_tool_budget(
     tool_results_since_finalization: usize,
     finalization_attempts: usize,
     tool_budget_stop_requested: bool,
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
 ) -> bool {
     answer_file_required
         && !tool_budget_stop_requested
@@ -74,7 +74,7 @@ pub(super) fn should_stop_for_failed_tool_budget(
     failed_tool_results_since_finalization: usize,
     finalization_attempts: usize,
     failure_budget_stop_requested: bool,
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
 ) -> bool {
     answer_file_required
         && !failure_budget_stop_requested
@@ -105,7 +105,7 @@ pub(super) fn compact_file_extraction_tool_result(
 }
 
 pub(super) fn build_compact_file_answer_prompt(
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
     original_prompt: &str,
 ) -> String {
     let evidence = compact_tool_evidence(engine);
@@ -122,8 +122,8 @@ pub(super) fn build_compact_file_answer_prompt(
     )
 }
 
-pub(super) fn send_compact_file_answer_prompt(engine: &mut ChatEngine, prompt: String) {
-    if let Some(conversation) = engine.conversation.as_mut() {
+pub(super) fn send_compact_file_answer_prompt(engine: &mut HeadlessRunner, prompt: String) {
+    if let Some(conversation) = engine.session.conversation_mut() {
         conversation.replace_history(Vec::new(), 0);
     }
     engine.send_message(prompt);
@@ -135,9 +135,12 @@ pub(super) fn build_compact_file_recovery_prompt(compact_prompt: &str) -> String
     )
 }
 
-pub(super) fn send_answer_file_finalization_prompt(engine: &mut ChatEngine, original_prompt: &str) {
+pub(super) fn send_answer_file_finalization_prompt(
+    engine: &mut HeadlessRunner,
+    original_prompt: &str,
+) {
     let prompt = build_answer_file_finalization_prompt(engine, original_prompt);
-    if let Some(conversation) = engine.conversation.as_mut() {
+    if let Some(conversation) = engine.session.conversation_mut() {
         conversation.replace_history(Vec::new(), 0);
     }
     engine.execution_settings.max_agent_turns = engine
@@ -148,7 +151,7 @@ pub(super) fn send_answer_file_finalization_prompt(engine: &mut ChatEngine, orig
 }
 
 pub(super) fn build_answer_file_finalization_prompt(
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
     original_prompt: &str,
 ) -> String {
     let evidence = compact_tool_evidence(engine);
@@ -176,8 +179,9 @@ pub(super) fn original_task_excerpt(original_prompt: &str) -> String {
     truncate_middle(task, FINALIZATION_ORIGINAL_PROMPT_CHARS)
 }
 
-pub(super) fn compact_tool_evidence(engine: &ChatEngine) -> String {
+pub(super) fn compact_tool_evidence(engine: &HeadlessRunner) -> String {
     let tool_calls: Vec<&ToolCallInfo> = engine
+        .transcript
         .messages
         .iter()
         .flat_map(|message| message.tool_calls())
@@ -307,7 +311,7 @@ pub(super) fn compact_tool_output(output: &str) -> String {
 }
 
 pub(super) fn infer_answer_candidate(
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
     response: &str,
     original_prompt: &str,
 ) -> Option<String> {
@@ -316,6 +320,7 @@ pub(super) fn infer_answer_candidate(
         texts.push(response.to_string());
     }
     for tool_call in engine
+        .transcript
         .messages
         .iter()
         .flat_map(|message| message.tool_calls())
@@ -537,7 +542,7 @@ pub(super) fn is_number_like(value: &str) -> bool {
 }
 
 pub(super) fn write_inferred_answer_file(
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
     candidate: &str,
 ) -> std::io::Result<PathBuf> {
     let mut last_error = None;
@@ -558,7 +563,7 @@ pub(super) fn write_inferred_answer_file(
 }
 
 pub(super) fn normalize_existing_answer_file_for_prompt(
-    engine: &ChatEngine,
+    engine: &HeadlessRunner,
     prompt: &str,
 ) -> std::io::Result<()> {
     let Some(path) = answer_file_candidates(engine)
@@ -625,7 +630,7 @@ pub(super) fn truncate_middle(text: &str, max_chars: usize) -> String {
     format!("{start}\n... [truncated] ...\n{end}")
 }
 
-pub(super) fn answer_file_exists(engine: &ChatEngine) -> bool {
+pub(super) fn answer_file_exists(engine: &HeadlessRunner) -> bool {
     // Treat any existing file (even empty) as a valid answer — empty string is a valid
     // answer for "empty list" questions.  We use metadata instead of content so we don't
     // accidentally overwrite an intentionally-empty answer in the salvage path.
@@ -634,7 +639,7 @@ pub(super) fn answer_file_exists(engine: &ChatEngine) -> bool {
         .any(|path| path.exists())
 }
 
-pub(super) fn answer_file_candidates(engine: &ChatEngine) -> Vec<PathBuf> {
+pub(super) fn answer_file_candidates(engine: &HeadlessRunner) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Some(workspace_dir) = engine.execution_settings.workspace_dir.as_deref() {

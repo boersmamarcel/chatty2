@@ -1,6 +1,6 @@
 StreamStarted
 TextChunk("Working on ")
 TextChunk("it")
-StreamEnded(status=Completed, usage=None, api_turns=1)
+StreamEnded(status=Completed, usage=None)
 => loop returned Ok
 => no follow-up

@@ -14,7 +14,35 @@
 //! - Conversation creation / loading / restore — `conversation_ops.rs`.
 //! - The persistence layer itself — `chatty_core::repositories::conversation_*`.
 
+use super::export_ops::{write_atif_export, write_jsonl_export};
 use super::*;
+
+use chatty_core::models::conversation::ConversationMode;
+use chatty_core::session::{fetch_hosted, refuse_reason, take_online};
+use rig_core::completion::Message;
+
+use crate::chatty::views::MoveConversationDialog;
+
+/// What a completed transfer produced, so the store update happens in one
+/// place with the conversation borrowed once (AGE-298).
+enum MoveOutcome {
+    /// The server accepted the history and named it; this is where it lives now.
+    WentOnline(ConversationMode),
+    /// The server's copy of the history, to reconcile against the local one.
+    CameBack(Vec<Message>),
+}
+
+/// Whether the per-conversation move between this machine and a server is
+/// offered at all (AGE-308).
+///
+/// Off by default: a move carries the transcript and nothing else today, so
+/// the sidebar does not offer it and the event it would emit is a no-op.
+/// Conversations already marked hosted are unaffected — the mode is data on
+/// the row, and this gates only the move.
+pub(crate) fn move_ui_enabled(cx: &App) -> bool {
+    cx.try_global::<ExecutionSettingsModel>()
+        .is_some_and(|settings| settings.hosted_conversations_enabled)
+}
 
 impl ChattyApp {
     /// Navigate to the next or previous conversation in the sidebar list.
@@ -159,10 +187,6 @@ impl ChattyApp {
                         // Get execution settings for tool creation
                         let (
                             exec_settings,
-                            pending_approvals,
-                            pending_clarifications,
-                            pending_write_approvals,
-                            pending_artifacts,
                             shell_session,
                             user_secrets,
                             theme_colors,
@@ -173,15 +197,6 @@ impl ChattyApp {
                                 let mut settings = cx
                                     .global::<crate::settings::models::ExecutionSettingsModel>()
                                     .clone();
-                                let approvals = cx
-                                    .global::<crate::chatty::models::ExecutionApprovalStore>()
-                                    .get_pending_approvals();
-                                let clarifications = cx
-                                    .global::<crate::chatty::models::ClarificationStore>()
-                                    .get_pending_clarifications();
-                                let write_approvals = cx
-                                    .global::<crate::chatty::models::WriteApprovalStore>()
-                                    .get_pending_approvals();
                                 let conv =
                                     cx.global::<ConversationsStore>().get_conversation(&conv_id);
                                 if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
@@ -195,7 +210,6 @@ impl ChattyApp {
                                     .workspace_dir
                                     .as_ref()
                                     .map(|dir| normalize_workspace_path(Path::new(dir)));
-                                let artifacts = conv.map(|c| c.pending_artifacts());
                                 let session = conv.and_then(|c| c.shell_session());
                                 let secrets = cx
                                     .global::<crate::settings::models::UserSecretsModel>()
@@ -206,10 +220,6 @@ impl ChattyApp {
                                     .cloned();
                                 (
                                     Some(settings),
-                                    Some(approvals),
-                                    Some(clarifications),
-                                    Some(write_approvals),
-                                    artifacts,
                                     session,
                                     secrets,
                                     Some(colors),
@@ -235,66 +245,67 @@ impl ChattyApp {
                             .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                             .ok()
                             .flatten();
-                        let (remote_agents, available_model_ids) = cx
+                        let remote_agents = cx
                             .update(|cx| {
-                                let agents = cx
-                                    .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                                cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                                     .map(|m| m.a2a_agent_configs())
-                                    .unwrap_or_default();
-                                let model_ids = cx
-                                    .try_global::<crate::settings::models::ModelsModel>()
-                                    .map(|m| {
-                                        m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
-                                (agents, model_ids)
+                                    .unwrap_or_default()
                             })
                             .unwrap_or_default();
 
+                        // The rebuilt agent keeps raising its requests on this
+                        // conversation's own session stores (AGE-272).
+                        let ctx = AgentBuildContext {
+                                mcp_tools,
+                                exec_settings,
+                                pending_approvals: None,
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
+                                pending_artifacts: None,
+                                shell_session,
+                                user_secrets,
+                                theme_colors,
+                                memory_service,
+                                skill_service: Some(skill_service),
+                                search_settings,
+                                embedding_service,
+                                module_agents,
+                                gateway_port,
+                                remote_agents,
+                                conversation_id: Some(conv_id.clone()),
+                        };
+                        let ctx = cx
+                            .update(|cx| {
+                                cx.global::<ConversationsStore>()
+                                    .get_session(&conv_id)
+                                    .map(|session| session.build_context(ctx))
+                            })
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                            .ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
+
                         // Factory creates shell session on-demand if not provided
-                        let (new_agent, new_shell_session, new_progress_slot) =
-                            AgentClient::from_model_config_with_tools(
-                                &model_config,
-                                &provider_config,
-                                AgentBuildContext {
-                                    mcp_tools,
-                                    exec_settings,
-                                    pending_approvals,
-                                    pending_clarifications,
-                                    pending_write_approvals,
-                                    pending_artifacts,
-                                    shell_session,
-                                    user_secrets,
-                                    theme_colors,
-                                    memory_service,
-                            skill_service: Some(skill_service),
-                                    search_settings,
-                                    embedding_service,
-                                    allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
-                                    module_agents,
-                                    gateway_port,
-                                    remote_agents,
-                                    available_model_ids,
-                                    conversation_id: Some(conv_id.clone()),
-                                },
-                            )
-                            .await?;
+                        let built_agent = AgentClient::from_model_config_with_tools(
+                            &model_config,
+                            &provider_config,
+                            ctx,
+                        )
+                        .await?;
 
                         // Update the conversation's agent synchronously
-                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            if let Some(conv) = store.get_conversation_mut(&conv_id) {
-                                debug!("Updating conversation model");
-                                conv.set_agent(
-                                    new_agent,
-                                    model_config.id.clone(),
-                                    built_workspace_dir.clone(),
-                                );
-                                // Always store the new shell session — the factory either reused
-                                // the existing one or created a fresh one.
-                                if new_shell_session.is_some() {
-                                    conv.set_shell_session(new_shell_session);
-                                }
-                                conv.set_invoke_agent_progress_slot(new_progress_slot);
+                        cx.update_global::<ConversationsStore, _>(|store, cx| {
+                            // The settings the tools were built with are the
+                            // session's too.
+                            let config = desktop_session_config(cx);
+                            let session = store
+                                .get_session_mut(&conv_id)
+                                .ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
+                            session.set_config(config);
+                            debug!("Updating conversation model");
+                            if session.install_agent(
+                                built_agent,
+                                model_config.id.clone(),
+                                built_workspace_dir,
+                            ) {
                                 Ok(())
                             } else {
                                 Err(anyhow::anyhow!("Conversation not found"))
@@ -308,61 +319,11 @@ impl ChattyApp {
                         let conv_data_res =
                             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                                 store.get_conversation(&conv_id).and_then(|conv| {
-                                    let history = match conv.serialize_history() {
-                                        Ok(h) => h,
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to serialize conversation history for save after model change");
-                                            return None;
-                                        }
-                                    };
-                                    let traces = match conv.serialize_traces() {
-                                        Ok(t) => t,
-                                        Err(e) => {
-                                            warn!(error = ?e, "Failed to serialize conversation traces for save after model change");
-                                            return None;
-                                        }
-                                    };
-                                    let now = SystemTime::now()
-                                        .duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs()
-                                        as i64;
-
-                                    Some(ConversationData {
-                                        id: conv.id().to_string(),
-                                        title: conv.title().to_string(),
-                                        model_id: conv.model_id().to_string(),
-                                        message_history: history,
-                                        system_traces: traces,
-                                        token_usage: conv
-                                            .serialize_token_usage()
-                                            .unwrap_or_else(|_| "{}".to_string()),
-                                        attachment_paths: conv
-                                            .serialize_attachment_paths()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        message_timestamps: conv
-                                            .serialize_message_timestamps()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        message_feedback: conv
-                                            .serialize_message_feedback()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        regeneration_records: conv
-                                            .serialize_regeneration_records()
-                                            .unwrap_or_else(|_| "[]".to_string()),
-                                        created_at: conv
-                                            .created_at()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs()
-                                            as i64,
-                                        updated_at: now,
-                                        working_dir: conv
-                                            .working_dir()
-                                            .map(|p| p.to_string_lossy().to_string()),
-                                        agent_task_snapshot: conv
-                                            .serialize_agent_task_snapshot()
-                                            .unwrap_or(None),
-                                    })
+                                    conv.to_conversation_data()
+                                        .map_err(|e| {
+                                            warn!(error = ?e, "Failed to serialize conversation for save after model change");
+                                        })
+                                        .ok()
                                 })
                             });
 
@@ -425,6 +386,195 @@ impl ChattyApp {
         self.refresh_chat_input_skills(dir.as_deref(), cx);
     }
 
+    /// Open the confirmation for moving a conversation between this machine
+    /// and a server (AGE-298).
+    ///
+    /// Refused mid-turn: a turn can be blocked on an approval or a
+    /// clarification that lives in the stores of the session that raised it,
+    /// and moving would leave it with no address any answer could name. The
+    /// direction is read from the conversation's current mode, so the dialog
+    /// and the menu entry cannot disagree about which way it goes.
+    pub(super) fn confirm_conversation_move(&mut self, id: &str, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+        if !move_ui_enabled(cx) {
+            debug!(
+                conv_id = %conv_id,
+                "Ignoring a conversation move: hosted conversations are not enabled"
+            );
+            return;
+        }
+        if !cx.global::<ConversationsStore>().is_loaded(&conv_id) {
+            // The move needs the history, and only a loaded conversation has
+            // it. Loading also opens the conversation, which is the one the
+            // user is acting on anyway; the dialog reads the direction from
+            // the row meanwhile.
+            self.load_conversation(&conv_id, cx);
+        }
+        let store = cx.global::<ConversationsStore>();
+        let mode = store
+            .get_conversation(&conv_id)
+            .map(|conversation| conversation.mode().clone())
+            .unwrap_or_else(|| {
+                if store.is_hosted(&conv_id) {
+                    // Not loaded, but the row says it is hosted. The dialog
+                    // only needs the direction; the address is read again when
+                    // the move runs, off the loaded conversation.
+                    ConversationMode::Hosted {
+                        server_url: String::new(),
+                        remote_id: String::new(),
+                    }
+                } else {
+                    ConversationMode::Local
+                }
+            });
+        let going_online = !mode.is_hosted();
+        let turn_active = store.is_streaming(&conv_id);
+
+        if let Some(reason) = refuse_reason(turn_active, &mode, going_online) {
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(reason.to_string(), cx);
+            });
+            return;
+        }
+
+        cx.defer(move |cx| {
+            // The main window's root view is gpui-component's `Root`, not
+            // `ChattyApp`, so the handle is used untyped: a downcast to the
+            // app would return `None` and the click would do nothing.
+            let Some(window) = cx.windows().first().copied() else {
+                warn!(conv_id = %conv_id, "No window to open the move dialog in");
+                return;
+            };
+            window
+                .update(cx, |_, window, cx| {
+                    MoveConversationDialog::open(conv_id.clone(), going_online, window, cx);
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to open the move dialog"))
+                .ok();
+        });
+    }
+
+    /// Carry out a confirmed move.
+    ///
+    /// `target` is the server URL when going online and `None` when bringing
+    /// the conversation home. The ordering is the safety property AGE-298
+    /// asks for: the history transfer happens first and *nothing* local
+    /// changes until it has succeeded, so a client killed part-way through
+    /// leaves the conversation exactly as it was and the hosted copy it never
+    /// learned the id of is unreachable rather than half-adopted.
+    pub fn move_conversation(&mut self, id: &str, target: Option<String>, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+        let loaded = cx
+            .global::<ConversationsStore>()
+            .get_conversation(&conv_id)
+            .map(|conversation| {
+                (
+                    conversation.title().to_string(),
+                    conversation.messages(),
+                    conversation.mode().clone(),
+                )
+            });
+        let Some((title, messages, mode)) = loaded else {
+            // The confirm opened before the load that the dialog started had
+            // finished; nothing has moved, so saying so is the whole recovery.
+            warn!(conv_id = %conv_id, "Cannot move a conversation that is not loaded");
+            self.chat_view.update(cx, |view, cx| {
+                view.add_info_message(
+                    "This conversation is still loading. Try the move again in a moment."
+                        .to_string(),
+                    cx,
+                );
+            });
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let outcome = match &target {
+                Some(server_url) => take_online(server_url, &title, &messages)
+                    .await
+                    .map(MoveOutcome::WentOnline),
+                None => {
+                    let Some((server_url, remote_id)) = mode.hosted_on() else {
+                        return Ok(());
+                    };
+                    fetch_hosted(server_url, remote_id)
+                        .await
+                        .map(|remote| MoveOutcome::CameBack(remote.messages))
+                }
+            };
+
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // Nothing local was touched, so there is nothing to undo.
+                    warn!(conv_id = %conv_id, error = ?error, "The conversation move failed");
+                    weak.update(cx, |app, cx| {
+                        app.chat_view.update(cx, |view, cx| {
+                            view.add_info_message(
+                                format!("Could not move this conversation: {error:#}"),
+                                cx,
+                            );
+                        });
+                    })
+                    .ok();
+                    return Ok(());
+                }
+            };
+
+            weak.update(cx, |app, cx| {
+                let notice = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    match outcome {
+                        MoveOutcome::WentOnline(new_mode) => {
+                            let where_to = new_mode
+                                .hosted_on()
+                                .map(|(url, _)| url.to_string())
+                                .unwrap_or_default();
+                            store.set_conversation_mode(&conv_id, new_mode);
+                            format!("This conversation now runs on {where_to}.")
+                        }
+                        MoveOutcome::CameBack(messages) => {
+                            // The local side applied every event of every
+                            // hosted turn it was present for, so its history is
+                            // usually already complete *and* richer — it has
+                            // the traces the wire does not carry. The server's
+                            // copy is taken only when it is longer, which is
+                            // the case it exists for: turns this client missed.
+                            let local_len = store
+                                .get_conversation(&conv_id)
+                                .map(|conversation| conversation.messages().len())
+                                .unwrap_or(0);
+                            let missed = messages.len().saturating_sub(local_len);
+                            if missed > 0 && let Some(conversation) =
+                                store.get_conversation_mut(&conv_id)
+                            {
+                                conversation.import_history(messages);
+                            }
+                            store.set_conversation_mode(&conv_id, ConversationMode::Local);
+                            match missed {
+                                0 => "This conversation runs on this machine again.".to_string(),
+                                n => format!(
+                                    "This conversation runs on this machine again, with {n} message(s) it ran without you."
+                                ),
+                            }
+                        }
+                    }
+                });
+
+                app.persist_conversation(&conv_id, cx);
+                app.refresh_sidebar(cx);
+                // Reload so the transcript reflects a bring-back that adopted
+                // turns this client missed, and the sidebar re-badges the row.
+                app.load_conversation(&conv_id, cx);
+                app.chat_view.update(cx, |view, cx| {
+                    view.add_info_message(notice, cx);
+                });
+            })
+            .ok();
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
     /// Delete a conversation
     pub(super) fn delete_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
@@ -484,26 +634,64 @@ impl ChattyApp {
     /// Persist a conversation to disk asynchronously.
     /// Also updates the metadata store so the sidebar reflects the latest title and cost.
     pub(super) fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
+        self.persist_and_export_conversation(conv_id, false, false, cx);
+    }
+
+    /// Persist a conversation to disk asynchronously, optionally also writing
+    /// the ATIF / JSONL training exports from the same `ConversationData` —
+    /// built once, off the UI thread, and reused for the save and each
+    /// requested export instead of re-serializing per consumer (finding F3,
+    /// AGE-220).
+    pub(super) fn persist_and_export_conversation(
+        &self,
+        conv_id: &str,
+        export_atif: bool,
+        export_jsonl: bool,
+        cx: &mut Context<Self>,
+    ) {
         let conv_id = conv_id.to_string();
         let repo = self.conversation_repo.clone();
 
-        let conv_data_opt = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store
-                .get_conversation(&conv_id)
-                .and_then(build_conversation_data)
+        // Cheap clone of the fields the row is built from — the actual
+        // serde_json::to_string work happens in the spawned task below, off
+        // the UI thread (AGE-220, finding F3).
+        let snapshot = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            store.get_conversation(&conv_id).map(Conversation::snapshot)
         });
 
-        if let Some(conv_data) = conv_data_opt {
-            // Update metadata so title and cost changes are reflected in the sidebar
-            let total_cost = conv_data.total_cost();
-            cx.update_global::<ConversationsStore, _>(|store, _| {
-                store.upsert_metadata(
-                    &conv_data.id,
-                    &conv_data.title,
-                    total_cost,
-                    conv_data.updated_at,
-                );
-            });
+        let Some(snapshot) = snapshot else {
+            error!(conv_id = %conv_id, "Conversation not found for persistence");
+            return;
+        };
+
+        // Update metadata immediately from typed fields so the sidebar
+        // reflects title/cost right away, without waiting on the deferred
+        // serialization below.
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let total_cost = snapshot.token_usage.total_estimated_cost_usd;
+        cx.update_global::<ConversationsStore, _>(|store, _| {
+            store.upsert_metadata(&snapshot.id, &snapshot.title, total_cost, now);
+        });
+
+        let model_config: Option<ModelConfig> = if export_atif || export_jsonl {
+            cx.global::<ModelsModel>()
+                .get_model(&snapshot.model_id)
+                .cloned()
+        } else {
+            None
+        };
+
+        cx.spawn(async move |_, _cx| {
+            let conv_data = match snapshot.to_data() {
+                Ok(data) => data,
+                Err(e) => {
+                    error!(conv_id = %conv_id, error = ?e, "Failed to build conversation data for persistence (serialization failed)");
+                    return Ok::<_, anyhow::Error>(());
+                }
+            };
 
             debug!(
                 conv_id = %conv_id,
@@ -512,18 +700,52 @@ impl ChattyApp {
                 "Persisting conversation data"
             );
 
-            let conv_id_for_save = conv_id.clone();
-            cx.spawn(async move |_, _cx| {
-                if let Err(e) = repo.save(&conv_id_for_save, conv_data).await {
-                    warn!(error = ?e, conv_id = %conv_id_for_save, "Failed to save conversation to disk");
-                } else {
-                    debug!(conv_id = %conv_id_for_save, "Conversation saved to disk");
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .detach();
-        } else {
-            error!(conv_id = %conv_id, "Failed to build conversation data for persistence (serialization failed)");
-        }
+            if let Err(e) = repo.save(&conv_id, conv_data.clone()).await {
+                warn!(error = ?e, conv_id = %conv_id, "Failed to save conversation to disk");
+            } else {
+                debug!(conv_id = %conv_id, "Conversation saved to disk");
+            }
+
+            if export_atif {
+                write_atif_export(&conv_id, &conv_data, model_config.as_ref()).await;
+            }
+            if export_jsonl {
+                write_jsonl_export(&conv_id, &conv_data, model_config.as_ref()).await;
+            }
+
+            Ok(())
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_ui_enabled;
+    use crate::settings::models::execution_settings::ExecutionSettingsModel;
+
+    /// AGE-308: the default build offers no move, and it takes an explicit
+    /// opt-in to get one. Both halves matter — the first is what keeps users
+    /// away from a transport that carries only the transcript.
+    #[gpui::test]
+    fn the_move_is_offered_only_when_hosted_conversations_are_enabled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            assert!(
+                !move_ui_enabled(cx),
+                "no settings loaded yet: the move must not be offered"
+            );
+
+            cx.set_global(ExecutionSettingsModel::default());
+            assert!(
+                !move_ui_enabled(cx),
+                "default settings must not offer the move"
+            );
+
+            cx.global_mut::<ExecutionSettingsModel>()
+                .hosted_conversations_enabled = true;
+            assert!(move_ui_enabled(cx), "the developer toggle turns it back on");
+        });
     }
 }

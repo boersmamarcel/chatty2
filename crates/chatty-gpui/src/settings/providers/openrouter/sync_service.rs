@@ -3,8 +3,8 @@ use gpui::{AsyncApp, BorrowAppContext, Global};
 use tracing::{debug, info, warn};
 
 use chatty_core::settings::providers::openrouter::discovery::{
-    OpenRouterModel, discover_openrouter_models, model_completion_cost, model_prompt_cost,
-    model_supports_images, model_supports_pdf,
+    OpenRouterModel, discover_openrouter_models, model_cache_read_cost, model_cache_write_cost,
+    model_completion_cost, model_prompt_cost, model_supports_images, model_supports_pdf,
 };
 
 use crate::settings::models::models_store::{ModelConfig, ModelsModel};
@@ -188,6 +188,8 @@ fn build_model_config(cm: &CuratedModel, data: &OpenRouterModel) -> ModelConfig 
     // Pricing in USD per 1 000 000 tokens
     config.cost_per_million_input_tokens = model_prompt_cost(data);
     config.cost_per_million_output_tokens = model_completion_cost(data);
+    config.cost_per_million_cache_read_tokens = model_cache_read_cost(data);
+    config.cost_per_million_cache_write_tokens = model_cache_write_cost(data);
 
     config.synced()
 }

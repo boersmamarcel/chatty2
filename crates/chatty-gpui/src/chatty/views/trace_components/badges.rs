@@ -46,49 +46,6 @@ pub(super) fn execution_engine_badge(engine: ExecutionEngine) -> (String, Rgba) 
     (label.to_string(), color)
 }
 
-#[allow(dead_code)]
-pub(super) fn render_mode_badge(
-    label: &'static str,
-    is_remote: bool,
-    badge_text: Hsla,
-) -> AnyElement {
-    let bg = if is_remote {
-        rgba(0x3B82F6FF)
-    } else {
-        rgba(0x6B7280FF)
-    };
-
-    div()
-        .text_xs()
-        .px_2()
-        .py(px(0.5))
-        .rounded_sm()
-        .bg(bg)
-        .text_color(badge_text)
-        .flex_shrink_0()
-        .child(label)
-        .into_any_element()
-}
-
-#[allow(dead_code)]
-pub(super) fn sub_agent_mode_label(source: &ToolSource) -> &'static str {
-    match source {
-        ToolSource::HiveCloud
-        | ToolSource::ExternalService { .. }
-        | ToolSource::Internet { .. } => "remote",
-        ToolSource::Local => "local",
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn render_sub_agent_mode_badge(source: &ToolSource, badge_text: Hsla) -> AnyElement {
-    render_mode_badge(
-        sub_agent_mode_label(source),
-        !matches!(source, ToolSource::Local),
-        badge_text,
-    )
-}
-
 pub(super) fn is_code_execution_tool(tool_call: &ToolCallBlock) -> bool {
     matches!(tool_call.tool_name.as_str(), "execute_code" | "daytona_run")
 }

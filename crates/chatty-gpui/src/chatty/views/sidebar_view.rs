@@ -16,6 +16,10 @@ pub enum SidebarEvent {
     SelectConversation(String),
     DeleteConversation(String),
     ExportConversation(String),
+    /// Take this conversation online, or bring it back (AGE-298). Which of the
+    /// two is meant follows the conversation's current mode, which the
+    /// controller reads — the sidebar only says which conversation.
+    MoveConversation(String),
     ToggleCollapsed(bool),
     LoadMore,
 }
@@ -74,13 +78,6 @@ impl SidebarView {
         cx.notify();
     }
 
-    /// Set the collapsed state of the sidebar
-    #[allow(dead_code)]
-    pub fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.is_collapsed = collapsed;
-        cx.notify();
-    }
-
     /// Get the current collapsed state
     pub fn is_collapsed(&self) -> bool {
         self.is_collapsed
@@ -114,6 +111,21 @@ impl Render for SidebarView {
 
         let sidebar_entity = cx.entity().clone();
         let active_id = self.active_conversation_id.clone();
+        // Read once per render rather than per row: the store answers this
+        // from the metadata layer, so no conversation is loaded to badge it.
+        let hosted_ids: std::collections::HashSet<String> = cx
+            .try_global::<crate::chatty::models::ConversationsStore>()
+            .map(|store| {
+                self.conversations
+                    .iter()
+                    .filter(|(id, _, _)| store.is_hosted(id))
+                    .map(|(id, _, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // AGE-308: the move between local and hosted is developer-only until
+        // online mode is account-scoped, so the menu simply does not offer it.
+        let move_enabled = crate::chatty::controllers::app_controller::move_ui_enabled(cx);
 
         let width = if self.is_collapsed { px(0.) } else { px(255.) };
 
@@ -215,6 +227,18 @@ impl Render for SidebarView {
                                                                 cx.emit(SidebarEvent::ExportConversation(id.clone()));
                                                             });
                                                         }
+                                                    })
+                                                    .hosted(hosted_ids.contains(id))
+                                                    .when(move_enabled, |item| {
+                                                        item.on_move({
+                                                            let entity = sidebar_entity.clone();
+                                                            let id = id.clone();
+                                                            move |_conv_id, cx| {
+                                                                entity.update(cx, |_, cx| {
+                                                                    cx.emit(SidebarEvent::MoveConversation(id.clone()));
+                                                                });
+                                                            }
+                                                        })
                                                     }),
                                                 )
                                                 .when(ix == 0, |this| this.mt_3())

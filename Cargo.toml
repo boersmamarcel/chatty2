@@ -13,10 +13,11 @@ members = [
     "crates/chatty-flow",
     "crates/chatty-optimize",
 ]
+exclude = ["templates"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.51"
+version = "0.3.61"
 edition = "2024"
 # Declared MSRV for the shipping research crates (also per-crate rust-version).
 # 1.94, not 1.95: nothing in the tree needs 1.95, and cloud build agents run a
@@ -38,6 +39,7 @@ rmcp = { version = "=2.1.0", features = ["client", "macros", "transport-streamab
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bytes = "1"
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "fs", "macros", "process", "io-util"] }
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 dirs = "6.0"

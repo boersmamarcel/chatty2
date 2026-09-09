@@ -1,102 +1,58 @@
 # Getting started
 
-**When to read this:** You are setting up Chatty for the first time.
+**When to read this:** You are installing Chatty for the first time and want to send your first message.
 
-Product overview: [Why Chatty?](./overview.md). Demos and marketing:
-[boersmamarcel/chatty](https://github.com/boersmamarcel/chatty).
+Chatty is a desktop and terminal AI agent that runs on your own machine: your keys, conversations and files stay local, and the model only reaches what you switch on. Why it exists: [the landing page](../index.md).
 
-## 1. Download
+![Chatty overview](../assets/animations/hero.gif)
 
-Grab the latest release from [GitHub Releases](https://github.com/boersmamarcel/chatty2/releases):
+## 1. Install
 
-| Platform | Format |
-|----------|--------|
-| macOS (Intel & Apple Silicon) | `.dmg` installer |
-| Linux (x86_64) | `.tar.gz` archive |
+Download the latest release from [GitHub Releases](https://github.com/boersmamarcel/chatty2/releases):
+
+| Platform | File |
+|----------|------|
+| macOS (Intel and Apple Silicon) | `.dmg` |
+| Linux (x86_64) | `.AppImage` |
 | Windows (x86_64) | `.exe` installer |
 
-## 2. Connect a provider
+Chatty checks for new releases in the background and offers them in the status footer. Details: [Advanced](./advanced.md).
 
-On first launch, connect at least one LLM provider.
+## 2. Connect a provider and add a model
 
-1. Click the **gear icon** in the title bar to open Settings
-2. Open the **Models & Providers** tab
-3. Click **Manage keys** — one sheet holds OpenRouter, Ollama and Azure OpenAI
-4. Paste your API key next to the provider you want (Ollama needs none — it
-   connects to your local instance), then press **Test** to check it
+1. Click the gear icon in the title bar to open Settings, then **Models & Providers**.
+2. **Manage keys** — paste an OpenRouter key, point at a local Ollama, or connect Azure OpenAI. Press **Test** to check it.
+3. **Add model** — search the provider's catalogue, tick the models you want, then **Add**.
 
-A recorded walkthrough lives in the repo
-([`add_provider_and_model.gif`](https://github.com/boersmamarcel/chatty2/blob/main/assets/animations/add_provider_and_model.gif);
-~50 MB, not inlined here). Capability details:
-[Providers & models](./providers-and-models.md).
+Ollama models appear on their own once Ollama is running. Azure fields, the roster, favourites and troubleshooting: [Providers & models](./providers-and-models.md).
 
-## 3. Add a model
+## 3. Send a message
 
-1. Still on **Models & Providers**, click **Add model**
-2. Search the provider's catalogue and tick the models you want
-3. **Add** — they land in the roster straight away
+Close Settings and type. A new conversation opens on a start screen that shows what is switched on — modules, MCP servers, agents, file access, memory and whether a workspace is set — so you know what the agent can reach before you ask. Switch models with the selector at the bottom of the chat.
 
-Chatty auto-detects vision and PDF support. No extra capability flags to set.
-Star a row to pin it to the top; its ⋯ menu sets the model new conversations
-start with.
+- Type `/` for the command picker (`↑/↓`, `Enter`).
+- Type `@` to mention a file from the working directory.
 
-## 4. Start chatting
+Rendering, attachments, artifacts, cost tracking and search: [Chatting](./chatting.md).
 
-Close Settings and send a message. A new conversation shows a start screen of
-active capabilities — skills, MCP servers, agents, file access, web tools,
-memory, and workspace status — before you type anything. Switch models with
-the selector at the bottom of the chat.
+## 4. Turn on tools (optional)
 
-- Type `/` for the slash-command picker (`↑/↓`, `Enter`). Commands include
-  `/clear`, `/new`, `/compact`, `/context`, `/copy`, `/cwd`, `/cd`, `/add-dir`,
-  and `/agent`. Workspace skills (`.claude/skills/`) and global skills also
-  appear with a `[skill]` badge.
-- Type `@` for a file picker over the current working directory. Hidden files
-  and common build dirs (`.git`, `node_modules`, `target`) are excluded.
+Tools are off by default, so at this point Chatty is a chat window. To let the agent read and edit files, run commands and use extensions, open Settings → **Code Execution**, set a **Workspace Directory**, switch on **Enable Code Execution** and choose an approval mode. Walkthrough: [Agents & tools](./agents-and-tools.md). What each approval mode does and how the sandbox works: [Security & sandboxing](./security.md).
 
-Full command list: [slash commands reference](../dev/reference/slash-commands.md).
+> [!TIP]
+> Web access is a separate switch (Settings → **Internet**) and is on by default, so the agent can fetch pages and search the web even before you enable code execution.
 
-## 5. Enable agentic tools
-
-Filesystem, sandboxed shell, MCP, and sub-agents are **off by default**. Enable
-them in **Settings → Code Execution**:
-
-1. Set a **workspace directory** (absolute path) — tools can only touch files inside it
-2. Toggle **code execution** on
-3. Choose an **approval mode**:
-   - **Ask every time** — approve each tool call (recommended at first)
-   - **Auto-approve** — tools run without prompting
-   - **Deny all** — tools are listed but blocked
-
-**Per-chat working directory:** the folder icon in the chat input bar opens an
-OS directory picker and overrides the global workspace for that conversation.
-`×` resets to the global default. The override is saved with the conversation.
-
-**Code execution:** simple stdlib Python runs on the host via MontySandbox
-(~5–50 ms). For JavaScript, TypeScript, Rust, Bash, or third-party Python
-packages, enable **Docker Fallback** (Docker must be running). Chatty probes
-common socket paths, including rootless Docker and Docker Desktop. A custom
-**Docker Host** field covers non-standard sockets
-(e.g. `/run/user/1000/docker.sock`).
-
-Isolation details: [Security & sandboxing](./security.md). Tool list:
-[Agentic tools](./agentic-tools.md).
-
-## Desktop vs terminal
+## Desktop or terminal?
 
 | App | Use when |
 |-----|----------|
-| `chatty` (GPUI) | Daily interactive work, settings UI, attachments |
-| `chatty-tui` | Terminal, scripting, headless sub-agents |
+| Chatty (desktop) | Daily work, settings, attachments, artifacts |
+| `chatty-tui` | Terminal sessions, scripts and pipelines, headless sub-agents |
 
-Install `chatty-tui` from the desktop app (macOS: **Chatty → Install CLI**;
-Linux/Windows: **Settings → General → Install CLI…**) or from the same release
-package. Zero-config Ollama / OpenAI-compatible servers:
-[Terminal interface](./terminal.md).
+Both share the same providers and models. Install the terminal app from the desktop app: [Terminal interface](./terminal.md).
 
 ## Next
 
-- [Why Chatty?](./overview.md)
-- [Agents](./agents.md)
 - [Providers & models](./providers-and-models.md)
-- [Agentic tools](./agentic-tools.md)
+- [Chatting](./chatting.md)
+- [Agents & tools](./agents-and-tools.md)

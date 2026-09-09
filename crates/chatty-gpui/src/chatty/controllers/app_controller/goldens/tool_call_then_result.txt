@@ -3,6 +3,6 @@ ToolCallStarted(id="call-1", "read_file")
 ToolCallInput(id="call-1", "{\"path\":\"README.md\"}")
 ToolCallResult(id="call-1", "# Chatty")
 TextChunk("It is the readme.")
-StreamEnded(status=Completed, usage=None, api_turns=2)
+StreamEnded(status=Completed, usage=None)
 => loop returned Ok
 => no follow-up

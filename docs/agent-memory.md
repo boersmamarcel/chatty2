@@ -1,5 +1,7 @@
 # Agent Memory System
 
+**When to read this:** You are touching the `remember` / `search_memory` / `save_skill` tools or the `MemoryService` behind them.
+
 Chatty includes a persistent memory system that allows the AI agent to store and recall information across conversations and app restarts. It is built on [memvid-core](https://crates.io/crates/memvid-core), a lightweight vector database with hybrid similarity + full-text search.
 
 ## Overview
@@ -9,17 +11,19 @@ Chatty includes a persistent memory system that allows the AI agent to store and
 │  LLM Agent  │──────▶│ MemoryService │──────▶│  memory.mv2  │
 │  (rig-core) │◀──────│  (singleton)  │◀──────│  (on disk)   │
 └─────────────┘       └───────────────┘       └──────────────┘
-    uses tools:            Arc<Mutex<>>           binary file,
-    RememberTool           thread-safe            persisted in
-    SearchMemoryTool       async API              data directory
+    uses tools:            dedicated memvid       binary file,
+    RememberTool           thread behind an       persisted in
+    SearchMemoryTool       async command API      data directory
+    SaveSkillTool
 ```
 
-The agent has two tools:
+The agent has three tools backed by this store:
 
 | Tool | Purpose |
 |:-----|:--------|
 | `remember` | Store a piece of information with optional title and tags |
 | `search_memory` | Retrieve relevant memories via natural-language query |
+| `save_skill` | Store a reusable multi-step procedure as a memory entry |
 
 ## Storage
 
@@ -52,11 +56,11 @@ The `SearchMemoryTool` accepts:
 - **`query`** (required) — a natural-language search string
 - **`top_k`** (optional) — max results to return (default: 5, range: 1–20)
 
-Search uses memvid-core's hybrid approach combining **vector similarity** and **full-text search** (enabled via the `lex` feature). Each result includes the stored text, optional title, and a relevance score.
+Search uses memvid-core's full-text index (the `lex` feature). When `embedding_enabled` is on and an embedding provider is configured, `remember` also stores an embedding (`remember_with_embedding`) and `search_memory` queries the vector index (`search_vec`) instead. Each result includes the stored text, optional title, and a relevance score.
 
 ### Automatic Recall
 
-The system prompt instructs the agent to call `search_memory` on the **first user message of every conversation**, using a query derived from that message. This ensures relevant prior context is recalled without the user having to ask.
+The system prompt instructs the agent to call `search_memory` proactively whenever a question might benefit from stored context (preferences, prior decisions, project conventions), and to call `remember` — not just say "noted" — whenever the user asks it to remember something.
 
 ## Architecture
 
@@ -78,11 +82,12 @@ crates/chatty-core/src/
     └── search_memory_tool.rs # SearchMemoryTool (rig_agent::tool::Tool impl)
 ```
 
-**`MemoryService`** — the core service, wraps `memvid-core` in `Arc<Mutex<>>` for async-safe access:
+**`MemoryService`** — the core service. It owns a dedicated OS thread that performs every memvid operation (open, index setup, search, put, commit) and talks to it over a command channel, so the async executor is never blocked and tantivy's thread-sensitive index state stays on one thread:
 
 ```rust
+#[derive(Clone)]
 pub struct MemoryService {
-    memvid: Arc<Mutex<Memvid>>,
+    cmd_tx: mpsc::Sender<MemoryCommand>,
     path: PathBuf,
 }
 ```
@@ -96,6 +101,8 @@ Public API:
 | `search(query, top_k)` | Search memories by natural language |
 | `stats()` | Get entry count and file size |
 | `clear()` | Remove all stored memories |
+| `delete(frame_id)` / `list_memories(query, limit)` | Used by the Settings → Memory browser |
+| `remember_with_embedding()` / `search_vec()` | Vector variants used when semantic search is enabled |
 
 **`MemoryHit`** — a single search result:
 
@@ -103,7 +110,9 @@ Public API:
 pub struct MemoryHit {
     pub text: String,
     pub title: Option<String>,
-    pub score: f32,
+    pub score: f32,                    // serialised as `relevance_score`
+    pub source: Option<MemoryHitSource>,
+    pub frame_id: Option<u64>,         // memvid frame id, not shown to the LLM
 }
 ```
 
@@ -125,7 +134,7 @@ pub struct ExecutionSettingsModel {
 }
 ```
 
-This can be changed in the Settings → Execution panel. When disabled, the memory service is not initialized and the agent has no memory tools.
+This can be changed in the Settings → Memory page. When disabled, the memory service is not initialized and the agent has no memory tools.
 
 ## Research connection (ACE / M4)
 
@@ -136,7 +145,7 @@ store — see the [app ↔ research bridge](research/app-research-bridge.md#memo
 ## Dependencies
 
 ```toml
-memvid-core = { version = "2.0", default-features = false, features = ["lex"] }
+memvid-core = { version = "2.0.139", default-features = false, features = ["lex", "temporal_track"] }
 ```
 
-The `lex` feature enables lexical (full-text) indexing alongside vector similarity search.
+The `lex` feature enables lexical (full-text) indexing; `temporal_track` is enabled for memvid's temporal search request options, which Chatty currently leaves unset.

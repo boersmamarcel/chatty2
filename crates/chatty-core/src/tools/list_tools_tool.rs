@@ -373,14 +373,6 @@ impl ListToolsTool {
             });
         }
 
-        if tools.sub_agent {
-            native_tools.push(ToolInfo {
-                name: "sub_agent".to_string(),
-                description: "Delegate a task to an independent sub-agent that has access to the same tools. The sub-agent runs autonomously in its own process, executes the task (including any tool calls it needs), and returns the result. Use this to parallelize work or isolate complex sub-tasks. Supports an optional `model` parameter to run the sub-agent with a different model.".to_string(),
-                source: "native".to_string(),
-            });
-        }
-
         if tools.browser {
             for (name, description) in [
                 (
@@ -456,11 +448,6 @@ impl ListToolsTool {
             native_tools,
             mcp_tools,
         }
-    }
-
-    /// Create a new ListToolsTool (for backward compatibility)
-    pub fn new() -> Self {
-        Self::new_with_config(&ToolAvailability::default(), Vec::new())
     }
 }
 
@@ -543,12 +530,6 @@ impl Tool for ListToolsTool {
     }
 }
 
-impl Default for ListToolsTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,7 +560,6 @@ mod tests {
             execute_code: false,
             memory: false,
             search_web: false,
-            sub_agent: false,
             browser: false,
             browser_use: false,
             daytona: false,
@@ -613,7 +593,6 @@ mod tests {
             execute_code: true,
             memory: true,
             search_web: true,
-            sub_agent: true,
             browser: true,
             browser_use: true,
             daytona: true,
@@ -628,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_has_list_tools_and_read_skill() {
-        let tool = ListToolsTool::new();
+        let tool = ListToolsTool::new_with_config(&ToolAvailability::default(), Vec::new());
         let output = tool
             .call(&mut ToolContext::new(), ListToolsArgs {})
             .await
@@ -764,7 +743,6 @@ mod tests {
             "save_skill",
             "search_memory",
             "search_web",
-            "sub_agent",
             "browser_use",
             "daytona_run",
         ];

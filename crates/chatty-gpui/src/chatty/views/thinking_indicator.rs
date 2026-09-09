@@ -87,11 +87,6 @@ impl ThinkingIndicator {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn ticker(&self) -> Entity<HeadlineTicker> {
-        self.ticker.clone()
-    }
-
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.start_offset = next_start_offset();
         self.started_at = Instant::now();

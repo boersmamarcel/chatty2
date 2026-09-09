@@ -298,7 +298,7 @@ impl ChattyApp {
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
             let source = classify_agent_source(&agent_name, cx);
-            view.start_sub_agent_progress(
+            view.start_delegation_progress(
                 &format!("[Agent: {agent_name}] {prompt_for_display}"),
                 source,
                 cx,
@@ -311,9 +311,10 @@ impl ChattyApp {
         cx.spawn(async move |weak, cx| {
             use futures::StreamExt;
 
-            let client = chatty_core::services::A2aClient::new();
-
-            // Use streaming to match invoke_agent's visual behaviour.
+            // Streaming, to match invoke_agent's visual behaviour — and on
+            // the delegation client, because a remote agent's answer takes as
+            // long as it takes (AGE-319).
+            let client = chatty_core::services::A2aClient::for_delegation();
             let stream_result = client.send_message_stream(&config, &prompt).await;
 
             let (success, result_text) =
@@ -338,7 +339,7 @@ impl ChattyApp {
                                     && let Some(ref msg) = message {
                                         chat_view
                                             .update(cx, |view, cx| {
-                                                view.append_sub_agent_progress(msg, cx);
+                                                view.append_delegation_progress(msg, cx);
                                             })
                                             .map_err(|e| warn!(error = ?e, "Failed to update chat view with A2A progress"))
                                             .ok();
@@ -400,7 +401,7 @@ impl ChattyApp {
             // Finalize the progress trace.
             chat_view
                 .update(cx, |view, cx| {
-                    view.finalize_sub_agent_progress(success, result_text, cx)
+                    view.finalize_delegation_progress(success, result_text, cx)
                 })
                 .map_err(|e| warn!(error = ?e, "Failed to finalize A2A progress in chat view"))
                 .ok();
@@ -463,7 +464,7 @@ impl ChattyApp {
         // Clone the prompt for the display before it is moved into the async task.
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
-            view.start_sub_agent_progress(&prompt_for_display, ToolSource::Local, cx);
+            view.start_delegation_progress(&prompt_for_display, ToolSource::Local, cx);
         });
 
         // Channel for streaming stderr progress lines from the subprocess.
@@ -519,9 +520,9 @@ impl ChattyApp {
                     if let Some(stderr) = stderr {
                         let reader = std::io::BufReader::new(stderr);
                         for line in reader.lines().map_while(Result::ok) {
-                            if chatty_core::tools::is_chatty_progress_line(&line) {
-                                continue;
-                            }
+                            // Every line is the child's human-readable log
+                            // now: ADR-0011's C4 removed the machine lines
+                            // this used to filter out.
                             let _ = progress_tx.send(line);
                         }
                     }
@@ -557,7 +558,7 @@ impl ChattyApp {
                     biased;
                     Some(line) = progress_rx.recv() => {
                         chat_view
-                            .update(cx, |view, cx| view.append_sub_agent_progress(&line, cx))
+                            .update(cx, |view, cx| view.append_delegation_progress(&line, cx))
                             .map_err(|e| warn!(error = ?e, "Failed to update chat view with sub-agent progress"))
                             .ok();
                     }
@@ -566,7 +567,7 @@ impl ChattyApp {
                         // the task completing.
                         while let Ok(line) = progress_rx.try_recv() {
                             chat_view
-                                .update(cx, |view, cx| view.append_sub_agent_progress(&line, cx))
+                                .update(cx, |view, cx| view.append_delegation_progress(&line, cx))
                                 .map_err(|e| warn!(error = ?e, "Failed to update chat view with drained sub-agent progress"))
                                 .ok();
                         }
@@ -630,7 +631,7 @@ impl ChattyApp {
             let result_for_fallback = result_text.clone();
             chat_view
                 .update(cx, |view, cx| {
-                    view.finalize_sub_agent_progress(success, result_text, cx)
+                    view.finalize_delegation_progress(success, result_text, cx)
                 })
                 .map_err(|e| warn!(error = ?e, "Failed to finalize sub-agent progress in chat view"))
                 .ok();

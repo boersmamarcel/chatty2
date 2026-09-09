@@ -1,8 +1,8 @@
 # Paper → experiment → product pipeline
 
 **When to read this:** You need the end-to-end story of how SOTA agentic papers land in
-Chatty — what gets experimented on, what Marcel decides, and what becomes production code
-vs a user setting vs nothing.
+Chatty — what gets experimented on, what the human reviewer decides, and what becomes
+production code vs a user setting vs nothing.
 
 This is the **organizing frame** for research documentation. Individual papers, crate
 promises, and ADRs hang off it.
@@ -13,10 +13,10 @@ promises, and ADRs hang off it.
 flowchart LR
   Papers[SOTA papers] --> StageA[Stage A<br/>in-repo fidelity]
   StageA --> StageB[Stage B<br/>Harbor benchmarks]
-  StageB --> Marcel[Human evaluation<br/>paired stats + ablations]
-  Marcel -->|reject| Archive[Document why not]
-  Marcel -->|setting| Setting[User-configurable<br/>opt-in feature]
-  Marcel -->|default| Default[Ship as default<br/>when dominating]
+  StageB --> Human[Human evaluation<br/>paired stats + ablations]
+  Human -->|reject| Archive[Document why not]
+  Human -->|setting| Setting[User-configurable<br/>opt-in feature]
+  Human -->|default| Default[Ship as default<br/>when dominating]
 
   StageA --> Crates[Research crates<br/>trace / playbook / flow / optimize]
   Setting --> Core[chatty-core settings<br/>+ shipping crates]
@@ -31,8 +31,8 @@ is necessary but not sufficient — cross-module results (AGE-21) and product co
 
 | Stage | Where | Purpose | Who interprets results |
 |-------|-------|---------|------------------------|
-| **Stage A** | `chatty2` research crates | Fidelity to each paper's mechanism; trace contracts; in-process optimizers | Marcel (`owner:human` / `owner:pair` on reserved symbols) |
-| **Stage B** | [`harbor-chatty`](../../../harbor-chatty) (Harbor) | Containerized coding/env benchmarks (HumanEval, Polyglot, AppWorld, …) | Marcel — agents build harness plumbing only |
+| **Stage A** | `chatty2` research crates | Fidelity to each paper's mechanism; trace contracts; in-process optimizers | The human reviewer (`owner:human` / `owner:pair` on reserved symbols) |
+| **Stage B** | [`harbor-chatty`](https://github.com/boersmamarcel/harbor-chatty) (Harbor) | Containerized coding/env benchmarks (HumanEval, Polyglot, AppWorld, …) | The human reviewer — agents build harness plumbing only |
 
 Stage A answers *"did we implement the idea correctly?"* Stage B answers *"does it help on
 tasks users care about?"* Neither stage auto-promotes to production.
@@ -55,8 +55,8 @@ HotpotQA alone does not automatically become a Chatty default.
 
 **Settings surface:** persisted models in `chatty-core` settings (`ModelConfig`, future
 `FlowSettingsModel`, playbook storage — see product gate issues below). Optimizer output
-(preamble, playbook bullets, workflow IR) lands through an apply policy Marcel must choose
-(AGE-45).
+(preamble, playbook bullets, workflow IR) lands through an apply policy the human reviewer
+must choose (AGE-45).
 
 ## Paper → crate → product landing
 
@@ -96,12 +96,12 @@ flowchart TB
 ```
 
 **Shipping crates** (`chatty-core`, `chatty-trace`, `chatty-playbook`, `chatty-flow`) are
-held to the [production bar](./crate-promises-chatty-trace.md) (AGE-26). **Build-time
+held to the [production bar](https://linear.app/agents-research/issue/AGE-26) (AGE-26). **Build-time
 crates** (`chatty-optimize`) are held to *correct*, not latency-safe.
 
-## What Marcel owns vs what agents build
+## What the human reviewer owns vs what agents build
 
-| Marcel (human) | Agents |
+| Human reviewer | Agents |
 |----------------|--------|
 | Reserved type definitions in `RESERVED.md` (~200 lines containing the idea) | Everything around them (~2000 lines): wiring, tests, loaders, CI |
 | Running and interpreting cross-module experiments (AGE-21) | Harness plumbing for those experiments |
@@ -113,7 +113,7 @@ Agents must not implement reserved symbols, close gate issues, or predict benchm
 
 ## Open product gates (block promotion UX)
 
-These Marcel decisions define *how* optimized artifacts reach users:
+These human product decisions define *how* optimized artifacts reach users:
 
 | Issue | Question |
 |-------|----------|
@@ -134,9 +134,9 @@ Rigorous docs mirror the pipeline — each layer answers a different question:
 | **App bridge** | Which app components map to which research modules? | [`app-research-bridge.md`](./app-research-bridge.md) | Built |
 | **Architecture** | What runs where at runtime? | [`system-overview.md`](../system-overview.md), [`component-map.md`](../component-map.md) | Built |
 | **Paper fidelity** | What did the paper actually claim? | [`research/modules/`](./modules/index.md) | Built (M0–M4) |
-| **Crate promises** | What does each shipping crate guarantee? | [`crate-promises-*.md`](./crate-promises-chatty-trace.md) | Stubs until Stage A |
+| **Crate promises** | What does each shipping crate guarantee? | Each crate's `README.md` ([`chatty-trace`](../../crates/chatty-trace/README.md), [`chatty-playbook`](../../crates/chatty-playbook/README.md), [`chatty-flow`](../../crates/chatty-flow/README.md)) | Built |
 | **ADRs** | Why this fork (Harbor, AppWorld, cost model)? | [`docs/research/*.md`](./harbor-pivot.md) | Partial |
-| **Promotion record** | What shipped, as what, with what evidence? | [`promotion-log.md`](./promotion-log.md) — Marcel updates | Template ready |
+| **Promotion record** | What shipped, as what, with what evidence? | Recorded by the human reviewer per verdict ([archived template](../archive/research/promotion-log.md)) | No verdicts yet |
 | **Settings map** | Which settings map to which mechanisms? | [`settings-integration-map.md`](./settings-integration-map.md) | Built (gates open) |
 | **Experiment protocol** | How to run Stage A/B rigorously? | [`experiment-protocol.md`](./experiment-protocol.md) | Built |
 | **Reference** | What can I configure today? | Generated tools/CLI/env pages | Partial |
@@ -144,9 +144,8 @@ Rigorous docs mirror the pipeline — each layer answers a different question:
 ### Completed doc layers
 
 1. ~~**Per-paper module pages**~~ — [`modules/`](./modules/index.md)
-2. ~~**Promotion log**~~ — [`promotion-log.md`](./promotion-log.md)
-3. ~~**Settings integration map**~~ — [`settings-integration-map.md`](./settings-integration-map.md)
-4. ~~**Experiment protocol**~~ — [`experiment-protocol.md`](./experiment-protocol.md)
+2. ~~**Settings integration map**~~ — [`settings-integration-map.md`](./settings-integration-map.md)
+3. ~~**Experiment protocol**~~ — [`experiment-protocol.md`](./experiment-protocol.md)
 
 ### Still open
 

@@ -1,150 +1,140 @@
 # Documentation index
 
-A short pointer page so agents and humans can scan all of `docs/` without
-listing the directory. Files are grouped by purpose.
+A one-glance map of every documentation source in the repository, for agents
+and humans who want to scan `docs/` without listing the directory. The
+published site is the mdBook at https://boersmamarcel.github.io/chatty2/
+(`make docs-serve` locally); its navigation is `docs-site/src/SUMMARY.md`.
 
-For the top-level orientation read [`AGENTS.md`](../AGENTS.md) first;
-for coding patterns and behavioural rules read
-[`CLAUDE.md`](../CLAUDE.md).
+Read [`AGENTS.md`](../AGENTS.md) first for the workspace map and build
+commands. Coding rules for humans are on the site's Contributing patterns
+page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 
-**Published site:** GitHub Pages mdBook (run `make docs-serve` locally).
+## User guide (hand-written, `docs-site/src/user/`)
 
-## User guides (mdBook `/user/`)
-
-End-user how-to pages are hand-written in `docs-site/src/user/` (not copies of
-`docs/`). The repo [README.md](../README.md) is a short landing page that
-points here.
-
-| File | When to read |
+| Page | When to read |
 |---|---|
-| [`../docs-site/src/user/getting-started.md`](../docs-site/src/user/getting-started.md) | First-run download, provider, model, tools |
-| [`../docs-site/src/user/overview.md`](../docs-site/src/user/overview.md) | What Chatty is (docs voice) |
-| [`../docs-site/src/user/agents.md`](../docs-site/src/user/agents.md) | Agent loop, plans, context window |
-| [`../docs-site/src/user/providers-and-models.md`](../docs-site/src/user/providers-and-models.md) | Providers, models, capabilities |
-| [`../docs-site/src/user/agentic-tools.md`](../docs-site/src/user/agentic-tools.md) | Built-in tools and MCP |
-| [`../docs-site/src/user/memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and skills |
-| [`../docs-site/src/user/sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless `chatty-tui` children |
-| [`../docs-site/src/user/security.md`](../docs-site/src/user/security.md) | Workspace, shell, approval, secrets |
-| [`../docs-site/src/user/features.md`](../docs-site/src/user/features.md) | Rendering, traces, export, themes |
-| [`../docs-site/src/user/terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` modes and keybindings |
+| [`getting-started.md`](../docs-site/src/user/getting-started.md) | First run: download, provider, model, first message |
+| [`providers-and-models.md`](../docs-site/src/user/providers-and-models.md) | Connect OpenRouter, Ollama or Azure; manage the model roster |
+| [`chatting.md`](../docs-site/src/user/chatting.md) | Rendering, artifacts, PR status bar, cost, themes |
+| [`agents-and-tools.md`](../docs-site/src/user/agents-and-tools.md) | The agent loop and what the agent can do |
+| [`extensions.md`](../docs-site/src/user/extensions.md) | Hive marketplace, built-in integrations, custom MCP servers |
+| [`memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and saved skills |
+| [`sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless child agents |
+| [`security.md`](../docs-site/src/user/security.md) | Approval modes, sandboxing, secrets |
+| [`terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` install, modes, keybindings |
+| [`advanced.md`](../docs-site/src/user/advanced.md) | Training-data export, where Chatty stores data, updates |
 
-## Architecture & design
+## Developer guide (hand-written, `docs-site/src/dev/`)
+
+| Page | When to read |
+|---|---|
+| [`start/build-and-run.md`](../docs-site/src/dev/start/build-and-run.md) | Clone to running binary in 10 minutes |
+| [`start/first-change.md`](../docs-site/src/dev/start/first-change.md) | Add an LLM tool end to end |
+| [`start/tutorial-echo-agent.md`](../docs-site/src/dev/start/tutorial-echo-agent.md) | First WASM module tutorial |
+| [`start/tutorial-benford-agent.md`](../docs-site/src/dev/start/tutorial-benford-agent.md) | Agentic WASM module tutorial |
+| [`where-to-look.md`](../docs-site/src/dev/where-to-look.md) | Task → file/doc routing (How-to landing page) |
+| [`guides/add-provider.md`](../docs-site/src/dev/guides/add-provider.md) | Add an LLM provider |
+| [`guides/add-slash-command.md`](../docs-site/src/dev/guides/add-slash-command.md) | Add a `/` command to both front ends |
+| [`guides/add-gpui-view.md`](../docs-site/src/dev/guides/add-gpui-view.md) | Add a desktop view or dialog |
+| [`guides/build-wasm-module.md`](../docs-site/src/dev/guides/build-wasm-module.md) | Author a WASM plugin |
+| [`guides/test.md`](../docs-site/src/dev/guides/test.md) | How the test suite is organised and run |
+| [`guides/debug.md`](../docs-site/src/dev/guides/debug.md) | Debug overlay, logs, stream and rendering bugs |
+| [`guides/build-package.md`](../docs-site/src/dev/guides/build-package.md) | Build and package for each platform |
+| [`guides/contribute-docs.md`](../docs-site/src/dev/guides/contribute-docs.md) | Edit the docs, page template, checks |
+| [`contributing-patterns.md`](../docs-site/src/dev/contributing-patterns.md) | The rules a PR is reviewed against |
+| [`crates.md`](../docs-site/src/dev/crates.md) | Workspace crate index (Reference landing page) |
+| [`ci-reference.md`](../docs-site/src/dev/ci-reference.md) | Make targets and CI workflows |
+| [`doc-frontmatter.md`](../docs-site/src/dev/doc-frontmatter.md) | Optional YAML frontmatter schema |
+| [`glossary.md`](../docs-site/src/dev/glossary.md) | Terms used across the docs |
+
+## Architecture & explanation (`docs/`, synced to the site)
 
 | File | When to read | What it covers |
 |---|---|---|
-| [`system-overview.md`](system-overview.md) | First time in the repo | One-page mental model, message path diagram |
+| [`system-overview.md`](system-overview.md) | First time in the repo | Layers, crate roles, message path, startup, key design decisions |
 | [`component-map.md`](component-map.md) | Need diagrams of how parts connect | Crate/module/entity relationship visuals |
-| [`architecture-overview.md`](architecture-overview.md) | Contributor onboarding | Workspace structure, data flow, persistence |
-| [`workspace-crate-split.md`](workspace-crate-split.md) | Why core/gpui/tui exist | Crate split rationale |
-| [`entity-communication.md`](entity-communication.md) | GPUI event wiring | EventEmitter / `cx.subscribe()` pattern. How-to: [add a desktop GPUI view](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/guides/add-gpui-view.md) |
+| [`workspace-crate-split.md`](workspace-crate-split.md) | Deciding where code goes | Crate boundaries, the `gpui-globals` feature |
+| [`entity-communication.md`](entity-communication.md) | GPUI event wiring | `EventEmitter` / `cx.subscribe()` pattern |
 | [`stream-manager.md`](stream-manager.md) | Stream bugs or cancellation | LLM stream lifecycle, events |
-| [`rendering-system.md`](rendering-system.md) | Markdown/math/mermaid UI | Rendering pipeline |
-| [`token-tracking.md`](token-tracking.md) | Context window / compact | Token budget accounting |
+| [`rendering-system.md`](rendering-system.md) | Markdown/math/mermaid UI | Rendering pipeline and caches |
+| [`token-tracking.md`](token-tracking.md) | Context window, cost | Token budget accounting |
+| [`context-compaction.md`](context-compaction.md) | Long conversations, `/compact` | How compaction works |
 | [`agent-memory.md`](agent-memory.md) | Memory tools / skills | Persistent agent memory store |
+| [`a2a-and-wasm-modules.md`](a2a-and-wasm-modules.md) | WASM agents or A2A | Module flow, manifest, limits |
+| [`wit-reference.md`](wit-reference.md) | Authoring WASM modules | WIT interface schemas (reference) |
+| [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded catalog and community servers (reference) |
+| [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Labels, version bump, changelog, GitHub Release |
+| [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
 
-## Modules / extensions
-
-| File | When to read | What it covers |
-|---|---|---|
-| [`../docs-site/src/dev/guides/build-wasm-module.md`](../docs-site/src/dev/guides/build-wasm-module.md) | **Author a WASM plugin** | Quick start, host LLM Mermaid diagrams, testing |
-| [`../docs-site/src/dev/guides/tutorial-echo-agent.md`](../docs-site/src/dev/guides/tutorial-echo-agent.md) | First WASM tutorial | echo-agent SDK walkthrough |
-| [`../docs-site/src/dev/guides/tutorial-benford-agent.md`](../docs-site/src/dev/guides/tutorial-benford-agent.md) | Agentic WASM tutorial | benford-agent LLM + tool loop |
-| [`a2a-and-wasm-modules.md`](a2a-and-wasm-modules.md) | WASM agents or A2A | End-to-end module flow |
-| [`wit-reference.md`](wit-reference.md) | Authoring WASM modules | WIT interface schemas |
-| [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded MCP catalog |
-| [`pre-built-apis.md`](pre-built-apis.md) | Bundled integrations | Pre-built API list |
-
-## Operations
+## Research notes (`docs/research/`, synced to the site under Explanation)
 
 | File | When to read | What it covers |
 |---|---|---|
-| [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Version bump, changelog, GH Release |
-| [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, workspace debuginfo profile, local pruning |
-| [`stale-doc-policy.md`](stale-doc-policy.md) | Code changed, unsure if docs must | Same-PR rule, drift reports, update-agent-docs |
-| [`monty-sandbox.md`](monty-sandbox.md) | Code execution | Docker / Monty sandbox |
-| [`debug_ui.md`](debug_ui.md) | Layout/rendering bugs | `CHATTY_DEBUG_UI` overlay |
-| [`refactor-followups.md`](refactor-followups.md) | Large-file splits | Deferred agent-friendliness work |
-| [`chatty-bugs-plan.md`](chatty-bugs-plan.md) | Working the Chatty bugs project | Root causes + workstreams for the open AGE bug issues |
-
-## Research / ADRs
-
-| File | When to read | What it covers |
-|---|---|---|
-| [`research/app-research-bridge.md`](research/app-research-bridge.md) | **App ↔ research map** | Memory, context window, loop, traces → M0–M4 |
-| [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | Research pipeline | SOTA → experiment → product flow |
-| [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
-| [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace / M0 work | Trace contract module notes |
-| [`research/modules/m1-react.md`](research/modules/m1-react.md) | ReAct substrate work | M1 strategy variants |
-| [`research/modules/m2-aflow.md`](research/modules/m2-aflow.md) | chatty-flow / M2 work | AFlow workflow search |
-| [`research/modules/m3-gepa.md`](research/modules/m3-gepa.md) | chatty-optimize / M3 work | GEPA prompt evolution |
-| [`research/modules/m4-ace.md`](research/modules/m4-ace.md) | chatty-playbook / M4 work | ACE playbook deltas |
-| [`research/promotion-log.md`](research/promotion-log.md) | After experiments | Marcel-only promotion verdicts |
-| [`research/settings-integration-map.md`](research/settings-integration-map.md) | Product integration | Settings ↔ research mechanisms |
+| [`research/README.md`](research/README.md) | Entry point | What M0–M4 are and where the ADRs live |
+| [`research/app-research-bridge.md`](research/app-research-bridge.md) | App ↔ research map | Memory, context window, loop, traces → M0–M4 |
+| [`research/paper-to-product-pipeline.md`](research/paper-to-product-pipeline.md) | Research pipeline | Paper → experiment → product flow |
 | [`research/experiment-protocol.md`](research/experiment-protocol.md) | Running evals | Stage A/B checklist, cost accounting |
+| [`research/settings-integration-map.md`](research/settings-integration-map.md) | Product integration | Settings ↔ research mechanisms |
 | [`research/harbor-pivot.md`](research/harbor-pivot.md) | Stage B sandboxes | Harbor pivot decision |
-| [`research/crate-promises-chatty-trace.md`](research/crate-promises-chatty-trace.md) | chatty-trace work | Trace crate scope |
-| [`research/crate-promises-chatty-playbook.md`](research/crate-promises-chatty-playbook.md) | chatty-playbook work | Playbook crate scope |
-| [`research/crate-promises-chatty-flow.md`](research/crate-promises-chatty-flow.md) | chatty-flow work | Flow crate scope |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
-| [`research/README.md`](research/README.md) | Research folder entry | How the research docs are organized |
+| [`research/adr-0011-broker-ab-2026-09-08.md`](research/adr-0011-broker-ab-2026-09-08.md) | ADR-0011 kill criteria | `sub_agent` vs the broker, measured (AGE-302) |
+| [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
+| [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace | Trace contract |
+| [`research/modules/m1-react.md`](research/modules/m1-react.md) | ReAct substrate | M1 strategy variants |
+| [`research/modules/m2-aflow.md`](research/modules/m2-aflow.md) | chatty-flow | AFlow workflow search |
+| [`research/modules/m3-gepa.md`](research/modules/m3-gepa.md) | chatty-optimize | GEPA prompt evolution |
+| [`research/modules/m4-ace.md`](research/modules/m4-ace.md) | chatty-playbook | ACE playbook deltas |
 
-## Workspace crates
-
-One-line map of all 13 workspace crates. Full index with dependency diagram:
-[crates.md](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/crates.md)
-(mdBook: **Crates → Workspace crate index**).
+## Crate READMEs (`crates/*/README.md`, synced to the site under Reference)
 
 | Crate | Purpose |
 |---|---|
-| `chatty-core` | UI-agnostic agent core: models, services, tools, settings, sandbox |
-| `chatty-gpui` | GPUI desktop app (`chatty` binary) |
-| `chatty-tui` | Ratatui terminal app (interactive, headless, pipe) |
-| `chatty-wasm-runtime` | Wasmtime embedding and host WIT interfaces |
-| `chatty-module-registry` | WASM module discovery, manifest, lifecycle |
-| `chatty-protocol-gateway` | HTTP gateway: OpenAI / MCP / A2A |
-| `chatty-module-sdk` | SDK for `wasm32-wasip2` agent modules |
-| `chatty-trace` | Research: trace capture, ATIF export, feedback (M0) |
-| `chatty-playbook` | Research: ACE playbook memory (M4) |
-| `chatty-flow` | Research: AFlow workflow IR (M2) |
-| `chatty-optimize` | Research: GEPA/AFlow optimizers, paired stats (M3) |
-| `hive-client` | Hive module registry client |
-| `hive-billing-sdk` | Hive billing SDK for WASM publishers |
+| [`chatty-core`](../crates/chatty-core/README.md) | UI-agnostic agent core: models, services, tools, settings, sandbox |
+| [`chatty-gpui`](../crates/chatty-gpui/README.md) | GPUI desktop app (`chatty` binary) |
+| [`chatty-tui`](../crates/chatty-tui/README.md) | Ratatui terminal app (interactive, headless, pipe) |
+| [`chatty-wasm-runtime`](../crates/chatty-wasm-runtime/README.md) | Wasmtime embedding and host WIT interfaces |
+| [`chatty-module-registry`](../crates/chatty-module-registry/README.md) | WASM module discovery, manifest, lifecycle |
+| [`chatty-protocol-gateway`](../crates/chatty-protocol-gateway/README.md) | HTTP gateway: OpenAI / MCP / A2A |
+| [`chatty-module-sdk`](../crates/chatty-module-sdk/README.md) | SDK for `wasm32-wasip2` agent modules |
+| [`chatty-trace`](../crates/chatty-trace/README.md) | Research: trace capture, ATIF export, feedback (M0) |
+| [`chatty-playbook`](../crates/chatty-playbook/README.md) | Research: ACE playbook memory (M4) |
+| [`chatty-flow`](../crates/chatty-flow/README.md) | Research: AFlow workflow IR (M2) |
+| [`chatty-optimize`](../crates/chatty-optimize/README.md) | Research: GEPA/AFlow optimizers, paired stats (M3) |
+| [`hive-client`](../crates/hive-client/README.md) | Hive module registry client |
+| [`hive-billing-sdk`](../crates/hive-billing-sdk/README.md) | Hive billing SDK for WASM publishers |
 
-## Crate READMEs
+## Generated reference (`docs/generated/`, gitignored)
 
-| File | When to read | What it covers |
-|---|---|---|
-| [`../crates/chatty-core/README.md`](../crates/chatty-core/README.md) | Core crate work | UI-agnostic models, tools, services |
-| [`../crates/chatty-gpui/README.md`](../crates/chatty-gpui/README.md) | Desktop UI work | GPUI binary |
-| [`../crates/chatty-tui/README.md`](../crates/chatty-tui/README.md) | Terminal UI work | Ratatui binary, headless mode |
-| [`../crates/chatty-trace/README.md`](../crates/chatty-trace/README.md) | chatty-trace work | Trace capture crate |
-| [`../crates/chatty-playbook/README.md`](../crates/chatty-playbook/README.md) | chatty-playbook work | ACE playbook crate |
-| [`../crates/chatty-flow/README.md`](../crates/chatty-flow/README.md) | chatty-flow work | Workflow IR crate |
-| [`../crates/chatty-optimize/README.md`](../crates/chatty-optimize/README.md) | Optimizer tooling | Offline GEPA/AFlow (not in app binary) |
-| [`../crates/chatty-wasm-runtime/README.md`](../crates/chatty-wasm-runtime/README.md) | WASM runtime | Wasmtime agent modules |
-| [`../crates/chatty-module-registry/README.md`](../crates/chatty-module-registry/README.md) | Module registry | Discovery and lifecycle |
-| [`../crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md) | HTTP gateway | OpenAI / MCP / A2A protocols |
-| [`../crates/chatty-module-sdk/README.md`](../crates/chatty-module-sdk/README.md) | WASM module SDK | Authoring agent modules |
-
-## Generated reference (`docs/generated/`)
-
-Regenerate with `make docs-gen`. Synced into the mdBook site on build.
+Regenerate with `make docs-gen`; the tables live in
+`scripts/gen-docs-reference.sh` and CI diffs them against the source
+(`make docs-check-reference`).
 
 | File | When to read |
 |---|---|
-| `tools-catalog.md` | Look up LLM tool names |
+| `tools-catalog.md` | Look up an LLM tool name and its source module |
 | `provider-matrix.md` | Provider auth, capabilities, TUI flags |
-| `slash-commands.md` | `/` commands in GPUI |
-| `cli-flags.md` | `chatty-tui --help` when the binary is already built; otherwise a static fallback |
+| `slash-commands.md` | `/` commands in GPUI and TUI |
+| `cli-flags.md` | `chatty-tui --help` (live when the binary is built) |
 | `env-vars.md` | `CHATTY_*` and related env vars |
-| `settings-schema.md` | Persisted settings JSON: paths, fields, defaults (AGE-101 pair review) |
+| `settings-schema.md` | Persisted settings JSON: paths, fields, defaults |
 | `event-catalog.md` | GPUI entity events and subscribers |
 | `singleton-inventory.md` | Process-global state and repositories |
-| `llms.txt` | Agent discovery index (curated links) |
-| `llms-full.txt` | Concatenated key pages for large-context agents |
+| `llms.txt`, `llms-full.txt` | Agent discovery index and concatenated key pages |
+
+## Upstream patch proposals (`docs/upstream/`, not synced)
+
+| File | What it covers |
+|---|---|
+| [`upstream/rig-core-prompt-caching-latest-message.md`](upstream/rig-core-prompt-caching-latest-message.md) | Drafted rig-core patch marking the latest message inside `finalize_openrouter_request_body`, which would let chatty delete the `PromptCachingHttpClient` workaround (AGE-239, origin AGE-205). Not yet submitted upstream. |
+
+## Archived (`docs/archive/`, not synced)
+
+Point-in-time plans and audits kept for their reasoning; open items live in
+Linear. See [`archive/README.md`](archive/README.md).
 
 ---
 
-**Adding a doc?** Append a row to the appropriate section above so this
-index stays one-glance complete.
+**Adding a doc?** A new file under `docs/` needs a row above and an entry in
+`docs-site/src/SUMMARY.md`; CI checks both. Working notes go to
+`docs/archive/` instead.

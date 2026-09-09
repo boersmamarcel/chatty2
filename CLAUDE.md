@@ -181,7 +181,9 @@ sudo apt-get install -y \
 - **Tokio Runtime**: The app uses Tokio for all async operations. The runtime is entered at startup and maintained throughout the application lifecycle.
 - **Global State**: Uses GPUI's global state system (`cx.set_global`, `cx.global`) for app-wide state like providers, models, and settings.
 - **Async Loading**: Providers, models, and settings are loaded asynchronously to avoid blocking the UI during startup.
-- **Stream Lifecycle**: LLM response streams are managed by `StreamManager` (`src/chatty/models/stream_manager.rs`), a centralized GPUI entity that owns all stream state, emits events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. Each registered stream carries a monotonic epoch so a `StreamEnded` event from a superseded stream (e.g. a synchronously re-registered follow-up turn) is ignored rather than tearing down the new one. Both frontends drive chatty-core's shared `run_stream_loop` (`crates/chatty-core/src/services/stream_processor.rs`): the loop, its cancellation checks and its stall watchdog (`STALL_TIMEOUT` = 180s, ends a turn that yields nothing for too long) live there, and each frontend supplies only a `StreamChunkHandler` — `GpuiStreamHandler` in `message_ops_internals.rs`, `TuiStreamHandler` in `chatty-tui/src/engine/streaming.rs`. Turn-lifecycle behaviour is changed in core, once, not in two hand-rolled `select!` loops (AGE-192). `on_chunk` is `async` because the desktop awaits an Azure token refresh on a mid-stream 401; the trait carries no `Send` bound, since the desktop handler holds an `AsyncApp`. Scripted-stream fixtures for both frontends' characterization tests live in `chatty_core::services::stream_fixtures` behind the `test-support` feature, with golden event sequences under `crates/chatty-core/src/services/goldens/` and `crates/chatty-tui/src/engine/goldens/` (`UPDATE_GOLDENS=1` rewrites them). See Idiomatic Patterns > StreamManager Pattern for details.
+- **Stream Lifecycle**: LLM response streams are managed by `StreamManager` (`src/chatty/models/stream_manager.rs`), a centralized GPUI entity that owns all stream state, emits events for decoupled UI updates, and uses cancellation tokens for graceful shutdown. Each registered stream carries a monotonic epoch so a `StreamEnded` event from a superseded stream (e.g. a synchronously re-registered follow-up turn) is ignored rather than tearing down the new one. Both frontends drive chatty-core's shared `run_stream_loop` (`crates/chatty-core/src/services/stream_processor.rs`): the loop, its cancellation checks and its stall watchdog (`STALL_TIMEOUT` = 180s, ends a turn that yields nothing for too long) live there, and the one `StreamChunkHandler` that drives it is chatty-core's own `SessionStreamHandler` (see AgentSession below); neither frontend has a handler of its own any more (AGE-192, AGE-195). Turn-lifecycle behaviour is changed in core, once. `on_chunk` is synchronous: the Azure Entra token is attached to every request by `AzureAuthHttpClient` (`factories/agent_factory/azure_auth_http.rs`, an `HttpClientExt` wrapper over the token cache, AGE-245), so a handler never has to await a token refresh; the trait carries no `Send` bound, since the desktop's event sink holds an `AsyncApp`. Scripted-stream fixtures for both frontends' characterization tests live in `chatty_core::services::stream_fixtures` behind the `test-support` feature, with golden event sequences under `crates/chatty-core/src/services/goldens/`, `crates/chatty-core/src/session/goldens/`, `crates/chatty-tui/src/engine/goldens/` and `crates/chatty-gpui/src/chatty/controllers/app_controller/goldens/` (`UPDATE_GOLDENS=1` rewrites them). See Idiomatic Patterns > StreamManager Pattern for details.
+- **AgentSession (AGE-194)**: `chatty_core::session::AgentSession` (`crates/chatty-core/src/session/`) is the turn written once: it owns one `Conversation` plus the three per-agent stores (execution approvals, write approvals, clarifications) whose handles the agent's tools were built with — the owner assembles only the services part of an `AgentBuildContext` and the session completes it (`build_context`), builds and owns the conversation (`create_conversation` / `restore_conversation`) or installs a rebuilt agent on it (`install_agent`; AGE-272) — and `begin_turn` does approval channels → `shape_context` → `stream_prompt` → `run_stream_loop` and returns the turn as a future for the frontend to spawn. Every outcome arrives as a `SessionEvent` (`session/event.rs`, the contract every frontend binds to): `TurnStarted` first, `TurnEnded` exactly once and last, `Error`/`Cancelled` before it saying why, and `FollowUp` after it carrying the next turn's prompt. The per-chunk protocol logic that used to live in each frontend's handler — todo-protocol follow-up, loop guard, malformed-tool-call retry (`MALFORMED_TOOL_CALL_FOLLOW_UP` lives here), usage folding — is `SessionStreamHandler` (`session/handler.rs`), driven by a `TurnPolicy` the session builds from `AgentSessionConfig` (settings by value; the session never calls a repository and holds no `'static` state, so two sessions in one process share nothing). The owner feeds events back through `apply()`, which records the turn on the conversation: streaming text, the trace (tool calls, approvals, clarifications, the delegation row; AGE-274), turn messages, the todo snapshot, usage. On `TurnEnded` it calls `finish_turn(trace, artifacts)`, which commits under the shared empty-turn rule; `None` persists the session's own trace, and the desktop passes the ChatView's instead because it carries the user's clarification answers. `recovery_action(&error)` is the owner's stream-error policy (`decide_recovery` for the session's surface) with the attempt bookkeeping inside the session, per error kind and reset by a human turn (AGE-273); headless is the one surface that retries, and sends its recovery prompt as a `ProtocolFollowUp` turn so the budget holds. Adapters: `From<SessionEvent> for AppEvent` (chatty-tui `events.rs`) and `StreamManager::handle_session_event` (chatty-gpui). Both frontends run on it (AGE-195): chatty-tui's `ChatEngine` owns one `AgentSession` and keeps only display state; on the desktop `ConversationsStore` holds an `AgentSession` per loaded conversation (`get_session`/`get_session_mut`, with `get_conversation` delegating), so each conversation's agent raises approvals on its own stores — there are no app-wide approval-store globals any more, and the approve/deny/clarification UI resolves a request through `ConversationsStore::resolve_execution_approval` / `resolve_write_approval` / `resolve_clarification`, which find the session that raised it. `run_llm_stream` (`message_ops_internals.rs`) is the desktop's event sink (`DesktopSink`): it calls `session.apply` for the conversation, forwards to `StreamManager`, and keeps the desktop-only work — ChatView trace capture before `Error`/`TurnEnded`, the delegation row and plan strip in the view, follow-up injection. `finalize_completed_stream` and `finalize_stopped_stream` call `finish_turn`; an errored desktop turn is finalized like a stopped one, so no user message is left dangling. `begin_turn_with_flag` lets `StreamManager` register the turn with the cancel token before the turn starts. Each frontend's characterization replays the scenarios through the session and its adapter (`engine/characterization.rs`, `session_characterization.rs`). Session `TurnKind::Regenerate` takes the tail user message off the history snapshot and resends it; nothing is added. Headless and `--pipe` ride the session directly (AGE-196): `chatty-tui/src/headless/runner.rs`'s `HeadlessRunner` owns an `AgentSession` and a `Transcript` (`engine/transcript.rs`, the terminal transcript bookkeeping shared with `ChatEngine`) and nothing of the terminal; `engine::build_agent_context` assembles the `AgentBuildContext` for both. A delegated child reports its turn to the parent through the runner's event observer — the broker participant's socket (`chatty-tui/src/participant/`, AGE-301) — and `SessionEvent` is serde-serializable so it can cross that boundary. Stderr is the child's human-readable log and nothing else, which `/agent` shows. There is no other progress protocol. A child's `ask_user` is not cancelled when a parent is listening: it parks the child's task in A2A `input-required` with the question attached, the parent's `invoke_agent` re-asks it on the parent's own clarification store (the same popover, or one more hop up if the parent is a worker too), and the answer comes back down as a broker `input` frame that `chatty_protocol_gateway::worker::answer_clarifications` resolves on the child's store (ADR-0011 C7, AGE-306). Plain `--headless` still cancels, since nobody is listening.
+- **Conversation mode: Local vs. Hosted (AGE-298)**: A conversation carries a `ConversationMode` (`Local | Hosted { server_url, remote_id }`, `chatty_core::models::conversation`) recording whether its turns run in-process or on a `chatty-server`. `Local` is the absent case: it lives on `Conversation`/`ConversationSnapshot`/`ConversationData` as `Option<String>` JSON, so a conversation that never moves persists exactly the bytes it did before the mode existed, and a pre-AGE-298 row loads as `Local`. SQLite migration 4 adds a nullable `mode` column; `ConversationMetadata` carries the same serialized mode so the sidebar can badge a hosted conversation (`ConversationsStore::is_hosted`) without loading it. The frontend keeps its `AgentSession` either way — it owns the local `Conversation`, applies every event, and finishes the turn — so a hosted conversation only adds a `HostedSession` (`session/hosted.rs`) alongside it in `ConversationsStore`'s `hosted: HashMap<String, HostedSession>` (kept in sync with each conversation's own mode, never set independently). `HostedSession` turns one SSE response body back into the same `SessionEvent` sequence a local turn would emit — the wire is a serialization of `SessionEvent` (AGE-281), so nothing here invents a vocabulary or interprets an event — and guarantees the same `TurnStarted`…`TurnEnded` pairing even when the server never accepts the turn. `session::transport` (re-exported as `turn_transport`) is four free functions — `begin_turn`, `is_turn_active`, `cancel`, `resolve_approval`/`resolve_clarification` — that dispatch to the local session or the `HostedSession` depending on which is present; it is functions rather than a trait because the turn future must stay `Send` for chatty-tui's `tokio::spawn` while `emit` must not be `Send` for chatty-gpui (`AsyncApp`-holding sink), and `futures::future::Either` is `Send` exactly when both arms are. `session::move_conversation` holds the move itself: `take_online`/`fetch_hosted` transfer history over HTTP, and the mode flips only after that succeeds — a client killed mid-move leaves the local conversation untouched. `MoveSummary` (`TAKE_ONLINE_SUMMARY`/`BRING_BACK_SUMMARY`) is the single source both the TUI's `/online` command and the desktop's move-confirmation dialog (`MoveConversationDialog`, sidebar globe badge) read to tell the user what does and does not move — workspace files, attachments, MCP servers, memory, skills and provider keys never move. `refuse_reason` blocks a move mid-turn (a pending approval/clarification lives in the stores of the session that raised it) or onto/off the mode a conversation is already in. Bringing a conversation back reconciles rather than overwrites: the server's history is adopted via `Conversation::import_history` only when it is longer than what this client already recorded.
 - **Theme System**: Themes are loaded from `./themes` directory. User preferences (theme name + dark mode) are persisted to JSON.
 - **Math Cache**: LaTeX math expressions are compiled to SVG using Typst and cached in platform-specific directories:
   - **macOS**: `~/Library/Application Support/chatty/math_cache/`
@@ -196,12 +198,16 @@ sudo apt-get install -y \
   - **macOS**: `~/Library/Application Support/chatty/lib/`
   - **Linux**: `~/.local/share/chatty/lib/` or `$XDG_DATA_HOME/chatty/lib/`
   - **Windows**: `%APPDATA%\chatty\lib\`
-- **Built-in Browser** (AGE-142, `browser` feature): A CDP control layer over a real Chrome, in `crates/chatty-core/src/services/browser/`. Headless. By default the agent's tools reach only `localhost` and workspace-local `file://` URLs (Lane A) — the self-review loop (render → screenshot → critique → fix) carries no credentials and needs no approval gate. When the app's internet-access setting (`ExecutionSettings::fetch_enabled`, the same toggle that gates `fetch_tool`/`search_web`) is on, the agent factory builds an open-web manager (`BrowserManager::open_web`) instead: `NavigationPolicy::Open` allows any public http(s) host too, still refusing private/internal network targets via the same SSRF denylist as `fetch_tool` (`services::ssrf_guard`, shared so the two can't drift). The profile stays ephemeral either way — no stored credentials, so still no approval gate. The navigation policy lives on the profile (`profile.rs`), not in the tools, so Lane B's per-task origin allowlist (`AGE-158`, not implemented yet) extends it rather than replacing it. Element refs from `browser_snapshot` carry a generation that navigation invalidates; a stale ref is refused, never mis-resolved. Console and network output is drained to files under `<workspace>/.chatty/browser/` and summarized, rather than dumped into context. `browser_screenshot` queues the PNG through `PendingArtifacts` (the `add_attachment` path) rather than returning `ToolResultContent::Image`: rig rejects tool-result images for OpenRouter, Ollama and OpenAI Chat Completions, and the conversion error kills the whole stream. The consequence is that the model sees a screenshot on the turn *after* it captures one. When a Lane A browser tool call appears in the transcript, `ChatView::maybe_open_browser_artifact` (chat_view/mod.rs) auto-docks a live artifact panel: it looks up the running conversation's `BrowserManager` via `services::browser::registry` (a `conversation_id → Arc<BrowserManager>` map the agent factory populates, since chatty-core has no other path to chatty-gpui's UI layer) and streams `Page.startScreencast` frames (`screencast.rs`) into it — watching the agent drive the page live, not a one-shot screenshot. The panel forwards mouse/keyboard input over CDP (`input.rs`) so the user can type/click directly. A `ControlLock` (`control.rs`) arbitrates: the agent holds control by default and needs no permission to act, but the user can *take* control at any moment (no negotiation), which refuses mutating session actions (navigate, resize) with `BrowserError::ControlHeldByUser` until released — read-only tools (snapshot, screenshot, console, network) are never gated, since watching never collides. Chrome is not bundled: `provisioning.rs` prefers a cached pinned Chrome for Testing build, then an installed Chrome/Chromium/Edge at or above `MIN_CHROME_MAJOR`, then downloads the pinned build and verifies it against a SHA-256 committed in that file. Regenerate the pin with `scripts/pin-chrome.sh`. Platform cache paths:
+- **Built-in Browser** (AGE-142, `browser` feature): A CDP control layer over a real Chrome, in `crates/chatty-core/src/services/browser/`. Headless. By default the agent's tools reach only `localhost` and workspace-local `file://` URLs (Lane A) — the self-review loop (render → screenshot → critique → fix) carries no credentials and needs no approval gate. When the app's internet-access setting (`ExecutionSettings::fetch_enabled`, the same toggle that gates `fetch_tool`/`search_web`) is on, the agent factory builds an open-web manager (`BrowserManager::open_web`) instead: `NavigationPolicy::Open` allows any public http(s) host too, still refusing private/internal network targets via the same SSRF denylist as `fetch_tool` (`services::ssrf_guard`, shared so the two can't drift). The profile stays ephemeral either way — no stored credentials, so still no approval gate. The navigation policy lives on the profile (`profile.rs`), not in the tools, so Lane B's per-task origin allowlist (`AGE-158`, not implemented yet) extends it rather than replacing it. Element refs from `browser_snapshot` carry a generation that navigation invalidates; a stale ref is refused, never mis-resolved. Console and network output is drained to files under `<workspace>/.chatty/browser/` and summarized, rather than dumped into context. `browser_screenshot` queues the PNG through `PendingArtifacts` (the `add_attachment` path) rather than returning `ToolResultContent::Image`: rig rejects tool-result images for OpenRouter, Ollama and OpenAI Chat Completions, and the conversion error kills the whole stream. The consequence is that the model sees a screenshot on the turn *after* it captures one. When a Lane A browser tool call appears in the transcript, `ChatView::maybe_open_browser_artifact` (chat_view/mod.rs) auto-docks a live artifact panel: it looks up the running conversation's `BrowserManager` via `services::browser::registry` (a `conversation_id → Arc<BrowserManager>` map the agent factory populates, since chatty-core has no other path to chatty-gpui's UI layer) and streams `Page.startScreencast` frames (`screencast.rs`) into it — watching the agent drive the page live, not a one-shot screenshot. The panel forwards mouse/keyboard input over CDP (`input.rs`) so the user can type/click directly. A `ControlLock` (`control.rs`) arbitrates: the agent holds control by default and needs no permission to act, but the user can *take* control at any moment (no negotiation), which refuses mutating session actions (navigate, resize) with `BrowserError::ControlHeldByUser` until released — read-only tools (snapshot, screenshot, console, network) are never gated, since watching never collides. Each real take/release transition (AGE-156) is recorded in the activity trail as a synthetic, already-finished tool row (`ToolCallBlock::browser_control_handoff`, classified as its own `ToolKind::Handoff` so it tallies as "N browser handoffs" instead of files explored) — `ChatView::record_browser_control_change` decides whether the row joins the live streaming trace (mid-turn; the stream's own finalization persists it) or is appended straight to the last assistant message via `Conversation::append_trace_item_to_last_assistant` (post-turn; persisted immediately), so the view and the store never disagree about which path was taken. Chrome is not bundled: `provisioning.rs` prefers a cached pinned Chrome for Testing build, then an installed Chrome/Chromium/Edge at or above `MIN_CHROME_MAJOR`, then downloads the pinned build and verifies it against a SHA-256 committed in that file. Regenerate the pin with `scripts/pin-chrome.sh`. Platform cache paths:
   - **macOS**: `~/Library/Application Support/chatty/browsers/<version>/`
   - **Linux**: `~/.local/share/chatty/browsers/<version>/` or `$XDG_DATA_HOME/chatty/browsers/<version>/`
   - **Windows**: `%APPDATA%\chatty\browsers\<version>\`
 - **Transcript Rendering**: The desktop transcript renders conversation history as typed blocks (`crates/chatty-gpui/src/chatty/views/transcript/`) — turns, tool rows, diffs, plans, artifact cards, approvals, etc. — built from `MessageEntry` + `system_trace` JSON via `adapt_message()`/`adapt_messages()`. Persistence stays untyped in chatty-core; these typed block types live only in chatty-gpui. The list itself renders on gpui's `list`/`ListState`, not gpui-component's `v_virtual_list`: `List` measures each item as it lays it out and caches the result, so turn heights are an output, not a hand-estimated input (the old `TranscriptLayout` estimator was deleted along with every height constant it needed). Use `ListAlignment::Top`, not `Bottom` — `Bottom` re-nulls the scroll anchor every frame while pinned, so `bounds_for_item` returns `None` and the plan strip's measured geometry disappears; sticky-to-bottom is instead one line (anchor past the last item, let `layout_items` backfill). `set_scroll_handler`'s callback runs while `ListState`'s internal `RefCell` is mutably borrowed, so it may only set a flag — calling back into the list from inside it panics. `adapt_message()` emits a `Block::Plan` per message that called `write_todos`, but every plan block renders the same live conversation-level snapshot, so a follow-up turn that re-plans would otherwise paint the identical panel twice; `retain_last_plan_block()` (`transcript/adapter.rs`) keeps only the newest plan block per adapted turn list.
+- **Tool turns are persisted as rig produced them (AGE-247, D1 = b)**: a turn with tool calls persists every message rig recorded for it, in order — assistant tool-call message(s), user tool-result message(s), then the final assistant text — so the model sees its own tool activity on later turns. rig hands the list over on the final response (`PromptResponse.messages`); `llm_service` yields it as `StreamChunk::TurnMessages` before `Done`, each frontend parks it on the `Conversation` (`set_streaming_turn_messages`), and the turn's finalizer persists the tool round-trips ahead of the final text entry. On the streamed path that finalizer is `Conversation::finalize_turn` (AGE-243, both frontends), which delegates to the same `finalize_response_state` helper that `Conversation::finalize_response` uses for slash-command results — one ordering, not two that can drift. Both take the parked record, so a dropped turn discards it instead of leaking it into the next. Only the final text entry carries the trace JSON and attachments; tool entries carry neither, and `turn_tool_messages` cuts after the last tool result so no tool-call message is ever persisted without its result (OpenAI-compatible endpoints reject orphans). Payloads are kept whole; compaction bounds them (AGE-248). Readers that render, export or count turns skip tool messages via `services::is_tool_message` (transcript `load_history`, markdown/ATIF/JSONL exporters) and count *exchanges* with `services::exchange_count` (title trigger, `generate_title`), while regeneration (`remove_last_assistant_message`) pops the whole turn back to the user text message that started it.
+- **Token usage is per provider request, normalised once**: rig-agent's multi-turn stream emits a `CompletionCall` item per provider request and a `FinalResponse` with the turn's aggregate. `llm_service::normalize_usage` turns each into an `ApiCallUsage` (`models/token_usage.rs`) with `input_tokens` meaning the *uncached* prompt share, so `input + cache_read + cache_write` is the whole prompt whichever provider convention the numbers arrived in (OpenAI-compatible reports cached tokens inside `prompt_tokens`; Anthropic native reports them separately). The stream yields `StreamChunk::ApiCallUsage` per request and a final `StreamChunk::TokenUsage` aggregate; `StreamManager` builds the persisted `TokenUsage` from the per-call records (`TokenUsage::from_calls`, which is where `api_turn_count` comes from) and only falls back to the aggregate when no per-call record arrived. Cache hit rate is a per-request property, so never sum first and divide later. Each call is logged as `LLM completion call usage` with `hit_rate`; that log line is the prompt-caching diagnostic (AGE-207). Cost uses `TokenPricing`, with cache read/write rates from `ModelConfig` when set (OpenRouter sync fills them from `pricing.input_cache_read` / `input_cache_write`) and the input rate otherwise. OpenRouter agents are built from `completion_model(..).with_prompt_caching()` rather than `client.agent(..)`, since that is the only place rig's `cache_control` opt-in lives; that marks the system message (preamble + tools). The conversation history caches only if the *latest* message carries a breakpoint too, and rig's hooks cannot add one (`RequestPatch` merges `additional_params` at the top level, so `messages` cannot be patched), so the OpenRouter client is built on `PromptCachingHttpClient` (`factories/agent_factory/prompt_cache_http.rs`), a `reqwest` wrapper implementing rig's `HttpClientExt` that rewrites every `POST …/chat/completions` body to mark the last user/assistant message (AGE-205). Two breakpoints total, within Anthropic's limit of four. The moving one rewrites the previously-last message every turn, so on the OpenRouter path the request history is append-only only modulo `cache_control` markers: `session/append_only_prefix.rs` records both provider paths against a fake daemon and pins exactly that, and `agent_factory/cache_breakpoint_probe.rs` (ignored, needs `OPENROUTER_API_KEY`) measures against the real provider whether the marker counts as cached content (AGE-291). MCP connections are a `BTreeMap` so the tool block is byte-stable across restarts (AGE-206).
 - **Tool failure detection is text-based, not a flag**: the streamed `ToolResult` carries no error flag (rig's `is_error()` lives on `ToolExecutionResult`, which never reaches the stream), so `llm_service::tool_result_looks_like_error` recognizes a failure by sniffing the message text (`Error:` prefix, `"the tool failed"`, `"malformed JSON"`). `tools::mod::map_tool_error()` must keep writing that `Error: {tool_name}: {message}` prefix — dropping it once made every typed tool failure get filed as a success, with the error prose landing in `output` (a failed `compile_typst` minted an artifact card for a PDF that was never written). A test (`failures_are_recognisable_as_errors_downstream`) pins the two together; keep it green when touching either side.
+- **Repository conformance suite (AGE-280)**: `chatty_core::repositories::store_conformance` (behind the `test-support` feature, the same seam as `services::stream_fixtures`) exercises create/read/update/delete against any implementation of the settings repository traits (`define_single_json_repository!`/`define_list_json_repository!` in `settings/repositories/mod.rs`) or `ConversationRepository`, via a `single_settings_conformance!`/`list_settings_conformance!`-generated fn per trait plus `conformance_conversation`. Comparisons go through `serde_json::Value`, not `PartialEq`, so the suite needs no changes to the settings model structs. It's exported so an out-of-tree store-backed implementation (e.g. hive's) can run the identical suite from a dev-dependency and be proven equivalent to the JSON/SQLite backends shipped here; every JSON repository's `with_path` constructor and `ConversationSqliteRepository::with_path` exist only for this (`#[cfg(any(test, feature = "test-support"))]`). Replaces the deleted `InMemoryConversationRepository`.
+- **GitHub PR Status Bar**: `chatty_core::services::github_pr_service::resolve_pull_request` resolves the pull request whose head is the workspace's current branch — `gh` CLI first (already authenticated, works for private repos), REST API fallback (`GITHUB_TOKEN`/`GH_TOKEN` from env only, never persisted or logged). Every failure path (not a git repo, no GitHub remote, no PR for the branch, request error) resolves to `None`, never an error — the bar simply doesn't render. `PrStatusBarView` (`chatty-gpui/src/chatty/views/chat_input/pr_status_bar_view.rs`) owns its own poller (20s while CI is pending, 60s once settled) and is gated on `ExecutionSettingsModel::git_enabled`; `ChatView::sync_pr_status` only feeds it the current conversation ID and workspace path each frame. A `generation` counter bumped on every context change lets an in-flight poll's stale result be discarded rather than overwriting a newer context's state. Dismissal is keyed on `(conversation_id, pr_number)`, so it reappears if the branch/PR changes. chatty-tui's status bar (`ui/status_bar.rs`) surfaces the same PR number and CI state alongside the git branch.
 
 ## CI/CD
 
@@ -243,6 +249,16 @@ Alternative triggers:
 - **Manual release**: GitHub UI → Create Release → Release workflow runs standalone
 - **On `main`**: `/create-release patch` triggers `workflow_dispatch` directly
 
+**A merge only releases if the PR carried a release label.** The label is read
+from the merged pull request, so it must be on the PR *before* the merge —
+adding it afterwards does nothing, and neither does a plain merge of unlabeled
+work. When the gate rejects a merge, Prepare Release still shows a run: its
+conclusion is `skipped`, not `failure`. The gate also declines a PR whose head
+branch starts with `docs/` or that carries the `documentation` label, so
+docs-only work never cuts a version. To ship work that already landed
+unlabeled, merge any labeled follow-up PR — the changelog spans every commit
+since the last tag, so the earlier merge is picked up.
+
 ### Changelog Generation
 
 The Prepare Release workflow auto-generates release notes by parsing commits since the last tag:
@@ -253,6 +269,8 @@ The Prepare Release workflow auto-generates release notes by parsing commits sin
 The changelog becomes the GitHub Release body automatically.
 
 ## Idiomatic Patterns
+
+A curated human-readable version of these patterns is on the docs site: docs-site/src/dev/contributing-patterns.md.
 
 This section documents the common Rust and GPUI patterns used throughout the Chatty codebase.
 
@@ -722,54 +740,50 @@ cx.defer(move |cx| {
 
 **When to use**: Processing LLM response streams or other async iterators.
 
-**Pattern**: Use `async_stream::stream!` macro with pattern matching for clean stream processing.
+**Pattern**: Use `async_stream::stream!` with a single mapping function from rig's per-item stream to this app's `StreamChunk`s, rather than a macro duplicated per provider (AGE-210 replaced the old `process_agent_stream!` macro, which had two near-identical expansions, with `map_item`).
 
 ```rust
 // llm_service.rs
-macro_rules! process_agent_stream {
-    ($stream:expr) => {
-        Box::pin(async_stream::stream! {
-            while let Some(item) = $stream.next().await {
-                match item {
-                    Ok(StreamItem::Text(content)) => {
-                        yield Ok(StreamChunk::Text(content.text));
-                    }
-                    Ok(StreamItem::ToolCall(tool_call)) => {
-                        yield Ok(StreamChunk::ToolCallStarted {
-                            id: tool_call.id.clone(),
-                            name: tool_call.function.name.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        yield Ok(StreamChunk::Error(e.to_string()));
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            yield Ok(StreamChunk::Done);
-        })
-    };
+fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamChunk> {
+    match item {
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
+            vec![StreamChunk::Text(text.text)]
+        }
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+            vec![
+                StreamChunk::ToolCallStarted { id: /* resolve_call_id(..) */, name: tool_call.function.name.clone() },
+                StreamChunk::ToolCallInput { id: /* .. */, arguments: /* serialized args */ },
+            ]
+        }
+        MultiTurnStreamItem::FinalResponse(final_response) => {
+            // turn usage aggregate, plus TurnMessages when rig recorded the turn
+            vec![/* .. */]
+        }
+        // CompletionCall, StreamUserItem (tool result), etc.
+        _ => Vec::new(),
+    }
 }
 
-pub async fn stream_prompt(
-    agent: &AgentClient,
-    history: &[Message],
-    contents: Vec<UserContent>,
-) -> Result<(ResponseStream, Message)> {
-    let stream = match agent {
-        AgentClient::Anthropic(agent) => {
-            let mut stream = agent
-                .stream_prompt(user_message.clone())
-                .with_history(history.to_vec())
-                .multi_turn(10)
-                .await;
-            process_agent_stream!(stream)
+pub async fn stream_prompt(agent: &AgentClient, history: Vec<Message>, /* .. */) -> Result<ResponseStream> {
+    let mut agent_stream = agent.agent.stream_prompt(user_message).history(history).max_turns(max_agent_turns).await;
+
+    Ok(Box::pin(async_stream::stream! {
+        loop {
+            tokio::select! {
+                item = agent_stream.next() => match item {
+                    Some(result) => {
+                        // map_stream_result: Ok(item) -> map_item(item, semantics);
+                        // Err(e) -> classify_streaming_error(e) into a typed StreamErrorKind (AGE-244)
+                        let (chunks, stop) = map_stream_result(result, semantics);
+                        for chunk in chunks { yield Ok(chunk); }
+                        if stop { return; }
+                    }
+                    None => { yield Ok(StreamChunk::Done); return; }
+                },
+                // .. approval / resolution / clarification channels
+            }
         }
-        // ... other providers
-    };
-    
-    Ok((stream, user_message))
+    }))
 }
 ```
 
@@ -800,19 +814,24 @@ send_message() ──► StreamManager ──► StreamManagerEvent ──► ha
 pub enum StreamStatus { Active, Completed, Cancelled, Error(String) }
 
 pub struct StreamState {
-    response_text: String,
-    status: StreamStatus,
-    token_usage: Option<(u32, u32)>,
-    trace_json: Option<serde_json::Value>,
+    epoch: u64,                            // registration epoch; a stale StreamEnded is ignored
+    pub status: StreamStatus,
+    pub token_usage: Option<TokenUsage>,   // built from `calls` once the aggregate arrives
+    calls: Vec<ApiCallUsage>,              // one record per provider request, in order
+    pub trace_json: Option<serde_json::Value>,
     task: Option<Task<anyhow::Result<()>>>,
     cancel_flag: Arc<AtomicBool>,
+    pending_artifacts: Option<PendingArtifacts>, // queued by AddAttachmentTool, drained on finalize
+    has_emitted_first_chunk: bool,         // first text chunk goes out immediately, later ones batched
+    // ... plus the text-batching buffer and its flush timer
 }
 
 pub enum StreamManagerEvent {
     StreamStarted { conversation_id },
     TextChunk { conversation_id, text },
     ToolCallStarted { conversation_id, id, name },
-    // ... 8 more variants
+    TokenUsage { conversation_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens },
+    // ... 7 more variants
     StreamEnded { conversation_id, status, response_text, token_usage, trace_json },
 }
 ```
@@ -896,20 +915,45 @@ Model capabilities (image/PDF/temperature support) are stored in two complementa
 
 **Purpose**: Provides default capability values when creating new models.
 
+`ProviderType` has three variants today — `OpenRouter`, `Ollama`, and
+`AzureOpenAI`. The former per-provider variants (`OpenAI`, `Anthropic`,
+`Gemini`, `Mistral`) were removed because OpenRouter now fronts all of those
+providers as a single gateway client; each removed variant carries a serde
+`alias` onto `OpenRouter` so existing stored JSON with the old variant names
+keeps deserializing without a migration step.
+
 **Implementation**:
 ```rust
+#[serde(rename_all = "snake_case")]
+pub enum ProviderType {
+    /// OpenRouter — gateway to 200+ models (Anthropic, Google, Mistral, Meta, etc.)
+    /// Accepts legacy JSON values from removed provider variants for backward compatibility.
+    #[serde(
+        alias = "open_ai",
+        alias = "open_a_i",
+        alias = "anthropic",
+        alias = "gemini",
+        alias = "mistral"
+    )]
+    OpenRouter,
+    Ollama,
+    #[serde(rename = "azure_openai")]
+    AzureOpenAI,
+}
+
 impl ProviderType {
     pub fn default_capabilities(&self) -> (bool, bool) {
         match self {
-            ProviderType::Anthropic => (true, true),   // Images + PDFs
-            ProviderType::Gemini => (true, true),      // Images + PDFs
-            ProviderType::OpenAI => (true, false),     // Images only (PDF lossy)
-            ProviderType::Ollama => (false, false),    // Per-model detection
-            ProviderType::Mistral => (false, false),   // No multimodal support
+            // OpenRouter is a gateway to multimodal models (Anthropic, Google, etc.)
+            ProviderType::OpenRouter => (true, true),   // Images + PDFs
+            ProviderType::AzureOpenAI => (true, false), // Images only (PDF lossy)
+            ProviderType::Ollama => (false, false),     // Per-model detection
         }
     }
 }
 ```
+
+`ProviderType` has exactly these three variants (`crates/chatty-core/src/settings/models/providers_store.rs`). The removed direct providers (`anthropic`, `gemini`, `mistral`, `open_ai`) survive only as serde aliases that deserialize to `OpenRouter`, so old settings files still load.
 
 **Used in**:
 - `models_controller.rs`: When creating new models
@@ -975,9 +1019,9 @@ Ollama models have **per-model** capabilities that are dynamically detected:
 
 ### Adding New Providers
 
-When adding a new provider (e.g., "Cohere"):
+Most new models need no new provider: OpenRouter already fronts Anthropic, Google, Mistral, Meta and others, so prefer adding the model under `ProviderType::OpenRouter`. A genuinely new backend (its own API shape, like Azure) needs:
 
-1. Add variant to `ProviderType` enum
+1. Add variant to `ProviderType` enum (with `display_name()` and a stable serde name)
 2. Update `ProviderType::default_capabilities()` with provider defaults
 3. ModelConfig automatically inherits these defaults via `create_model()` controller
 
@@ -1073,24 +1117,22 @@ To enable filesystem tools:
 
 ## Security Practices
 
-### Sensitive Env Var Masking
+### MCP API Key Masking
 
-MCP server env vars may contain API keys, tokens, and other secrets. The LLM must never see real values.
+`McpServerConfig` (`crates/chatty-core/src/settings/models/mcp_store.rs`) describes an already-running MCP endpoint: `name`, `url`, `api_key: Option<String>` (sent as `Authorization: Bearer …`), `enabled`, `is_module`. There is no env-var map; the API key is the only secret. The LLM must never see its value.
 
-**Rule**: Any path that sends `McpServerConfig` data to the LLM **must** call `masked_env()` instead of accessing `.env` directly.
+**Rule**: Any path that sends `McpServerConfig` data to the LLM reports `has_api_key()` (a `bool`), never the `api_key` field.
 
 ```rust
-// WRONG — sends real secrets to the LLM
-let env = server.env.clone();
+// WRONG — sends the real secret to the LLM
+let key = server.api_key.clone();
 
-// CORRECT — masks sensitive values before LLM sees them
-let env = server.masked_env(); // KEY/TOKEN/SECRET/etc. → "****"
+// CORRECT — only whether a key is configured
+let has_api_key = server.has_api_key();
 ```
 
-**Sensitive key detection** (`is_sensitive_env_key` in `mcp_store.rs`): matches keys containing KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL, AUTH, or API (case-insensitive).
-
 **Where masking is applied today:**
-- `list_mcp_services` tool output (`McpServerSummary.env`)
+- `list_mcp_services` tool output (`McpServerSummary.has_api_key`, `tools/list_mcp_tool.rs`; `test_list_masks_api_key` pins it)
 
 **Where masking must be added if new LLM-facing surfaces are added:**
 - Any future tool that returns `McpServerConfig` data
@@ -1099,41 +1141,40 @@ let env = server.masked_env(); // KEY/TOKEN/SECRET/etc. → "****"
 
 ### Masked Sentinel Preservation
 
-`MASKED_VALUE_SENTINEL = "****"` means "preserve the existing stored value". This is implemented in `edit_mcp_service`:
+`MASKED_API_KEY_SENTINEL = "****"` (`mcp_store.rs`) means "preserve the existing stored value". Any write path that accepts an API key from the LLM must resolve it:
 
 ```rust
 // If LLM sends back "****", keep the real stored value — don't overwrite
-if v == MASKED_VALUE_SENTINEL {
-    let existing = server.env.get(&k).cloned().unwrap_or_default();
-    (k, existing)
+let api_key = if incoming.as_deref() == Some(MASKED_API_KEY_SENTINEL) {
+    existing.api_key.clone()
 } else {
-    (k, v)  // LLM sent a new real value — store it
-}
+    incoming // LLM sent a new real value — store it
+};
 ```
 
-**If a new tool accepts env vars as input** (e.g., a future `patch_mcp_service`), apply the same sentinel resolution pattern.
+**If a new tool accepts an API key as input**, apply the same sentinel resolution pattern, and hold `MCP_WRITE_LOCK` (same file) around load → modify → save so concurrent tool calls cannot race.
 
-**If adding a new server** (`add_mcp_service`): reject `****` values with a clear error — there is no existing value to preserve.
+**If adding a new server**: reject `****` with a clear error — there is no existing value to preserve.
 
 ### Logging Rules
 
-Never log sensitive values. Log key *names* only.
+Never log sensitive values. Log presence, not the key.
 
 ```rust
 // WRONG
-tracing::info!(env = ?server.env, "Server configured");
+tracing::info!(api_key = ?server.api_key, "Server configured");
 
 // CORRECT
-tracing::info!(env_keys = ?server.env.keys().collect::<Vec<_>>(), "Server configured");
+tracing::info!(has_api_key = server.has_api_key(), "Server configured");
 ```
 
 ### New LLM-Facing Output Structs
 
 When adding a new `#[derive(Serialize)]` struct that will be returned as tool output:
 
-1. If it wraps `McpServerConfig`, use `masked_env()` — never `.env`
+1. If it wraps `McpServerConfig`, expose `has_api_key` — never `api_key`
 2. If it includes any `ProviderConfig` fields, exclude `api_key` (it is never exposed to the LLM)
-3. Add a test that the output contains `"****"` for a server with a real API key
+3. Add a test that the output for a server with a real API key does not contain the key
 
 ### Where Real Values Are Safe
 
@@ -1141,6 +1182,6 @@ These paths use raw (unmasked) values intentionally:
 
 | Location | Why raw values are safe |
 |:---------|:------------------------|
-| `McpService::start_server` | Sets env vars on child process, never sent to LLM |
-| `mcp_json_repository` | Disk persistence, private config directory |
+| `McpService::connect` (`services/mcp_service.rs`) | Sets the bearer auth header on the HTTP transport, never sent to LLM |
+| `McpRepository` (`settings/repositories/`) | Disk persistence, private config directory |
 | `providers_store.rs` → disk | API keys for LLM API auth, private storage only |

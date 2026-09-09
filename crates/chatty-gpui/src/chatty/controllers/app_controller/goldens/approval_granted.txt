@@ -3,6 +3,6 @@ ToolCallStarted(id="call-1", "run_shell")
 ApprovalRequested(id="approval-1", "rm -rf build", sandboxed=false)
 ApprovalResolved(id="approval-1", approved=true)
 ToolCallResult(id="call-1", "removed 'build'")
-StreamEnded(status=Completed, usage=None, api_turns=2)
+StreamEnded(status=Completed, usage=None)
 => loop returned Ok
 => no follow-up

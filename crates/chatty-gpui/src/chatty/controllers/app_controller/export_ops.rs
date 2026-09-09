@@ -133,6 +133,10 @@ impl ChattyApp {
         let title = conv.title().to_string();
         let mut markdown = format!("# {title}\n\n");
         for entry in conv.entries() {
+            // Tool round-trips are rendered from the trace (AGE-247).
+            if chatty_core::services::is_tool_message(&entry.message) {
+                continue;
+            }
             let trace_json = entry.system_trace.as_ref();
 
             match &entry.message {
@@ -212,185 +216,136 @@ impl ChattyApp {
         })
         .detach();
     }
+}
 
-    /// Export a conversation as ATIF JSON to the exports directory.
-    ///
-    /// Builds ConversationData from the store, looks up the ModelConfig for
-    /// provider metadata, converts to ATIF, and writes the file asynchronously.
-    pub(super) fn export_conversation_atif(&self, conv_id: &str, cx: &mut Context<Self>) {
-        let conv_id = conv_id.to_string();
-
-        // Build ConversationData and get the model config (same data as persist_conversation)
-        let export_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store
-                .get_conversation(&conv_id)
-                .and_then(build_conversation_data)
-        });
-
-        let Some(conv_data) = export_data else {
-            warn!(conv_id = %conv_id, "Cannot export ATIF: conversation not found");
+/// Convert `conv_data` to ATIF and write it to the exports directory.
+///
+/// Takes an already-built `ConversationData` (shared with the SQLite save
+/// and the JSONL export) rather than rebuilding it, so a turn's history and
+/// traces are serialized once, not once per consumer (finding F3, AGE-220).
+pub(super) async fn write_atif_export(
+    conv_id: &str,
+    conv_data: &ConversationData,
+    model_config: Option<&ModelConfig>,
+) {
+    // Convert to ATIF
+    let atif_json = match conversation_to_atif(conv_data, model_config) {
+        Ok(json) => json,
+        Err(e) => {
+            warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to ATIF");
             return;
-        };
+        }
+    };
 
-        // Look up ModelConfig for provider metadata
-        let model_config: Option<ModelConfig> = cx
-            .global::<ModelsModel>()
-            .get_model(&conv_data.model_id)
-            .cloned();
+    // Determine exports directory
+    let exports_dir = match dirs::config_dir() {
+        Some(config) => config.join("chatty").join("exports"),
+        None => {
+            warn!("Cannot determine config directory for ATIF export");
+            return;
+        }
+    };
 
-        cx.spawn(async move |_, _cx| {
-            // Convert to ATIF
-            let atif_json = match conversation_to_atif(&conv_data, model_config.as_ref()) {
-                Ok(json) => json,
-                Err(e) => {
-                    warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to ATIF");
-                    return Ok::<_, anyhow::Error>(());
-                }
-            };
-
-            // Determine exports directory
-            let exports_dir = match dirs::config_dir() {
-                Some(config) => config.join("chatty").join("exports"),
-                None => {
-                    warn!("Cannot determine config directory for ATIF export");
-                    return Ok(());
-                }
-            };
-
-            // Create exports directory if needed
-            if let Err(e) = tokio::fs::create_dir_all(&exports_dir).await {
-                warn!(error = ?e, "Failed to create ATIF exports directory");
-                return Ok(());
-            }
-
-            // Write atomically using temp file + rename
-            let file_path = exports_dir.join(format!("{}.atif.json", conv_id));
-            let temp_path = file_path.with_extension(format!("json.{}.tmp", std::process::id()));
-
-            let json_str = match serde_json::to_string_pretty(&atif_json) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(error = ?e, conv_id = %conv_id, "Failed to serialize ATIF JSON");
-                    return Ok(());
-                }
-            };
-
-            if let Err(e) = tokio::fs::write(&temp_path, &json_str).await {
-                warn!(error = ?e, conv_id = %conv_id, "Failed to write ATIF temp file");
-                return Ok(());
-            }
-
-            if let Err(e) = tokio::fs::rename(&temp_path, &file_path).await {
-                warn!(error = ?e, conv_id = %conv_id, "Failed to rename ATIF temp file");
-                return Ok(());
-            }
-
-            debug!(
-                conv_id = %conv_id,
-                path = %file_path.display(),
-                "ATIF export saved"
-            );
-
-            Ok(())
-        })
-        .detach();
+    // Create exports directory if needed
+    if let Err(e) = tokio::fs::create_dir_all(&exports_dir).await {
+        warn!(error = ?e, "Failed to create ATIF exports directory");
+        return;
     }
 
-    /// Export a conversation as JSONL (SFT + DPO) to the exports directory.
-    ///
-    /// Builds ConversationData from the store, converts to SFT and DPO JSONL lines,
-    /// and appends to sft.jsonl and dpo.jsonl with deduplication by _conversation_id.
-    pub(super) fn export_conversation_jsonl(&self, conv_id: &str, cx: &mut Context<Self>) {
-        let conv_id = conv_id.to_string();
+    // Write atomically using temp file + rename
+    let file_path = exports_dir.join(format!("{}.atif.json", conv_id));
+    let temp_path = file_path.with_extension(format!("json.{}.tmp", std::process::id()));
 
-        // Build ConversationData (same pattern as export_conversation_atif)
-        let export_data = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-            store
-                .get_conversation(&conv_id)
-                .and_then(build_conversation_data)
-        });
-
-        let Some(conv_data) = export_data else {
-            warn!(conv_id = %conv_id, "Cannot export JSONL: conversation not found");
+    let json_str = match serde_json::to_string_pretty(&atif_json) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = ?e, conv_id = %conv_id, "Failed to serialize ATIF JSON");
             return;
-        };
+        }
+    };
 
-        // Look up ModelConfig for system prompt
-        let model_config: Option<ModelConfig> = cx
-            .global::<ModelsModel>()
-            .get_model(&conv_data.model_id)
-            .cloned();
-
-        cx.spawn(async move |_, _cx| {
-            // Convert to SFT
-            let sft_options = SftExportOptions::default();
-            let sft_line =
-                match conversation_to_sft_jsonl(&conv_data, model_config.as_ref(), &sft_options) {
-                    Ok(line) => line,
-                    Err(e) => {
-                        warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to SFT JSONL");
-                        None
-                    }
-                };
-
-            // Convert to DPO
-            let dpo_lines = match conversation_to_dpo_jsonl(&conv_data, model_config.as_ref()) {
-                Ok(lines) => lines,
-                Err(e) => {
-                    warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to DPO JSONL");
-                    Vec::new()
-                }
-            };
-
-            // Determine exports directory
-            let exports_dir = match dirs::config_dir() {
-                Some(config) => config.join("chatty").join("exports"),
-                None => {
-                    warn!("Cannot determine config directory for JSONL export");
-                    return Ok::<_, anyhow::Error>(());
-                }
-            };
-
-            if let Err(e) = tokio::fs::create_dir_all(&exports_dir).await {
-                warn!(error = ?e, "Failed to create JSONL exports directory");
-                return Ok(());
-            }
-
-            // Append SFT line with dedup
-            let has_sft = sft_line.is_some();
-            if let Some(sft_val) = sft_line
-                && let Err(e) = append_jsonl_with_dedup(
-                    &exports_dir.join("sft.jsonl"),
-                    &[sft_val],
-                    &conv_id,
-                )
-                .await
-            {
-                warn!(error = ?e, conv_id = %conv_id, "Failed to write SFT JSONL");
-            }
-
-            // Append DPO lines with dedup
-            let dpo_count = dpo_lines.len();
-            if !dpo_lines.is_empty()
-                && let Err(e) = append_jsonl_with_dedup(
-                    &exports_dir.join("dpo.jsonl"),
-                    &dpo_lines,
-                    &conv_id,
-                )
-                .await
-            {
-                warn!(error = ?e, conv_id = %conv_id, "Failed to write DPO JSONL");
-            }
-
-            debug!(
-                conv_id = %conv_id,
-                has_sft = has_sft,
-                dpo_count = dpo_count,
-                "JSONL export saved"
-            );
-
-            Ok(())
-        })
-        .detach();
+    if let Err(e) = tokio::fs::write(&temp_path, &json_str).await {
+        warn!(error = ?e, conv_id = %conv_id, "Failed to write ATIF temp file");
+        return;
     }
+
+    if let Err(e) = tokio::fs::rename(&temp_path, &file_path).await {
+        warn!(error = ?e, conv_id = %conv_id, "Failed to rename ATIF temp file");
+        return;
+    }
+
+    debug!(
+        conv_id = %conv_id,
+        path = %file_path.display(),
+        "ATIF export saved"
+    );
+}
+
+/// Convert `conv_data` to SFT and DPO JSONL lines and append them to the
+/// exports directory (deduplicated by conversation id).
+///
+/// Takes an already-built `ConversationData` (shared with the SQLite save
+/// and the ATIF export) rather than rebuilding it (finding F3, AGE-220).
+pub(super) async fn write_jsonl_export(
+    conv_id: &str,
+    conv_data: &ConversationData,
+    model_config: Option<&ModelConfig>,
+) {
+    // Convert to SFT
+    let sft_options = SftExportOptions::default();
+    let sft_line = match conversation_to_sft_jsonl(conv_data, model_config, &sft_options) {
+        Ok(line) => line,
+        Err(e) => {
+            warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to SFT JSONL");
+            None
+        }
+    };
+
+    // Convert to DPO
+    let dpo_lines = match conversation_to_dpo_jsonl(conv_data, model_config) {
+        Ok(lines) => lines,
+        Err(e) => {
+            warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to DPO JSONL");
+            Vec::new()
+        }
+    };
+
+    // Determine exports directory
+    let exports_dir = match dirs::config_dir() {
+        Some(config) => config.join("chatty").join("exports"),
+        None => {
+            warn!("Cannot determine config directory for JSONL export");
+            return;
+        }
+    };
+
+    if let Err(e) = tokio::fs::create_dir_all(&exports_dir).await {
+        warn!(error = ?e, "Failed to create JSONL exports directory");
+        return;
+    }
+
+    // Append SFT line with dedup
+    let has_sft = sft_line.is_some();
+    if let Some(sft_val) = sft_line
+        && let Err(e) =
+            append_jsonl_with_dedup(&exports_dir.join("sft.jsonl"), &[sft_val], conv_id).await
+    {
+        warn!(error = ?e, conv_id = %conv_id, "Failed to write SFT JSONL");
+    }
+
+    // Append DPO lines with dedup
+    let dpo_count = dpo_lines.len();
+    if !dpo_lines.is_empty()
+        && let Err(e) =
+            append_jsonl_with_dedup(&exports_dir.join("dpo.jsonl"), &dpo_lines, conv_id).await
+    {
+        warn!(error = ?e, conv_id = %conv_id, "Failed to write DPO JSONL");
+    }
+
+    debug!(
+        conv_id = %conv_id,
+        has_sft = has_sft,
+        dpo_count = dpo_count,
+        "JSONL export saved"
+    );
 }

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
 use crate::services::filesystem_service::FileSystemService;
+use crate::settings::models::execution_settings::ApprovalMode;
 
 use super::ExcelToolError;
 use super::parsing::{build_format, parse_cell_ref, parse_range, write_cell_value};
@@ -84,13 +85,19 @@ pub struct WriteExcelOutput {
 #[derive(Clone)]
 pub struct WriteExcelTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl WriteExcelTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -319,6 +326,7 @@ impl Tool for WriteExcelTool {
         // Request approval
         let approved = request_write_approval(
             &self.pending_approvals,
+            &self.approval_mode,
             WriteOperation::WriteFile {
                 path: canonical.display().to_string(),
                 is_overwrite,
