@@ -449,11 +449,6 @@ impl ListToolsTool {
             mcp_tools,
         }
     }
-
-    /// Create a new ListToolsTool (for backward compatibility)
-    pub fn new() -> Self {
-        Self::new_with_config(&ToolAvailability::default(), Vec::new())
-    }
 }
 
 impl Tool for ListToolsTool {
@@ -535,12 +530,6 @@ impl Tool for ListToolsTool {
     }
 }
 
-impl Default for ListToolsTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_has_list_tools_and_read_skill() {
-        let tool = ListToolsTool::new();
+        let tool = ListToolsTool::new_with_config(&ToolAvailability::default(), Vec::new());
         let output = tool
             .call(&mut ToolContext::new(), ListToolsArgs {})
             .await

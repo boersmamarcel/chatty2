@@ -154,7 +154,7 @@ If the server answers with a `Content-Type` other than `text/event-stream`, the 
 
 The host–guest interface is
 [`wit/chatty-module.wit`](https://github.com/boersmamarcel/chatty2/blob/main/wit/chatty-module.wit)
-(package `chatty:module@0.1.0`); [wit-reference.md](wit-reference.md) has the full
+(package `chatty:module@0.2.0`); [wit-reference.md](wit-reference.md) has the full
 type reference.
 
 **Host imports** (what the host provides to the module):
