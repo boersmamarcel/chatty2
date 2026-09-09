@@ -1,4 +1,5 @@
 mod azure_auth_http;
+mod build_context;
 #[cfg(test)]
 mod cache_breakpoint_probe;
 mod mcp_helpers;
@@ -17,10 +18,8 @@ use rig_agent::completion::Prompt;
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
-use crate::services::memory_service::MemoryService;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
-use crate::services::skill_service::SkillService;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
@@ -31,10 +30,10 @@ use crate::tools::{
     FinalAnswerTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool,
     GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
-    LocalModuleAgentSummary, MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool,
-    ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool,
-    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, UpdateTodoTool,
-    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
+    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
+    ShellSetEnvTool, ShellStatusTool, UpdateTodoTool, VerifyCompletionTool, WriteFileTool,
+    WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -52,6 +51,7 @@ use preamble_builder::build_preamble;
 use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
+pub use build_context::{AgentBuildContext, AgentServices, gated_exec_settings};
 pub use tool_registry::ToolAvailability;
 
 fn doc_retriever_enabled() -> bool {
@@ -155,40 +155,6 @@ fn get_or_build_search_service(workspace_dir: &str) -> Result<std::sync::Arc<Cod
 enum PendingGitService {
     Cached(std::sync::Arc<GitService>),
     Spawned(tokio::task::JoinHandle<Result<GitService>>),
-}
-
-/// Contextual dependencies for building an agent.
-///
-/// Groups the many optional services and settings needed by
-/// `AgentClient::from_model_config_with_tools()` and `Conversation::new/from_data()`.
-pub struct AgentBuildContext {
-    pub mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
-    pub exec_settings: Option<crate::settings::models::ExecutionSettingsModel>,
-    pub pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
-    pub pending_clarifications: Option<crate::models::clarification_store::PendingClarifications>,
-    pub pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
-    /// Sink for artifacts (e.g. attachments) queued mid-stream by tools like
-    /// `AddAttachmentTool`, so the desktop transcript can mint a card for
-    /// them. Always `None` from chatty-tui, which has no artifact viewport.
-    pub pending_artifacts: Option<PendingArtifacts>,
-    pub shell_session: Option<std::sync::Arc<ShellSession>>,
-    pub user_secrets: Vec<(String, String)>,
-    /// Theme palette handed to `CreateChartTool` so generated charts match
-    /// the desktop app's theme. Always `None` from chatty-tui, which has no
-    /// themed chart rendering.
-    pub theme_colors: Option<[String; 5]>,
-    pub memory_service: Option<MemoryService>,
-    pub skill_service: Option<SkillService>,
-    pub search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
-    pub embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
-    pub module_agents: Vec<LocalModuleAgentSummary>,
-    pub gateway_port: Option<u16>,
-    pub remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
-    /// Conversation this turn belongs to. Only consulted when the `browser`
-    /// feature is on, to register the built `BrowserManager` where the
-    /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
-    /// else (e.g. chatty-tui, which doesn't enable that feature).
-    pub conversation_id: Option<String>,
 }
 
 /// Result of `AgentClient::from_model_config_with_tools()`: the built client

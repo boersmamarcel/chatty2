@@ -45,7 +45,7 @@ use parking_lot::Mutex;
 use similar::TextDiff;
 
 use super::*;
-use crate::factories::agent_factory::AgentBuildContext;
+use crate::factories::agent_factory::{AgentBuildContext, AgentServices};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 
@@ -330,25 +330,10 @@ async fn session_with(
             "New Chat".to_string(),
             model_config,
             provider_config,
-            AgentBuildContext {
-                mcp_tools: None,
+            AgentBuildContext::from_services(AgentServices {
                 exec_settings: Some(settings),
-                pending_approvals: None,
-                pending_clarifications: None,
-                pending_write_approvals: None,
-                pending_artifacts: None,
-                shell_session: None,
-                user_secrets: Vec::new(),
-                theme_colors: None,
-                memory_service: None,
-                skill_service: None,
-                search_settings: None,
-                embedding_service: None,
-                module_agents: Vec::new(),
-                gateway_port: None,
-                remote_agents: Vec::new(),
-                conversation_id: None,
-            },
+                ..AgentServices::default()
+            }),
         )
         .await
         .expect("the fixture conversation builds");

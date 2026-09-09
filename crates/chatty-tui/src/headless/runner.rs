@@ -13,6 +13,9 @@
 //! the human-readable log and nothing else.
 
 use anyhow::{Context, Result};
+use chatty_core::factories::agent_factory::{
+    AgentBuildContext, AgentServices, gated_exec_settings,
+};
 use chatty_core::models::TurnOutcome;
 use chatty_core::services::StreamSurface;
 use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
@@ -21,7 +24,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::engine::{AgentContextInputs, ChatEngineConfig, Transcript, build_agent_context};
+use crate::engine::{ChatEngineConfig, Transcript};
 use crate::events::AppEvent;
 
 /// Takes the turn's events as they happen.
@@ -85,18 +88,24 @@ impl HeadlessRunner {
             Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
             None => None,
         };
-        let mut ctx = build_agent_context(AgentContextInputs {
-            execution_settings: &self.execution_settings,
-            module_settings: &self.config.module_settings,
-            user_secrets: &self.config.user_secrets,
-            memory_service: &self.config.memory_service,
-            skill_service: &self.skill_service,
-            search_settings: &self.config.search_settings,
-            embedding_service: &self.config.embedding_service,
-            remote_agents: &self.config.remote_agents,
-            module_agents: &self.config.module_agents,
-        });
-        ctx.mcp_tools = mcp_tools;
+        let ctx = AgentBuildContext {
+            mcp_tools,
+            ..AgentBuildContext::from_services(AgentServices {
+                exec_settings: gated_exec_settings(&self.execution_settings),
+                user_secrets: self.config.user_secrets.clone(),
+                memory_service: self.config.memory_service.clone(),
+                skill_service: Some(self.skill_service.clone()),
+                search_settings: self.config.search_settings.clone(),
+                embedding_service: self.config.embedding_service.clone(),
+                module_agents: self.config.module_agents.clone(),
+                gateway_port: self
+                    .config
+                    .module_settings
+                    .enabled
+                    .then_some(self.config.module_settings.gateway_port),
+                remote_agents: self.config.remote_agents.clone(),
+            })
+        };
 
         self.session
             .create_conversation(

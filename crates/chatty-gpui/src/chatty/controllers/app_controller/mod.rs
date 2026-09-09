@@ -38,7 +38,7 @@ use chatty_core::exporters::jsonl_exporter::{
     SftExportOptions, append_jsonl_with_dedup, conversation_to_dpo_jsonl, conversation_to_sft_jsonl,
 };
 use chatty_core::factories::AgentClient;
-use chatty_core::factories::agent_factory::AgentBuildContext;
+use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
 use chatty_core::repositories::{ConversationData, ConversationRepository};
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind, turn_transport,
@@ -333,22 +333,20 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     // own session stores (AGE-272).
     let ctx = AgentBuildContext {
         mcp_tools,
-        exec_settings,
-        pending_approvals: None,
-        pending_clarifications: None,
-        pending_write_approvals: None,
-        pending_artifacts: None,
         shell_session,
-        user_secrets,
         theme_colors,
-        memory_service,
-        skill_service: Some(skill_service),
-        search_settings,
-        embedding_service,
-        module_agents,
-        gateway_port,
-        remote_agents,
         conversation_id: Some(conv_id.clone()),
+        ..AgentBuildContext::from_services(AgentServices {
+            exec_settings,
+            user_secrets,
+            memory_service,
+            skill_service: Some(skill_service),
+            search_settings,
+            embedding_service,
+            module_agents,
+            gateway_port,
+            remote_agents,
+        })
     };
     let Some(ctx) = cx
         .update(|cx| {
