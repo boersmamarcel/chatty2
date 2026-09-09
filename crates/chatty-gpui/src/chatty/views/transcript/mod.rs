@@ -58,7 +58,7 @@ pub use activity::{ActivityGroup, RunTally, classify_tool};
 pub use adapter::{
     COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
     adapt_messages_with_traces, attach_plan_block, block_visible_in_turn, format_worked_for,
-    format_working_for, plan_turn_index, turn_has_work_fold,
+    format_working_for, plan_turn_index, retain_last_plan_block, turn_has_work_fold,
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;

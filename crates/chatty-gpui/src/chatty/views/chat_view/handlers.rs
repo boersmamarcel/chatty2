@@ -17,7 +17,7 @@
 //!
 //! - Streaming text deltas — see `append_assistant_text` in `mod.rs`.
 //! - History loading / sub-agent progress — see `history.rs` and
-//!   `sub_agent.rs`.
+//!   `delegation.rs`.
 //! - The `Render` path — `mod.rs`.
 
 use gpui::*;
@@ -25,13 +25,13 @@ use std::time::SystemTime;
 use tracing::{debug, trace, warn};
 
 use super::super::message_types::{
-    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, ThinkingBlock,
-    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
+    ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
     classify_initial_execution_engine, detect_execution_engine, friendly_tool_name,
     is_denial_result, predict_execution_engine,
 };
 use super::super::trace_components::SystemTraceView;
-use super::{ChatView, PendingApprovalInfo, PendingClarificationInfo};
+use super::{ChatView, ChatViewEvent, PendingApprovalInfo, PendingClarificationInfo};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::chatty::views::transcript::ChosenOption;
 use crate::chatty::views::transcript::{attachment_image_path, extract_table_preview};
@@ -39,6 +39,93 @@ use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQu
 use std::collections::HashMap;
 
 impl ChatView {
+    /// Record a browser control handoff (AGE-156) in the activity trail of
+    /// the parent assistant message, as a synthetic finished tool row.
+    ///
+    /// Mid-stream the row goes onto `live_trace`, where the stream's own
+    /// finalization persists it. After the stream has settled the row goes
+    /// straight into that message's `SystemTraceView`, and the emitted
+    /// event asks the controller to persist it. With no assistant message
+    /// yet there is nothing to attach it to, so it is dropped.
+    pub(super) fn record_browser_control_change(
+        &mut self,
+        taken: bool,
+        url: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let item = ToolCallBlock::browser_control_handoff(taken, url);
+
+        if let Some(idx) = self.parent_streaming_assistant_index() {
+            let msg = &mut self.messages[idx];
+            let trace = msg.live_trace.get_or_insert_with(SystemTrace::new);
+            trace.add_tool_call(item.clone());
+            let trace_clone = trace.clone();
+            match msg.system_trace_view.as_ref() {
+                Some(view_entity) => view_entity.update(cx, |view, cx| {
+                    view.update_trace(trace_clone, cx);
+                    cx.notify();
+                }),
+                None => {
+                    let trace_view = cx.new(|_cx| SystemTraceView::new(trace_clone));
+                    self.subscribe_trace_view(&trace_view, cx);
+                    self.messages[idx].system_trace_view = Some(trace_view);
+                }
+            }
+            cx.emit(ChatViewEvent::BrowserControlChanged {
+                item: Box::new(item),
+                streaming: true,
+            });
+        } else if let Some(idx) = self.parent_assistant_index() {
+            let msg = &mut self.messages[idx];
+            match msg.system_trace_view.as_ref() {
+                Some(view_entity) => view_entity.update(cx, |view, cx| {
+                    let mut trace = view.get_trace().clone();
+                    trace.add_tool_call(item.clone());
+                    view.update_trace(trace, cx);
+                    cx.notify();
+                }),
+                None => {
+                    let mut trace = SystemTrace::new();
+                    trace.add_tool_call(item.clone());
+                    let trace_view = cx.new(|_cx| SystemTraceView::new(trace));
+                    self.subscribe_trace_view(&trace_view, cx);
+                    self.messages[idx].system_trace_view = Some(trace_view);
+                }
+            }
+            cx.emit(ChatViewEvent::BrowserControlChanged {
+                item: Box::new(item),
+                streaming: false,
+            });
+        } else {
+            debug!(
+                taken,
+                "browser control changed with no assistant message to record it on"
+            );
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Forward a trace view's events (expand/collapse, approvals) back to
+    /// this chat view, the same way `handle_tool_call_started` wires the
+    /// views it creates.
+    fn subscribe_trace_view(&self, trace_view: &Entity<SystemTraceView>, cx: &mut Context<Self>) {
+        let chat_view_entity = cx.entity();
+        cx.subscribe(
+            trace_view,
+            move |_chat_view, _trace_view, event: &super::super::message_types::TraceEvent, cx| {
+                let event_clone = event.clone();
+                let chat_view = chat_view_entity.clone();
+                cx.defer(move |cx| {
+                    chat_view.update(cx, |chat_view, cx| {
+                        chat_view.handle_trace_event(&event_clone, cx);
+                    });
+                });
+            },
+        )
+        .detach();
+    }
+
     /// Handle tool call started event
     pub fn handle_tool_call_started(
         &mut self,
@@ -50,7 +137,7 @@ impl ChatView {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
         let Some(parent_idx) = self.parent_streaming_assistant_index().or_else(|| {
-            if self.sub_agent_progress_msg_idx.is_some() {
+            if self.delegation_progress_msg_idx.is_some() {
                 self.start_assistant_message(cx);
                 Some(self.messages.len() - 1)
             } else {
@@ -601,35 +688,21 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Handle approval decision from floating bar
-    pub(super) fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
+    /// Handle approval decision from the floating bar, the plan strip, or the
+    /// approve/deny keyboard shortcuts. A no-op when nothing is pending.
+    pub fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
         if let Some(ref pending) = self.pending_approval {
             let id = pending.id.clone();
 
-            // Try execution approval store first (bash commands)
-            let mut resolved = false;
-            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
-                use crate::chatty::models::execution_approval_store::ApprovalDecision;
-                resolved = store.resolve(&id, if approved {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Denied
-                });
-            }
-
-            // If not found in execution store, try write approval store (filesystem writes)
-            if !resolved {
-                if let Some(store) = cx.try_global::<crate::chatty::models::WriteApprovalStore>() {
-                    use crate::chatty::models::write_approval_store::WriteApprovalDecision;
-                    store.resolve(
-                        &id,
-                        if approved {
-                            WriteApprovalDecision::Approved
-                        } else {
-                            WriteApprovalDecision::Denied
-                        },
-                    );
-                }
+            // The request was raised on the stores of the conversation whose
+            // agent is waiting (AGE-195), execution or write. For a
+            // conversation running online those stores are on the server, so
+            // an id no local store knows goes over the wire instead (AGE-298).
+            if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>()
+                && !store.resolve_approval(&id, approved)
+            {
+                let send = store.resolve_approval_remotely(&id, approved);
+                cx.background_spawn(send).detach();
             }
 
             // Immediately clear pending approval to hide the bar
@@ -781,14 +854,17 @@ impl ChatView {
         // the stream can push its next chunk straight away.
         self.pending_clarification = None;
 
-        match cx.try_global::<chatty_core::models::ClarificationStore>() {
+        match cx.try_global::<crate::chatty::models::ConversationsStore>() {
             Some(store) => {
-                if !store.resolve(&id, answers.clone()) {
-                    warn!(clarification_id = %id, "No pending clarification to resolve");
+                // No local store holding the id means the question came from a
+                // conversation running online; its answers go over the wire.
+                if !store.resolve_clarification(&id, answers.clone()) {
+                    let send = store.resolve_clarification_remotely(&id, answers.clone());
+                    cx.background_spawn(send).detach();
                 }
             }
             None => {
-                warn!(clarification_id = %id, "ClarificationStore global missing; answers dropped")
+                warn!(clarification_id = %id, "ConversationsStore global missing; answers dropped")
             }
         }
 

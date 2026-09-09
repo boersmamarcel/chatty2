@@ -21,11 +21,8 @@ impl Global for crate::settings::models::HiveSettingsModel {}
 impl Global for crate::settings::models::ExtensionsModel {}
 
 // ── Chatty models ────────────────────────────────────────────────────────────
-impl Global for crate::models::ClarificationStore {}
 impl Global for crate::models::ConversationsStore {}
 impl Global for crate::models::ErrorStore {}
-impl Global for crate::models::ExecutionApprovalStore {}
-impl Global for crate::models::WriteApprovalStore {}
 
 // ── Services ─────────────────────────────────────────────────────────────────
 #[cfg(feature = "math-render")]
@@ -38,6 +35,3 @@ impl Global for crate::services::MermaidRendererService {}
 impl Global for crate::services::MemoryService {}
 impl Global for crate::services::EmbeddingService {}
 impl Global for crate::services::SkillService {}
-
-// ── Auth ─────────────────────────────────────────────────────────────────────
-impl Global for crate::auth::AzureTokenCache {}

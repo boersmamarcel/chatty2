@@ -9,7 +9,7 @@ body:
         Use this when a published page would send a contributor or agent
         to the wrong place. Same-PR updates belong on the code PR, not here.
 
-        Policy: `docs/stale-doc-policy.md`
+        Policy: the "Documentation" section of `CONTRIBUTING.md`
   - type: input
     id: page
     attributes:

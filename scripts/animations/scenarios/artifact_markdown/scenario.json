@@ -1,0 +1,33 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Project README",
+ "turns": [
+  {
+   "match": "readme",
+   "replies": [
+    {
+     "tool_calls": [
+      {
+       "name": "write_file",
+       "arguments": {
+        "path": "README.md",
+        "content": "# weather-cli\n\nA tiny command-line tool that turns a temperature into a one-line forecast.\n\n## Install\n\n```bash\ncargo install --path .\n```\n\n## Usage\n\n```bash\nweather-cli 21.5C\n# 21.5°C — warm, stay hydrated\n```\n\n## How it works\n\n1. `parse_temperature` strips a trailing `C` and parses the number.\n2. `Forecast::describe` maps the value to one of three messages.\n\n## License\n\nMIT\n"
+       }
+      }
+     ]
+    },
+    {
+     "text": "I wrote a short `README.md` with install and usage instructions, a two-step explanation of how the tool works, and the license."
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}

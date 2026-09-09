@@ -1,0 +1,4 @@
+StreamStarted
+TextChunk("Partial ")
+StreamError(kind=Other)
+StreamCompleted

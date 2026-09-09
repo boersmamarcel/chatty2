@@ -90,6 +90,14 @@ pub fn presentation_on_open(current: ArtifactMode, opening_same_path: bool) -> A
 pub enum ArtifactViewEvent {
     Closed,
     PresentationChanged,
+    /// The browser changed hands (AGE-156): the user took control
+    /// (`taken`) or handed it back, while the page showed `url`. Emitted
+    /// only on a real transition, never when the lock was already held by
+    /// the new holder, so the activity trail records each handoff once.
+    BrowserControlChanged {
+        taken: bool,
+        url: String,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -618,8 +626,14 @@ impl ArtifactView {
         let Some(session) = self.browser_session.as_ref() else {
             return;
         };
-        session.take_control();
+        let previous = session.take_control();
         self.browser_control = ControlHolder::User;
+        if previous != ControlHolder::User {
+            cx.emit(ArtifactViewEvent::BrowserControlChanged {
+                taken: true,
+                url: self.browser_current_url.clone(),
+            });
+        }
         cx.notify();
     }
 
@@ -628,8 +642,14 @@ impl ArtifactView {
         let Some(session) = self.browser_session.as_ref() else {
             return;
         };
-        session.release_control();
+        let previous = session.release_control();
         self.browser_control = ControlHolder::Agent;
+        if previous == ControlHolder::User {
+            cx.emit(ArtifactViewEvent::BrowserControlChanged {
+                taken: false,
+                url: self.browser_current_url.clone(),
+            });
+        }
         cx.notify();
     }
 
@@ -647,6 +667,9 @@ impl ArtifactView {
         if url.is_empty() {
             return;
         }
+        // Record the handoff here; `navigate_as_user` takes the lock again
+        // but that is a no-op once the user already holds it.
+        self.take_browser_control(cx);
         cx.spawn(async move |this, cx| {
             let result = session.navigate_as_user(&url).await;
             this.update(cx, |this, cx| {
@@ -677,6 +700,7 @@ impl ArtifactView {
         let Some(session) = self.browser_session.clone() else {
             return;
         };
+        self.take_browser_control(cx);
         cx.spawn(async move |this, cx| {
             let result = session.reload_as_user().await;
             this.update(cx, |this, cx| {

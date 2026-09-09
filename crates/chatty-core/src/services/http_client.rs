@@ -4,6 +4,7 @@
 //! that user-agent strings, timeouts, and redirect policies are consistent
 //! across the codebase.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Default user-agent for outgoing HTTP requests.
@@ -17,6 +18,23 @@ pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKi
 pub fn default_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
+/// Build a client for a response whose *duration* cannot be known in advance.
+///
+/// A total timeout is the wrong instrument for a stream: it bounds the whole
+/// exchange, so a delegation that parks while a human answers a question dies
+/// on the transport rather than on the question's own deadline. What can
+/// honestly be bounded is **silence** — `read` is the gap between bytes, and
+/// an SSE server that sends keep-alives (as this app's broker does, every
+/// 15 s) keeps a live-but-quiet stream well inside it.
+pub fn streaming_client(connect: Duration, read: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(read)
         .user_agent(USER_AGENT)
         .build()
         .expect("Failed to initialize HTTP client (TLS backend error)")
@@ -56,4 +74,33 @@ pub fn browser_client(timeout_secs: u64) -> reqwest::Client {
         .user_agent(BROWSER_USER_AGENT)
         .build()
         .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
+static LLM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+});
+
+/// Shared client for LLM provider traffic (OpenRouter, Ollama, Azure OpenAI).
+///
+/// One connection pool for the app's lifetime instead of a fresh one per
+/// agent build, so conversations reuse TLS/TCP connections. Deliberately
+/// carries **no total request timeout** — completion streams run for
+/// minutes and a timeout here would kill them mid-stream.
+pub fn llm_client() -> &'static reqwest::Client {
+    &LLM_CLIENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_client_returns_same_instance() {
+        let a = llm_client() as *const reqwest::Client;
+        let b = llm_client() as *const reqwest::Client;
+        assert_eq!(a, b);
+    }
 }

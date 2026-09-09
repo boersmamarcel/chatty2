@@ -160,12 +160,6 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
                 .to_string(),
         );
     }
-    if tools.sub_agent {
-        tool_sections.push(
-            "- **sub_agent** (delegate tasks to an independent sub-agent with the same tools)"
-                .to_string(),
-        );
-    }
     if tools.browser {
         tool_sections.push(
             "- **browser_navigate / browser_snapshot / browser_screenshot / browser_console /              browser_network / browser_resize** (built-in browser, localhost and workspace              file:// URLs only)"
@@ -770,25 +764,6 @@ mod tests {
         assert!(result.contains("file_structure_detector"));
         assert!(result.contains("query_data"));
         assert!(result.contains("describe_data"));
-    }
-
-    #[test]
-    fn sub_agent_section_included() {
-        let tools = ToolAvailability {
-            sub_agent: true,
-            ..Default::default()
-        };
-        let result = build_preamble(
-            "",
-            &ProviderType::OpenRouter,
-            &tools,
-            &None,
-            &McpTools::none(),
-            &[],
-            &[],
-        );
-        assert!(result.contains("sub_agent"));
-        assert!(result.contains("delegate"));
     }
 
     #[test]

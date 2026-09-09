@@ -29,7 +29,6 @@ pub struct ToolAvailability {
     pub execute_code: bool,
     pub memory: bool,
     pub search_web: bool,
-    pub sub_agent: bool,
     pub browser: bool,
     pub browser_use: bool,
     pub daytona: bool,
@@ -167,9 +166,6 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.search_web {
         names.insert(String::from("search_web"));
-    }
-    if tools.sub_agent {
-        names.insert(String::from("sub_agent"));
     }
     if tools.browser {
         names.extend(
@@ -392,7 +388,6 @@ mod tests {
             ("compile_typst", "compile_typst"),
             ("execute_code", "execute_code"),
             ("search_web", "search_web"),
-            ("sub_agent", "sub_agent"),
             ("browser_use", "browser_use"),
             ("daytona", "daytona_run"),
             ("publish_module", "publish_wasm_module"),
@@ -406,7 +401,6 @@ mod tests {
                 "compile_typst" => tools.compile_typst = true,
                 "execute_code" => tools.execute_code = true,
                 "search_web" => tools.search_web = true,
-                "sub_agent" => tools.sub_agent = true,
                 "browser_use" => tools.browser_use = true,
                 "daytona" => tools.daytona = true,
                 "publish_module" => tools.publish_module = true,
@@ -466,7 +460,6 @@ mod tests {
             execute_code: true,
             memory: true,
             search_web: true,
-            sub_agent: true,
             browser: true,
             browser_use: true,
             daytona: true,
@@ -500,7 +493,6 @@ mod tests {
             "fetch",
             "search_web",
             "remember",
-            "sub_agent",
             "browser_navigate",
             "browser_screenshot",
             "browser_use",

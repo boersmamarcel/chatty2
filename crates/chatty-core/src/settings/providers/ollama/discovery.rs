@@ -37,8 +37,14 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
     // Build the API endpoint URL
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
 
-    // Make HTTP request to Ollama API
-    let response = reqwest::get(&url).await?;
+    // Use the shared client, as the per-model calls below already do.
+    //
+    // `reqwest::get` builds a throwaway `Client` per call — re-reading proxy and
+    // system config each time — and carries *no timeout*, so a hung Ollama would
+    // stall this call indefinitely. That mattered: discovery runs on startup, and
+    // this one line was ~380ms of a ~630ms cold boot (AGE-163).
+    let client = crate::services::http_client::default_client(30);
+    let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(
@@ -49,7 +55,6 @@ pub async fn discover_ollama_models(base_url: &str) -> Result<Vec<(String, Strin
 
     let tags_response: OllamaTagsResponse = response.json().await?;
 
-    let client = crate::services::http_client::default_client(30);
     let mut models = Vec::new();
 
     for m in tags_response.models {

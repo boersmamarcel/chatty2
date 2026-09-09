@@ -9,14 +9,18 @@ src = "src"
 create-missing = false
 
 [output.html]
-default-theme = "rust"
+default-theme = "light"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/boersmamarcel/chatty2"
 edit-url-template = "https://github.com/boersmamarcel/chatty2/edit/main/{path}"
 site-url = "/chatty2/"
 additional-css = ["theme/chatty.css"]
-additional-js = ["theme/mermaid.min.js", "theme/mermaid-init.js"]
-no-section-label = false
+additional-js = ["theme/mermaid-init.js"]
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 1
 
 [output.html.search]
 enable = true

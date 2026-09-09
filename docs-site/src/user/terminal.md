@@ -1,67 +1,63 @@
-# Terminal interface (`chatty-tui`)
+# Terminal interface
 
-**When to read this:** Use Chatty from a terminal — interactive, headless, or
-piped. Shares provider and model config with the desktop app.
+**When to read this:** You want to use Chatty from a terminal — interactively, as a one-shot command, or in a pipeline — with the same providers and models as the desktop app.
+
+## Install
+
+| Method | How |
+|--------|-----|
+| **From the desktop app** | macOS: **Chatty** menu → **Install CLI…**. Linux and Windows: **Settings → General → Install CLI…**. The same spot offers **Reinstall CLI** later |
+| **From the release** | The desktop package already contains `chatty-tui` |
+| **From source** | Build it yourself: [Build and run](../dev/start/build-and-run.md) |
+
+Where it lands: macOS puts a link in `/usr/local/bin` (you may be asked for an administrator password); Linux copies the binary to `~/.local/bin` — add that folder to your `PATH` if `chatty-tui` is not found; Windows adds the app's install folder to your user `PATH`, so open a new terminal afterwards.
+
+> [!NOTE]
+> After a desktop update on Linux, the copy in `~/.local/bin` is refreshed the next time the desktop app launches. `/update` inside `chatty-tui` does the same on demand.
 
 ## Modes
 
-| Mode | Command | Description |
-|------|---------|-------------|
-| **Interactive** | `chatty-tui` | Full-screen TUI: scrollable chat, model picker, tool picker, approvals |
-| **Headless** | `chatty-tui --headless -m "question"` | One message → stdout (scripts, [sub-agents](./sub-agents.md)) |
-| **Pipe** | `cat file.rs \| chatty-tui --pipe` | stdin as the message, print the response |
+| Mode | Command | Use |
+|------|---------|-----|
+| **Interactive** | `chatty-tui` | Full-screen chat with a model picker, tool picker and approval prompts |
+| **Headless** | `chatty-tui --headless -m "question"` | One message in, the answer on stdout — for scripts and [sub-agents](./sub-agents.md) |
+| **Pipe** | `cat notes.md \| chatty-tui --pipe` | stdin is the message; the answer goes to stdout |
+
+Useful flags: `--model <id or name>` picks a model (exact id, then name, then substring); `--enable` / `--disable` switch tool groups for this run (`shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`); `--auto-approve` skips every approval prompt ([Security & sandboxing](./security.md)). Full list: [CLI flags](../dev/reference/cli-flags.md).
 
 ## Zero-config quick start
 
-Connect to a running model server without opening the desktop app:
+Talk to a running model server without opening the desktop app or storing a key:
 
 ```bash
-# Ollama (discovers models at localhost:11434)
+# Ollama (discovers models at localhost:11434; pass a URL for another host)
 chatty-tui --ollama
 chatty-tui --ollama --model llama3.2
 
-# vLLM / llama.cpp / LM Studio (OpenAI-compatible)
+# vLLM, llama.cpp, LM Studio or any OpenAI-compatible server
 chatty-tui --openai-compat-url http://localhost:8000
 chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key sk-...
 ```
 
-## Installing
+## Welcome screen and status bar
 
-| Method | How |
-|--------|-----|
-| **Desktop app** | macOS: **Chatty** menu → **Install CLI**. Linux/Windows: **Settings → General → Install CLI…** |
-| **Releases** | Same package as the desktop app includes `chatty-tui` |
-| **Source** | `cargo install --path crates/chatty-tui` |
+An empty interactive session shows what is active: model and context window, workspace and git branch, enabled tool groups, internet capabilities (fetch, search, browser, cloud sandbox, MCP) and runtime features (memory, modules, remote agents). MCP, memory and embeddings load in the background — badges show `⟳` (for example `[MCP ⟳]`) and the status bar reads *loading services…* until they are ready.
 
-Linux install path is `~/.local/bin`; Windows uses the user bin directory.
+The status bar always shows the app version, the working directory and the git branch when you are inside a repository, plus the branch's pull request (`#591 open ✓`) when git integration is on. Footer hints switch to `Ctrl+C stop` while a reply streams. A scrollbar appears when the transcript overflows; scrolling up unpins auto-scroll, `End` re-pins it.
 
-## Welcome screen & status bar
-
-Interactive mode with an empty conversation shows: active model and context
-window, workspace, git branch, enabled tools (shell, fs-read/write, git, code,
-docker), internet capabilities (fetch, search, browser-use, daytona, MCP), and
-runtime features (memory, modules, remote agents).
-
-MCP, memory, and embeddings load in the background. While they initialize,
-badges show `⟳` (e.g. `[MCP ⟳]`) and the status bar reads `● loading
-services…`. The status bar always has app version, cwd (truncated), and git
-branch when inside a repo. Footer hints switch to `Ctrl+C stop` while
-streaming. A scrollbar appears when the transcript overflows; scrolling up
-unpins auto-scroll, `End` (or scrolling back down) re-pins it.
-
-## Keybindings (interactive)
+## Keys
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Send message |
-| `/` | Slash-command picker (`↑/↓`, `Tab` or `Enter`) |
+| `Enter` | Send |
+| `/` | Command picker (`↑/↓`, `Tab` or `Enter`) |
 | `@` | File picker (type to filter) |
 | `PageUp` / `PageDown`, `Shift+↑/↓`, mouse wheel | Scroll |
-| `End` | Jump to bottom, resume auto-scroll |
-| `y` / `n` | Approve / deny a tool prompt |
+| `End` | Jump to the bottom and resume auto-scroll |
+| `y` / `n` | Approve or deny a tool prompt |
 | `1`-`9` | Pick an option when the agent asks a clarifying question (`ask_user`) |
 | `t` | Type a custom answer instead of picking an option |
-| `Ctrl+C` | Stop streaming (or quit if idle) |
+| `Ctrl+C` | Stop streaming, or quit when idle |
 | `Ctrl+Q` | Quit immediately |
 
 A pending clarifying question replaces the input row and takes over the
@@ -69,34 +65,16 @@ keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
 answered one at a time; press `Esc` while typing a custom answer to go back
 to the options.
 
-Launch overrides: `--enable tool1,tool2` / `--disable tool1,tool2`.
+The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
-## Slash commands (TUI)
+`/online` shows where the current conversation runs and, before anything moves, a table of what a move would and would not carry. `/online <server-url>` uploads the conversation's history to that `chatty-server` and continues it there; `/online off` brings it back to this machine. Workspace files, attachments, MCP servers, memory, skills and provider API keys never leave this machine.
 
-| Command | Action |
-|---------|--------|
-| `/model [query]` | Switch model (`/model` opens the picker) |
-| `/tools [name]` | Toggle tool groups |
-| `/modules [show\|enable\|disable\|dir <path>\|port <n>]` | Module runtime |
-| `/add-dir <directory>` | Expand workspace |
-| `/agent <prompt>` | Headless sub-agent |
-| `/clear`, `/new` | Fresh conversation |
-| `/compact` | Summarize older messages |
-| `/context` | Token usage and cwd |
-| `/copy` | Copy latest response |
-| `/update` | CLI auto-update (Linux: refresh `~/.local/bin/chatty-tui`) |
-| `/cwd`, `/cd [directory]` | Show or change cwd |
-| `/quit`, `/exit` | Quit (works while streaming) |
+## Shared configuration
 
-## Config sharing
+`chatty-tui` reads the same settings as the desktop app — providers, models, tools, secrets and memory — so run the desktop app once to set things up, or skip that entirely with `--ollama` / `--openai-compat-url`. Where the files live: [Advanced](./advanced.md).
 
-`chatty-tui` reads the same config files as the desktop app
-(`~/.config/chatty/` or the platform equivalent). Run the desktop app once to
-set providers, or skip that with `--ollama` / `--openai-compat-url`.
-
-CLI reference: [cli-flags.md](../dev/reference/cli-flags.md).
-
-## Related
+## Next
 
 - [Sub-agents](./sub-agents.md)
 - [Getting started](./getting-started.md)
+- [Advanced](./advanced.md)

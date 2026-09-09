@@ -53,7 +53,7 @@ impl ChatView {
         self.parsed_cache.clear();
 
         // Reset sub-agent tracking (sub-agent progress is UI-only, not in history)
-        self.sub_agent_progress_msg_idx = None;
+        self.delegation_progress_msg_idx = None;
 
         self.messages.clear();
         self.reset_transcript_list();
@@ -66,6 +66,12 @@ impl ChatView {
         self.last_auto_opened_browser_tool_id = None;
 
         for (idx, entry) in entries.iter().enumerate() {
+            // Tool round-trips are persisted for the model (AGE-247); the
+            // transcript renders tool activity from the trace on the final
+            // text message, and `history_index` stays the entry index.
+            if chatty_core::services::is_tool_message(&entry.message) {
+                continue;
+            }
             let feedback = entry.feedback.clone();
             match &entry.message {
                 Message::User { content, .. } => {

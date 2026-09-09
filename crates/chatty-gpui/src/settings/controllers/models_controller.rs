@@ -20,6 +20,18 @@ fn notify_models_changed(cx: &mut App) {
     }
 }
 
+/// Publish a mutation of the models store: refresh the UI right away, then
+/// write the new roster to disk in the background (the optimistic-update
+/// pattern every mutation here follows).
+fn commit(cx: &mut App) {
+    let models_to_save = cx.global::<ModelsModel>().models().to_vec();
+
+    cx.refresh_windows();
+    notify_models_changed(cx);
+
+    save_models_async(models_to_save, cx);
+}
+
 /// Create a new model
 pub fn create_model(mut config: ModelConfig, cx: &mut App) {
     // Auto-set capabilities based on provider type
@@ -27,61 +39,53 @@ pub fn create_model(mut config: ModelConfig, cx: &mut App) {
     config.supports_images = supports_images;
     config.supports_pdf = supports_pdf;
 
-    // 1. Apply update immediately (optimistic update)
-    let model = cx.global_mut::<ModelsModel>();
-    model.add_model(config);
+    cx.global_mut::<ModelsModel>().add_model(config);
 
-    // 2. Get updated state for async save
-    let models_to_save = cx.global::<ModelsModel>().models().to_vec();
+    commit(cx);
+}
 
-    // 3. Refresh UI immediately (optimistic update)
-    cx.refresh_windows();
-    notify_models_changed(cx);
+/// Toggle a model's favourite flag.
+pub fn toggle_favorite(model_id: &str, cx: &mut App) {
+    if cx
+        .global_mut::<ModelsModel>()
+        .toggle_favorite(model_id)
+        .is_none()
+    {
+        error!(model_id, "Failed to toggle favourite: model not found");
+        return;
+    }
 
-    // 4. Save async with error handling
-    save_models_async(models_to_save, cx);
+    commit(cx);
+}
+
+/// Make a model the default for new conversations, clearing the previous one.
+pub fn set_default_model(model_id: &str, cx: &mut App) {
+    if !cx.global_mut::<ModelsModel>().set_default(model_id) {
+        error!(model_id, "Failed to set default: model not found");
+        return;
+    }
+
+    commit(cx);
 }
 
 /// Update an existing model
 pub fn update_model(updated_config: ModelConfig, cx: &mut App) {
-    // 1. Apply update immediately (optimistic update)
-    let model = cx.global_mut::<ModelsModel>();
-
-    if !model.update_model(updated_config) {
+    if !cx.global_mut::<ModelsModel>().update_model(updated_config) {
         error!("Failed to update model: model not found");
         return;
     }
 
-    // 2. Get updated state for async save
-    let models_to_save = cx.global::<ModelsModel>().models().to_vec();
-
-    // 3. Refresh UI immediately (optimistic update)
-    cx.refresh_windows();
-    notify_models_changed(cx);
-
-    // 4. Save async with error handling
-    save_models_async(models_to_save, cx);
+    commit(cx);
 }
 
 /// Delete a model by ID
 pub fn delete_model(model_id: String, cx: &mut App) {
-    // 1. Apply update immediately (optimistic update)
-    let model = cx.global_mut::<ModelsModel>();
-
-    if !model.delete_model(&model_id) {
+    if !cx.global_mut::<ModelsModel>().delete_model(&model_id) {
         error!("Failed to delete model: model not found");
         return;
     }
 
-    // 2. Get updated state for async save
-    let models_to_save = cx.global::<ModelsModel>().models().to_vec();
-
-    // 3. Refresh UI immediately (optimistic update)
-    cx.refresh_windows();
-    notify_models_changed(cx);
-
-    // 4. Save async with error handling
-    save_models_async(models_to_save, cx);
+    commit(cx);
 }
 
 /// Save models asynchronously to disk

@@ -54,6 +54,11 @@ struct ShellProcess {
     is_sandboxed: bool,
 }
 
+/// How long to wait for the shell to become waitable after its stdout hit
+/// EOF. Exit is near-instant; this only bounds the pathological case of a
+/// shell that closed stdout and kept running.
+const EXIT_REAP_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+
 struct CommandReadResult {
     exit_code: i32,
     shell_exited: bool,
@@ -561,16 +566,22 @@ impl ShellSession {
                     .map_err(|e| anyhow!("Failed to read from shell stdout: {}", e))?;
 
                 if bytes_read == 0 {
-                    return match proc.child.try_wait() {
-                        Ok(Some(status)) => Ok(CommandReadResult {
+                    // EOF means the shell closed its stdout, normally because
+                    // it is exiting (`exit 42`). Linux closes a process's file
+                    // descriptors before it becomes waitable, so a one-shot
+                    // `try_wait` here can still see it running and report a
+                    // successful exit as a failure. Wait for the exit, bounded
+                    // so a shell that merely closed stdout cannot hang us.
+                    return match tokio::time::timeout(EXIT_REAP_TIMEOUT, proc.child.wait()).await {
+                        Ok(Ok(status)) => Ok(CommandReadResult {
                             exit_code: Self::exit_code_from_status(status),
                             shell_exited: true,
                         }),
-                        Ok(None) => Err(anyhow!("Shell stdout closed before command completion")),
-                        Err(e) => Err(anyhow!(
+                        Ok(Err(e)) => Err(anyhow!(
                             "Failed to read shell exit status after stdout closed: {}",
                             e
                         )),
+                        Err(_) => Err(anyhow!("Shell stdout closed before command completion")),
                     };
                 }
 

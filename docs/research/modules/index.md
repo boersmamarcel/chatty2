@@ -36,10 +36,10 @@ flowchart TB
 | Field | Values |
 |-------|--------|
 | **Stage** | `not started` · `stage-a` · `stage-b` · `promotion-pending` |
-| **Promotion** | `pending` · `rejected` · `setting` · `default` — filled in [promotion log](../promotion-log.md) by Marcel only |
+| **Promotion** | `pending` · `rejected` · `setting` · `default` — recorded by the human reviewer only (the [archived promotion-log template](../../archive/research/promotion-log.md) shows the fields) |
 
 ## Cross-module work
 
 Head-to-head comparisons (ACE vs GEPA rollout counts, combined workflows) belong in
 [AGE-21](https://linear.app/agents-research/issue/AGE-21) — human interpretation only.
-Agents build harness plumbing; Marcel runs and writes up results.
+Agents build harness plumbing; the human reviewer runs and writes up results.

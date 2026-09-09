@@ -14,7 +14,7 @@
 #![allow(clippy::collapsible_if)]
 
 use crate::assets::CustomIcon;
-use crate::chatty::models::execution_approval_store::{ApprovalDecision, ExecutionApprovalStore};
+use crate::chatty::models::ConversationsStore;
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{ActiveTheme, Icon, Sizable, button::Button};
 use std::time::Duration;
@@ -323,7 +323,8 @@ impl SystemTraceView {
             .child(
                 div()
                     .map(|this| {
-                        if tool_call.tool_name != "sub_agent" && !is_code_execution_tool(tool_call)
+                        if tool_call.tool_name != "invoke_agent"
+                            && !is_code_execution_tool(tool_call)
                         {
                             if let Some(engine) = tool_call.execution_engine {
                                 let (badge_text, badge_color) = execution_engine_badge(engine);
@@ -567,10 +568,16 @@ impl SystemTraceView {
                                 .on_click({
                                     let id = approval_id.clone();
                                     move |_event, _window, cx| {
-                                        if let Some(store) =
-                                            cx.try_global::<ExecutionApprovalStore>()
-                                        {
-                                            store.resolve(&id, ApprovalDecision::Approved);
+                                        if let Some(store) = cx.try_global::<ConversationsStore>() {
+                                            // A conversation running online
+                                            // keeps its approval stores on the
+                                            // server, so an id no local store
+                                            // knows goes over the wire (AGE-298).
+                                            if !store.resolve_approval(&id, true) {
+                                                let send =
+                                                    store.resolve_approval_remotely(&id, true);
+                                                cx.background_spawn(send).detach();
+                                            }
 
                                             // Update UI state
                                             if let Some(entity) = entity_for_approve.upgrade() {
@@ -601,10 +608,16 @@ impl SystemTraceView {
                                 .on_click({
                                     let id = approval_id;
                                     move |_event, _window, cx| {
-                                        if let Some(store) =
-                                            cx.try_global::<ExecutionApprovalStore>()
-                                        {
-                                            store.resolve(&id, ApprovalDecision::Denied);
+                                        if let Some(store) = cx.try_global::<ConversationsStore>() {
+                                            // A conversation running online
+                                            // keeps its approval stores on the
+                                            // server, so an id no local store
+                                            // knows goes over the wire (AGE-298).
+                                            if !store.resolve_approval(&id, false) {
+                                                let send =
+                                                    store.resolve_approval_remotely(&id, false);
+                                                cx.background_spawn(send).detach();
+                                            }
 
                                             // Update UI state
                                             if let Some(entity) = entity_for_deny.upgrade() {

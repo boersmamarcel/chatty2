@@ -37,7 +37,6 @@ mod tests {
     use crate::models::write_approval_store::WriteApprovalStore;
     use crate::services::filesystem_service::FileSystemService;
     use crate::settings::models::execution_settings::ApprovalMode;
-    use crate::tools::filesystem_write_tool::set_global_write_approval_mode;
     use rig_agent::tool::{Tool, ToolContext};
 
     #[test]
@@ -576,8 +575,7 @@ mod tests {
                 .unwrap(),
         );
         let write_approvals = WriteApprovalStore::new().get_pending_approvals();
-        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
-        let tool = WriteExcelTool::new(service, write_approvals);
+        let tool = WriteExcelTool::new(service, ApprovalMode::AutoApproveAll, write_approvals);
 
         let output = tool
             .call(
@@ -618,8 +616,11 @@ mod tests {
                 .unwrap(),
         );
         let write_approvals = WriteApprovalStore::new().get_pending_approvals();
-        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
-        let tool = EditExcelTool::new(service.clone(), write_approvals);
+        let tool = EditExcelTool::new(
+            service.clone(),
+            ApprovalMode::AutoApproveAll,
+            write_approvals,
+        );
 
         tool.call(
             &mut ToolContext::new(),
@@ -670,8 +671,11 @@ mod tests {
                 .unwrap(),
         );
         let write_approvals = WriteApprovalStore::new().get_pending_approvals();
-        set_global_write_approval_mode(ApprovalMode::AutoApproveAll);
-        let tool = EditExcelTool::new(service.clone(), write_approvals);
+        let tool = EditExcelTool::new(
+            service.clone(),
+            ApprovalMode::AutoApproveAll,
+            write_approvals,
+        );
 
         let output = tool
             .call(

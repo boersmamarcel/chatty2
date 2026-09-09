@@ -62,6 +62,12 @@ fn verb_for(tool_name: &str, display_name: &str, state: &ToolCallState) -> Strin
         "fetch" => ("Fetching", "Fetched"),
         "git_diff" => ("Diffing", "Diffed"),
         "git_status" => ("Checking", "Checked"),
+        // Synthetic rows for the human-takeover handoffs (AGE-156).
+        "browser_take_control" => (
+            "Taking control of the browser",
+            "Took control of the browser",
+        ),
+        "browser_release_control" => ("Handing the browser back", "Handed the browser back"),
         other => {
             return tense_unknown(display_name, other, state);
         }
@@ -133,6 +139,16 @@ fn subject_for(tool_name: &str, input: &str, display_name: &str) -> String {
                 }
             }
         }
+    }
+    // The handoff rows' only subject is the URL, returned above when present.
+    // With none (the session was still opening), the display-name fallback
+    // below would split "Taking control of the browser" and read
+    // "Took control of the browser control of the browser".
+    if matches!(
+        tool_name,
+        "browser_take_control" | "browser_release_control"
+    ) {
+        return String::new();
     }
     // If display already embeds a specific subject ("Read README.md"), keep it
     // only when it isn't the generic friendly name.
@@ -410,6 +426,45 @@ mod tests {
         );
         assert_eq!(label.headline(), "Read docs/poem.md");
         assert!(label.added.is_none());
+    }
+
+    #[test]
+    fn browser_handoffs_read_as_past_tense_sentences_with_the_url() {
+        let take = tool_row_label(
+            "Taking control of the browser",
+            "browser_take_control",
+            &ToolCallState::Success,
+            r#"{"url":"https://example.com"}"#,
+            None,
+        );
+        assert_eq!(
+            take.headline(),
+            "Took control of the browser https://example.com"
+        );
+
+        let release = tool_row_label(
+            "Handing the browser back",
+            "browser_release_control",
+            &ToolCallState::Success,
+            r#"{"url":"https://example.com/docs"}"#,
+            None,
+        );
+        assert_eq!(
+            release.headline(),
+            "Handed the browser back https://example.com/docs"
+        );
+    }
+
+    #[test]
+    fn browser_handoff_without_a_url_is_just_the_verb() {
+        let label = tool_row_label(
+            "Taking control of the browser",
+            "browser_take_control",
+            &ToolCallState::Success,
+            r#"{"url":""}"#,
+            None,
+        );
+        assert_eq!(label.headline(), "Took control of the browser");
     }
 
     #[test]

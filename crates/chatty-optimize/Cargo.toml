@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "GEPA + AFlow search, paired stats, optimizer QA loaders (build-time / on-demand)"
 publish = false
-rust-version = "1.95"
+rust-version = "1.94"
 
 [lib]
 name = "chatty_optimize"

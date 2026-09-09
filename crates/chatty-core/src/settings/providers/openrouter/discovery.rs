@@ -34,6 +34,13 @@ pub struct OpenRouterArchitecture {
 pub struct OpenRouterPricing {
     pub prompt: String,
     pub completion: String,
+    /// Per-token price of a prompt token served from cache. Absent for
+    /// models whose provider does not report cache pricing.
+    #[serde(default)]
+    pub input_cache_read: Option<String>,
+    /// Per-token price of a prompt token written to cache.
+    #[serde(default)]
+    pub input_cache_write: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -69,6 +76,34 @@ pub async fn discover_openrouter_models() -> Result<Vec<OpenRouterModel>> {
     debug!(count = body.data.len(), "OpenRouter models fetched");
 
     Ok(body.data)
+}
+
+/// Check that an OpenRouter API key is accepted.
+///
+/// `/api/v1/models` is public, so a successful fetch says nothing about the
+/// key — this asks the authenticated `/api/v1/key` endpoint instead, which is
+/// what makes the settings sheet's Test button mean anything.
+pub async fn verify_openrouter_key(api_key: &str) -> Result<()> {
+    if api_key.trim().is_empty() {
+        return Err(anyhow::anyhow!("No API key set"));
+    }
+
+    let resp = reqwest::Client::new()
+        .get("https://openrouter.ai/api/v1/key")
+        .bearer_auth(api_key.trim())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        Err(anyhow::anyhow!("Key rejected"))
+    } else {
+        Err(anyhow::anyhow!("OpenRouter returned HTTP {status}"))
+    }
 }
 
 /// Return `true` if the model supports image input.
@@ -146,6 +181,26 @@ pub fn model_completion_cost(model: &OpenRouterModel) -> Option<f64> {
         .map(|per_token| per_token * TOKENS_PER_MILLION)
 }
 
+/// Cache-read cost per 1 000 000 tokens, when the model reports one.
+pub fn model_cache_read_cost(model: &OpenRouterModel) -> Option<f64> {
+    model
+        .pricing
+        .input_cache_read
+        .as_deref()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|per_token| per_token * TOKENS_PER_MILLION)
+}
+
+/// Cache-write cost per 1 000 000 tokens, when the model reports one.
+pub fn model_cache_write_cost(model: &OpenRouterModel) -> Option<f64> {
+    model
+        .pricing
+        .input_cache_write
+        .as_deref()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|per_token| per_token * TOKENS_PER_MILLION)
+}
+
 #[cfg(test)]
 mod pricing_tests {
     use super::*;
@@ -161,6 +216,34 @@ mod pricing_tests {
             "supported_parameters": [],
         });
         serde_json::from_value(json).expect("fixture parses")
+    }
+
+    /// Cache pricing is optional on the wire: a model without it yields `None`
+    /// (so the app falls back to the input rate), one with it converts per
+    /// token → per million like the other fields.
+    #[test]
+    fn cache_pricing_is_optional_and_converted_per_million() {
+        let without = model_with_pricing("0.000003", "0.000015");
+        assert_eq!(model_cache_read_cost(&without), None);
+        assert_eq!(model_cache_write_cost(&without), None);
+
+        let json = serde_json::json!({
+            "id": "test/model",
+            "name": "Test",
+            "context_length": 1000,
+            "architecture": { "modality": "text", "input_modalities": ["text"] },
+            "pricing": {
+                "prompt": "0.000003",
+                "completion": "0.000015",
+                "input_cache_read": "0.0000003",
+                "input_cache_write": "0.00000375"
+            },
+            "top_provider": {},
+            "supported_parameters": [],
+        });
+        let with: OpenRouterModel = serde_json::from_value(json).expect("fixture parses");
+        assert!((model_cache_read_cost(&with).unwrap() - 0.3).abs() < 1e-9);
+        assert!((model_cache_write_cost(&with).unwrap() - 3.75).abs() < 1e-9);
     }
 
     /// OpenRouter quotes per token; the app stores per million. Sonnet 4.6 is

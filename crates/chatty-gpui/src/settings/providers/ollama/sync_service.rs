@@ -41,28 +41,33 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
                         identifier.clone(),
                     );
                     config.supports_images = *supports_vision;
-                    config
+                    config.synced()
                 })
                 .collect();
 
-            // Sync Ollama models: remove old ones, add new ones
+            // Sync Ollama models: drop the ones this sync owns that are gone,
+            // then upsert what's installed now. Models the user added by hand
+            // are ModelSource::User and stay put.
             cx.update(|cx| {
                 cx.update_global::<ModelsModel, _>(|model, _cx| {
-                    // Get existing Ollama model IDs
-                    let existing_ollama_ids: Vec<String> = model
-                        .models_by_provider(&ProviderType::Ollama)
-                        .iter()
-                        .map(|m| m.id.clone())
-                        .collect();
+                    let discovered_ids: std::collections::HashSet<&str> =
+                        new_model_configs.iter().map(|c| c.id.as_str()).collect();
 
-                    // Remove all existing Ollama models
-                    for id in existing_ollama_ids {
+                    for id in model.stale_sync_ids(&ProviderType::Ollama, &discovered_ids) {
                         model.delete_model(&id);
                     }
 
-                    // Add newly discovered models
+                    // Upsert, preserving the user's favourite/default flags.
                     for config in &new_model_configs {
-                        model.add_model(config.clone());
+                        match model.get_model(&config.id) {
+                            Some(existing) => {
+                                let mut config = config.clone();
+                                config.is_favorite = existing.is_favorite;
+                                config.is_default = existing.is_default;
+                                model.update_model(config);
+                            }
+                            None => model.add_model(config.clone()),
+                        }
                     }
 
                     debug!(count = new_model_configs.len(), "Models synced");
@@ -101,17 +106,15 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
         Ok(_) => {
             info!(url = %ollama_base_url, "No Ollama models installed, install with: ollama pull <model-name>");
 
-            // Remove any existing Ollama models since none are available
-            cx.update(|cx| {
+            // Drop the models this sync put there, since none are installed
+            // any more. User-added Ollama entries are left alone.
+            let removed = cx.update(|cx| {
+                let mut removed = 0usize;
                 cx.update_global::<ModelsModel, _>(|model, _cx| {
-                    let existing_ollama_ids: Vec<String> = model
-                        .models_by_provider(&ProviderType::Ollama)
-                        .iter()
-                        .map(|m| m.id.clone())
-                        .collect();
-
-                    for id in existing_ollama_ids {
+                    let none = std::collections::HashSet::new();
+                    for id in model.stale_sync_ids(&ProviderType::Ollama, &none) {
                         model.delete_model(&id);
+                        removed += 1;
                     }
                 });
 
@@ -125,7 +128,18 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
                         cx.emit(ModelsNotifierEvent::ModelsChanged);
                     });
                 }
+
+                removed
             })?;
+
+            // Persist the removal — without this the store and the file on
+            // disk disagree until some other write happens to flush it.
+            if removed > 0 {
+                let all_models = cx.update(|cx| cx.global::<ModelsModel>().models().to_vec())?;
+                if let Err(e) = chatty_core::models_repository().save_all(all_models).await {
+                    warn!(error = ?e, "Failed to save models after removing Ollama models");
+                }
+            }
 
             Ok(0)
         }

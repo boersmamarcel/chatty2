@@ -141,6 +141,15 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         tui: true,
     },
     SlashCommandSpec {
+        command: "/online",
+        description: "Show where this conversation runs; /online <url> takes it online, /online off brings it back",
+        insert_text: "/online",
+        execute_immediately: true,
+        // The desktop moves a conversation from the sidebar menu (AGE-298).
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
         command: "/quit",
         description: "Quit Chatty",
         insert_text: "/quit",
