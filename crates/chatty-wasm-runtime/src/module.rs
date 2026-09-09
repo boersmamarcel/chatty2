@@ -41,9 +41,6 @@ pub struct WasmModule {
     limits: ResourceLimits,
     /// Metrics from the most recent invocation.
     last_metrics: Option<InvocationMetrics>,
-    /// Billing provider for session management.
-    #[allow(dead_code)]
-    billing_provider: Option<Arc<dyn BillingProvider>>,
 }
 
 impl WasmModule {
@@ -163,7 +160,7 @@ impl WasmModule {
         Module::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 
-        let state = ModuleState::new(manifest, llm_provider, billing_provider.clone(), &limits);
+        let state = ModuleState::new(manifest, llm_provider, billing_provider, &limits);
         let mut store = Store::new(engine, state);
 
         // Register memory limiter.
@@ -183,7 +180,6 @@ impl WasmModule {
             module,
             limits,
             last_metrics: None,
-            billing_provider,
         })
     }
 

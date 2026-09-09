@@ -449,11 +449,6 @@ impl ConversationsStore {
         self.active_conversation_id.as_ref()
     }
 
-    /// Clear the active conversation.
-    #[allow(dead_code)]
-    pub fn clear_active(&mut self) {
-        self.active_conversation_id = None;
-    }
 }
 
 impl Default for ConversationsStore {
