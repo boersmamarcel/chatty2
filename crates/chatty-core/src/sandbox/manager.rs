@@ -1,12 +1,80 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use super::backend::{ExecutionResult, Language, SandboxBackend, SandboxConfig};
 use super::docker::DockerSandbox;
 use super::monty::MontySandbox;
+
+/// The containers one manager owns, keyed by language.
+type SandboxMap = Arc<Mutex<HashMap<Language, Box<dyn SandboxBackend>>>>;
+
+/// Every sandbox map in this process that still has containers to tear down.
+///
+/// A manager's `Drop` cannot await, so it can only *spawn* a cleanup task —
+/// and detached tasks die with the Tokio runtime, which at app quit is
+/// dropped right after `app.run` returns. A manager dropped that late would
+/// leave its container running with nothing left pointing at it.
+///
+/// Entries are therefore held here by strong reference from construction
+/// until their cleanup actually completes, so [`shutdown_all`] can finish the
+/// job synchronously on the way out. Destroying twice is harmless:
+/// [`destroy_all`] drains the map under its lock, so whichever call gets
+/// there first takes the backends and the other finds nothing.
+static LIVE_SANDBOXES: LazyLock<SyncMutex<HashMap<u64, SandboxMap>>> =
+    LazyLock::new(|| SyncMutex::new(HashMap::new()));
+
+static NEXT_MANAGER_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Track `sandboxes` in [`LIVE_SANDBOXES`], returning its key.
+fn register(sandboxes: &SandboxMap) -> u64 {
+    let id = NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed);
+    live_sandboxes().insert(id, sandboxes.clone());
+    id
+}
+
+/// Stop tracking the map registered under `id`.
+fn unregister(id: u64) {
+    live_sandboxes().remove(&id);
+}
+
+/// Lock the registry, recovering from a panic in another holder.
+///
+/// The registry is a plain `HashMap` with no invariant a panic could leave
+/// half-applied, so poisoning carries no information worth propagating —
+/// and refusing to clean up containers because an unrelated task panicked
+/// would be strictly worse.
+fn live_sandboxes() -> std::sync::MutexGuard<'static, HashMap<u64, SandboxMap>> {
+    LIVE_SANDBOXES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Destroy every sandbox container still alive in this process, awaiting
+/// completion.
+///
+/// Call once on the way out, after the last thing that could be holding a
+/// [`SandboxManager`] is gone but while a Tokio runtime is still available
+/// to block on (see `chatty-gpui/src/main.rs`). Containers are started with
+/// `sleep infinity` and no `--rm`, so anything missed here outlives the
+/// process.
+pub async fn shutdown_all() -> Result<()> {
+    let maps: Vec<SandboxMap> = live_sandboxes().drain().map(|(_, map)| map).collect();
+
+    let mut errors = Vec::new();
+    for map in maps {
+        if let Err(e) = destroy_all(&map).await {
+            errors.push(e.to_string());
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("; "))
+    }
+}
 
 /// Per-conversation sandbox manager.
 ///
@@ -29,15 +97,21 @@ use super::monty::MontySandbox;
 /// For all other languages (JavaScript, TypeScript, Rust, Bash), Docker is
 /// always used.
 pub struct SandboxManager {
-    sandboxes: Arc<Mutex<HashMap<Language, Box<dyn SandboxBackend>>>>,
+    sandboxes: SandboxMap,
     config: SandboxConfig,
+    /// Key into [`LIVE_SANDBOXES`], cleared once this manager's containers
+    /// have been destroyed.
+    id: u64,
 }
 
 impl SandboxManager {
     pub fn new(config: SandboxConfig) -> Self {
+        let sandboxes: SandboxMap = Arc::new(Mutex::new(HashMap::new()));
+        let id = register(&sandboxes);
         Self {
-            sandboxes: Arc::new(Mutex::new(HashMap::new())),
+            sandboxes,
             config,
+            id,
         }
     }
 
@@ -218,12 +292,31 @@ impl SandboxManager {
 }
 
 /// Drain `sandboxes` and destroy every container in it.
+///
+/// Every backend is destroyed even if an earlier one fails, and failures are
+/// reported together at the end. `drain()` removes an entry whether or not
+/// its `destroy()` succeeds and `DockerSandbox` has no `Drop`, so returning
+/// early would drop the untried backends on the floor — leaking their
+/// containers *and* untracking them, leaving nothing able to retry.
 async fn destroy_all(sandboxes: &Mutex<HashMap<Language, Box<dyn SandboxBackend>>>) -> Result<()> {
     let mut guard = sandboxes.lock().await;
-    for (_, sandbox) in guard.drain() {
-        sandbox.destroy().await?;
+
+    let mut errors = Vec::new();
+    for (language, sandbox) in guard.drain() {
+        if let Err(e) = sandbox.destroy().await {
+            errors.push(format!("{language:?}: {e}"));
+        }
     }
-    Ok(())
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "failed to destroy {} sandbox container(s): {}",
+            errors.len(),
+            errors.join("; ")
+        )
+    }
 }
 
 impl Drop for SandboxManager {
@@ -235,8 +328,11 @@ impl Drop for SandboxManager {
     /// outlives every Rust-side reference to it. Runs as a detached task
     /// since Docker removal is an async HTTP call and `Drop::drop` isn't.
     fn drop(&mut self) {
+        let id = self.id;
         let sandboxes = self.sandboxes.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // Nothing to spawn on. Leave the map registered so `shutdown_all`
+            // can still reach these containers.
             warn!("no Tokio runtime available to destroy sandbox containers on drop");
             return;
         };
@@ -244,6 +340,11 @@ impl Drop for SandboxManager {
             if let Err(e) = destroy_all(&sandboxes).await {
                 warn!(error = %e, "failed to destroy sandbox container on drop");
             }
+            // Only now, once the containers are actually gone (or gone from
+            // the map with the failure logged), stop tracking them. If this
+            // task is cancelled before reaching here, `shutdown_all` still
+            // has the map.
+            unregister(id);
         });
     }
 }
@@ -255,9 +356,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A fake backend that just records whether `destroy()` ran, so these
-    /// tests don't need a real Docker daemon.
+    /// tests don't need a real Docker daemon. `fail` makes `destroy()`
+    /// report an error *after* recording the attempt, standing in for a
+    /// Docker removal that the daemon rejects.
     struct MockBackend {
         destroyed: Arc<AtomicBool>,
+        fail: bool,
     }
 
     #[async_trait::async_trait]
@@ -268,6 +372,9 @@ mod tests {
 
         async fn destroy(self: Box<Self>) -> Result<()> {
             self.destroyed.store(true, Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("simulated docker removal failure");
+            }
             Ok(())
         }
 
@@ -280,16 +387,20 @@ mod tests {
         }
     }
 
+    fn mock(destroyed: &Arc<AtomicBool>, fail: bool) -> Box<dyn SandboxBackend> {
+        Box::new(MockBackend {
+            destroyed: destroyed.clone(),
+            fail,
+        })
+    }
+
     fn manager_with_mock(destroyed: Arc<AtomicBool>) -> SandboxManager {
         let manager = SandboxManager::new(SandboxConfig::default());
         manager
             .sandboxes
             .try_lock()
             .expect("uncontended in test setup")
-            .insert(
-                Language::Python,
-                Box::new(MockBackend { destroyed }) as Box<dyn SandboxBackend>,
-            );
+            .insert(Language::Python, mock(&destroyed, false));
         manager
     }
 
@@ -324,5 +435,58 @@ mod tests {
             destroyed.load(Ordering::SeqCst),
             "dropping the manager should destroy its tracked sandboxes in the background"
         );
+    }
+
+    /// A failing `destroy()` must not strand the containers behind it: they
+    /// are removed from the map either way, so anything skipped would leak
+    /// with nothing left tracking it.
+    #[tokio::test]
+    async fn destroy_all_destroys_every_container_even_when_one_fails() {
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let third = Arc::new(AtomicBool::new(false));
+
+        // A bare map rather than a manager: this one is deliberately not in
+        // the process registry, so its failing backend can't affect the
+        // `shutdown_all` test.
+        let sandboxes = Mutex::new(HashMap::new());
+        {
+            let mut guard = sandboxes.lock().await;
+            guard.insert(Language::Python, mock(&first, true));
+            guard.insert(Language::JavaScript, mock(&second, false));
+            guard.insert(Language::Bash, mock(&third, false));
+        }
+
+        let err = destroy_all(&sandboxes)
+            .await
+            .expect_err("the failing backend should be reported");
+
+        assert!(first.load(Ordering::SeqCst));
+        assert!(
+            second.load(Ordering::SeqCst) && third.load(Ordering::SeqCst),
+            "a failure on one container must not skip the others"
+        );
+        assert!(sandboxes.lock().await.is_empty());
+        assert!(
+            err.to_string().contains("simulated docker removal failure"),
+            "the underlying error should survive into the summary: {err}"
+        );
+    }
+
+    /// The process-exit backstop: containers are reachable through the
+    /// registry without going through the owning manager, which at quit may
+    /// never be dropped early enough for its detached cleanup task to run.
+    #[tokio::test]
+    async fn shutdown_all_destroys_containers_of_a_still_live_manager() {
+        let destroyed = Arc::new(AtomicBool::new(false));
+        let manager = manager_with_mock(destroyed.clone());
+
+        shutdown_all().await.expect("shutdown should succeed");
+
+        assert!(
+            destroyed.load(Ordering::SeqCst),
+            "shutdown_all should reach containers via the registry"
+        );
+        assert!(manager.sandboxes.lock().await.is_empty());
     }
 }
