@@ -411,6 +411,66 @@ async fn message_send_returns_the_participants_answer() {
     assert_eq!(answer, "42");
 }
 
+/// AGE-321: a worker that asks a question under `message/send` ends the task
+/// with the question in hand, instead of parking until its clarification
+/// timeout on a caller that can never answer.
+#[tokio::test]
+async fn message_send_ends_promptly_when_the_worker_asks_a_question() {
+    let harness = Harness::start().await;
+    let mut stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+
+    let stub_task = tokio::spawn(async move {
+        let task = stub.next_frame().await;
+        assert_eq!(task["type"], "task");
+        let task_id = task["taskId"].as_str().unwrap().to_string();
+
+        stub.send(json!({
+            "type": "status",
+            "taskId": task_id,
+            "state": "input-required",
+            "message": "Which database?",
+            "input": {
+                "id": "req-1",
+                "questions": [{
+                    "id": "q1",
+                    "question": "Which database?",
+                    "options": ["Postgres", "SQLite"],
+                }],
+            },
+        }))
+        .await;
+
+        // The worker now waits, as a parked one does. Nothing more is sent:
+        // the broker ending the task is what un-parks it.
+        stub
+    });
+
+    // A generous bound that is still far below the 300 s clarification
+    // timeout: the point of the fix is that this does not wait one out.
+    let answer = tokio::time::timeout(
+        Duration::from_secs(10),
+        A2aClient::new().send_message(&harness.agent("stub-worker"), "migrate the schema"),
+    )
+    .await
+    .expect("the task ends without waiting out the clarification timeout");
+
+    let error = answer.expect_err("a question a caller cannot answer fails the task");
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("Which database?"),
+        "the failure has to quote the question, got: {text}"
+    );
+    assert!(
+        text.contains("message/stream"),
+        "and say how to ask so it can be answered, got: {text}"
+    );
+
+    // The worker is still parked on its question; dropping it closes the
+    // socket, which is what a reaped worker's exit does in production.
+    drop(stub_task.await.unwrap());
+    harness.await_deregistration("stub-worker").await;
+}
+
 /// The card a participant published at registration is served at its
 /// well-known path, and `A2aClient` reads it as any other agent's.
 #[tokio::test]
