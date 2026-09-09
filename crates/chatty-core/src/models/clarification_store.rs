@@ -8,7 +8,14 @@ use serde::{Deserialize, Serialize};
 
 /// How long the agent waits for the user to answer before giving up.
 /// Matches the execution-approval timeout.
-const CLARIFICATION_TIMEOUT_SECS: u64 = 300;
+///
+/// Public because the delegation transport has to outlast it. A worker's
+/// question travels up to a human (ADR-0011 C7) over the SSE stream that is
+/// carrying the delegation, so if that stream gave up first, "nobody
+/// answered" would surface as a connection error and this timeout could never
+/// fire at all. `services::a2a_client` asserts that ordering at compile time
+/// rather than leaving two constants to coincide.
+pub const CLARIFICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Maximum questions accepted in a single `ask_user` call. Keeps the popover
 /// above the chat input answerable in one sitting.
@@ -133,12 +140,7 @@ pub async fn request_clarification(
         notify_clarification(&state.notifier, request_id.clone(), questions);
     }
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(CLARIFICATION_TIMEOUT_SECS),
-        rx,
-    )
-    .await
-    {
+    match tokio::time::timeout(CLARIFICATION_TIMEOUT, rx).await {
         Ok(Ok(answers)) => Ok(answers),
         Ok(Err(_)) => {
             // Responder dropped — the request was cancelled out from under us.

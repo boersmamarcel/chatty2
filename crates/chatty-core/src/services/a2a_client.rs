@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
-use crate::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
+use std::time::Duration;
+
+use crate::models::clarification_store::{
+    CLARIFICATION_TIMEOUT, ClarificationAnswer, ClarifyingQuestion,
+};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 
 /// The key under a status's `metadata` that carries what an
@@ -75,6 +79,33 @@ pub enum A2aStreamEvent {
     },
 }
 
+/// How long the delegation transport waits for the far side to connect.
+///
+/// Short on purpose: an agent that cannot be reached at all should fail
+/// quickly, whatever the rest of the exchange is allowed to take.
+pub const DELEGATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a delegation stream may stay **silent** before it is treated as
+/// dead (ADR-0011 C7, AGE-319).
+///
+/// Not a budget for the delegation: a delegated turn can legitimately run for
+/// as long as its work takes, and a worker's question can park it for as long
+/// as a human takes to answer. What cannot be legitimate is a stream that
+/// says nothing at all — this app's broker sends SSE keep-alives every 15 s,
+/// so silence past this point means the socket, not the agent, has gone.
+///
+/// It exceeds [`CLARIFICATION_TIMEOUT`] deliberately, and the assertion below
+/// keeps it that way: an unanswered question has to fail as an unanswered
+/// question, on the clarification store's own deadline, rather than as a
+/// transport error that says nothing about what happened.
+pub const DELEGATION_READ_TIMEOUT: Duration = Duration::from_secs(360);
+
+const _: () = assert!(
+    DELEGATION_READ_TIMEOUT.as_secs() > CLARIFICATION_TIMEOUT.as_secs(),
+    "the delegation transport must outlast the clarification timeout, or a \
+     question nobody answers fails as a dead socket instead"
+);
+
 /// A lightweight HTTP client for remote A2A agents.
 #[derive(Clone)]
 pub struct A2aClient {
@@ -116,10 +147,24 @@ impl A2aClient {
         }
     }
 
-    /// Create a client with a custom timeout (useful for long-running agent calls).
-    pub fn with_timeout(timeout: std::time::Duration) -> Self {
+    /// A client for driving a delegation stream.
+    ///
+    /// Bounds silence rather than duration — see [`DELEGATION_READ_TIMEOUT`].
+    pub fn for_delegation() -> Self {
         Self {
-            http: crate::services::http_client::default_client(timeout.as_secs()),
+            http: crate::services::http_client::streaming_client(
+                DELEGATION_CONNECT_TIMEOUT,
+                DELEGATION_READ_TIMEOUT,
+            ),
+        }
+    }
+
+    /// [`for_delegation`](Self::for_delegation) with the silence budget a test
+    /// can wait for. The production one is minutes; nothing in CI should be.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_delegation_with_read_timeout(read: Duration) -> Self {
+        Self {
+            http: crate::services::http_client::streaming_client(DELEGATION_CONNECT_TIMEOUT, read),
         }
     }
 
@@ -650,6 +695,136 @@ mod tests {
         let block = r#"data:{"jsonrpc":"2.0","id":1,"result":{"id":"t","status":{"state":"working"},"final":false}}"#;
         let evt = parse_sse_event(block);
         assert!(evt.is_some());
+    }
+
+    // ── AGE-319: what the delegation transport may and may not bound ────────
+
+    /// An SSE server that sends `frames` `gap` apart, then the terminal one.
+    ///
+    /// Stands in for a broker carrying a delegated turn: the frames are its
+    /// keep-alives and progress, the gap is how quiet it goes between them.
+    async fn sse_server(frames: usize, gap: Duration) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let port = listener.local_addr().expect("the bound address").port();
+
+        let server = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await;
+
+            // Each frame goes out first and the gap follows it, so a caller
+            // always sees the stream alive before it can see it go quiet.
+            for _ in 0..frames {
+                let frame = "data:{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":\"t\",\
+                             \"status\":{\"state\":\"working\"},\"final\":false}}\n\n";
+                let chunked = format!("{:x}\r\n{}\r\n", frame.len(), frame);
+                if socket.write_all(chunked.as_bytes()).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(gap).await;
+            }
+
+            let last = "data:{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":\"t\",\
+                        \"status\":{\"state\":\"completed\"},\"final\":true}}\n\n";
+            let chunked = format!("{:x}\r\n{}\r\n0\r\n\r\n", last.len(), last);
+            let _ = socket.write_all(chunked.as_bytes()).await;
+            let _ = socket.flush().await;
+        });
+
+        (format!("http://127.0.0.1:{port}"), server)
+    }
+
+    fn agent(url: &str) -> A2aAgentConfig {
+        A2aAgentConfig {
+            name: "worker".to_string(),
+            url: url.to_string(),
+            api_key: None,
+            enabled: true,
+            skills: vec![],
+        }
+    }
+
+    /// Drive a delegation to its end, reporting how many events arrived and
+    /// how it finished. The count matters: a test that expects a *silence*
+    /// failure has to know the stream was alive first, or a refused
+    /// connection would satisfy it just as well.
+    async fn drive(client: &A2aClient, url: &str) -> (usize, Result<()>) {
+        use futures::StreamExt;
+
+        let mut stream = match client
+            .send_message_stream(&agent(url), "do the thing")
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return (0, Err(error)),
+        };
+        let mut seen = 0usize;
+        while let Some(event) = stream.next().await {
+            if let Err(error) = event {
+                return (seen, Err(error));
+            }
+            seen += 1;
+        }
+        (seen, Ok(()))
+    }
+
+    /// A delegation may take longer than the silence budget and still finish:
+    /// the transport bounds gaps, not duration. Before AGE-319 this was a
+    /// total timeout, so a turn that outlived it died mid-answer however
+    /// chatty the far side was.
+    #[tokio::test]
+    async fn a_stream_may_run_far_longer_than_its_silence_budget() {
+        let gap = Duration::from_millis(40);
+        let (url, _server) = sse_server(12, gap).await;
+        // Runs ~480 ms in 40 ms steps, against a 200 ms budget for any one
+        // step: more than twice as long as a total timeout of that size.
+        let client = A2aClient::for_delegation_with_read_timeout(Duration::from_millis(200));
+
+        let (seen, outcome) = drive(&client, &url).await;
+        outcome.expect("a long but talkative delegation completes");
+        assert_eq!(seen, 13, "every frame arrives, including the terminal one");
+    }
+
+    /// Silence is still a failure — that is what the read timeout is for, and
+    /// it is why dropping the total timeout does not mean waiting forever on a
+    /// socket nobody is on the other end of.
+    #[tokio::test]
+    async fn a_stream_that_goes_quiet_fails() {
+        // One frame, then a gap five times the budget.
+        let (url, _server) = sse_server(1, Duration::from_millis(400)).await;
+        let client = A2aClient::for_delegation_with_read_timeout(Duration::from_millis(80));
+
+        let (seen, outcome) = drive(&client, &url).await;
+        assert!(
+            seen > 0,
+            "the stream has to be alive before it goes quiet, or this proves nothing"
+        );
+        assert!(
+            outcome.is_err(),
+            "a stream silent past the read timeout must fail"
+        );
+    }
+
+    /// The ordering AGE-319 is about, checked where a reader will see it. The
+    /// compile-time assertion in this module is what enforces it.
+    #[test]
+    fn the_transport_outlasts_the_question_it_carries() {
+        assert!(
+            DELEGATION_READ_TIMEOUT > CLARIFICATION_TIMEOUT,
+            "a question nobody answers must fail as an unanswered question, \
+             not as a dead socket"
+        );
     }
 
     #[test]
