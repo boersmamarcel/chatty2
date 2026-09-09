@@ -432,7 +432,7 @@ impl ChattyApp {
                 let id = id.clone();
                 let name = name.clone();
 
-                if name == "invoke_agent" || name == "sub_agent" {
+                if name == "invoke_agent" {
                     // Suppress ToolCallBlock in the UI — the sub-agent progress
                     // system will handle visualisation via the progress channel.
                     self.active_invoke_agent_ids.insert(id);
@@ -470,7 +470,7 @@ impl ChattyApp {
                 let result = result.clone();
 
                 if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent / sub_agent result — sub-agent progress already
+                    // invoke_agent result — the delegation progress already
                     // finalized via the progress channel; skip creating a ToolCallBlock result.
                 } else {
                     chat_view.update(cx, |view, cx| {
@@ -489,7 +489,7 @@ impl ChattyApp {
                 let error = error.clone();
 
                 if self.active_invoke_agent_ids.remove(&id) {
-                    // invoke_agent / sub_agent error — sub-agent progress handles error
+                    // invoke_agent error — the delegation progress handles error
                     // finalization via the progress channel.
                 } else {
                     chat_view.update(cx, |view, cx| {
@@ -670,7 +670,7 @@ impl ChattyApp {
                     if let Some(conv) = store.get_conversation_mut(conversation_id) {
                         conv.set_streaming_message(None);
                         conv.set_streaming_trace(None);
-                        conv.set_streaming_sub_agent_trace(None);
+                        conv.set_streaming_delegation_trace(None);
                         conv.set_streaming_turn_messages(None);
                     }
                 });

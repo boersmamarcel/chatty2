@@ -77,7 +77,6 @@ tools = [
     ("save_skill", "memory", "save_skill_tool.rs", "memory enabled"),
     ("search_memory", "memory", "search_memory_tool.rs", "memory enabled"),
     ("search_web", "web", "search_web_tool.rs", ""),
-    ("sub_agent", "agents", "sub_agent_tool.rs", "spawns chatty-tui"),
     ("browser_use", "web", "browser_use_tool.rs", ""),
     ("daytona_run", "sandbox", "daytona_tool/", "Daytona cloud sandbox"),
     ("publish_wasm_module", "modules", "publish_module_tool.rs", ""),
@@ -237,9 +236,11 @@ opt-in (`false`) for security.
 | `network_isolation` | `bool` | `false` | Sandbox network isolation when available |
 | `max_agent_turns` | `u32` | `10` | Tool-call rounds per response |
 | `memory_enabled` | `bool` | `true` | `remember` / `search_memory` |
+| `warn_on_external_agent` | `bool` | `false` | say so before `invoke_agent` sends a prompt outside the fleet (ADR-0011 C5) |
 | `embedding_enabled` | `bool` | `false` | Semantic memory search |
 | `embedding_provider` | `Option<ProviderType>` | `null` | Independent of chat provider |
 | `embedding_model` | `Option<String>` | `null` | e.g. `text-embedding-3-small` |
+| `hosted_conversations_enabled` | `bool` | `false` | Developer-only: offers the per-conversation move between local and hosted (AGE-308) |
 
 `ApprovalMode` has no `rename_all` — JSON uses the Rust variant names above.
 
@@ -727,6 +728,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
+| `LIVE_SANDBOXES` | `sandbox/manager.rs` | `LazyLock<Mutex<HashMap<u64, SandboxMap>>>` | Holds every live `SandboxManager`'s container map so `shutdown_all()` can destroy them at process exit — a manager's `Drop` can only spawn a detached task, which dies with the runtime |
 
 **Design rule:** service and repository singletons stay centralized in `lib.rs`; domain-local `OnceLock`s stay in the module that owns the behavior to avoid coupling unrelated code.
 

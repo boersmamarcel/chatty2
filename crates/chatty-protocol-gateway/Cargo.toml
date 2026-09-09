@@ -17,10 +17,34 @@ async-stream = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 
+# Only for the `worker` feature: the participant *side* of the socket needs
+# `SessionEvent` to map a turn onto task frames. Optional, and off by
+# default, so the broker itself still builds without an agent in it.
+# chatty-core does not depend on this crate, so the edge stays acyclic.
+chatty-core = { path = "../chatty-core", optional = true, default-features = false }
+
 [dev-dependencies]
+# The participant socket is verified against the client the rest of the app
+# already uses (`A2aClient`), not a stub of it: ADR-0011's first kill
+# criterion is about what a real caller sees. chatty-core does not depend on
+# this crate, so this dev-only edge is acyclic.
+chatty-core = { path = "../chatty-core" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tower = "0.5"
 axum = { version = "0.8", features = ["macros"] }
+futures = { workspace = true }
+tempfile = { workspace = true }
+
+[features]
+default = []
+# The worker half of ADR-0011: `TaskMapper` and the one-task participant
+# loop, shared by every process that can be a worker — `chatty-tui` on the
+# desktop, hive's `chatty-server` inside a microVM (AGE-307). It lives here
+# rather than in either of them because the frame sequence a parent renders
+# has to have exactly one implementation; two would be free to drift, and
+# ADR-0011's first kill criterion is measured by diffing that sequence.
+worker = ["dep:chatty-core"]
