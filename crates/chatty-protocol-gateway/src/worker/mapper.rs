@@ -17,7 +17,8 @@
 //! | `Text` | `artifact` (a chunk, `lastChunk: false`) |
 //! | `ToolCallStarted` / `ToolCallResult` / `ToolCallError` | `status: working` with the progress line |
 //! | `ToolCallInput` | — |
-//! | `ApprovalRequested` / `ClarificationRequested` | `status: input-required` |
+//! | `ApprovalRequested` | `status: input-required` |
+//! | `ClarificationRequested` | `status: input-required`, carrying the request (see below) |
 //! | `ApprovalResolved` | `status: working` |
 //! | `Delegation` | `status: working` (a grandchild's progress) |
 //! | `ApiCallUsage` | — (folded into `TokenUsage`) |
@@ -46,18 +47,66 @@
 //! terminal status when the whole delegation is over, built from
 //! [`TaskMapper::terminal`].
 //!
+//! # A question goes up the chain
+//!
+//! `ClarificationRequested` is the worker's `ask_user` waiting on someone.
+//! Its status frame carries the whole request — the store's request id and
+//! every question with its options — so the caller can put the same popover
+//! in front of a human, or park its own task the same way if it is a worker
+//! too (ADR-0011 C7, AGE-306). The answer comes back as a
+//! [`TaskInput`](crate::participant::TaskInput) and is handed to the
+//! worker's clarification store by [`answer_clarifications`]; the tool
+//! result that follows is what un-parks the task.
+//!
 //! # What A2A cannot carry
 //!
 //! Token usage. A2A has no notion of it, and inventing a frame would put
 //! accounting into the task protocol. It rides in the terminal status's
 //! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it.
 
-use crate::participant::{ParticipantFrame, TaskState};
+use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
+use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::progress_text_for_event;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
+use tracing::warn;
+
+/// Answers for the running task, as the broker delivers them.
+pub type InputReceiver = mpsc::UnboundedReceiver<TaskInput>;
+
+/// Hand every answer the broker sends down to the store the worker's
+/// `ask_user` is waiting on, until the task is over.
+///
+/// The embedder spawns this beside its turn: the answers arrive on the
+/// socket's read half while the turn runs, and the store is the one thing
+/// both the tool and this loop can reach.
+pub async fn answer_clarifications(mut inputs: InputReceiver, clarifications: ClarificationStore) {
+    while let Some(input) = inputs.recv().await {
+        let request_id = input.request_id.clone();
+        if !clarifications.resolve(&request_id, clarification_answers(input)) {
+            warn!(
+                request = %request_id,
+                "The broker answered a question this worker is no longer asking"
+            );
+        }
+    }
+}
+
+/// The wire's answers in the clarification store's vocabulary.
+pub fn clarification_answers(input: TaskInput) -> Vec<ClarificationAnswer> {
+    input
+        .answers
+        .into_iter()
+        .map(|a| ClarificationAnswer {
+            id: a.id,
+            answer: a.answer,
+            custom: a.custom,
+        })
+        .collect()
+}
 
 /// Folds one delegated task's events into frames.
 pub struct TaskMapper {
@@ -97,12 +146,28 @@ impl TaskMapper {
                 TaskState::InputRequired,
                 Some(format!("approval needed: {command}")),
             )),
-            SessionEvent::ClarificationRequested { questions, .. } => {
+            SessionEvent::ClarificationRequested { id, questions } => {
                 let asked = questions
                     .first()
                     .map(|q| q.question.clone())
                     .unwrap_or_else(|| "a clarifying question".to_string());
-                Some(self.status(TaskState::InputRequired, Some(asked)))
+                Some(ParticipantFrame::Status {
+                    task_id: self.task_id.clone(),
+                    state: TaskState::InputRequired,
+                    message: Some(asked),
+                    metadata: None,
+                    input: Some(InputRequest {
+                        id: id.clone(),
+                        questions: questions
+                            .iter()
+                            .map(|q| InputQuestion {
+                                id: q.id.clone(),
+                                question: q.question.clone(),
+                                options: q.options.clone(),
+                            })
+                            .collect(),
+                    }),
+                })
             }
 
             // Usage is held rather than sent: see the module docs.
@@ -139,6 +204,7 @@ impl TaskMapper {
             state: self.state,
             message: self.failure.clone(),
             metadata: self.usage.as_ref().map(usage_metadata),
+            input: None,
         }
     }
 
@@ -148,6 +214,7 @@ impl TaskMapper {
             state,
             message,
             metadata: None,
+            input: None,
         }
     }
 }
@@ -323,6 +390,101 @@ mod tests {
         let metadata = metadata.expect("usage is attached to the terminal status");
         assert_eq!(metadata["usage"]["inputTokens"], 120);
         assert_eq!(metadata["usage"]["outputTokens"], 34);
+    }
+
+    #[test]
+    fn a_question_parks_the_task_with_everything_needed_to_answer_it() {
+        use chatty_core::models::clarification_store::ClarifyingQuestion;
+
+        let mut mapper = TaskMapper::new("task-1");
+        let frame = mapper
+            .map(&SessionEvent::ClarificationRequested {
+                id: "req-1".into(),
+                questions: vec![
+                    ClarifyingQuestion {
+                        id: "q1".into(),
+                        question: "Which database?".into(),
+                        options: vec!["Postgres".into(), "SQLite".into()],
+                    },
+                    ClarifyingQuestion {
+                        id: "q2".into(),
+                        question: "Which region?".into(),
+                        options: vec!["eu".into(), "us".into()],
+                    },
+                ],
+            })
+            .unwrap();
+        let ParticipantFrame::Status {
+            state,
+            message,
+            input,
+            ..
+        } = frame
+        else {
+            panic!("expected a status frame");
+        };
+        assert_eq!(state, TaskState::InputRequired);
+        assert_eq!(
+            message.as_deref(),
+            Some("Which database?"),
+            "the progress line is the first question"
+        );
+        let request = input.expect("the request rides with the parked state");
+        assert_eq!(
+            request.id, "req-1",
+            "the store's request id is what the answer resolves"
+        );
+        assert_eq!(
+            request.questions.len(),
+            2,
+            "every question goes up, not just the first"
+        );
+        assert_eq!(request.questions[1].options, vec!["eu", "us"]);
+        assert_eq!(outcome(&mapper), TaskState::Completed, "parked, not over");
+    }
+
+    #[tokio::test]
+    async fn answers_from_the_broker_reach_the_waiting_tool() {
+        use crate::participant::InputAnswer;
+        use chatty_core::models::clarification_store::{ClarifyingQuestion, request_clarification};
+
+        let mut store = ClarificationStore::new();
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+        store.set_notifier(notify_tx);
+        let pending = store.get_pending_clarifications();
+        let waiter = tokio::spawn(async move {
+            request_clarification(
+                &pending,
+                vec![ClarifyingQuestion {
+                    id: "q1".into(),
+                    question: "Which database?".into(),
+                    options: vec!["Postgres".into(), "SQLite".into()],
+                }],
+            )
+            .await
+        });
+        // The store announces the request the way it announces it to a
+        // frontend; its id is what the broker's answer must name.
+        let request_id = notify_rx.recv().await.expect("the request is announced").id;
+
+        let (inputs_tx, inputs_rx) = mpsc::unbounded_channel();
+        tokio::spawn(answer_clarifications(inputs_rx, store));
+        inputs_tx
+            .send(TaskInput {
+                request_id,
+                answers: vec![InputAnswer {
+                    id: "q1".into(),
+                    answer: "SQLite".into(),
+                    custom: false,
+                }],
+            })
+            .unwrap();
+
+        let answers = waiter.await.unwrap().unwrap();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].id, "q1");
+        assert_eq!(answers[0].answer, "SQLite");
+        assert!(!answers[0].custom);
     }
 
     #[test]

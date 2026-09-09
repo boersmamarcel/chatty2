@@ -311,9 +311,10 @@ impl ChattyApp {
         cx.spawn(async move |weak, cx| {
             use futures::StreamExt;
 
-            let client = chatty_core::services::A2aClient::new();
-
-            // Use streaming to match invoke_agent's visual behaviour.
+            // Streaming, to match invoke_agent's visual behaviour — and on
+            // the delegation client, because a remote agent's answer takes as
+            // long as it takes (AGE-319).
+            let client = chatty_core::services::A2aClient::for_delegation();
             let stream_result = client.send_message_stream(&config, &prompt).await;
 
             let (success, result_text) =
