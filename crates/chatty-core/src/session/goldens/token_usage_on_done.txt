@@ -1,0 +1,5 @@
+TurnStarted
+Text("Answer.")
+ApiCallUsage(turn=1, in=234, out=56, cache_read=1000, cache_write=0)
+TokenUsage(in=234, out=56, cache_read=1000, cache_write=0, api_turns=1, calls=1)
+TurnEnded

@@ -80,8 +80,7 @@ pub fn set_workspace_dir(dir: Option<String>, cx: &mut App) {
 /// Update approval mode and persist to disk
 pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     // 1. Apply update immediately
-    cx.global_mut::<ExecutionSettingsModel>().approval_mode = mode.clone();
-    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(mode);
+    cx.global_mut::<ExecutionSettingsModel>().approval_mode = mode;
 
     // 2. Get updated state for async save
     let settings = cx.global::<ExecutionSettingsModel>().clone();
@@ -89,7 +88,12 @@ pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     // 3. Refresh UI immediately
     cx.refresh_windows();
 
-    // 4. Save async with error handling
+    // 4. Notify so the active conversation's agent is rebuilt: the approval
+    //    policy travels on each tool from its AgentBuildContext (AGE-193), so
+    //    a change only reaches the tools through a rebuild.
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = chatty_core::execution_settings_repository();
         if let Err(e) = repo.save(settings).await {
@@ -209,6 +213,31 @@ pub fn toggle_browser(cx: &mut App) {
     let settings = cx.global::<ExecutionSettingsModel>().clone();
     cx.refresh_windows();
     notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
+/// Toggle the per-conversation move between local and hosted, and persist to
+/// disk (AGE-308).
+///
+/// Developer-only: with it off — the default — the sidebar offers no move and
+/// the TUI's `/online` refuses. It changes no tool, so the tool set is not
+/// notified.
+pub fn toggle_hosted_conversations(cx: &mut App) {
+    let new_enabled = !cx
+        .global::<ExecutionSettingsModel>()
+        .hosted_conversations_enabled;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .hosted_conversations_enabled = new_enabled;
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
 
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = chatty_core::execution_settings_repository();

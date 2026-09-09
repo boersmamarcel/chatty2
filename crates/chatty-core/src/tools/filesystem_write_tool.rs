@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::models::execution_approval_store::notify_approval_via_global;
+use crate::models::execution_approval_store::ApprovalNotification;
 use crate::models::write_approval_store::{
     PendingWriteApprovals, WriteApprovalDecision, WriteApprovalRequest, WriteOperation,
 };
@@ -15,16 +15,6 @@ use crate::tools::ToolError;
 
 /// Maximum wait time for user approval (5 minutes)
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
-
-// Global approval mode for write operations (set once at startup, read by tools)
-static GLOBAL_WRITE_APPROVAL_MODE: std::sync::OnceLock<parking_lot::Mutex<ApprovalMode>> =
-    std::sync::OnceLock::new();
-
-/// Set the global write approval mode (call at startup)
-pub fn set_global_write_approval_mode(mode: ApprovalMode) {
-    GLOBAL_WRITE_APPROVAL_MODE.get_or_init(|| parking_lot::Mutex::new(ApprovalMode::AlwaysAsk));
-    *GLOBAL_WRITE_APPROVAL_MODE.get().unwrap().lock() = mode;
-}
 
 /// Maximum characters to show in content preview
 const PREVIEW_MAX_CHARS: usize = 200;
@@ -41,18 +31,20 @@ fn preview(s: &str, max_chars: usize) -> String {
 /// Posts a request to the shared pending approvals store, then waits for the UI to resolve it.
 /// If `approval_mode` is `AutoApproveAll` or `AutoApproveSandboxed`, approves immediately
 /// without user interaction. `AlwaysAsk` prompts for each write.
+///
+/// The mode is the agent's own (`ExecutionSettingsModel::approval_mode` from
+/// its `AgentBuildContext`), never a process-wide setting, so two agents in
+/// one process can run under different policies (AGE-193).
 pub async fn request_write_approval(
     pending: &PendingWriteApprovals,
+    approval_mode: &ApprovalMode,
     operation: WriteOperation,
 ) -> Result<bool, anyhow::Error> {
-    use crate::settings::models::execution_settings::ApprovalMode;
-
-    // Check global auto-approve setting
-    if let Some(mode) = GLOBAL_WRITE_APPROVAL_MODE.get() {
-        let mode = mode.lock().clone();
-        if mode == ApprovalMode::AutoApproveAll || mode == ApprovalMode::AutoApproveSandboxed {
-            return Ok(true);
-        }
+    if matches!(
+        approval_mode,
+        ApprovalMode::AutoApproveAll | ApprovalMode::AutoApproveSandboxed
+    ) {
+        return Ok(true);
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -67,14 +59,26 @@ pub async fn request_write_approval(
         responder: tx,
     };
 
-    // Insert the pending request
+    // Insert the pending request and notify through the store's own
+    // per-turn notifier so the UI can show an approval bar (AGE-246 / D7).
     {
-        let mut store = pending.lock();
-        store.insert(id.clone(), request);
+        let mut state = pending.lock();
+        state.requests.insert(id.clone(), request);
+        match &state.notifier {
+            Some(tx) => {
+                if let Err(e) = tx.send(ApprovalNotification {
+                    id: id.clone(),
+                    command: description,
+                    is_sandboxed: false,
+                }) {
+                    warn!(approval_id = %id, error = ?e, "Failed to send write approval notification");
+                }
+            }
+            None => {
+                warn!(approval_id = %id, "Write approval notifier not set - notification not sent!");
+            }
+        }
     }
-
-    // Notify the stream so the UI can show an approval bar
-    notify_approval_via_global(id.clone(), description, false);
 
     debug!(approval_id = %id, "Waiting for write approval");
 
@@ -91,15 +95,13 @@ pub async fn request_write_approval(
         Ok(Err(_)) => {
             warn!(approval_id = %id, "Approval channel closed");
             // Clean up
-            let mut store = pending.lock();
-            store.remove(&id);
+            pending.lock().requests.remove(&id);
             Ok(false)
         }
         Err(_) => {
             warn!(approval_id = %id, "Write approval timed out");
             // Clean up
-            let mut store = pending.lock();
-            store.remove(&id);
+            pending.lock().requests.remove(&id);
             Err(anyhow::anyhow!(
                 "Write approval timed out after {} seconds",
                 APPROVAL_TIMEOUT.as_secs()
@@ -135,13 +137,19 @@ pub struct FinalAnswerOutput {
 #[derive(Clone)]
 pub struct FinalAnswerTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl FinalAnswerTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -225,7 +233,8 @@ impl Tool for FinalAnswerTool {
             content_preview: preview(&content, PREVIEW_MAX_CHARS),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Final answer write denied by user".to_string(),
@@ -384,13 +393,19 @@ pub struct WriteFileOutput {
 #[derive(Clone)]
 pub struct WriteFileTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl WriteFileTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -450,7 +465,8 @@ impl Tool for WriteFileTool {
             content_preview: preview(&args.content, PREVIEW_MAX_CHARS),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Write operation denied by user".to_string(),
@@ -556,13 +572,19 @@ pub struct DeleteFileOutput {
 #[derive(Clone)]
 pub struct DeleteFileTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl DeleteFileTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -613,7 +635,8 @@ impl Tool for DeleteFileTool {
             path: args.path.clone(),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Delete operation denied by user".to_string(),
@@ -646,13 +669,19 @@ pub struct MoveFileOutput {
 #[derive(Clone)]
 pub struct MoveFileTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl MoveFileTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -708,7 +737,8 @@ impl Tool for MoveFileTool {
             destination: args.destination.clone(),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Move operation denied by user".to_string(),
@@ -728,7 +758,101 @@ impl Tool for MoveFileTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_final_answer, preview};
+    use super::{normalize_final_answer, preview, request_write_approval};
+    use crate::models::write_approval_store::{
+        WriteApprovalDecision, WriteApprovalStore, WriteOperation,
+    };
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    /// AGE-246 / D7: two agents, each with its own `WriteApprovalStore`, must
+    /// not cross-notify — a request made against agent A's store is
+    /// delivered only to A's receiver, never B's.
+    #[tokio::test]
+    async fn write_approval_notifies_only_the_owning_store() {
+        let mut store_a = WriteApprovalStore::new();
+        let mut store_b = WriteApprovalStore::new();
+
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        store_a.set_notifier(tx_a);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        store_b.set_notifier(tx_b);
+
+        let pending_a = store_a.get_pending_approvals();
+        let waiter = tokio::spawn({
+            let pending_a = pending_a.clone();
+            async move {
+                request_write_approval(
+                    &pending_a,
+                    &ApprovalMode::AlwaysAsk,
+                    WriteOperation::DeleteFile {
+                        path: "/tmp/x".to_string(),
+                    },
+                )
+                .await
+            }
+        });
+
+        let notification = rx_a
+            .recv()
+            .await
+            .expect("agent A's receiver must see the notification");
+        assert!(
+            rx_b.try_recv().is_err(),
+            "agent B's receiver must not see agent A's request"
+        );
+
+        assert!(store_a.resolve(&notification.id, WriteApprovalDecision::Approved));
+        assert!(waiter.await.unwrap().unwrap());
+    }
+
+    /// AGE-193: the write-approval policy is the agent's own, not a process
+    /// global. Two agents streaming concurrently under different modes must
+    /// each get their own behaviour — B's auto-approve must not leak into A's
+    /// always-ask, and A's request must still reach only A's notifier.
+    #[tokio::test]
+    async fn concurrent_agents_keep_their_own_write_approval_mode() {
+        let mut store_a = WriteApprovalStore::new();
+        let mut store_b = WriteApprovalStore::new();
+
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+        store_a.set_notifier(tx_a);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        store_b.set_notifier(tx_b);
+
+        let op = || WriteOperation::DeleteFile {
+            path: "/tmp/x".to_string(),
+        };
+
+        let pending_a = store_a.get_pending_approvals();
+        let waiter_a = tokio::spawn({
+            let pending_a = pending_a.clone();
+            async move { request_write_approval(&pending_a, &ApprovalMode::AlwaysAsk, op()).await }
+        });
+        let pending_b = store_b.get_pending_approvals();
+        let waiter_b = tokio::spawn({
+            let pending_b = pending_b.clone();
+            async move { request_write_approval(&pending_b, &ApprovalMode::AutoApproveAll, op()).await }
+        });
+
+        // B auto-approves without ever prompting.
+        assert!(waiter_b.await.unwrap().unwrap());
+        assert!(
+            rx_b.try_recv().is_err(),
+            "auto-approve must not post a notification"
+        );
+
+        // A is still waiting on its own prompt, untouched by B's policy.
+        let notification = rx_a
+            .recv()
+            .await
+            .expect("agent A's receiver must see the notification");
+        assert!(
+            !waiter_a.is_finished(),
+            "always-ask must block until resolved"
+        );
+        assert!(store_a.resolve(&notification.id, WriteApprovalDecision::Denied));
+        assert!(!waiter_a.await.unwrap().unwrap());
+    }
 
     #[test]
     fn preview_truncates_on_char_boundary_not_bytes() {
@@ -807,13 +931,19 @@ pub struct ApplyDiffOutput {
 #[derive(Clone)]
 pub struct ApplyDiffTool {
     service: Arc<FileSystemService>,
+    approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
 }
 
 impl ApplyDiffTool {
-    pub fn new(service: Arc<FileSystemService>, pending_approvals: PendingWriteApprovals) -> Self {
+    pub fn new(
+        service: Arc<FileSystemService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingWriteApprovals,
+    ) -> Self {
         Self {
             service,
+            approval_mode,
             pending_approvals,
         }
     }
@@ -875,7 +1005,8 @@ impl Tool for ApplyDiffTool {
             new_preview: preview(&args.new_content, PREVIEW_MAX_CHARS),
         };
 
-        let approved = request_write_approval(&self.pending_approvals, operation).await?;
+        let approved =
+            request_write_approval(&self.pending_approvals, &self.approval_mode, operation).await?;
         if !approved {
             return Err(ToolError::OperationFailed(
                 "Diff operation denied by user".to_string(),

@@ -49,6 +49,22 @@ pub struct GitCommitOutput {
     pub summary: String,
 }
 
+/// A single entry from `git worktree list`
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GitWorktree {
+    /// Absolute path of the worktree's working directory
+    pub path: String,
+    /// Branch checked out there, if any (detached worktrees have none)
+    pub branch: Option<String>,
+}
+
+/// Directory, relative to the workspace root, that holds per-worker worktrees.
+///
+/// ADR-0012 leaves the location open between "under the workspace" and "beside
+/// it"; under it keeps every worker path inside the `PathValidator` root, which
+/// is the property the filesystem tools rely on.
+pub const WORKTREE_DIR: &str = ".chatty/worktrees";
+
 /// Git operations service.
 ///
 /// All operations are workspace-restricted via PathValidator and executed
@@ -311,6 +327,225 @@ impl GitService {
         Ok(format!("Switched to branch '{}'", name))
     }
 
+    /// Create a worktree for one parallel worker, on its own new branch.
+    ///
+    /// ADR-0012: a worker gets its own copy and hands back a branch, so two
+    /// workers editing one file produce a git conflict the leader can see
+    /// rather than a last-writer-wins result neither of them reported.
+    ///
+    /// `name` is a single path segment; the worktree lands at
+    /// `<workspace>/.chatty/worktrees/<name>` and the branch is created there.
+    pub async fn worktree_add(&self, name: &str, branch: &str) -> Result<PathBuf> {
+        Self::validate_worktree_name(name)?;
+        Self::validate_branch_name(branch)?;
+
+        self.exclude_worktree_dir_locally().await?;
+
+        let rel = format!("{WORKTREE_DIR}/{name}");
+        let path = self.workspace_root.join(&rel);
+        if path.exists() {
+            return Err(anyhow!(
+                "Worktree '{}' already exists at {}",
+                name,
+                path.display()
+            ));
+        }
+
+        self.run_git(&["worktree", "add", "-b", branch, &rel])
+            .await?;
+
+        info!(worktree = %path.display(), branch = %branch, "Worktree created");
+        Ok(path)
+    }
+
+    /// Remove a worker's worktree. The branch is kept — it is the worker's
+    /// output, and the leader still has to merge it.
+    ///
+    /// `force` is off by default on purpose. `git worktree remove` refuses a
+    /// tree with modified or untracked files, and that refusal is the only
+    /// guard against destroying work no commit has captured yet. Removal is a
+    /// separate step *after* a successful merge, never part of a worker's exit
+    /// path; see [`Self::commit_all`].
+    pub async fn worktree_remove(&self, name: &str, force: bool) -> Result<String> {
+        Self::validate_worktree_name(name)?;
+
+        let rel = format!("{WORKTREE_DIR}/{name}");
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&rel);
+        self.run_git(&args).await?;
+
+        info!(worktree = %name, force, "Worktree removed");
+        Ok(format!("Worktree '{}' removed", name))
+    }
+
+    /// Keep the harness's own worktrees out of the user's repository.
+    ///
+    /// [`WORKTREE_DIR`] sits inside the workspace so every worker path stays
+    /// within the `PathValidator` root (ADR-0017). The cost is borne by the
+    /// user's repo: `git status` reports `?? .chatty/`, and `git add -A`
+    /// stages a worktree as an *embedded git repository*, dropping a gitlink
+    /// into their history. `commit_all` is itself a `git add -A`, so this is
+    /// reachable from the harness and not only from the user.
+    ///
+    /// `.git/info/exclude` is the right lever: it is git's per-clone ignore
+    /// list, so the fix never touches the `.gitignore` the user tracks and
+    /// owns. Written to the *common* git dir, which linked worktrees share.
+    async fn exclude_worktree_dir_locally(&self) -> Result<()> {
+        let entry = format!("/{}/", WORKTREE_DIR.trim_end_matches('/'));
+
+        let common = self.run_git(&["rev-parse", "--git-common-dir"]).await?;
+        let common = common.trim();
+        let git_dir = if std::path::Path::new(common).is_absolute() {
+            PathBuf::from(common)
+        } else {
+            self.workspace_root.join(common)
+        };
+
+        let info_dir = git_dir.join("info");
+        let exclude = info_dir.join("exclude");
+
+        let current = tokio::fs::read_to_string(&exclude)
+            .await
+            .unwrap_or_default();
+        if current.lines().any(|line| line.trim() == entry) {
+            return Ok(());
+        }
+
+        tokio::fs::create_dir_all(&info_dir)
+            .await
+            .map_err(|e| anyhow!("Failed to create {}: {}", info_dir.display(), e))?;
+
+        let mut next = current;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str("# chatty sub-agent worktrees (ADR-0017); local-only, not your .gitignore\n");
+        next.push_str(&entry);
+        next.push('\n');
+
+        tokio::fs::write(&exclude, next)
+            .await
+            .map_err(|e| anyhow!("Failed to write {}: {}", exclude.display(), e))?;
+
+        debug!(exclude = %exclude.display(), entry = %entry, "Excluded worktree dir locally");
+        Ok(())
+    }
+
+    /// Stage everything and commit it, returning `None` when the tree is clean.
+    ///
+    /// This is the local form of ADR-0016's turn-commit barrier: a worker's
+    /// output is durable on its branch before anything else may remove the
+    /// tree it lives in.
+    ///
+    /// `git add -A` honours `.gitignore`, so build state stays out. It does
+    /// *not* separate generated artifacts from tracked source — an un-ignored
+    /// PDF lands in git history, which ADR-0016 rejects. Classifying it is
+    /// that ADR's open question; committing everything is the choice that
+    /// cannot lose data while the question is open.
+    pub async fn commit_all(&self, message: &str) -> Result<Option<GitCommitOutput>> {
+        if message.trim().is_empty() {
+            return Err(anyhow!("Commit message cannot be empty"));
+        }
+
+        self.run_git(&["add", "-A"]).await?;
+
+        let staged = self.run_git(&["diff", "--cached", "--stat"]).await?;
+        if staged.trim().is_empty() {
+            debug!("Nothing to commit; worktree is clean");
+            return Ok(None);
+        }
+
+        let output = self.run_git(&["commit", "-m", message]).await?;
+        let hash = self
+            .run_git(&["rev-parse", "HEAD"])
+            .await?
+            .trim()
+            .to_string();
+
+        info!(hash = %hash, "Worker output committed");
+
+        Ok(Some(GitCommitOutput {
+            hash,
+            message: message.to_string(),
+            summary: output.trim().to_string(),
+        }))
+    }
+
+    /// List the repository's worktrees, including the main one.
+    pub async fn worktree_list(&self) -> Result<Vec<GitWorktree>> {
+        let output = self.run_git(&["worktree", "list", "--porcelain"]).await?;
+        Ok(Self::parse_worktree_list(&output))
+    }
+
+    /// Parse `git worktree list --porcelain` into entries.
+    ///
+    /// Records are separated by a blank line; `worktree <path>` opens one and
+    /// `branch refs/heads/<name>` names its branch. A detached worktree has a
+    /// `detached` line and no branch.
+    fn parse_worktree_list(output: &str) -> Vec<GitWorktree> {
+        let mut out = Vec::new();
+        let mut path: Option<String> = None;
+        let mut branch: Option<String> = None;
+
+        for line in output.lines() {
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                if let Some(p) = path.take() {
+                    out.push(GitWorktree {
+                        path: p,
+                        branch: branch.take(),
+                    });
+                }
+                path = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("branch ") {
+                branch = Some(
+                    rest.trim()
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(rest.trim())
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(p) = path {
+            out.push(GitWorktree { path: p, branch });
+        }
+        out
+    }
+
+    /// Validate a worktree name: one path segment, no traversal.
+    ///
+    /// The name reaches `git worktree add` as a path relative to the workspace
+    /// root, so anything that could climb out of `WORKTREE_DIR` has to be
+    /// rejected here rather than caught later by `PathValidator`.
+    fn validate_worktree_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(anyhow!("Worktree name cannot be empty"));
+        }
+        if name.len() > 100 {
+            return Err(anyhow!("Worktree name too long (max 100 characters)"));
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err(anyhow!("Worktree name must be a single path segment"));
+        }
+        if name == "." || name == ".." || name.contains("..") {
+            return Err(anyhow!("Worktree name cannot contain '..'"));
+        }
+        if name.starts_with('-') {
+            return Err(anyhow!("Worktree name cannot start with '-'"));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return Err(anyhow!(
+                "Worktree name may only contain letters, digits, '-', '_' and '.'"
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a commit with the given message.
     ///
     /// Only commits already-staged changes. Returns an error if there are
@@ -425,6 +660,150 @@ mod tests {
     use std::fs;
 
     /// Helper to create a temporary git repository
+    // ── Worktree isolation (AGE-314 / ADR-0012) ──────────────────────────
+
+    #[test]
+    fn worktree_name_rejects_traversal_and_flags() {
+        for bad in ["", "..", "../evil", "a/b", "a..b", "-rf", "wt$(x)", "."] {
+            assert!(
+                GitService::validate_worktree_name(bad).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+        for good in ["w1", "w-1700000000-0", "worker_2", "a.b"] {
+            assert!(
+                GitService::validate_worktree_name(good).is_ok(),
+                "should accept {good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_worktree_list_porcelain() {
+        let out = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+                   worktree /repo/.chatty/worktrees/w1\nHEAD def\nbranch refs/heads/sub-agent/w1\n\n\
+                   worktree /repo/.chatty/worktrees/w2\nHEAD 123\ndetached\n";
+        let got = GitService::parse_worktree_list(out);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].branch.as_deref(), Some("main"));
+        assert_eq!(got[1].path, "/repo/.chatty/worktrees/w1");
+        assert_eq!(got[1].branch.as_deref(), Some("sub-agent/w1"));
+        assert_eq!(got[2].branch, None, "a detached worktree has no branch");
+    }
+
+    #[tokio::test]
+    async fn worktree_add_creates_an_isolated_checkout() {
+        let (tmp, git) = create_test_repo().await;
+        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+
+        assert!(path.exists(), "worktree directory should exist");
+        assert!(
+            path.starts_with(tmp.path()),
+            "worktree stays inside the workspace root"
+        );
+
+        let listed = git.worktree_list().await.unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|w| w.branch.as_deref() == Some("sub-agent/w1")),
+            "new worktree should be listed: {listed:?}"
+        );
+    }
+
+    /// A worker's worktree lives inside the user's repository, so it must be
+    /// invisible to the user's own git. Without the local exclude, `git status`
+    /// reports `?? .chatty/` and `git add -A` stages the worktree as an
+    /// embedded repository — a gitlink in their history.
+    #[tokio::test]
+    async fn worktree_add_leaves_the_parent_repo_status_clean() {
+        let (_tmp, git) = create_test_repo().await;
+        git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+
+        let status = git.run_git(&["status", "--porcelain"]).await.unwrap();
+        assert!(
+            status.trim().is_empty(),
+            "worktrees must not show up in the user's status, got: {status:?}"
+        );
+
+        git.run_git(&["add", "-A"]).await.unwrap();
+        let staged = git
+            .run_git(&["diff", "--cached", "--name-only"])
+            .await
+            .unwrap();
+        assert!(
+            staged.trim().is_empty(),
+            "`git add -A` must not stage the worktree, got: {staged:?}"
+        );
+    }
+
+    /// The property the whole teardown design rests on: a worker's uncommitted
+    /// work is never destroyed as a side effect of cleanup.
+    #[tokio::test]
+    async fn worktree_remove_refuses_to_discard_uncommitted_work() {
+        let (_tmp, git) = create_test_repo().await;
+        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+
+        tokio::fs::write(path.join("worker.txt"), "unsaved work")
+            .await
+            .unwrap();
+
+        let refused = git.worktree_remove("w1", false).await;
+        assert!(refused.is_err(), "must not delete a dirty worktree");
+        assert!(
+            path.join("worker.txt").exists(),
+            "the worker's file must survive the refused removal"
+        );
+
+        git.worktree_remove("w1", true)
+            .await
+            .expect("force removal is the explicit opt-in");
+    }
+
+    #[tokio::test]
+    async fn commit_all_captures_worker_output_then_removal_succeeds() {
+        let (_tmp, git) = create_test_repo().await;
+        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+
+        tokio::fs::write(path.join("worker.txt"), "the answer")
+            .await
+            .unwrap();
+
+        let worker_git = GitService::new(path.to_str().unwrap()).await.unwrap();
+        let commit = worker_git
+            .commit_all("sub-agent w1: do the task")
+            .await
+            .unwrap()
+            .expect("a dirty worktree should produce a commit");
+        assert!(!commit.hash.is_empty());
+
+        // Committed, so the non-forced removal now succeeds.
+        git.worktree_remove("w1", false)
+            .await
+            .expect("a clean worktree removes without force");
+
+        // And the output survives on the branch.
+        let log = git
+            .run_git(&["log", "--oneline", "sub-agent/w1"])
+            .await
+            .unwrap();
+        assert!(
+            log.contains("sub-agent w1"),
+            "branch keeps the output: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_all_on_a_clean_tree_is_none() {
+        let (_tmp, git) = create_test_repo().await;
+        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        let worker_git = GitService::new(path.to_str().unwrap()).await.unwrap();
+        assert!(
+            worker_git.commit_all("nothing").await.unwrap().is_none(),
+            "a worker that changed nothing produces no commit"
+        );
+    }
+
     async fn create_test_repo() -> (tempfile::TempDir, GitService) {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().to_str().unwrap();

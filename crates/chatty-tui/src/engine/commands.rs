@@ -4,10 +4,33 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
+use rig_core::completion::Message;
+use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
+
+use chatty_core::models::conversation::ConversationMode;
+use chatty_core::session::{
+    BRING_BACK_SUMMARY, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
+    refuse_reason, take_online,
+};
 
 use super::{ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker, ToolPickerItem};
 use crate::events::AppEvent;
+
+/// Render a move's "what travels and what does not" table for a terminal.
+///
+/// The strings come from chatty-core, so the TUI prompt and the desktop
+/// dialog say the same thing and neither can drift from what the code does.
+fn push_move_summary(out: &mut String, summary: &MoveSummary) {
+    out.push_str("Moves:\n");
+    for item in summary.moves {
+        out.push_str(&format!("  + {item}\n"));
+    }
+    out.push_str("Does not move:\n");
+    for (what, why) in summary.does_not_move {
+        out.push_str(&format!("  - {what} ({why})\n"));
+    }
+}
 
 /// Parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +57,9 @@ pub enum Command {
     Update,
     /// /cwd, /cd [directory] — show or change working directory
     Cwd(Option<String>),
+    /// /online [url|off] — show where this conversation runs, take it online,
+    /// or bring it back (AGE-298)
+    Online(Option<String>),
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -66,6 +92,7 @@ impl ChatEngine {
             "/copy" => Some(Command::Copy),
             "/update" => Some(Command::Update),
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
+            "/online" => Some(Command::Online(arg)),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }
@@ -73,27 +100,46 @@ impl ChatEngine {
 
     /// Clear all display and conversation state so a fresh conversation can be initialized.
     pub fn clear_conversation(&mut self) {
-        self.messages.clear();
+        self.transcript.clear();
         self.title = "New Chat".to_string();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
+        self.total_cache_read_tokens = 0;
+        self.total_cache_write_tokens = 0;
+        self.last_turn_usage = None;
         self.pin_to_bottom();
         self.pending_approval = None;
         self.pending_clarification = None;
-        self.clarification_store.cancel_all();
+        self.session.clarifications().cancel_all();
         self.model_picker = None;
         self.tool_picker = None;
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message("Started a new conversation.".to_string());
     }
 
     /// Show current context usage and working directory.
     pub fn context_summary(&self) -> String {
+        // The last request's prompt is the actual context size; summing every
+        // request's input tokens over the whole session over-states it (AGE-223).
         let used_tokens = self
-            .total_input_tokens
-            .saturating_add(self.total_output_tokens);
+            .last_turn_usage
+            .as_ref()
+            .and_then(|usage| usage.last_call())
+            .map(|call| call.prompt_tokens())
+            .unwrap_or_else(|| {
+                self.total_input_tokens
+                    .saturating_add(self.total_output_tokens)
+            });
         let workspace = self.current_working_directory();
+        let cache_line = if self.total_cache_read_tokens > 0 || self.total_cache_write_tokens > 0 {
+            format!(
+                "\nCached: {} tokens read, {} tokens written",
+                self.total_cache_read_tokens, self.total_cache_write_tokens
+            )
+        } else {
+            String::new()
+        };
         if let Some(max_context) = self.model_config.max_context_window
             && max_context > 0
         {
@@ -106,19 +152,24 @@ impl ChatEngine {
                 "░".repeat(20usize.saturating_sub(filled.min(20)))
             );
             format!(
-                "Context usage: {} / {} tokens ({:.1}%) {}\nInput: {} tokens, Output: {} tokens\nWorking directory: {}",
+                "Context usage: {} / {} tokens ({:.1}%) {}\nInput: {} tokens, Output: {} tokens{}\nWorking directory: {}",
                 used_tokens,
                 max_context_u32,
                 pct,
                 bar,
                 self.total_input_tokens,
                 self.total_output_tokens,
+                cache_line,
                 workspace,
             )
         } else {
             format!(
-                "Context usage: {} tokens (model max context window unknown)\nInput: {} tokens, Output: {} tokens\nWorking directory: {}",
-                used_tokens, self.total_input_tokens, self.total_output_tokens, workspace
+                "Context usage: {} tokens (model max context window unknown)\nInput: {} tokens, Output: {} tokens{}\nWorking directory: {}",
+                used_tokens,
+                self.total_input_tokens,
+                self.total_output_tokens,
+                cache_line,
+                workspace
             )
         }
     }
@@ -150,7 +201,7 @@ impl ChatEngine {
         let canonical_str = canonical.to_string_lossy().to_string();
         self.execution_settings.workspace_dir = Some(canonical_str.clone());
         self.refresh_workspace_context();
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message(format!(
             "Working directory changed to '{}'. Conversation context was reset.",
@@ -181,7 +232,7 @@ impl ChatEngine {
         let workspace_str = new_workspace.to_string_lossy().to_string();
         self.execution_settings.workspace_dir = Some(workspace_str.clone());
         self.refresh_workspace_context();
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message(format!(
             "Added directory '{}'. Workspace expanded to '{}'. Conversation context was reset.",
@@ -191,9 +242,171 @@ impl ChatEngine {
         Ok(workspace_str)
     }
 
+    /// `/online` with no argument: where this conversation runs, and what a
+    /// move would and would not carry.
+    ///
+    /// The table is printed *before* anything moves, because taking a
+    /// conversation online is a data egress and AGE-298 asks that the user see
+    /// what leaves this machine before they agree to it. `/online <url>` is
+    /// the confirmation — there is no second prompt, because typing the URL is
+    /// already a deliberate act and the terminal has just shown the table.
+    pub fn online_status(&self) -> String {
+        let mut out = String::new();
+        match self.conversation_mode() {
+            ConversationMode::Local => {
+                out.push_str("This conversation runs locally.\n");
+                out.push_str("  /online <server-url>  take it online\n\n");
+                push_move_summary(&mut out, &TAKE_ONLINE_SUMMARY);
+            }
+            ConversationMode::Hosted {
+                server_url,
+                remote_id,
+            } => {
+                out.push_str(&format!(
+                    "This conversation runs on {server_url} (as {remote_id}).\n"
+                ));
+                out.push_str("  /online off  bring it back to this machine\n\n");
+                push_move_summary(&mut out, &BRING_BACK_SUMMARY);
+            }
+        }
+        out
+    }
+
+    /// Where this conversation's turns run.
+    pub fn conversation_mode(&self) -> ConversationMode {
+        self.session
+            .conversation()
+            .map(|conv| conv.mode().clone())
+            .unwrap_or_default()
+    }
+
+    /// `/online <url>` — upload this conversation's history and continue it
+    /// there. `/online off` brings it back.
+    ///
+    /// Ordering is the safety property: the history goes up first, and only a
+    /// server that has accepted it and named it causes anything local to
+    /// change. A client killed part-way through leaves the local conversation
+    /// exactly as it was, and the hosted conversation it never learned the id
+    /// of is unreachable rather than half-adopted.
+    pub async fn set_online(&mut self, target: Option<String>) -> Result<()> {
+        let going_online = target.is_some();
+        let mode = self.conversation_mode();
+        if let Some(reason) = refuse_reason(self.is_streaming, &mode, going_online) {
+            self.add_system_message(reason.to_string());
+            return Ok(());
+        }
+        let Some(conversation) = self.session.conversation() else {
+            self.add_system_message("No active conversation to move.".to_string());
+            return Ok(());
+        };
+
+        match target {
+            Some(server_url) => {
+                let new_mode =
+                    take_online(&server_url, conversation.title(), &conversation.messages())
+                        .await
+                        .context("Failed to take the conversation online")?;
+                let (url, remote_id) = new_mode
+                    .hosted_on()
+                    .map(|(url, id)| (url.to_string(), id.to_string()))
+                    .expect("take_online returns a hosted mode");
+
+                self.hosted = Some(HostedSession::new(&url, &remote_id));
+                if let Some(conv) = self.session.conversation_mut() {
+                    conv.set_mode(new_mode);
+                }
+                self.add_system_message(format!(
+                    "This conversation now runs on {url}. Its history stays on this machine too — /online off brings it back."
+                ));
+            }
+            None => {
+                let (server_url, remote_id) = mode
+                    .hosted_on()
+                    .map(|(url, id)| (url.to_string(), id.to_string()))
+                    .expect("refuse_reason rejected a local conversation already");
+                let remote = fetch_hosted(&server_url, &remote_id)
+                    .await
+                    .context("Failed to read the hosted conversation back")?;
+
+                // This client applied every event of every hosted turn it was
+                // present for, so its local history is usually already
+                // complete *and richer* — it has the per-message traces the
+                // wire does not carry. Adopting the server's copy wholesale
+                // would throw those away. So the server's history is only
+                // taken when it is longer, which is exactly the case it exists
+                // to cover: turns that happened while this client was closed.
+                let local_len = self
+                    .session
+                    .conversation()
+                    .map(|conv| conv.messages().len())
+                    .unwrap_or(0);
+                let missed = remote.messages.len().saturating_sub(local_len);
+                if missed > 0 {
+                    for message in remote.messages.iter().skip(local_len) {
+                        self.append_missed_message(message);
+                    }
+                    if let Some(conv) = self.session.conversation_mut() {
+                        conv.import_history(remote.messages);
+                    }
+                }
+                if let Some(conv) = self.session.conversation_mut() {
+                    conv.set_mode(ConversationMode::Local);
+                }
+                self.hosted = None;
+                self.add_system_message(match missed {
+                    0 => "This conversation runs locally again.".to_string(),
+                    1 => "This conversation runs locally again, with 1 turn it ran without you."
+                        .to_string(),
+                    n => format!(
+                        "This conversation runs locally again, with {n} messages it ran without you."
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Put a message the hosted run recorded while this client was away into
+    /// the transcript, so bringing the conversation back shows what happened
+    /// rather than jumping silently forward.
+    ///
+    /// Tool round-trips are skipped for the same reason every other reader
+    /// skips them: they are history for the model, not lines for a person.
+    fn append_missed_message(&mut self, message: &Message) {
+        if chatty_core::services::is_tool_message(message) {
+            return;
+        }
+        match message {
+            Message::User { content } => {
+                let text = chatty_core::services::extract_user_text(content);
+                if !text.trim().is_empty() {
+                    self.transcript.push_user(text);
+                }
+            }
+            Message::Assistant { content, .. } => {
+                let text = content
+                    .iter()
+                    .filter_map(|item| match item {
+                        AssistantContent::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.trim().is_empty() {
+                    self.transcript.start_assistant();
+                    self.transcript.push_text(&text);
+                    self.transcript.finish_streaming();
+                }
+            }
+            // A system message is context the agent was given, not a line
+            // anyone said; the transcript has never shown one.
+            Message::System { .. } => {}
+        }
+    }
+
     /// Summarize older conversation history to reduce context usage.
     pub async fn compact_conversation(&mut self) -> Result<()> {
-        let (agent, history) = match self.conversation.as_ref() {
+        let (agent, history) = match self.session.conversation() {
             Some(conv) => (conv.agent().clone(), conv.messages()),
             None => {
                 self.add_system_message("No active conversation to compact.".to_string());
@@ -213,7 +426,7 @@ impl ChatEngine {
             .await
             .context("Failed to summarize conversation")?;
 
-        if let Some(conv) = self.conversation.as_mut() {
+        if let Some(conv) = self.session.conversation_mut() {
             conv.replace_history(result.new_history, midpoint);
         }
 
@@ -227,6 +440,7 @@ impl ChatEngine {
     /// Copy the latest assistant message to the system clipboard.
     pub fn copy_last_response_to_clipboard(&mut self) -> Result<()> {
         let text = self
+            .transcript
             .messages
             .iter()
             .rev()
@@ -300,12 +514,14 @@ impl ChatEngine {
 
         let label = format!("[remote agent: {}] {}", config.name, prompt);
         self.add_system_message(label);
-        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+        self.transcript.mark_last_as_delegation_row();
 
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            let client = chatty_core::services::A2aClient::new();
+            // The delegation client: a remote agent's answer takes as long as
+            // it takes, and only silence is a failure (AGE-319).
+            let client = chatty_core::services::A2aClient::for_delegation();
             let stream_result = client.send_message_stream(&config, &prompt).await;
 
             let message = match stream_result {
@@ -330,7 +546,8 @@ impl ChatEngine {
                                 } else if state == "working"
                                     && let Some(ref msg) = message
                                 {
-                                    let _ = event_tx.send(AppEvent::SubAgentProgress(msg.clone()));
+                                    let _ =
+                                        event_tx.send(AppEvent::DelegationProgress(msg.clone()));
                                 }
                             }
                             Ok(
@@ -362,7 +579,7 @@ impl ChatEngine {
                 Err(e) => format!("\u{26a0}\u{fe0f} A2A error: {e:#}"),
             };
 
-            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver A2A agent completion event");
             }
         });
@@ -382,7 +599,7 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching local sub-agent...".to_string());
-        self.sub_agent_msg_idx = Some(self.messages.len() - 1);
+        self.transcript.mark_last_as_delegation_row();
 
         tokio::task::spawn_blocking(move || {
             let message = match super::helpers::run_sub_agent_process(
@@ -403,7 +620,7 @@ impl ChatEngine {
                 Err(e) => format!("Sub-agent failed: {}", e),
             };
 
-            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver sub-agent completion event");
             }
         });
@@ -475,7 +692,7 @@ impl ChatEngine {
         let model_name = new_model.name.clone();
         self.model_config = new_model;
         self.provider_config = new_provider;
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
 
         self.add_system_message(format!(
@@ -597,7 +814,7 @@ impl ChatEngine {
             self.execution_settings.execute_code_enabled = true;
         }
 
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         self.add_system_message(
             "Tool settings updated. Conversation context was reset.".to_string(),
@@ -652,7 +869,7 @@ impl ChatEngine {
         };
         let state = if enabled { "enabled" } else { "disabled" };
         self.add_system_message(format!("Tool '{}' {}. Reinitializing...", name, state));
-        self.conversation = None;
+        self.session.set_conversation(None);
         self.is_ready = false;
         true
     }
@@ -735,7 +952,7 @@ impl ChatEngine {
                 }
             });
 
-            self.conversation = None;
+            self.session.set_conversation(None);
             self.is_ready = false;
             self.add_system_message(format!(
                 "Modules settings updated: enabled={}, dir={}, port={}. Conversation context was reset.",

@@ -264,35 +264,6 @@ pub(super) fn render_code_run_input(
     Some(CodeBlockComponent::new(Some(language), code, block_index).into_any_element())
 }
 
-/// Format the inline header text for a tool call.
-///
-/// Most tools show `$ <command>` (shell-style), but internet and memory tools use their
-/// friendly name as a prefix (e.g. "Searching online: rust async patterns").
-#[allow(dead_code)]
-pub(super) fn format_tool_call_header(tool_call: &ToolCallBlock) -> String {
-    let detail = extract_command_display(tool_call);
-
-    match tool_call.tool_name.as_str() {
-        "sub_agent" => format!("{}: {}", tool_call.display_name, detail),
-        "remember" | "search_memory" | "search_web" | "fetch" | "daytona_run" | "browser_use" => {
-            // Use the friendly display_name as prefix with the detail
-            format!("{}: {}", tool_call.display_name, detail)
-        }
-        _ => format!("$ {}", detail),
-    }
-}
-
-/// Extract a user-friendly display string from tool call input (truncated for headers)
-pub(super) fn extract_command_display(tool_call: &ToolCallBlock) -> String {
-    let full = extract_full_command(tool_call);
-    if full.chars().count() > 80 {
-        let truncated: String = full.chars().take(77).collect();
-        format!("{}...", truncated)
-    } else {
-        full
-    }
-}
-
 /// Extract the full, untruncated command string from tool call input
 pub(super) fn extract_full_command(tool_call: &ToolCallBlock) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tool_call.input) {
@@ -355,8 +326,8 @@ pub(super) fn extract_full_command(tool_call: &ToolCallBlock) -> String {
             }
         }
 
-        // For sub_agent: extract the task prompt
-        if tool_call.tool_name == "sub_agent" {
+        // For a delegated agent: extract the task prompt
+        if tool_call.tool_name == "invoke_agent" {
             if let Some(task) = json.get("task").and_then(|v| v.as_str()) {
                 return task.to_string();
             }

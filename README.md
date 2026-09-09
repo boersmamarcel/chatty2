@@ -33,6 +33,8 @@
   </tr>
 </table>
 
+<p align="center"><img src="assets/animations/pr_status_bar.gif" alt="Pull request status bar above the chat composer" width="800"></p>
+
 ## What is this repo?
 
 **chatty2** is the product source: the GPUI desktop app (`chatty`), the Ratatui

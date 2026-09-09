@@ -5,23 +5,37 @@
 //! provider-specific schema sanitization (e.g. OpenAI `"format"` stripping).
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
+use rig_agent::agent::AgentBuilder;
 use rig_agent::client::AgentClientExt;
+use rig_core::client::CompletionClient;
+use rig_core::providers::azure::AzureOpenAIAuth;
 
-use crate::auth::{AzureTokenCache, azure_auth};
+use crate::auth::AzureTokenCache;
 use crate::services::AgentTaskController;
+use crate::services::http_client::llm_client;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
 
 use super::AgentClient;
+use super::azure_auth_http::AzureAuthHttpClient;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
+use super::prompt_cache_http::PromptCachingHttpClient;
 use super::tool_collector::NativeTools;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
+/// What rig is told the Entra credential is. It never reaches Azure:
+/// `AzureAuthHttpClient` overwrites the header on every request (AGE-245).
+const AZURE_ENTRA_PLACEHOLDER_TOKEN: &str = "entra-token-attached-per-request";
+
 type McpToolSet = Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>;
+
+/// Preamble for the tool-less utility agent (AGE-227): title generation and
+/// summarization need a short, direct reply, never a tool call.
+const UTILITY_PREAMBLE: &str = "You are a utility model. Reply only with the requested text.";
 
 /// Build a provider-specific `AgentClient` from pre-collected native tools.
 ///
@@ -44,14 +58,61 @@ pub(super) async fn build_provider_agent(
             let key =
                 api_key.ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
-            let client = if let Some(ref url) = base_url {
-                rig_core::providers::openrouter::Client::builder()
-                    .api_key(&key)
-                    .base_url(url)
-                    .build()?
-            } else {
-                rig_core::providers::openrouter::Client::new(&key)?
-            };
+            // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
+            // OpenRouter cache nothing unless the request carries
+            // `cache_control` breakpoints; rig's `with_prompt_caching()` puts
+            // one on the system message (preamble + tools), and the HTTP
+            // layer below adds a moving one on the latest message so the
+            // conversation history caches across turns as well. OpenAI-family
+            // models ignore the markers and keep caching automatically on the
+            // shared prefix.
+            let mut builder = rig_core::providers::openrouter::Client::builder()
+                .api_key(&key)
+                .http_client(PromptCachingHttpClient::new(llm_client().clone()));
+            if let Some(ref url) = base_url {
+                builder = builder.base_url(url);
+            }
+            let client = builder.build()?;
+
+            let model = client
+                .completion_model(&model_config.model_identifier)
+                .with_prompt_caching();
+            let mut builder = AgentBuilder::new(model).preamble(preamble);
+
+            if model_config.supports_temperature {
+                builder = builder.temperature(model_config.temperature as f64);
+            }
+
+            if let Some(max_tokens) = model_config.max_tokens {
+                builder = builder.max_tokens(max_tokens as u64);
+            }
+
+            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
+            let builder = native_tools.apply_to_builder(builder);
+            let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
+
+            let utility_model = client
+                .completion_model(&model_config.model_identifier)
+                .with_prompt_caching();
+            let utility = AgentBuilder::new(utility_model)
+                .preamble(UTILITY_PREAMBLE)
+                .build();
+
+            Ok(AgentClient {
+                agent,
+                task_controller,
+                provider: ProviderType::OpenRouter,
+                utility,
+            })
+        }
+        ProviderType::Ollama => {
+            let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
+
+            let client = rig_core::providers::ollama::Client::builder()
+                .api_key(rig_core::client::Nothing)
+                .base_url(&url)
+                .http_client(llm_client().clone())
+                .build()?;
 
             let mut builder = client
                 .agent(&model_config.model_identifier)
@@ -65,34 +126,19 @@ pub(super) async fn build_provider_agent(
                 builder = builder.max_tokens(max_tokens as u64);
             }
 
-            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
             let builder = native_tools.apply_to_builder(builder);
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
-            Ok(AgentClient {
-                agent,
-                task_controller,
-                provider: ProviderType::OpenRouter,
-            })
-        }
-        ProviderType::Ollama => {
-            let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
 
-            let client = rig_core::providers::ollama::Client::builder()
-                .api_key(rig_core::client::Nothing)
-                .base_url(&url)
-                .build()?;
-
-            let builder = client
+            let utility = client
                 .agent(&model_config.model_identifier)
-                .preamble(preamble)
-                .temperature(model_config.temperature as f64);
+                .preamble(UTILITY_PREAMBLE)
+                .build();
 
-            let builder = native_tools.apply_to_builder(builder);
-            let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
             Ok(AgentClient {
                 agent,
                 task_controller,
                 provider: ProviderType::Ollama,
+                utility,
             })
         }
         ProviderType::AzureOpenAI => {
@@ -144,43 +190,6 @@ async fn build_azure_agent(
         ));
     }
 
-    let auth = match provider_config.azure_auth_method() {
-        AzureAuthMethod::EntraId => {
-            tracing::info!("Using Entra ID authentication with token cache");
-
-            let cache = AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
-                Ok(cache) => Some(cache),
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "Failed to create Azure token cache, will fetch tokens directly each time"
-                    );
-                    None
-                }
-            });
-
-            let token = if let Some(cache) = cache {
-                cache
-                    .get_token()
-                    .await
-                    .context("Failed to get cached Entra ID token")?
-            } else {
-                tracing::debug!("Using direct token fetch (cache unavailable)");
-                azure_auth::fetch_entra_id_token()
-                    .await
-                    .context("Failed to fetch Entra ID token")?
-            };
-
-            rig_core::providers::azure::AzureOpenAIAuth::Token(token)
-        }
-        AzureAuthMethod::ApiKey => {
-            tracing::info!("Using API Key authentication for Azure OpenAI");
-            let key = api_key
-                .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
-            rig_core::providers::azure::AzureOpenAIAuth::ApiKey(key)
-        }
-    };
-
     tracing::info!(
         endpoint = %endpoint,
         deployment = %model_config.model_identifier,
@@ -189,22 +198,77 @@ async fn build_azure_agent(
         "Building Azure OpenAI client"
     );
 
-    let client = rig_core::providers::azure::Client::builder()
-        .api_key(auth)
-        .azure_endpoint(endpoint.clone())
-        .api_version(api_version)
-        .build()
-        .map_err(|e| {
-            anyhow!(
-                "Failed to build Azure client with endpoint '{}': {}",
-                endpoint,
-                e
-            )
-        })?;
+    let client_error = |e: rig_core::http_client::Error| {
+        anyhow!(
+            "Failed to build Azure client with endpoint '{}': {}",
+            endpoint,
+            e
+        )
+    };
 
-    let mut builder = client
-        .agent(&model_config.model_identifier)
-        .preamble(preamble);
+    // The two auth methods build differently typed clients; both hand back the
+    // same type-erased `AgentBuilder`. Each also builds its own tool-less
+    // utility agent (AGE-227) from the client it owns: `client` cannot outlive
+    // the arm now that the two arms' client types differ.
+    let (builder, utility) = match provider_config.azure_auth_method() {
+        AzureAuthMethod::EntraId => {
+            tracing::info!("Using Entra ID authentication; the token is attached per request");
+
+            let cache = match AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
+                Ok(cache) => Some(cache),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to create the shared Azure token cache");
+                    None
+                }
+            }) {
+                Some(cache) => cache.clone(),
+                // The shared cache stays `None` for the process once creation
+                // failed; a per-agent cache is the same thing without the sharing.
+                None => AzureTokenCache::new().context("Failed to create Azure token cache")?,
+            };
+
+            // rig writes this placeholder into the bearer header at build time;
+            // `AzureAuthHttpClient` replaces it with a current token on every
+            // request, so an expired token is refreshed without a rebuild.
+            let client = rig_core::providers::azure::Client::builder()
+                .api_key(AzureOpenAIAuth::Token(
+                    AZURE_ENTRA_PLACEHOLDER_TOKEN.to_string(),
+                ))
+                .http_client(AzureAuthHttpClient::new(
+                    llm_client().clone(),
+                    Arc::new(cache),
+                ))
+                .azure_endpoint(endpoint.clone())
+                .api_version(api_version)
+                .build()
+                .map_err(client_error)?;
+            let utility = client
+                .agent(&model_config.model_identifier)
+                .preamble(UTILITY_PREAMBLE)
+                .build();
+            (client.agent(&model_config.model_identifier), utility)
+        }
+        AzureAuthMethod::ApiKey => {
+            tracing::info!("Using API Key authentication for Azure OpenAI");
+            let key = api_key
+                .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
+
+            let client = rig_core::providers::azure::Client::builder()
+                .api_key(AzureOpenAIAuth::ApiKey(key))
+                .azure_endpoint(endpoint.clone())
+                .api_version(api_version)
+                .http_client(llm_client().clone())
+                .build()
+                .map_err(client_error)?;
+            let utility = client
+                .agent(&model_config.model_identifier)
+                .preamble(UTILITY_PREAMBLE)
+                .build();
+            (client.agent(&model_config.model_identifier), utility)
+        }
+    };
+
+    let mut builder = builder.preamble(preamble);
 
     if model_config.supports_temperature {
         builder = builder.temperature(model_config.temperature as f64);
@@ -217,10 +281,12 @@ async fn build_azure_agent(
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
     let builder = native_tools.apply_to_builder(builder);
     let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
+
     Ok(AgentClient {
         agent,
         task_controller,
         provider: ProviderType::AzureOpenAI,
+        utility,
     })
 }
 
@@ -255,6 +321,31 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AGE-227: the utility agent must carry no tools. This mirrors the exact
+    /// builder path used for the Ollama arm's `utility` field — no
+    /// `.tool()`/`.rmcp_tools()` calls before `.build()` — without needing the
+    /// full `NativeTools` tool-collection setup that `build_provider_agent`
+    /// requires.
+    #[tokio::test]
+    async fn utility_agent_builder_path_has_no_tools() {
+        let client = rig_core::providers::ollama::Client::builder()
+            .api_key(rig_core::client::Nothing)
+            .base_url("http://localhost:11434")
+            .build()
+            .expect("client construction does not make a network call");
+
+        let utility = client
+            .agent("test-model")
+            .preamble(UTILITY_PREAMBLE)
+            .build();
+
+        let defs = utility
+            .tool_definitions(None)
+            .await
+            .expect("tool_definitions with no prompt does no I/O");
+        assert!(defs.is_empty(), "utility agent must be built with no tools");
+    }
 
     #[test]
     fn test_azure_url_normalization_basic() {

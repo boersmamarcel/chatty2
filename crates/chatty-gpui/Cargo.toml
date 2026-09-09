@@ -53,6 +53,13 @@ rust-embed.workspace = true
 # Syntax highlighting
 ropey.workspace = true
 
+[dev-dependencies]
+# Scripted stream fixtures shared with chatty-tui's characterization tests.
+chatty-core = { path = "../chatty-core", features = ["test-support"] }
+# `TestAppContext` — the desktop's stream handler drives real GPUI entities,
+# so characterizing it needs a real (headless) app context.
+gpui = { workspace = true, features = ["test-support"] }
+
 [build-dependencies]
 # Windows icon embedding
 winres = "0.1"

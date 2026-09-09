@@ -1,6 +1,12 @@
+mod azure_auth_http;
+#[cfg(test)]
+mod cache_breakpoint_probe;
 mod mcp_helpers;
 mod preamble_builder;
+mod prompt_cache_http;
 mod provider_builder;
+#[cfg(test)]
+mod tool_block_determinism;
 mod tool_collector;
 mod tool_registry;
 
@@ -27,8 +33,8 @@ use crate::tools::{
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     LocalModuleAgentSummary, MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool,
     ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool,
-    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool,
-    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, UpdateTodoTool,
+    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -54,6 +60,103 @@ fn doc_retriever_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Workspace-scoped services that depend only on the workspace directory:
+/// `FileSystemService::new`, `CodeSearchService::new`, and `GitService::new`
+/// all take just the directory, so a second agent build against the same
+/// workspace can reuse them instead of re-walking the filesystem or
+/// re-spawning git subprocesses (50-200ms) on every conversation
+/// open/switch/rebuild (finding B5, AGE-240).
+#[derive(Clone, Default)]
+struct WorkspaceServices {
+    fs: Option<std::sync::Arc<FileSystemService>>,
+    search: Option<std::sync::Arc<CodeSearchService>>,
+    git: Option<std::sync::Arc<GitService>>,
+}
+
+/// Process-wide cache of `WorkspaceServices`, keyed by canonical workspace
+/// directory. Cleared wholesale by `invalidate_workspace_services_cache()`
+/// when execution settings change, so a rebuilt agent can't reuse a service
+/// built under a stale configuration.
+static WORKSPACE_SERVICES_CACHE: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, WorkspaceServices>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Canonicalise a workspace directory for use as a cache key, falling back
+/// to the raw string when canonicalisation fails (e.g. the directory
+/// doesn't exist yet) — mirrors chatty-gpui's `normalize_workspace_path`
+/// (AGE-215), which normalises for the same "same directory, different
+/// spelling" reason.
+fn canonical_workspace_key(workspace_dir: &str) -> String {
+    std::fs::canonicalize(workspace_dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| workspace_dir.to_string())
+}
+
+/// Clear the process-wide workspace services cache. Call this when execution
+/// settings change (the desktop's `AgentConfigEvent::RebuildRequired`) so a
+/// rebuilt agent doesn't reuse a `FileSystemService`/`CodeSearchService`/
+/// `GitService` built under a stale configuration (AGE-240).
+pub fn invalidate_workspace_services_cache() {
+    WORKSPACE_SERVICES_CACHE.lock().clear();
+}
+
+/// Test-only counters asserting that a second agent build against the same
+/// workspace does not redo the expensive service construction (AGE-240
+/// acceptance criterion).
+#[cfg(test)]
+static WORKSPACE_FS_SERVICE_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static WORKSPACE_SEARCH_SERVICE_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static WORKSPACE_GIT_SERVICE_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn get_or_build_fs_service(workspace_dir: &str) -> Result<std::sync::Arc<FileSystemService>> {
+    let key = canonical_workspace_key(workspace_dir);
+    if let Some(cached) = WORKSPACE_SERVICES_CACHE
+        .lock()
+        .get(&key)
+        .and_then(|entry| entry.fs.clone())
+    {
+        return Ok(cached);
+    }
+    let service = std::sync::Arc::new(FileSystemService::new(workspace_dir).await?);
+    #[cfg(test)]
+    WORKSPACE_FS_SERVICE_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    WORKSPACE_SERVICES_CACHE.lock().entry(key).or_default().fs = Some(service.clone());
+    Ok(service)
+}
+
+fn get_or_build_search_service(workspace_dir: &str) -> Result<std::sync::Arc<CodeSearchService>> {
+    let key = canonical_workspace_key(workspace_dir);
+    if let Some(cached) = WORKSPACE_SERVICES_CACHE
+        .lock()
+        .get(&key)
+        .and_then(|entry| entry.search.clone())
+    {
+        return Ok(cached);
+    }
+    let service = std::sync::Arc::new(CodeSearchService::new(workspace_dir)?);
+    #[cfg(test)]
+    WORKSPACE_SEARCH_SERVICE_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    WORKSPACE_SERVICES_CACHE
+        .lock()
+        .entry(key)
+        .or_default()
+        .search = Some(service.clone());
+    Ok(service)
+}
+
+/// The git service started (or found cached) before the rest of tool
+/// construction runs, so the subprocess spawn overlaps with unrelated work
+/// (see the comment at the spawn site).
+enum PendingGitService {
+    Cached(std::sync::Arc<GitService>),
+    Spawned(tokio::task::JoinHandle<Result<GitService>>),
+}
+
 /// Contextual dependencies for building an agent.
 ///
 /// Groups the many optional services and settings needed by
@@ -64,24 +167,36 @@ pub struct AgentBuildContext {
     pub pending_approvals: Option<crate::models::execution_approval_store::PendingApprovals>,
     pub pending_clarifications: Option<crate::models::clarification_store::PendingClarifications>,
     pub pending_write_approvals: Option<crate::models::write_approval_store::PendingWriteApprovals>,
+    /// Sink for artifacts (e.g. attachments) queued mid-stream by tools like
+    /// `AddAttachmentTool`, so the desktop transcript can mint a card for
+    /// them. Always `None` from chatty-tui, which has no artifact viewport.
     pub pending_artifacts: Option<PendingArtifacts>,
     pub shell_session: Option<std::sync::Arc<ShellSession>>,
     pub user_secrets: Vec<(String, String)>,
+    /// Theme palette handed to `CreateChartTool` so generated charts match
+    /// the desktop app's theme. Always `None` from chatty-tui, which has no
+    /// themed chart rendering.
     pub theme_colors: Option<[String; 5]>,
     pub memory_service: Option<MemoryService>,
     pub skill_service: Option<SkillService>,
     pub search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
     pub embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
-    pub allow_sub_agent: bool,
     pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
     pub remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
-    pub available_model_ids: Vec<String>,
     /// Conversation this turn belongs to. Only consulted when the `browser`
     /// feature is on, to register the built `BrowserManager` where the
     /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
     /// else (e.g. chatty-tui, which doesn't enable that feature).
     pub conversation_id: Option<String>,
+}
+
+/// Result of `AgentClient::from_model_config_with_tools()`: the built client
+/// plus the two pieces of state the caller stores back on `Conversation`.
+pub struct BuiltAgent {
+    pub client: AgentClient,
+    pub shell_session: Option<std::sync::Arc<ShellSession>>,
+    pub invoke_agent_progress_slot: crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
 /// Provider-agnostic agent wrapper.
@@ -93,16 +208,20 @@ pub struct AgentClient {
     pub agent: Agent,
     pub task_controller: crate::services::AgentTaskController,
     provider: crate::settings::models::providers_store::ProviderType,
+    /// Tool-less agent built from the same client/model as `agent`, for
+    /// non-streaming calls (title generation, summarization) that need a
+    /// short reply and must not risk a tool call (AGE-227).
+    utility: Agent,
 }
 
 impl AgentClient {
-    /// Dispatch a non-streaming prompt through the wrapped provider agent.
+    /// Dispatch a non-streaming prompt through the tool-less utility agent.
     ///
     /// This is the central hook point for future shared prompt middleware
     /// (tracing, policy, retries, Rig hooks) that should apply consistently
     /// across title generation, summarization, and other non-streaming calls.
     pub async fn prompt(&self, prompt: &str) -> Result<String> {
-        Ok(self.agent.prompt(prompt).await?)
+        Ok(self.utility.prompt(prompt).await?)
     }
 
     pub fn task_controller(&self) -> crate::services::AgentTaskController {
@@ -114,11 +233,13 @@ impl AgentClient {
         model_config: &ModelConfig,
         provider_config: &ProviderConfig,
         ctx: AgentBuildContext,
-    ) -> Result<(
-        Self,
-        Option<std::sync::Arc<ShellSession>>,
-        crate::tools::invoke_agent_tool::InvokeAgentProgressSlot,
-    )> {
+    ) -> Result<BuiltAgent> {
+        // Measures agent-build latency end to end (AGE-240): logged at the
+        // bottom of this function alongside the workspace dir, so a
+        // WorkspaceServices cache hit is visible as a drop in this number on
+        // the second conversation opened against the same workspace.
+        let build_started_at = std::time::Instant::now();
+
         // Destructure context for local use
         let AgentBuildContext {
             mcp_tools,
@@ -134,11 +255,9 @@ impl AgentClient {
             skill_service,
             search_settings,
             embedding_service,
-            allow_sub_agent,
             module_agents,
             gateway_port,
             remote_agents,
-            available_model_ids,
             conversation_id,
         } = ctx;
 
@@ -207,8 +326,10 @@ impl AgentClient {
                 None
             };
 
-        // Start git service initialization early (spawns subprocesses that take 50-200ms).
-        let git_service_handle = if exec_settings
+        // Start git service initialization early (spawns subprocesses that take
+        // 50-200ms) unless a cached GitService for this workspace already
+        // exists, in which case there's nothing to wait on (AGE-240).
+        let git_service_pending = if exec_settings
             .as_ref()
             .map(|s| s.git_enabled)
             .unwrap_or(false)
@@ -217,8 +338,19 @@ impl AgentClient {
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_ref())
             {
-                let wd = workspace_dir.clone();
-                Some(tokio::spawn(async move { GitService::new(&wd).await }))
+                let key = canonical_workspace_key(workspace_dir);
+                let cached = WORKSPACE_SERVICES_CACHE
+                    .lock()
+                    .get(&key)
+                    .and_then(|entry| entry.git.clone());
+                if let Some(cached) = cached {
+                    Some(PendingGitService::Cached(cached))
+                } else {
+                    let wd = workspace_dir.clone();
+                    Some(PendingGitService::Spawned(tokio::spawn(async move {
+                        GitService::new(&wd).await
+                    })))
+                }
             } else {
                 None
             }
@@ -254,10 +386,8 @@ impl AgentClient {
             .as_ref()
             .and_then(|s| s.workspace_dir.as_ref())
         {
-            Some(workspace_dir) => match FileSystemService::new(workspace_dir).await {
+            Some(workspace_dir) => match get_or_build_fs_service(workspace_dir).await {
                 Ok(service) => {
-                    let service = std::sync::Arc::new(service);
-
                     // Read tools
                     let read_tools = if exec_settings
                         .as_ref()
@@ -283,9 +413,8 @@ impl AgentClient {
                         }
 
                         // Create code search tools alongside filesystem read tools
-                        match CodeSearchService::new(workspace_dir) {
+                        match get_or_build_search_service(workspace_dir) {
                             Ok(search_service) => {
-                                let search_service = std::sync::Arc::new(search_service);
                                 tracing::info!(workspace = %workspace_dir, "Code search tools enabled");
                                 search_tools = Some((
                                     SearchCodeTool::new(search_service.clone()),
@@ -317,7 +446,13 @@ impl AgentClient {
                         None
                     };
 
-                    // Write tools
+                    // Write tools carry the agent's own approval policy
+                    // (AGE-193): no process-global, so concurrent agents can
+                    // run under different modes.
+                    let write_approval_mode = exec_settings
+                        .as_ref()
+                        .map(|s| s.approval_mode.clone())
+                        .unwrap_or_default();
                     let write_tools = if exec_settings
                         .as_ref()
                         .map(|s| s.filesystem_write_enabled)
@@ -326,12 +461,32 @@ impl AgentClient {
                         tracing::info!(workspace = %workspace_dir, "Filesystem write tools enabled");
                         pending_write_approvals.as_ref().map(|approvals| {
                             (
-                                WriteFileTool::new(service.clone(), approvals.clone()),
-                                FinalAnswerTool::new(service.clone(), approvals.clone()),
+                                WriteFileTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                FinalAnswerTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
                                 CreateDirectoryTool::new(service.clone()),
-                                DeleteFileTool::new(service.clone(), approvals.clone()),
-                                MoveFileTool::new(service.clone(), approvals.clone()),
-                                ApplyDiffTool::new(service.clone(), approvals.clone()),
+                                DeleteFileTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                MoveFileTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                ApplyDiffTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
                             )
                         })
                     } else {
@@ -352,8 +507,16 @@ impl AgentClient {
                         excel_write_tools = pending_write_approvals.as_ref().map(|approvals| {
                             tracing::info!(workspace = %workspace_dir, "Excel write tools enabled");
                             (
-                                WriteExcelTool::new(service.clone(), approvals.clone()),
-                                EditExcelTool::new(service.clone(), approvals.clone()),
+                                WriteExcelTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
+                                EditExcelTool::new(
+                                    service.clone(),
+                                    write_approval_mode.clone(),
+                                    approvals.clone(),
+                                ),
                             )
                         });
                     }
@@ -612,51 +775,26 @@ impl AgentClient {
             None
         };
 
-        // Create git tools from the handle started earlier.
-        let git_tools: Option<GitTools> = if let Some(handle) = git_service_handle {
-            match handle.await {
+        // Resolve the git service started earlier: a cache hit is already an
+        // `Arc`, a freshly spawned one is awaited and then cached for the
+        // next agent build on this workspace (AGE-240).
+        let git_was_attempted = git_service_pending.is_some();
+        let git_service_ready: Option<std::sync::Arc<GitService>> = match git_service_pending {
+            Some(PendingGitService::Cached(service)) => Some(service),
+            Some(PendingGitService::Spawned(handle)) => match handle.await {
                 Ok(Ok(service)) => {
+                    let service = std::sync::Arc::new(service);
                     if let Some(workspace_dir) = exec_settings
                         .as_ref()
                         .and_then(|s| s.workspace_dir.as_ref())
                     {
-                        let service = std::sync::Arc::new(service);
-                        let approval_mode = exec_settings
-                            .as_ref()
-                            .map(|s| s.approval_mode.clone())
-                            .unwrap_or_default();
-                        let approvals = pending_approvals.clone().unwrap_or_else(|| {
-                            std::sync::Arc::new(parking_lot::Mutex::new(
-                                std::collections::HashMap::new(),
-                            ))
-                        });
-
-                        tracing::info!(workspace = %workspace_dir, "Git tools enabled");
-                        Some((
-                            GitStatusTool::new(service.clone()),
-                            GitDiffTool::new(service.clone()),
-                            GitLogTool::new(service.clone()),
-                            GitAddTool::new(
-                                service.clone(),
-                                approval_mode.clone(),
-                                approvals.clone(),
-                            ),
-                            GitCreateBranchTool::new(
-                                service.clone(),
-                                approval_mode.clone(),
-                                approvals.clone(),
-                            ),
-                            GitSwitchBranchTool::new(
-                                service.clone(),
-                                approval_mode.clone(),
-                                approvals.clone(),
-                            ),
-                            GitCommitTool::new(service, approval_mode, approvals),
-                        ))
-                    } else {
-                        tracing::error!("git_service_handle exists but workspace_dir is None");
-                        None
+                        let key = canonical_workspace_key(workspace_dir);
+                        WORKSPACE_SERVICES_CACHE.lock().entry(key).or_default().git =
+                            Some(service.clone());
                     }
+                    #[cfg(test)]
+                    WORKSPACE_GIT_SERVICE_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Some(service)
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
@@ -669,7 +807,52 @@ impl AgentClient {
                     tracing::warn!(error = ?e, "Git service init task panicked");
                     None
                 }
+            },
+            None => None,
+        };
+
+        // Create git tools from the resolved service.
+        let git_tools: Option<GitTools> = if let Some(service) = git_service_ready {
+            if let Some(workspace_dir) = exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+            {
+                let approval_mode = exec_settings
+                    .as_ref()
+                    .map(|s| s.approval_mode.clone())
+                    .unwrap_or_default();
+                let approvals = pending_approvals.clone().unwrap_or_else(|| {
+                    std::sync::Arc::new(parking_lot::Mutex::new(
+                        crate::models::execution_approval_store::PendingApprovalsState::new(),
+                    ))
+                });
+
+                tracing::info!(workspace = %workspace_dir, "Git tools enabled");
+                Some((
+                    GitStatusTool::new(service.clone()),
+                    GitDiffTool::new(service.clone()),
+                    GitLogTool::new(service.clone()),
+                    GitAddTool::new(service.clone(), approval_mode.clone(), approvals.clone()),
+                    GitCreateBranchTool::new(
+                        service.clone(),
+                        approval_mode.clone(),
+                        approvals.clone(),
+                    ),
+                    GitSwitchBranchTool::new(
+                        service.clone(),
+                        approval_mode.clone(),
+                        approvals.clone(),
+                    ),
+                    GitCommitTool::new(service, approval_mode, approvals),
+                ))
+            } else {
+                tracing::error!("git_service_ready exists but workspace_dir is None");
+                None
             }
+        } else if git_was_attempted {
+            // Failure (not a git repo, git missing, task panic) was already
+            // logged above when resolving `git_service_ready`.
+            None
         } else {
             if exec_settings
                 .as_ref()
@@ -779,28 +962,6 @@ impl AgentClient {
             tracing::info!("Code execution tool disabled by execution settings");
             None
         };
-
-        // Sub-agent tool is constructed later, after InvokeAgentTool, so it can
-        // share the progress slot. Availability is decided here for tool_availability.
-        let sub_agent_enabled =
-            allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false);
-        let sub_model_id = model_config.id.clone();
-        let sub_auto_approve = exec_settings
-            .as_ref()
-            .map(|s| {
-                matches!(
-                    s.approval_mode,
-                    crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
-                )
-            })
-            .unwrap_or(false);
-        if sub_agent_enabled {
-            tracing::debug!("Sub-agent tool enabled");
-        } else if !allow_sub_agent {
-            tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
-        } else {
-            tracing::debug!("Sub-agent tool disabled: execution not enabled");
-        }
 
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
@@ -925,7 +1086,6 @@ impl AgentClient {
             execute_code: execute_code_tool.is_some(),
             memory: remember_tool.is_some(),
             search_web: search_web_tool.is_some(),
-            sub_agent: sub_agent_enabled,
             #[cfg(feature = "browser")]
             browser: browser_tools.is_some(),
             #[cfg(not(feature = "browser"))]
@@ -951,26 +1111,42 @@ impl AgentClient {
         // Ask-the-user tool: only offered when a frontend is listening for the
         // question. Without a pending store the call would block until it
         // times out, so the model must not see the tool at all.
-        let ask_user_tool = pending_clarifications.map(AskUserTool::new);
+        let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
+
+        // The broker's local worker exists exactly when the gateway that
+        // serves it does (ADR-0011 C2); the gateway publishes it whenever it
+        // starts, so its port is the whole condition.
+        let local_agent = gateway_port.map(|_| crate::tools::LOCAL_AGENT_NAME);
 
         // Create list_agents tool (always available)
-        let list_agents_tool =
+        let mut list_agents_tool =
             ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
+        if let Some(name) = local_agent {
+            list_agents_tool = list_agents_tool.with_local_worker(name);
+        }
+        // With a gateway there is a live participant table to read, not just
+        // the settings snapshot (ADR-0011 C5).
+        if let Some(port) = gateway_port {
+            list_agents_tool = list_agents_tool.with_gateway_port(port);
+        }
 
         // Create invoke_agent tool (always available)
-        let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        let mut invoke_agent_tool =
+            InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        if let Some(name) = local_agent {
+            invoke_agent_tool = invoke_agent_tool.with_local_agent(name);
+        }
+        invoke_agent_tool = invoke_agent_tool.with_external_agent_warning(
+            exec_settings
+                .as_ref()
+                .is_some_and(|settings| settings.warn_on_external_agent),
+        );
+        // A delegated agent's question is re-asked on this agent's own
+        // `ask_user` surface (ADR-0011 C7), so it needs the same store.
+        if let Some(pending) = pending_clarifications {
+            invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
+        }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
-
-        let sub_agent_tool: Option<SubAgentTool> = if sub_agent_enabled {
-            Some(SubAgentTool::new(
-                sub_model_id,
-                sub_auto_approve,
-                available_model_ids,
-                invoke_agent_progress_slot.clone(),
-            ))
-        } else {
-            None
-        };
 
         // Publish module tool (if an MCP server exposes `publish_module`)
         let publish_module_tool: Option<PublishModuleTool> = mcp_tools.as_ref().and_then(|servers| {
@@ -1040,7 +1216,6 @@ impl AgentClient {
             search_memory_tool: search_memory_tool,
             read_skill_tool: read_skill_tool,
             search_web_tool: search_web_tool,
-            sub_agent_tool: sub_agent_tool,
             browser_tools: browser_tools,
             browser_use_tool: browser_use_tool,
             daytona_tool: daytona_tool,
@@ -1061,13 +1236,23 @@ impl AgentClient {
         )
         .await?;
 
-        Ok((agent, shell_session_out, invoke_agent_progress_slot))
+        tracing::info!(
+            workspace = ?exec_settings.as_ref().and_then(|s| s.workspace_dir.as_ref()),
+            elapsed_ms = build_started_at.elapsed().as_millis(),
+            "Agent build complete"
+        );
+
+        Ok(BuiltAgent {
+            client: agent,
+            shell_session: shell_session_out,
+            invoke_agent_progress_slot,
+        })
     }
 
-    /// Returns the provider name for logging/debugging.
-    #[allow(dead_code)]
-    pub fn provider_name(&self) -> &str {
-        self.provider.display_name()
+    /// The provider this agent is built against — the seam usage semantics
+    /// (AGE-212) and, later, per-provider auth are derived from.
+    pub fn provider(&self) -> crate::settings::models::providers_store::ProviderType {
+        self.provider.clone()
     }
 }
 

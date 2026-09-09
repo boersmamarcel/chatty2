@@ -26,6 +26,10 @@
 #   workspace/      optional files copied into the agent workspace
 #   profile/        optional JSON files overriding scripts/animations/profile/
 #   settings.sh     optional overrides: WIDTH, HEIGHT, SCALE, GIF_WIDTH, FPS
+#   setup.sh        optional: runs before the app starts, with $RUN_DIR set.
+#                   Use it to prepare the workspace (e.g. `git init`) or to
+#                   drop a stub command in $RUN_DIR/bin, which is first on
+#                   the app's PATH.
 #
 # Requirements (Debian/Ubuntu): xvfb openbox xdotool ffmpeg imagemagick x11-apps
 # mesa-vulkan-drivers python3. See scripts/animations/README.md.
@@ -50,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --keep-mp4) KEEP_MP4=1; shift ;;
     --no-gif) NO_GIF=1; shift ;;
     --all) ALL=1; shift ;;
-    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) SCENARIOS+=("$1"); shift ;;
   esac
@@ -171,6 +175,11 @@ record_one() {
     sed -e "s#@PORT@#$port#g" -e "s#@WORKSPACE@#$RUN_DIR/workspace#g" "$src" > "$RUN_DIR/home/.config/chatty/$base"
   done
 
+  # Anything the scenario needs in place before the app starts: a prepared
+  # workspace, or a stub command in $RUN_DIR/bin (first on the app's PATH).
+  mkdir -p "$RUN_DIR/bin"
+  [[ -f "$scen/setup.sh" ]] && ( set -e; source "$scen/setup.sh" )
+
   MOCK_LOG="$RUN_DIR/mock.log"
   python3 "$HERE/mock_ollama.py" --port "$port" --scenario "$scen/scenario.json" 2> "$MOCK_LOG" &
   PIDS+=($!)
@@ -202,6 +211,7 @@ PY
     export HOME="$run_home" XDG_CONFIG_HOME="$run_home/.config" XDG_DATA_HOME="$run_home/.local/share" \
       XDG_RUNTIME_DIR="$RUN_DIR/xdg-runtime" LC_ALL=C.UTF-8 WAYLAND_DISPLAY= \
       GPUI_X11_SCALE_FACTOR="$SCALE" RUST_LOG="${RUST_LOG:-warn}" \
+      PATH="$RUN_DIR/bin:$PATH" \
       HTTPS_PROXY="http://127.0.0.1:$proxy_port" HTTP_PROXY="http://127.0.0.1:$proxy_port" \
       https_proxy="http://127.0.0.1:$proxy_port" http_proxy="http://127.0.0.1:$proxy_port" \
       NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost

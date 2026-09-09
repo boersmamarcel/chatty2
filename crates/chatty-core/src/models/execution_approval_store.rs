@@ -1,48 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-use std::time::SystemTime;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use parking_lot::Mutex;
-
-// Global notification senders (set once per message send, cleared between messages)
-static GLOBAL_APPROVAL_NOTIFIER: OnceLock<
-    Mutex<Option<mpsc::UnboundedSender<ApprovalNotification>>>,
-> = OnceLock::new();
-
-/// Set the global approval notifier for the current message
-pub fn set_global_approval_notifier(tx: mpsc::UnboundedSender<ApprovalNotification>) {
-    GLOBAL_APPROVAL_NOTIFIER
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .replace(tx);
-}
-
-/// Notify via global channel (called by shell tools)
-pub fn notify_approval_via_global(id: String, command: String, is_sandboxed: bool) {
-    use tracing::{debug, warn};
-
-    if let Some(guard) = GLOBAL_APPROVAL_NOTIFIER.get() {
-        if let Some(tx) = guard.lock().as_ref() {
-            match tx.send(ApprovalNotification {
-                id: id.clone(),
-                command,
-                is_sandboxed,
-            }) {
-                Ok(_) => {
-                    debug!(id = %id, "Successfully sent approval notification via global channel");
-                }
-                Err(e) => {
-                    warn!(id = %id, error = ?e, "Failed to send approval notification via global channel");
-                }
-            }
-        } else {
-            warn!(id = %id, "Global approval notifier not set - notification not sent!");
-        }
-    } else {
-        warn!(id = %id, "Global approval notifier not initialized - notification not sent!");
-    }
-}
 
 /// Decision for an execution approval request
 #[derive(Clone, Debug)]
@@ -66,26 +26,32 @@ pub struct ApprovalResolution {
     pub approved: bool,
 }
 
-/// Request for user approval to execute a command
-pub struct ExecutionApprovalRequest {
-    /// Unique ID for tracking this request
-    #[allow(dead_code)]
-    pub id: String,
-    /// Command to be executed
-    #[allow(dead_code)]
-    pub command: String,
-    /// Whether execution will be sandboxed
-    #[allow(dead_code)]
-    pub is_sandboxed: bool,
-    /// When the request was created (for timeout tracking)
-    #[allow(dead_code)]
-    pub created_at: SystemTime,
-    /// Channel to send approval decision back to waiting execution
-    pub responder: oneshot::Sender<ApprovalDecision>,
+/// Inner state behind `PendingApprovals`: the in-flight requests plus the
+/// per-turn notifier the frontend installs (AGE-246 / D7) so a tool can
+/// announce a new request through the store it was handed, rather than a
+/// process-wide global that the next turn — on any conversation — would
+/// silently overwrite.
+///
+/// Each pending request is just the channel to send its decision back to the
+/// waiting execution; the id/command/is_sandboxed metadata a UI needs is
+/// already carried separately by `ApprovalNotification`, sent at the same
+/// time a request is inserted here.
+pub struct PendingApprovalsState {
+    requests: HashMap<String, oneshot::Sender<ApprovalDecision>>,
+    notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
+}
+
+impl PendingApprovalsState {
+    pub(crate) fn new() -> Self {
+        Self {
+            requests: HashMap::new(),
+            notifier: None,
+        }
+    }
 }
 
 /// Thread-safe storage for pending approvals (accessible from both GPUI and Tokio contexts)
-pub type PendingApprovals = Arc<Mutex<HashMap<String, ExecutionApprovalRequest>>>;
+pub type PendingApprovals = Arc<Mutex<PendingApprovalsState>>;
 
 /// Shared approval flow used by shell tools, git tools, and any future tool that
 /// requires user confirmation before executing.
@@ -102,6 +68,7 @@ pub async fn request_execution_approval(
     is_sandboxed: bool,
 ) -> anyhow::Result<bool> {
     use crate::settings::models::execution_settings::ApprovalMode;
+    use tracing::warn;
 
     match approval_mode {
         ApprovalMode::AutoApproveAll => return Ok(true),
@@ -112,47 +79,48 @@ pub async fn request_execution_approval(
     let (tx, rx) = oneshot::channel();
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    let request = ExecutionApprovalRequest {
-        id: request_id.clone(),
-        command: label.to_string(),
-        is_sandboxed,
-        created_at: SystemTime::now(),
-        responder: tx,
-    };
-
     {
-        let mut store = pending.lock();
-        store.insert(request_id.clone(), request);
+        let mut state = pending.lock();
+        state.requests.insert(request_id.clone(), tx);
+        match &state.notifier {
+            Some(notifier) => {
+                if let Err(e) = notifier.send(ApprovalNotification {
+                    id: request_id.clone(),
+                    command: label.to_string(),
+                    is_sandboxed,
+                }) {
+                    warn!(id = %request_id, error = ?e, "Failed to send approval notification");
+                }
+            }
+            None => {
+                warn!(id = %request_id, "Approval notifier not set - notification not sent!");
+            }
+        }
     }
-
-    notify_approval_via_global(request_id.clone(), label.to_string(), is_sandboxed);
 
     match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
         Ok(Ok(ApprovalDecision::Approved)) => Ok(true),
         Ok(Ok(ApprovalDecision::Denied)) => Ok(false),
         Ok(Err(_)) => Err(anyhow::anyhow!("Approval channel closed")),
         Err(_) => {
-            let mut store = pending.lock();
-            store.remove(&request_id);
+            pending.lock().requests.remove(&request_id);
             Err(anyhow::anyhow!("Approval timeout (5 minutes)"))
         }
     }
 }
 
-/// Global store for pending execution approval requests
+/// Per-agent store for pending execution approval requests.
 /// Uses Arc<Mutex<>> internally to allow access from both GPUI and async Tokio contexts
 #[derive(Clone)]
 pub struct ExecutionApprovalStore {
     pending_requests: PendingApprovals,
-    approval_notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
     resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
 impl ExecutionApprovalStore {
     pub fn new() -> Self {
         Self {
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            approval_notifier: None,
+            pending_requests: Arc::new(Mutex::new(PendingApprovalsState::new())),
             resolution_notifier: None,
         }
     }
@@ -162,24 +130,25 @@ impl ExecutionApprovalStore {
         self.pending_requests.clone()
     }
 
-    /// Set the notification channels on an existing store
-    /// This allows updating the notifiers without replacing the entire store
+    /// Set the notification channels on an existing store for the current
+    /// turn: the approval notifier lives on `PendingApprovals` itself, since
+    /// that is the handle `request_execution_approval` actually holds.
     pub fn set_notifiers(
         &mut self,
         approval_tx: mpsc::UnboundedSender<ApprovalNotification>,
         resolution_tx: mpsc::UnboundedSender<ApprovalResolution>,
     ) {
-        self.approval_notifier = Some(approval_tx);
+        self.pending_requests.lock().notifier = Some(approval_tx);
         self.resolution_notifier = Some(resolution_tx);
     }
 
     /// Resolve an approval request by ID, returning whether it existed
     /// This is called from GPUI context when user clicks approve/deny button
     pub fn resolve(&self, id: &str, decision: ApprovalDecision) -> bool {
-        let mut pending = self.pending_requests.lock();
-        if let Some(request) = pending.remove(id) {
+        let mut state = self.pending_requests.lock();
+        if let Some(responder) = state.requests.remove(id) {
             let approved = matches!(decision, ApprovalDecision::Approved);
-            let _ = request.responder.send(decision);
+            let _ = responder.send(decision);
 
             // Notify stream that approval was resolved
             if let Some(tx) = &self.resolution_notifier {
@@ -199,5 +168,74 @@ impl ExecutionApprovalStore {
 impl Default for ExecutionApprovalStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    /// AGE-246 / D7: two agents, each with its own `ExecutionApprovalStore`,
+    /// must not cross-notify — a request made against agent A's store is
+    /// delivered only to A's receiver, never B's.
+    #[tokio::test]
+    async fn per_agent_notifier_does_not_cross_notify_another_agents_store() {
+        let mut store_a = ExecutionApprovalStore::new();
+        let mut store_b = ExecutionApprovalStore::new();
+
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (resolution_tx_a, _resolution_rx_a) = mpsc::unbounded_channel();
+        store_a.set_notifiers(tx_a, resolution_tx_a);
+
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        let (resolution_tx_b, _resolution_rx_b) = mpsc::unbounded_channel();
+        store_b.set_notifiers(tx_b, resolution_tx_b);
+
+        let pending_a = store_a.get_pending_approvals();
+        let waiter = tokio::spawn({
+            let pending_a = pending_a.clone();
+            async move {
+                request_execution_approval(
+                    &pending_a,
+                    &ApprovalMode::AlwaysAsk,
+                    "rm -rf /tmp",
+                    false,
+                )
+                .await
+            }
+        });
+
+        let notification = rx_a
+            .recv()
+            .await
+            .expect("agent A's receiver must see the notification");
+        assert_eq!(notification.command, "rm -rf /tmp");
+        assert!(
+            rx_b.try_recv().is_err(),
+            "agent B's receiver must not see agent A's request"
+        );
+
+        assert!(store_a.resolve(&notification.id, ApprovalDecision::Approved));
+        assert!(waiter.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn auto_approve_all_skips_the_notifier_entirely() {
+        let store = ExecutionApprovalStore::new();
+        let pending = store.get_pending_approvals();
+
+        let approved =
+            request_execution_approval(&pending, &ApprovalMode::AutoApproveAll, "echo hi", false)
+                .await
+                .unwrap();
+
+        assert!(approved);
+    }
+
+    #[test]
+    fn resolve_reports_unknown_ids() {
+        let store = ExecutionApprovalStore::new();
+        assert!(!store.resolve("does-not-exist", ApprovalDecision::Approved));
     }
 }

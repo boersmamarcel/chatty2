@@ -1,0 +1,5 @@
+on_stream_started
+on_chunk(Ok(Text)) -> Continue
+on_chunk(Err("connection reset by peer")) -> Break
+on_stream_ended
+=> loop returned Ok

@@ -5,6 +5,7 @@
 //! separate modules with hand-written implementations.
 
 pub mod generic_json_repository;
+pub mod in_memory_repository;
 pub mod module_settings_json_repository;
 pub mod module_settings_repository;
 pub mod oauth_credential_json_repository;
@@ -19,6 +20,15 @@ pub use module_settings_json_repository::ModuleSettingsJsonRepository;
 pub use module_settings_repository::ModuleSettingsRepository;
 pub use oauth_credential_json_repository::JsonOAuthCredentialRepository;
 pub use oauth_credential_repository::OAuthCredentialRepository;
+
+// Re-export in-memory repository types (AGE-283 lease-time snapshot boot).
+pub use in_memory_repository::{
+    InMemoryA2aRepository, InMemoryExecutionSettingsRepository, InMemoryExtensionsRepository,
+    InMemoryGeneralSettingsRepository, InMemoryHiveSettingsRepository, InMemoryMcpRepository,
+    InMemoryModelsRepository, InMemoryModuleSettingsRepository, InMemoryProviderRepository,
+    InMemorySearchSettingsRepository, InMemoryTrainingSettingsRepository,
+    InMemoryUserSecretsRepository,
+};
 
 // ── Macros for generating repository boilerplate ─────────────────────────────
 
@@ -53,6 +63,17 @@ macro_rules! define_single_json_repository {
                 Ok(Self {
                     inner: generic_json_repository::GenericJsonRepository::new($filename)?,
                 })
+            }
+        }
+
+        /// Test-only constructor for a custom file path (used by unit tests
+        /// and the `store_conformance` suite exported behind `test-support`).
+        #[cfg(any(test, feature = "test-support"))]
+        impl $StructName {
+            pub fn with_path(file_path: std::path::PathBuf) -> Self {
+                Self {
+                    inner: generic_json_repository::GenericJsonRepository::with_path(file_path),
+                }
             }
         }
 
@@ -108,6 +129,17 @@ macro_rules! define_list_json_repository {
                 Ok(Self {
                     inner: generic_json_repository::GenericJsonListRepository::new($filename)?,
                 })
+            }
+        }
+
+        /// Test-only constructor for a custom file path (used by unit tests
+        /// and the `store_conformance` suite exported behind `test-support`).
+        #[cfg(any(test, feature = "test-support"))]
+        impl $StructName {
+            pub fn with_path(file_path: std::path::PathBuf) -> Self {
+                Self {
+                    inner: generic_json_repository::GenericJsonListRepository::with_path(file_path),
+                }
             }
         }
 
@@ -168,15 +200,6 @@ define_single_json_repository!(
     model = crate::settings::models::user_secrets_store::UserSecretsModel,
     filename = "user_secrets.json",
 );
-
-#[cfg(test)]
-impl UserSecretsJsonRepository {
-    pub(crate) fn with_path(file_path: std::path::PathBuf) -> Self {
-        Self {
-            inner: generic_json_repository::GenericJsonRepository::with_path(file_path),
-        }
-    }
-}
 
 define_single_json_repository!(
     trait HiveSettingsRepository,
