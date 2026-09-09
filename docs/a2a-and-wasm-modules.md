@@ -399,6 +399,17 @@ reaches someone who can answer and the answer descends the same hops
 runs a parent → child → grandchild chain over a real socket and asserts the
 grandchild's question reaches the parent's popover and its answer comes back.
 
+That chain is carried by `message/stream`. A caller that started the task with
+plain `message/send` has a single reply object with no room for a non-terminal
+update, so a worker parking under it is asking someone who cannot hear. The
+broker ends such a task immediately and quotes the question in the failure,
+rather than letting it wait out the worker's clarification timeout (AGE-321) —
+the caller learns what was wanted and can ask again over `message/stream`.
+Holding the task open for `tasks/get` polling would make non-streaming callers
+first-class and is the A2A-shaped answer; it was weighed and not taken, because
+it makes the broker stateful for open tasks and every delegation path here
+streams.
+
 Each worker runs in its own `git worktree` under the conversation's workspace
 (ADR-0012), through `chatty_core::services::worker_tree`.
 

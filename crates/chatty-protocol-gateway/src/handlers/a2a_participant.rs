@@ -37,6 +37,42 @@ use super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, json_rpc_error, json_rpc_ok
 /// `metadata` is the extension point it offers (ADR-0011 C7, AGE-306).
 pub const CLARIFICATION_METADATA_KEY: &str = "clarification";
 
+/// The failure a non-streaming caller gets when its worker asks something.
+///
+/// It quotes the question, because "the delegation failed" would leave the
+/// caller with no idea that anything was asked, which is the whole complaint
+/// in AGE-321. `status.message` carries the worker's own phrasing when it has
+/// one; the structured request stays on `status.metadata` for a caller that
+/// wants to parse it.
+fn unanswerable_question(worker_message: Option<&str>, metadata: Option<&Value>) -> String {
+    let asked = worker_message
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .or_else(|| questions_from(metadata))
+        .unwrap_or_else(|| "a question".to_string());
+
+    format!(
+        "the worker asked: {asked} — a `message/send` task cannot carry a \
+         question back to its caller, so it cannot be answered. Use \
+         `message/stream`, which carries `input-required` and takes the \
+         answer on the same task."
+    )
+}
+
+/// Every question in a parked task's `metadata.clarification`, joined.
+fn questions_from(metadata: Option<&Value>) -> Option<String> {
+    let questions = metadata?
+        .get(CLARIFICATION_METADATA_KEY)?
+        .get("questions")?
+        .as_array()?;
+    let asked: Vec<String> = questions
+        .iter()
+        .filter_map(|q| q.get("question")?.as_str().map(str::to_string))
+        .collect();
+    (!asked.is_empty()).then(|| asked.join("; "))
+}
+
 // ---------------------------------------------------------------------------
 // Agent card
 // ---------------------------------------------------------------------------
@@ -170,8 +206,24 @@ pub(crate) async fn runner_message_send(
 /// No timeout here on purpose: a task is over when the participant says so or
 /// when its socket closes, and the socket close is guaranteed to arrive
 /// because the listener deregisters on it. A caller that wants a deadline has
-/// one — `A2aClient` sets an HTTP timeout — and a second one here would cut
+/// one — `A2aClient` sets a read timeout — and a second one here would cut
 /// off long turns that are working fine.
+///
+/// # A question ends it (AGE-321)
+///
+/// Non-terminal progress has nowhere to go in a non-streaming reply;
+/// `message/stream` is the method that carries it. `input-required` is the
+/// one kind that cannot simply be dropped: the worker is parked on a question
+/// this caller will never see, so waiting would buy nothing but the worker's
+/// own clarification timeout — minutes of silence ending in a failure that
+/// does not say a question was ever asked.
+///
+/// So the task ends here, and the failure quotes the question. The caller
+/// learns what was wanted and can ask again over `message/stream`, which can
+/// carry both the question and the answer. Holding the task open for
+/// `tasks/get` polling instead would make non-streaming callers first-class,
+/// and it is the A2A-shaped answer, but it makes the broker stateful for open
+/// tasks; that was weighed and deliberately not taken here.
 async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     let mut text = String::new();
     let mut state = TaskState::Failed;
@@ -181,17 +233,18 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     while let Some(update) = task.updates.recv().await {
         match update {
             TaskUpdate::Artifact { text: chunk, .. } => text.push_str(&chunk),
-            // Non-terminal progress has nowhere to go in a non-streaming
-            // reply; `message/stream` is the method that carries it. That
-            // includes `input-required`: a caller that cannot see the
-            // question cannot answer it, and the worker's own clarification
-            // timeout is what un-parks the task.
             TaskUpdate::Status {
                 state: s,
                 message: m,
                 metadata: d,
                 ..
             } => {
+                if s == TaskState::InputRequired {
+                    state = TaskState::Failed;
+                    message = Some(unanswerable_question(m.as_deref(), d.as_ref()));
+                    metadata = d;
+                    break;
+                }
                 if s.is_terminal() {
                     state = s;
                     message = m;
@@ -200,6 +253,9 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
             }
         }
     }
+    // Dropping the task cancels it, which closes the worker's socket and
+    // un-parks its `ask_user` — the question dies with the task rather than
+    // waiting out a timeout nobody is going to beat.
     task.finish(state == TaskState::Completed, metadata.as_ref());
 
     let mut result = json!({

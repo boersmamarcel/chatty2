@@ -118,7 +118,7 @@ impl InvokeAgentTool {
             remote_agents,
             module_agents,
             gateway_base_url,
-            client: A2aClient::with_timeout(std::time::Duration::from_secs(300)),
+            client: A2aClient::for_delegation(),
             progress_slot: Arc::new(Mutex::new(None)),
             local_agent: None,
             warn_outside_fleet: false,

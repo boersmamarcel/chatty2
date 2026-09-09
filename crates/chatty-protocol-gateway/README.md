@@ -145,9 +145,30 @@ that is itself a worker parks its own task the same way — the question climbs
 until it reaches someone who can answer, and the answer descends the same
 hops. Escalate-to-human is the only policy; whether a leader may answer on a
 worker's behalf is an open question on ADR-0011. A level with nobody to ask
-ends the delegation rather than guessing. `message/send` on a fresh task cannot carry the question
-to its caller, so a task parked under it waits out the worker's own
-clarification timeout.
+ends the delegation rather than guessing.
+
+**A non-streaming caller gets the question as a failure** (AGE-321). A plain
+`message/send` reply is a single object with no room for a non-terminal
+update, so a worker that parks under one is asking someone who will never
+hear it. The broker ends the task at that point and quotes the question in
+`status.message`, leaving the structured request on `status.metadata`:
+
+```json
+{ "id": "task-…",
+  "status": { "state": "failed",
+              "message": { "parts": [{ "type": "text",
+                "text": "the worker asked: Which database? — a `message/send` task cannot carry a question back to its caller…" }] },
+              "metadata": { "clarification": { "id": "req-…", "questions": [ … ] } } } }
+```
+
+> **Decision, 2026-09-09 (Marcel).** Fail fast rather than hold the task open
+> for `tasks/get` polling. Polling is the A2A-shaped answer and would make
+> non-streaming callers first-class, but it makes the broker stateful for open
+> tasks — a task table, its cleanup, and lifetimes that interact with leases
+> and the ledger — and every delegation path in this repository streams, so
+> the callers it would serve are third parties. Failing immediately with the
+> question in hand removes the multi-minute silent hang that was the actual
+> complaint, and costs nothing that polling would later have to undo.
 
 **The connection is the liveness signal.** There is no heartbeat: when the
 socket closes, for any reason, the participant is deregistered and every task
