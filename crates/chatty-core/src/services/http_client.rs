@@ -23,6 +23,23 @@ pub fn default_client(timeout_secs: u64) -> reqwest::Client {
         .expect("Failed to initialize HTTP client (TLS backend error)")
 }
 
+/// Build a client for a response whose *duration* cannot be known in advance.
+///
+/// A total timeout is the wrong instrument for a stream: it bounds the whole
+/// exchange, so a delegation that parks while a human answers a question dies
+/// on the transport rather than on the question's own deadline. What can
+/// honestly be bounded is **silence** — `read` is the gap between bytes, and
+/// an SSE server that sends keep-alives (as this app's broker does, every
+/// 15 s) keeps a live-but-quiet stream well inside it.
+pub fn streaming_client(connect: Duration, read: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(read)
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
 /// Build an HTTP client that does **not** follow redirects.
 ///
 /// Used by the fetch tool (to report redirects) and OAuth flows (to capture
