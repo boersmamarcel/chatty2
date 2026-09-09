@@ -25,10 +25,53 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::participant::{
-    LocalRunner, ParticipantCard, ParticipantRegistry, TaskState, TaskStream, TaskUpdate, Worker,
+    InputRequest, ParticipantCard, ParticipantRegistry, TaskInput, TaskState, TaskStream,
+    TaskUpdate, VirtualAgent, WorkerHandle,
 };
 
-use super::jsonrpc::{INTERNAL_ERROR, json_rpc_error, json_rpc_ok};
+use super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, json_rpc_error, json_rpc_ok};
+
+/// The key under an A2A status's `metadata` that carries what a parked task
+/// is waiting for, and under a `message/send` message's `metadata` that
+/// carries the answer. A2A's own `TaskStatus` has no field for either;
+/// `metadata` is the extension point it offers (ADR-0011 C7, AGE-306).
+pub const CLARIFICATION_METADATA_KEY: &str = "clarification";
+
+/// The failure a non-streaming caller gets when its worker asks something.
+///
+/// It quotes the question, because "the delegation failed" would leave the
+/// caller with no idea that anything was asked, which is the whole complaint
+/// in AGE-321. `status.message` carries the worker's own phrasing when it has
+/// one; the structured request stays on `status.metadata` for a caller that
+/// wants to parse it.
+fn unanswerable_question(worker_message: Option<&str>, metadata: Option<&Value>) -> String {
+    let asked = worker_message
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .or_else(|| questions_from(metadata))
+        .unwrap_or_else(|| "a question".to_string());
+
+    format!(
+        "the worker asked: {asked} — a `message/send` task cannot carry a \
+         question back to its caller, so it cannot be answered. Use \
+         `message/stream`, which carries `input-required` and takes the \
+         answer on the same task."
+    )
+}
+
+/// Every question in a parked task's `metadata.clarification`, joined.
+fn questions_from(metadata: Option<&Value>) -> Option<String> {
+    let questions = metadata?
+        .get(CLARIFICATION_METADATA_KEY)?
+        .get("questions")?
+        .as_array()?;
+    let asked: Vec<String> = questions
+        .iter()
+        .filter_map(|q| q.get("question")?.as_str().map(str::to_string))
+        .collect();
+    (!asked.is_empty()).then(|| asked.join("; "))
+}
 
 // ---------------------------------------------------------------------------
 // Agent card
@@ -68,17 +111,22 @@ struct RunningTask {
     updates: TaskStream,
     /// Cancels the task if the caller hangs up before it finishes.
     guard: TaskGuard,
-    /// Present only for a runner-spawned worker: the child process, reaped
-    /// when this is dropped.
-    worker: Option<Worker>,
+    /// Present only for a worker a virtual agent started: the process or the
+    /// leased microVM behind it, reaped when this is dropped.
+    worker: Option<Box<dyn WorkerHandle>>,
 }
 
 impl RunningTask {
     /// The task reached a terminal state; nothing is left to cancel.
-    fn finish(&mut self, succeeded: bool) {
+    ///
+    /// `metadata` is the terminal status's, carrying the worker's token
+    /// usage. It is passed on rather than only rendered because a hosted
+    /// worker's ledger row wants it beside the lease-seconds only the worker
+    /// handle knows (AGE-307).
+    fn finish(&mut self, succeeded: bool, metadata: Option<&Value>) {
         self.guard.finished();
         if let Some(worker) = self.worker.as_mut() {
-            worker.set_succeeded(succeeded);
+            worker.finish(succeeded, metadata);
         }
     }
 }
@@ -94,8 +142,8 @@ fn submit(registry: &ParticipantRegistry, name: &str, prompt: String) -> Option<
     })
 }
 
-/// Spawn a worker for `prompt` and submit the task to it.
-async fn spawn(runner: &LocalRunner, prompt: String) -> Result<RunningTask, String> {
+/// Start a worker for `prompt` and submit the task to it.
+async fn spawn(runner: &dyn VirtualAgent, prompt: String) -> Result<RunningTask, String> {
     let (worker, updates) = runner
         .run_task(prompt)
         .await
@@ -138,16 +186,16 @@ pub(crate) async fn message_send(
     }
 }
 
-/// Spawn a worker, run one task on it to completion, and reap it.
+/// Start a worker, run one task on it to completion, and reap it.
 pub(crate) async fn runner_message_send(
-    runner: &LocalRunner,
+    runner: &dyn VirtualAgent,
     id: Option<Value>,
     prompt: String,
 ) -> Response {
     match spawn(runner, prompt).await {
         Ok(task) => send_task(id, task).await,
         Err(reason) => {
-            warn!(agent = runner.agent_name(), %reason, "Could not start a local worker");
+            warn!(agent = runner.agent_name(), %reason, "Could not start a worker");
             json_rpc_error(StatusCode::OK, id, INTERNAL_ERROR, reason)
         }
     }
@@ -158,8 +206,24 @@ pub(crate) async fn runner_message_send(
 /// No timeout here on purpose: a task is over when the participant says so or
 /// when its socket closes, and the socket close is guaranteed to arrive
 /// because the listener deregisters on it. A caller that wants a deadline has
-/// one — `A2aClient` sets an HTTP timeout — and a second one here would cut
+/// one — `A2aClient` sets a read timeout — and a second one here would cut
 /// off long turns that are working fine.
+///
+/// # A question ends it (AGE-321)
+///
+/// Non-terminal progress has nowhere to go in a non-streaming reply;
+/// `message/stream` is the method that carries it. `input-required` is the
+/// one kind that cannot simply be dropped: the worker is parked on a question
+/// this caller will never see, so waiting would buy nothing but the worker's
+/// own clarification timeout — minutes of silence ending in a failure that
+/// does not say a question was ever asked.
+///
+/// So the task ends here, and the failure quotes the question. The caller
+/// learns what was wanted and can ask again over `message/stream`, which can
+/// carry both the question and the answer. Holding the task open for
+/// `tasks/get` polling instead would make non-streaming callers first-class,
+/// and it is the A2A-shaped answer, but it makes the broker stateful for open
+/// tasks; that was weighed and deliberately not taken here.
 async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     let mut text = String::new();
     let mut state = TaskState::Failed;
@@ -169,13 +233,18 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     while let Some(update) = task.updates.recv().await {
         match update {
             TaskUpdate::Artifact { text: chunk, .. } => text.push_str(&chunk),
-            // Non-terminal progress has nowhere to go in a non-streaming
-            // reply; `message/stream` is the method that carries it.
             TaskUpdate::Status {
                 state: s,
                 message: m,
                 metadata: d,
+                ..
             } => {
+                if s == TaskState::InputRequired {
+                    state = TaskState::Failed;
+                    message = Some(unanswerable_question(m.as_deref(), d.as_ref()));
+                    metadata = d;
+                    break;
+                }
                 if s.is_terminal() {
                     state = s;
                     message = m;
@@ -184,7 +253,10 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
             }
         }
     }
-    task.finish(state == TaskState::Completed);
+    // Dropping the task cancels it, which closes the worker's socket and
+    // un-parks its `ask_user` — the question dies with the task rather than
+    // waiting out a timeout nobody is going to beat.
+    task.finish(state == TaskState::Completed, metadata.as_ref());
 
     let mut result = json!({
         "id": task.task_id,
@@ -222,16 +294,16 @@ pub(crate) fn message_stream(
     }
 }
 
-/// Spawn a worker and stream its task.
+/// Start a worker and stream its task.
 pub(crate) async fn runner_message_stream(
-    runner: &LocalRunner,
+    runner: &dyn VirtualAgent,
     id: Option<Value>,
     prompt: String,
 ) -> Response {
     match spawn(runner, prompt).await {
         Ok(task) => stream_task(id, task),
         Err(reason) => {
-            warn!(agent = runner.agent_name(), %reason, "Could not start a local worker");
+            warn!(agent = runner.agent_name(), %reason, "Could not start a worker");
             failed_stream(id, "unknown", reason)
         }
     }
@@ -262,18 +334,18 @@ fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
                         }
                     }));
                 }
-                TaskUpdate::Status { state, message, metadata } => {
+                TaskUpdate::Status { state, message, metadata, input } => {
                     let terminal = state.is_terminal();
                     yield sse(&status_event(
                         &id,
                         &task_id,
                         &state.to_string(),
                         message.as_deref(),
-                        metadata,
+                        with_clarification(metadata.clone(), input),
                         terminal,
                     ));
                     if terminal {
-                        task.finish(state == TaskState::Completed);
+                        task.finish(state == TaskState::Completed, metadata.as_ref());
                         ended = true;
                         break;
                     }
@@ -304,6 +376,76 @@ fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Fold what a parked task is waiting for into the status's `metadata`, next
+/// to whatever else rides there.
+fn with_clarification(metadata: Option<Value>, input: Option<InputRequest>) -> Option<Value> {
+    let Some(input) = input else {
+        return metadata;
+    };
+    let mut metadata = match metadata {
+        Some(Value::Object(map)) => Value::Object(map),
+        // A non-object metadata cannot be extended; the request wins, since
+        // without it the caller cannot answer.
+        _ => json!({}),
+    };
+    metadata[CLARIFICATION_METADATA_KEY] = json!(input);
+    Some(metadata)
+}
+
+// ---------------------------------------------------------------------------
+// message/send on a parked task
+// ---------------------------------------------------------------------------
+
+/// Answer a task parked in `input-required`.
+///
+/// A2A's way of resuming a task is `message/send` with the message's
+/// `taskId` set; the answers ride in the message's `metadata` under
+/// [`CLARIFICATION_METADATA_KEY`] as a [`TaskInput`]. The reply is the task
+/// as it stands — `working` — rather than the finished task: the caller is
+/// already consuming the task's stream, and a second reader of one task's
+/// updates would need the registry to fan out, which nothing else needs.
+///
+/// A `message/send` whose `taskId` the broker does not hold open starts a
+/// new task instead; only [`ParticipantRegistry::owns_task`] tells the two
+/// apart, and the router asks it before coming here.
+pub(crate) fn message_input(
+    registry: &ParticipantRegistry,
+    id: Option<Value>,
+    task_id: &str,
+    params: &Value,
+) -> Response {
+    let input = params
+        .pointer("/message/metadata")
+        .and_then(|m| m.get(CLARIFICATION_METADATA_KEY))
+        .cloned()
+        .and_then(|v| serde_json::from_value::<TaskInput>(v).ok());
+    let Some(input) = input else {
+        return json_rpc_error(
+            StatusCode::OK,
+            id,
+            INVALID_PARAMS,
+            format!(
+                "task '{task_id}' is waiting for input; the message must carry \
+                 `metadata.{CLARIFICATION_METADATA_KEY}` with `requestId` and `answers`"
+            ),
+        );
+    };
+
+    match registry.answer_task(task_id, input) {
+        Ok(()) => json_rpc_ok(
+            id,
+            json!({
+                "id": task_id,
+                "status": { "state": TaskState::Working.to_string() },
+            }),
+        ),
+        Err(e) => {
+            warn!(task = %task_id, error = %e, "Could not deliver an answer");
+            json_rpc_error(StatusCode::OK, id, INTERNAL_ERROR, e.to_string())
+        }
+    }
 }
 
 /// A single-event SSE response for a failure that happened before the task

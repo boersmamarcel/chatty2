@@ -191,8 +191,8 @@ struct Cli {
     /// Run as a participant of the broker listening on this Unix socket.
     ///
     /// The process registers, waits for one delegated task, runs it, and
-    /// reports its progress and result over the socket rather than as
-    /// `CHATTY_EVENT` lines on stderr (ADR-0011 / AGE-301). Implies the
+    /// reports its progress and result over the socket rather than on
+    /// stderr (ADR-0011 / AGE-301). Implies the
     /// headless turn loop; `--message` is not used, the prompt arrives from
     /// the broker.
     ///
@@ -376,7 +376,7 @@ async fn main() -> Result<()> {
     // doesn't matter for non-interactive use), while the interactive TUI defers
     // heavy services to a background task so the UI appears instantly.
     let participant_mode = cli.participant_socket.is_some();
-    if cli.pipe || cli.headless || participant_mode {
+    let result = if cli.pipe || cli.headless || participant_mode {
         // ── Headless / pipe / participant: load everything before running ──
         let (user_secrets, mcp_service, memory_service, search_settings) =
             load_deferred_services(&execution_settings).await;
@@ -476,7 +476,19 @@ async fn main() -> Result<()> {
         // It will be re-initialized once ServicesReady arrives with full context.
         engine.spawn_init_conversation();
         app::run(engine, event_rx).await
+    };
+
+    // The engine (and with it any `SandboxManager`) is gone, but its `Drop`
+    // could only spawn a detached cleanup task, which dies with the runtime
+    // this function returns into. Sandbox containers run `sleep infinity`
+    // with no `--rm`, so tear them down here instead. Headless and
+    // participant runs are short-lived and spawned per task, so this is the
+    // path that would accumulate containers fastest.
+    if let Err(e) = chatty_core::sandbox::shutdown_all().await {
+        warn!(error = %e, "Failed to destroy sandbox containers during shutdown");
     }
+
+    result
 }
 
 /// Load all deferred services concurrently (MCP, memory, user secrets, search settings).

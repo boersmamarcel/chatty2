@@ -13,7 +13,7 @@ chatty-module-registry = { path = "../chatty-module-registry" }
 # Participant mode (AGE-301): the broker socket's frames and its client half.
 # Already in the graph via chatty-module-registry / chatty-wasm-runtime; this
 # adds axum and tower-http, not wasmtime.
-chatty-protocol-gateway = { path = "../chatty-protocol-gateway" }
+chatty-protocol-gateway = { path = "../chatty-protocol-gateway", features = ["worker"] }
 
 # LLM framework (needed for rig types used in chatty-core's API)
 rig-core.workspace = true
@@ -48,6 +48,8 @@ chatty-core = { path = "../chatty-core", features = ["test-support"] }
 axum = "0.8"
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 parking_lot.workspace = true
+# AGE-306's chain test puts the participant socket in a temp dir.
+tempfile.workspace = true
 
 [features]
 default = ["mcp"]

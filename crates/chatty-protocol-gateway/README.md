@@ -123,6 +123,53 @@ participant → {"type":"status","taskId":"task-…","state":"completed"}
 `status` states are A2A's (`submitted`, `working`, `input-required`,
 `completed`, `failed`, `canceled`); the terminal three end the task.
 
+**A question goes up the chain, the answer comes back down** (ADR-0011 C7,
+AGE-306). A worker whose `ask_user` is waiting parks its task in
+`input-required` and says what it is waiting for — the request id and every
+question with its options — under `input`. The broker serves that to the A2A
+caller under the status's `metadata.clarification`; the caller answers with
+A2A `message/send` carrying the task's id on the message and the answers under
+the message's `metadata.clarification`, which the broker turns into an `input`
+frame on the same task. The worker's next status un-parks it.
+
+```
+participant → {"type":"status","taskId":"task-…","state":"input-required","message":"Which database?",
+               "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
+broker      → {"type":"input","taskId":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
+participant → {"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+```
+
+`invoke_agent` is the caller: it re-asks the question on its own agent's
+`ask_user` store, so a human behind it sees the ordinary popover, and an agent
+that is itself a worker parks its own task the same way — the question climbs
+until it reaches someone who can answer, and the answer descends the same
+hops. Escalate-to-human is the only policy; whether a leader may answer on a
+worker's behalf is an open question on ADR-0011. A level with nobody to ask
+ends the delegation rather than guessing.
+
+**A non-streaming caller gets the question as a failure** (AGE-321). A plain
+`message/send` reply is a single object with no room for a non-terminal
+update, so a worker that parks under one is asking someone who will never
+hear it. The broker ends the task at that point and quotes the question in
+`status.message`, leaving the structured request on `status.metadata`:
+
+```json
+{ "id": "task-…",
+  "status": { "state": "failed",
+              "message": { "parts": [{ "type": "text",
+                "text": "the worker asked: Which database? — a `message/send` task cannot carry a question back to its caller…" }] },
+              "metadata": { "clarification": { "id": "req-…", "questions": [ … ] } } } }
+```
+
+> **Decision, 2026-09-09 (Marcel).** Fail fast rather than hold the task open
+> for `tasks/get` polling. Polling is the A2A-shaped answer and would make
+> non-streaming callers first-class, but it makes the broker stateful for open
+> tasks — a task table, its cleanup, and lifetimes that interact with leases
+> and the ledger — and every delegation path in this repository streams, so
+> the callers it would serve are third parties. Failing immediately with the
+> question in hand removes the multi-minute silent hang that was the actual
+> complaint, and costs nothing that polling would later have to undo.
+
 **The connection is the liveness signal.** There is no heartbeat: when the
 socket closes, for any reason, the participant is deregistered and every task
 it still owed is failed with a `failed` status naming the disconnect. A
@@ -130,16 +177,25 @@ process that has died cannot fail to send a heartbeat, so the socket is the
 only signal that cannot lie.
 
 Opt in with `ProtocolGateway::with_participant_socket(path)`; without it no
-socket is opened. Unix only — the hosted transport is vsock (AGE-307).
+socket is opened. The hosted transport is Firecracker vsock, which reaches
+this crate as a plain stream — `serve_connection` takes any of them, and
+`ParticipantConnection::register_over` is the worker's side of the same
+generalization (AGE-307).
 
-### The local runner
+### Virtual agents and the local runner
 
-`ProtocolGateway::with_local_runner` publishes one *virtual* agent —
-`local-agent` — that is not a connected process but a factory. A task
-addressed to it spawns a `chatty-tui` child, waits for that child to register
-over the socket, routes the task to it, and reaps it. To the caller it is an
-A2A agent like any other, which is the point: `invoke_agent` replaces
-`sub_agent` without the parent learning a second fan-out path.
+`ProtocolGateway::with_virtual_agent` publishes one agent that is not a
+connected process but a factory. A task addressed to it starts a worker, waits
+for that worker to register over the socket, routes the task to it, and reaps
+it. To the caller it is an A2A agent like any other, which is the point:
+`invoke_agent` replaces `sub_agent` without the parent learning a second
+fan-out path.
+
+`LocalRunner` is the implementation that spawns a `chatty-tui` child. It is
+not the only one: hive's `VmRunner` leases a Firecracker microVM per task
+(AGE-307) and fills the same slot, which is why the trait exists rather than
+the gateway naming a concrete runner. Everything past "the worker registered"
+is the same code for both.
 
 **One child per task.** The child can serve tasks until its socket closes, but
 the runner's policy is one-shot, keeping the process lifecycle identical to
@@ -162,3 +218,18 @@ cargo run -p chatty-protocol-gateway -- --modules-dir ~/.local/share/chatty/modu
 ```
 
 The server binds to `http://0.0.0.0:8420` by default.
+
+## Being a worker (`worker` feature)
+
+The `worker` feature adds the other end of the participant socket: `TaskMapper`,
+the `SessionEvent` → A2A table, and `serve_one_task`, the loop a process runs
+when it *is* the worker — register, take one task, run it, send one terminal
+status, exit.
+
+It lives here rather than in `chatty-tui` because two crates run it:
+`chatty-tui` on the desktop and hive's `chatty-server` inside a microVM. The
+frame sequence a parent renders is what ADR-0011's first kill criterion is
+measured on, so a second copy of the mapping would be a second answer to the
+question the ADR asks. The feature is off by default — it is the only thing in
+this crate that needs `chatty-core`, and a broker that never runs an agent
+itself builds without it.

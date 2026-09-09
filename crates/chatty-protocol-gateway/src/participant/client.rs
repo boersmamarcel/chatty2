@@ -1,26 +1,49 @@
-//! The participant side of the socket: what a child process talks.
+//! The participant side of the socket: what a worker talks.
 //!
 //! It lives next to the listener so the two halves of the protocol cannot
-//! drift. A child (`chatty-tui --participant-socket …`) owns one of these for
-//! its whole life: connect, register, then answer tasks until the broker
+//! drift. A worker (`chatty-tui --participant-socket …`) owns one of these
+//! for its whole life: connect, register, then answer tasks until the broker
 //! closes the socket or the process exits.
+//!
+//! The transport is the caller's, not this type's. It is a Unix socket on
+//! the desktop and an `AF_VSOCK` stream from inside a microVM (AGE-307), and
+//! the frames are identical over both — which is the whole reason C1's
+//! contract could be reused for the hosted half. The halves are boxed rather
+//! than the type being generic so that the shared worker loop stays one
+//! concrete type regardless of what it is speaking over.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::debug;
 
 use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
 
+type BoxedRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxedWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
 /// A registered connection to the broker.
 pub struct ParticipantConnection {
-    lines: Lines<BufReader<OwnedReadHalf>>,
-    write: OwnedWriteHalf,
+    reader: ParticipantReader,
+    writer: ParticipantWriter,
     name: String,
+}
+
+/// The broker's frames, read one at a time.
+///
+/// One half of [`ParticipantConnection::into_split`]: a worker running a
+/// task reports on the other half while it waits here for the answer to a
+/// question it asked (AGE-306), and neither side may hold the other up.
+pub struct ParticipantReader {
+    lines: Lines<BufReader<BoxedRead>>,
+}
+
+/// The participant's frames, written one per line.
+pub struct ParticipantWriter {
+    write: BoxedWrite,
 }
 
 impl ParticipantConnection {
@@ -35,11 +58,26 @@ impl ParticipantConnection {
         let stream = UnixStream::connect(socket)
             .await
             .with_context(|| format!("failed to reach the broker at {}", socket.display()))?;
-        let (read, write) = stream.into_split();
+        Self::register_over(stream, card).await
+    }
+
+    /// Register `card` over an already-connected stream.
+    ///
+    /// The general form: a microVM's worker reaches the broker over vsock,
+    /// which is not a path (AGE-307).
+    pub async fn register_over<S>(stream: S, card: ParticipantCard) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (read, write) = tokio::io::split(stream);
 
         let mut conn = Self {
-            lines: BufReader::new(read).lines(),
-            write,
+            reader: ParticipantReader {
+                lines: BufReader::new(Box::new(read) as BoxedRead).lines(),
+            },
+            writer: ParticipantWriter {
+                write: Box::new(write) as BoxedWrite,
+            },
             name: card.name.clone(),
         };
         conn.send(ParticipantFrame::Register { card }).await?;
@@ -66,35 +104,16 @@ impl ParticipantConnection {
 
     /// The next frame from the broker, or `None` when it closes the socket.
     pub async fn next_frame(&mut self) -> Result<Option<BrokerFrame>> {
-        loop {
-            let Some(line) = self
-                .lines
-                .next_line()
-                .await
-                .context("the broker connection failed")?
-            else {
-                return Ok(None);
-            };
-            if line.trim().is_empty() {
-                continue;
-            }
-            return Ok(Some(serde_json::from_str(&line).with_context(|| {
-                format!("the broker sent a frame this build cannot parse: {line}")
-            })?));
-        }
+        self.reader.next_frame().await
     }
 
     pub async fn send(&mut self, frame: ParticipantFrame) -> Result<()> {
-        let mut line = serde_json::to_string(&frame).context("failed to encode a frame")?;
-        line.push('\n');
-        self.write
-            .write_all(line.as_bytes())
-            .await
-            .context("failed to write to the broker")?;
-        self.write
-            .flush()
-            .await
-            .context("failed to flush to the broker")
+        self.writer.send(frame).await
+    }
+
+    /// Take the two halves apart so they can be driven by different tasks.
+    pub fn into_split(self) -> (ParticipantReader, ParticipantWriter) {
+        (self.reader, self.writer)
     }
 
     pub async fn status(
@@ -108,6 +127,7 @@ impl ParticipantConnection {
             state,
             message,
             metadata: None,
+            input: None,
         })
         .await
     }
@@ -126,6 +146,7 @@ impl ParticipantConnection {
             state,
             message,
             metadata,
+            input: None,
         })
         .await
     }
@@ -137,5 +158,42 @@ impl ParticipantConnection {
             last_chunk,
         })
         .await
+    }
+}
+
+impl ParticipantReader {
+    /// The next frame from the broker, or `None` when it closes the socket.
+    pub async fn next_frame(&mut self) -> Result<Option<BrokerFrame>> {
+        loop {
+            let Some(line) = self
+                .lines
+                .next_line()
+                .await
+                .context("the broker connection failed")?
+            else {
+                return Ok(None);
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            return Ok(Some(serde_json::from_str(&line).with_context(|| {
+                format!("the broker sent a frame this build cannot parse: {line}")
+            })?));
+        }
+    }
+}
+
+impl ParticipantWriter {
+    pub async fn send(&mut self, frame: ParticipantFrame) -> Result<()> {
+        let mut line = serde_json::to_string(&frame).context("failed to encode a frame")?;
+        line.push('\n');
+        self.write
+            .write_all(line.as_bytes())
+            .await
+            .context("failed to write to the broker")?;
+        self.write
+            .flush()
+            .await
+            .context("failed to flush to the broker")
     }
 }
