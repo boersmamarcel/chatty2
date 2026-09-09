@@ -21,6 +21,22 @@
 //! participant → {"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
 //! participant → {"type":"status","taskId":"task-…","state":"completed"}
 //! ```
+//!
+//! # A parked task
+//!
+//! A worker that asks a question (`ask_user`) parks its task in
+//! `input-required` and says what it is waiting for; the answer comes back
+//! down as an `input` frame on the same task, and the task resumes
+//! (ADR-0011 C7, AGE-306).
+//!
+//! ```text
+//! participant → {"type":"status","taskId":"task-…","state":"input-required",
+//!                "message":"Which database?",
+//!                "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
+//! broker      → {"type":"input","taskId":"task-…",
+//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
+//! participant → {"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+//! ```
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,6 +81,51 @@ impl std::fmt::Display for TaskState {
     }
 }
 
+/// One question a parked task is waiting on.
+///
+/// Field for field the shape of chatty-core's `ClarifyingQuestion`, so the
+/// two serialize identically; it is spelled out here because the wire's
+/// schema belongs with the wire, and this crate does not depend on
+/// chatty-core without the `worker` feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputQuestion {
+    pub id: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+/// What a task in `input-required` is waiting for: one `ask_user` call.
+///
+/// `id` is the worker's own request id — the key its clarification store
+/// resolves on — and it rides up and back down unchanged so the answer
+/// lands on the call that asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputRequest {
+    pub id: String,
+    pub questions: Vec<InputQuestion>,
+}
+
+/// The answer to one [`InputQuestion`]; the shape of chatty-core's
+/// `ClarificationAnswer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputAnswer {
+    pub id: String,
+    pub answer: String,
+    #[serde(default)]
+    pub custom: bool,
+}
+
+/// The answers for a parked task: A2A `message/send` on the same task id,
+/// in the broker's vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInput {
+    /// The [`InputRequest::id`] this answers.
+    pub request_id: String,
+    pub answers: Vec<InputAnswer>,
+}
+
 /// One skill on a participant's agent card.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParticipantSkill {
@@ -107,6 +168,11 @@ pub enum ParticipantFrame {
     /// — usage belongs to the ledger, not to the task protocol — and
     /// inventing a frame for it would put accounting in the wire format.
     /// The broker's ledger (AGE-307) reads it from there.
+    ///
+    /// `input` accompanies `input-required` and says what the task is
+    /// waiting for. The broker serves it to the caller under the A2A
+    /// status's `metadata.clarification`, and the caller's answer comes
+    /// back as [`BrokerFrame::Input`].
     #[serde(rename_all = "camelCase")]
     Status {
         task_id: String,
@@ -115,6 +181,8 @@ pub enum ParticipantFrame {
         message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<InputRequest>,
     },
     /// A chunk of the task's output, in stream order. The broker turns this
     /// into an A2A `TaskArtifactUpdateEvent`.
@@ -144,6 +212,10 @@ pub enum BrokerFrame {
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
     Cancel { task_id: String },
+    /// The answer to a task parked in `input-required`. Resolve the request
+    /// it names and carry on; the next `Status` frame un-parks the task.
+    #[serde(rename_all = "camelCase")]
+    Input { task_id: String, input: TaskInput },
 }
 
 #[cfg(test)]
@@ -157,6 +229,7 @@ mod tests {
             state: TaskState::InputRequired,
             message: Some("which file?".into()),
             metadata: None,
+            input: None,
         };
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "status");
@@ -167,6 +240,67 @@ mod tests {
             json.get("metadata").is_none(),
             "an absent metadata field stays off the wire"
         );
+        assert!(
+            json.get("input").is_none(),
+            "an absent input field stays off the wire"
+        );
+    }
+
+    #[test]
+    fn a_parked_task_says_what_it_is_waiting_for() {
+        let frame = ParticipantFrame::Status {
+            task_id: "task-1".into(),
+            state: TaskState::InputRequired,
+            message: Some("Which database?".into()),
+            metadata: None,
+            input: Some(InputRequest {
+                id: "req-1".into(),
+                questions: vec![InputQuestion {
+                    id: "q1".into(),
+                    question: "Which database?".into(),
+                    options: vec!["Postgres".into(), "SQLite".into()],
+                }],
+            }),
+        };
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["input"]["id"], "req-1");
+        assert_eq!(json["input"]["questions"][0]["id"], "q1");
+        assert_eq!(json["input"]["questions"][0]["options"][1], "SQLite");
+
+        let back: ParticipantFrame = serde_json::from_value(json).unwrap();
+        let ParticipantFrame::Status { input, .. } = back else {
+            panic!("expected a status frame");
+        };
+        assert_eq!(input.unwrap().questions.len(), 1);
+    }
+
+    #[test]
+    fn an_input_frame_carries_the_answers_under_the_request_id() {
+        let json = serde_json::to_value(BrokerFrame::Input {
+            task_id: "task-1".into(),
+            input: TaskInput {
+                request_id: "req-1".into(),
+                answers: vec![InputAnswer {
+                    id: "q1".into(),
+                    answer: "Postgres".into(),
+                    custom: false,
+                }],
+            },
+        })
+        .unwrap();
+        assert_eq!(json["type"], "input");
+        assert_eq!(json["taskId"], "task-1");
+        assert_eq!(json["input"]["requestId"], "req-1");
+        assert_eq!(json["input"]["answers"][0]["answer"], "Postgres");
+
+        // `custom` is optional on the way in: a caller that only ever picks
+        // an option need not say so.
+        let line = r#"{"type":"input","taskId":"t","input":{"requestId":"r","answers":[{"id":"q1","answer":"x"}]}}"#;
+        let frame: BrokerFrame = serde_json::from_str(line).unwrap();
+        let BrokerFrame::Input { input, .. } = frame else {
+            panic!("expected an input frame");
+        };
+        assert!(!input.answers[0].custom);
     }
 
     #[test]

@@ -4,13 +4,43 @@
 //! - `GET /.well-known/agent.json` — discover the agent's capabilities
 //! - `POST <url>` with `message/send` JSON-RPC — send a task and receive a result
 //! - `POST <url>` with `message/stream` JSON-RPC — stream task updates via SSE
+//! - `POST <url>` with `message/send` on an existing `taskId` — answer a task
+//!   parked in `input-required` (ADR-0011 C7, AGE-306)
 
 use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
+use crate::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
 use crate::settings::models::a2a_store::A2aAgentConfig;
+
+/// The key under a status's `metadata` that carries what an
+/// `input-required` task is waiting for, and under an answering message's
+/// `metadata` that carries the answers. The broker's spelling
+/// (`chatty_protocol_gateway::handlers`), repeated here because this crate
+/// is below the gateway.
+pub const CLARIFICATION_METADATA_KEY: &str = "clarification";
+
+/// What a task parked in `input-required` is waiting for: an `ask_user`
+/// call somewhere down the chain, with the request id its store resolves
+/// on. Field for field the broker's `InputRequest`.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct A2aClarificationRequest {
+    pub id: String,
+    pub questions: Vec<ClarifyingQuestion>,
+}
+
+impl A2aClarificationRequest {
+    /// The request behind an `input-required` status, if the status carries
+    /// one. A parked task without it — an approval, say — cannot be answered
+    /// from here.
+    pub fn from_status_metadata(metadata: Option<&Value>) -> Option<Self> {
+        let value = metadata?.get(CLARIFICATION_METADATA_KEY)?.clone();
+        serde_json::from_value(value).ok()
+    }
+}
 
 /// Discovered capabilities from a remote A2A agent card.
 #[derive(Clone, Debug)]
@@ -32,6 +62,10 @@ pub enum A2aStreamEvent {
         is_final: bool,
         /// Optional status message (e.g. progress text or error details).
         message: Option<String>,
+        /// The status's `metadata`, verbatim. Carries the request behind an
+        /// `input-required` state (see [`A2aClarificationRequest`]) and the
+        /// worker's usage on the terminal status.
+        metadata: Option<Value>,
     },
     /// An artifact chunk (text content from the agent).
     ArtifactUpdate {
@@ -313,6 +347,7 @@ impl A2aClient {
                     state: "completed".to_string(),
                     is_final: true,
                     message: None,
+                    metadata: None,
                 }),
                 Ok(A2aStreamEvent::ArtifactUpdate {
                     task_id: tid,
@@ -364,6 +399,73 @@ impl A2aClient {
         };
 
         Ok(Box::pin(event_stream))
+    }
+}
+
+impl A2aClient {
+    /// Answer a task parked in `input-required`.
+    ///
+    /// A2A resumes a task with `message/send` carrying the task's id on the
+    /// message; the answers ride in the message's `metadata` under
+    /// [`CLARIFICATION_METADATA_KEY`], and a text part spells them out for
+    /// a reader that only reads text. The task's stream, which the caller
+    /// is still consuming, is where the task's progress continues.
+    pub async fn send_task_input(
+        &self,
+        config: &A2aAgentConfig,
+        task_id: &str,
+        request_id: &str,
+        answers: &[ClarificationAnswer],
+    ) -> Result<()> {
+        let url = config.url.trim_end_matches('/').to_string();
+        let text = answers
+            .iter()
+            .map(|a| format!("{}: {}", a.id, a.answer))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "taskId": task_id,
+                    "parts": [{ "type": "text", "text": text }],
+                    "metadata": {
+                        CLARIFICATION_METADATA_KEY: {
+                            "requestId": request_id,
+                            "answers": answers,
+                        }
+                    }
+                }
+            }
+        });
+
+        debug!(url = %url, agent = %config.name, task = %task_id, "Answering a parked A2A task");
+
+        let mut req = self.http.post(&url).json(&body);
+        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
+        if !resp.status().is_success() {
+            bail!("{}", detailed_http_error("message/send", resp).await);
+        }
+        let value: Value = resp
+            .json()
+            .await
+            .context("Failed to parse A2A message/send response as JSON")?;
+        if let Some(err) = value.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            bail!("A2A agent refused the answer: {}", msg);
+        }
+        Ok(())
     }
 }
 
@@ -440,11 +542,13 @@ fn parse_sse_event(block: &str) -> Option<A2aStreamEvent> {
             .pointer("/message/parts/0/text")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let metadata = status.get("metadata").cloned();
         return Some(A2aStreamEvent::StatusUpdate {
             task_id,
             state,
             is_final,
             message,
+            metadata,
         });
     }
 
@@ -472,6 +576,34 @@ mod tests {
             }
             _ => panic!("Expected StatusUpdate"),
         }
+    }
+
+    #[test]
+    fn parse_sse_input_required_carries_the_request() {
+        let block = r#"data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-abc","status":{"state":"input-required","message":{"parts":[{"type":"text","text":"Which database?"}]},"metadata":{"clarification":{"id":"req-1","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}},"final":false}}"#;
+        let evt = parse_sse_event(block).unwrap();
+        let A2aStreamEvent::StatusUpdate {
+            state,
+            message,
+            metadata,
+            ..
+        } = evt
+        else {
+            panic!("Expected StatusUpdate");
+        };
+        assert_eq!(state, "input-required");
+        assert_eq!(message.as_deref(), Some("Which database?"));
+        let request = A2aClarificationRequest::from_status_metadata(metadata.as_ref())
+            .expect("the request is in the metadata");
+        assert_eq!(request.id, "req-1");
+        assert_eq!(request.questions[0].options, vec!["Postgres", "SQLite"]);
+    }
+
+    #[test]
+    fn a_status_without_a_request_cannot_be_answered() {
+        assert!(A2aClarificationRequest::from_status_metadata(None).is_none());
+        let usage_only = json!({ "usage": { "inputTokens": 1 } });
+        assert!(A2aClarificationRequest::from_status_metadata(Some(&usage_only)).is_none());
     }
 
     #[test]

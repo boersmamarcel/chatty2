@@ -19,6 +19,14 @@
 //! here — cancellation is enforced by the broker reaping the worker, which
 //! for a microVM means killing it. When workers become persistent, this is
 //! the loop that grows a cancel path.
+//!
+//! # The way back down
+//!
+//! The socket is read for the whole task, not only until the task arrives:
+//! a worker whose `ask_user` parked the task gets its answer as an `input`
+//! frame (AGE-306), which lands on the [`InputReceiver`] the turn was
+//! handed. What the turn does with it is [`answer_clarifications`] — the
+//! embedder spawns that beside its turn with the session's store.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -30,10 +38,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::TaskMapper;
+use super::{InputReceiver, TaskMapper};
 use crate::participant::{
-    BrokerFrame, ParticipantCard, ParticipantConnection, ParticipantFrame, ParticipantSkill,
+    BrokerFrame, ParticipantCard, ParticipantConnection, ParticipantFrame, ParticipantReader,
+    ParticipantSkill,
 };
+
+#[cfg(doc)]
+use super::answer_clarifications;
 
 /// Where a running turn's events go. The same shape `chatty-tui`'s headless
 /// runner already takes as an observer, so the desktop hands it straight on.
@@ -66,8 +78,9 @@ pub fn worker_card(name: &str, version: &str) -> ParticipantCard {
 /// a vsock stream from inside a microVM (AGE-307). Which one it is changes
 /// nothing below this line, which is the property C8 is built on.
 ///
-/// `run` is handed the task's prompt and the sink its turn's events must go
-/// to; its `Err` becomes the task's failure message. It must not outlive the
+/// `run` is handed the task's prompt, the sink its turn's events must go
+/// to, and the receiver the broker's answers to the turn's questions arrive
+/// on; its `Err` becomes the task's failure message. It must not outlive the
 /// sink it was given — the sink is what closes the frame queue, and a copy
 /// left alive in a detached task would hold the terminal status behind it.
 /// Dropping the future that owns it, which is what awaiting `run` does, is
@@ -75,7 +88,7 @@ pub fn worker_card(name: &str, version: &str) -> ParticipantCard {
 pub async fn serve_one_task<S, F, Fut>(stream: S, card: ParticipantCard, run: F) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
-    F: FnOnce(String, EventSink) -> Fut,
+    F: FnOnce(String, EventSink, InputReceiver) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     let mut connection = ParticipantConnection::register_over(stream, card)
@@ -111,20 +124,25 @@ where
         })
     };
 
-    let writer = tokio::spawn({
-        let mut connection = connection;
-        async move {
-            while let Some(frame) = frames_rx.recv().await {
-                if let Err(e) = connection.send(frame).await {
-                    warn!(error = %e, "Failed to report progress to the broker");
-                    return Err(e);
-                }
+    let (reader, mut writer_half) = connection.into_split();
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = frames_rx.recv().await {
+            if let Err(e) = writer_half.send(frame).await {
+                warn!(error = %e, "Failed to report progress to the broker");
+                return Err(e);
             }
-            Ok(connection)
         }
+        Ok(writer_half)
     });
 
-    let outcome = run(prompt, sink).await;
+    // Answers come down the read half while the turn runs. The reader lives
+    // exactly as long as the turn: the receiver it feeds is dropped with the
+    // turn, and nothing after that can be waiting for a frame.
+    let (inputs_tx, inputs_rx) = mpsc::unbounded_channel();
+    let reader = tokio::spawn(forward_inputs(reader, task_id.clone(), inputs_tx));
+
+    let outcome = run(prompt, sink, inputs_rx).await;
+    reader.abort();
 
     // The sink died with the future that owned it, which closed the queue and
     // ended the writer; only then is the socket free for the terminal status.
@@ -153,6 +171,43 @@ where
         .context("failed to report the task's final status")?;
 
     outcome
+}
+
+/// Read frames for the running task until the broker closes the socket or
+/// nobody is left to take an answer.
+async fn forward_inputs(
+    mut reader: ParticipantReader,
+    task_id: String,
+    inputs: mpsc::UnboundedSender<crate::participant::TaskInput>,
+) {
+    loop {
+        match reader.next_frame().await {
+            Ok(Some(BrokerFrame::Input {
+                task_id: for_task,
+                input,
+            })) if for_task == task_id => {
+                if inputs.send(input).is_err() {
+                    debug!(task = %task_id, "An answer arrived after the turn stopped listening");
+                    return;
+                }
+            }
+            Ok(Some(BrokerFrame::Input { task_id: other, .. })) => {
+                debug!(task = %other, "Ignoring an answer for a task this worker does not run")
+            }
+            Ok(Some(BrokerFrame::Cancel { .. })) => {
+                debug!(task = %task_id, "Cancel received; the broker reaps the worker")
+            }
+            Ok(Some(other)) => debug!(?other, "Ignoring an unexpected frame mid-task"),
+            Ok(None) => {
+                debug!(task = %task_id, "The broker closed the socket mid-task");
+                return;
+            }
+            Err(e) => {
+                warn!(task = %task_id, error = %e, "Lost the broker mid-task");
+                return;
+            }
+        }
+    }
 }
 
 /// Read frames until a task arrives, or the broker closes the socket.

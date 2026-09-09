@@ -123,6 +123,32 @@ participant → {"type":"status","taskId":"task-…","state":"completed"}
 `status` states are A2A's (`submitted`, `working`, `input-required`,
 `completed`, `failed`, `canceled`); the terminal three end the task.
 
+**A question goes up the chain, the answer comes back down** (ADR-0011 C7,
+AGE-306). A worker whose `ask_user` is waiting parks its task in
+`input-required` and says what it is waiting for — the request id and every
+question with its options — under `input`. The broker serves that to the A2A
+caller under the status's `metadata.clarification`; the caller answers with
+A2A `message/send` carrying the task's id on the message and the answers under
+the message's `metadata.clarification`, which the broker turns into an `input`
+frame on the same task. The worker's next status un-parks it.
+
+```
+participant → {"type":"status","taskId":"task-…","state":"input-required","message":"Which database?",
+               "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
+broker      → {"type":"input","taskId":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
+participant → {"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+```
+
+`invoke_agent` is the caller: it re-asks the question on its own agent's
+`ask_user` store, so a human behind it sees the ordinary popover, and an agent
+that is itself a worker parks its own task the same way — the question climbs
+until it reaches someone who can answer, and the answer descends the same
+hops. Escalate-to-human is the only policy; whether a leader may answer on a
+worker's behalf is an open question on ADR-0011. A level with nobody to ask
+ends the delegation rather than guessing. `message/send` on a fresh task cannot carry the question
+to its caller, so a task parked under it waits out the worker's own
+clarification timeout.
+
 **The connection is the liveness signal.** There is no heartbeat: when the
 socket closes, for any reason, the participant is deregistered and every task
 it still owed is failed with a `failed` status naming the disconnect. A

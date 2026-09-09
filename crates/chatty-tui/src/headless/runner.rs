@@ -237,14 +237,21 @@ impl HeadlessRunner {
             AppEvent::ApprovalResolved { id, approved } => {
                 self.session.note_approval_resolved(&id, approved)
             }
-            // Nobody can answer in headless mode: unblock the tool now rather
-            // than letting it wait out its timeout.
             AppEvent::ClarificationRequested { id, questions } => {
                 self.session.note_clarification_requested(&id, &questions);
-                eprintln!(
-                    "The agent asked a clarifying question; headless mode has no one to answer."
-                );
-                self.session.clarifications().cancel_all();
+                if self.event_observer.is_some() {
+                    // A parent is following this turn: the question has gone
+                    // up the chain as `input-required`, and the answer comes
+                    // back through the participant loop (AGE-306).
+                    eprintln!("The agent asked a clarifying question; waiting for the parent.");
+                } else {
+                    // Nobody can answer in plain headless mode: unblock the
+                    // tool now rather than letting it wait out its timeout.
+                    eprintln!(
+                        "The agent asked a clarifying question; headless mode has no one to answer."
+                    );
+                    self.session.clarifications().cancel_all();
+                }
             }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),

@@ -1111,7 +1111,7 @@ impl AgentClient {
         // Ask-the-user tool: only offered when a frontend is listening for the
         // question. Without a pending store the call would block until it
         // times out, so the model must not see the tool at all.
-        let ask_user_tool = pending_clarifications.map(AskUserTool::new);
+        let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
 
         // The broker's local worker exists exactly when the gateway that
         // serves it does (ADR-0011 C2); the gateway publishes it whenever it
@@ -1141,6 +1141,11 @@ impl AgentClient {
                 .as_ref()
                 .is_some_and(|settings| settings.warn_on_external_agent),
         );
+        // A delegated agent's question is re-asked on this agent's own
+        // `ask_user` surface (ADR-0011 C7), so it needs the same store.
+        if let Some(pending) = pending_clarifications {
+            invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
+        }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
         // Publish module tool (if an MCP server exposes `publish_module`)
