@@ -227,7 +227,16 @@ examples.
    it; chatty-tui does not. If a `Global` impl is missing, add it in
    `crates/chatty-core/src/gpui_globals.rs`.
 
-7. **Large module directories.** Several complex areas have been split
+7. **Sub-agent worktrees.** `sub_agent` tool workers each get their own
+   `git worktree` under `<workspace>/.chatty/worktrees/<name>` on a
+   `sub-agent/<name>` branch (AGE-314), passed to the child via chatty-tui's
+   `--workspace <DIR>` flag. Worktrees are left in place after a worker
+   exits (never auto-removed) and are excluded via `.git/info/exclude`, not
+   `.gitignore` — they won't show in `git status` but can still accumulate
+   on disk. Falls back to the old shared-tree behavior if the workspace
+   isn't a git repo. See CLAUDE.md.
+
+8. **Large module directories.** Several complex areas have been split
    into sub-module directories (`chat_view/`, `chat_input/`,
    `auto_updater/`, `trace_components/`, `transcript/`, etc.). Start
    with the `mod.rs` and its module-level docstring to scope what you
