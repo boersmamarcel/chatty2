@@ -140,6 +140,41 @@ async fn detailed_http_error(operation: &str, resp: reqwest::Response) -> String
     }
 }
 
+/// What a finished `message/send` task amounts to: its text, or an error
+/// carrying why it failed.
+///
+/// A task that failed used to come back as `Ok("")` — the state was never
+/// read, so every failure reached the caller as an empty success. That is
+/// silence in place of a reason, and under AGE-321 it is specifically the
+/// reason a worker's unanswerable question would never be seen: the broker
+/// puts the question in the failure's message, and this is what carries it
+/// out.
+fn task_outcome(value: &Value) -> Result<String> {
+    let state = value
+        .pointer("/result/status/state")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    if matches!(state, "failed" | "canceled") {
+        let reason = value
+            .pointer("/result/status/message/parts/0/text")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("the agent gave no reason");
+        bail!("the agent's task {state}: {reason}");
+    }
+
+    Ok(value
+        .pointer("/result/artifacts/0/parts/0/text")
+        .or_else(|| value.pointer("/result/artifacts/0/parts/0"))
+        .and_then(|v| v.as_str())
+        .or_else(|| value.pointer("/result/output").and_then(|v| v.as_str()))
+        .or_else(|| value.pointer("/result").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string())
+}
+
 impl A2aClient {
     pub fn new() -> Self {
         Self {
@@ -298,16 +333,7 @@ impl A2aClient {
             bail!("A2A agent returned error: {}", msg);
         }
 
-        // Extract text from result.artifacts[0].parts[0].text
-        let text = value
-            .pointer("/result/artifacts/0/parts/0/text")
-            .or_else(|| value.pointer("/result/artifacts/0/parts/0"))
-            .and_then(|v| v.as_str())
-            .or_else(|| value.pointer("/result/output").and_then(|v| v.as_str()))
-            .or_else(|| value.pointer("/result").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
-
+        let text = task_outcome(&value)?;
         info!(agent = %config.name, "A2A message/send completed");
         Ok(text)
     }
@@ -825,6 +851,53 @@ mod tests {
             "a question nobody answers must fail as an unanswered question, \
              not as a dead socket"
         );
+    }
+
+    #[test]
+    fn a_failed_task_is_an_error_that_carries_its_reason() {
+        let reply = json!({
+            "result": {
+                "id": "task-1",
+                "status": {
+                    "state": "failed",
+                    "message": { "parts": [{ "type": "text", "text": "the worker asked: Which database?" }] },
+                },
+                "artifacts": [{ "parts": [{ "type": "text", "text": "" }] }],
+            }
+        });
+
+        let error = task_outcome(&reply).expect_err("a failed task is not a success");
+        let text = format!("{error:#}");
+        assert!(text.contains("Which database?"), "{text}");
+        assert!(text.contains("failed"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_task_without_a_reason_still_fails() {
+        let reply = json!({ "result": { "status": { "state": "failed" } } });
+        let error = task_outcome(&reply).expect_err("still an error");
+        assert!(format!("{error:#}").contains("no reason"));
+    }
+
+    #[test]
+    fn a_completed_task_returns_its_text() {
+        let reply = json!({
+            "result": {
+                "status": { "state": "completed" },
+                "artifacts": [{ "parts": [{ "type": "text", "text": "42" }] }],
+            }
+        });
+        assert_eq!(task_outcome(&reply).unwrap(), "42");
+    }
+
+    /// An agent that says nothing about state is taken at its word, as before:
+    /// this reads a failure, it does not invent one.
+    #[test]
+    fn a_reply_without_a_state_is_still_its_text() {
+        let reply = json!({
+            "result": { "artifacts": [{ "parts": [{ "type": "text", "text": "hello" }] }] }
+        });
+        assert_eq!(task_outcome(&reply).unwrap(), "hello");
     }
 
     #[test]
