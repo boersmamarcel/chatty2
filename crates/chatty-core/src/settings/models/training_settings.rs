@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Settings for training data collection and export
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TrainingSettingsModel {
     /// Auto-export conversations as ATIF JSON after each completed assistant response.
     /// Opt-in: disabled by default.

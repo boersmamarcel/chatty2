@@ -33,8 +33,8 @@ use crate::tools::{
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     LocalModuleAgentSummary, MoveFileTool, PendingArtifacts, PublishModuleTool, ReadBinaryTool,
     ReadFileTool, ReadSkillTool, RememberTool, SaveSkillTool, SearchCodeTool, SearchMemoryTool,
-    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, SubAgentTool,
-    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    SearchWebTool, ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, UpdateTodoTool,
+    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -181,11 +181,9 @@ pub struct AgentBuildContext {
     pub skill_service: Option<SkillService>,
     pub search_settings: Option<crate::settings::models::search_settings::SearchSettingsModel>,
     pub embedding_service: Option<crate::services::embedding_service::EmbeddingService>,
-    pub allow_sub_agent: bool,
     pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
     pub remote_agents: Vec<crate::settings::models::a2a_store::A2aAgentConfig>,
-    pub available_model_ids: Vec<String>,
     /// Conversation this turn belongs to. Only consulted when the `browser`
     /// feature is on, to register the built `BrowserManager` where the
     /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
@@ -257,11 +255,9 @@ impl AgentClient {
             skill_service,
             search_settings,
             embedding_service,
-            allow_sub_agent,
             module_agents,
             gateway_port,
             remote_agents,
-            available_model_ids,
             conversation_id,
         } = ctx;
 
@@ -967,28 +963,6 @@ impl AgentClient {
             None
         };
 
-        // Sub-agent tool is constructed later, after InvokeAgentTool, so it can
-        // share the progress slot. Availability is decided here for tool_availability.
-        let sub_agent_enabled =
-            allow_sub_agent && exec_settings.as_ref().map(|s| s.enabled).unwrap_or(false);
-        let sub_model_id = model_config.id.clone();
-        let sub_auto_approve = exec_settings
-            .as_ref()
-            .map(|s| {
-                matches!(
-                    s.approval_mode,
-                    crate::settings::models::execution_settings::ApprovalMode::AutoApproveAll
-                )
-            })
-            .unwrap_or(false);
-        if sub_agent_enabled {
-            tracing::debug!("Sub-agent tool enabled");
-        } else if !allow_sub_agent {
-            tracing::debug!("Sub-agent tool disabled: running as a sub-agent");
-        } else {
-            tracing::debug!("Sub-agent tool disabled: execution not enabled");
-        }
-
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
             doc_retriever: doc_retriever_tool.is_some(),
@@ -1112,7 +1086,6 @@ impl AgentClient {
             execute_code: execute_code_tool.is_some(),
             memory: remember_tool.is_some(),
             search_web: search_web_tool.is_some(),
-            sub_agent: sub_agent_enabled,
             #[cfg(feature = "browser")]
             browser: browser_tools.is_some(),
             #[cfg(not(feature = "browser"))]
@@ -1138,26 +1111,42 @@ impl AgentClient {
         // Ask-the-user tool: only offered when a frontend is listening for the
         // question. Without a pending store the call would block until it
         // times out, so the model must not see the tool at all.
-        let ask_user_tool = pending_clarifications.map(AskUserTool::new);
+        let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
+
+        // The broker's local worker exists exactly when the gateway that
+        // serves it does (ADR-0011 C2); the gateway publishes it whenever it
+        // starts, so its port is the whole condition.
+        let local_agent = gateway_port.map(|_| crate::tools::LOCAL_AGENT_NAME);
 
         // Create list_agents tool (always available)
-        let list_agents_tool =
+        let mut list_agents_tool =
             ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
+        if let Some(name) = local_agent {
+            list_agents_tool = list_agents_tool.with_local_worker(name);
+        }
+        // With a gateway there is a live participant table to read, not just
+        // the settings snapshot (ADR-0011 C5).
+        if let Some(port) = gateway_port {
+            list_agents_tool = list_agents_tool.with_gateway_port(port);
+        }
 
         // Create invoke_agent tool (always available)
-        let invoke_agent_tool = InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        let mut invoke_agent_tool =
+            InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
+        if let Some(name) = local_agent {
+            invoke_agent_tool = invoke_agent_tool.with_local_agent(name);
+        }
+        invoke_agent_tool = invoke_agent_tool.with_external_agent_warning(
+            exec_settings
+                .as_ref()
+                .is_some_and(|settings| settings.warn_on_external_agent),
+        );
+        // A delegated agent's question is re-asked on this agent's own
+        // `ask_user` surface (ADR-0011 C7), so it needs the same store.
+        if let Some(pending) = pending_clarifications {
+            invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
+        }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
-
-        let sub_agent_tool: Option<SubAgentTool> = if sub_agent_enabled {
-            Some(SubAgentTool::new(
-                sub_model_id,
-                sub_auto_approve,
-                available_model_ids,
-                invoke_agent_progress_slot.clone(),
-            ))
-        } else {
-            None
-        };
 
         // Publish module tool (if an MCP server exposes `publish_module`)
         let publish_module_tool: Option<PublishModuleTool> = mcp_tools.as_ref().and_then(|servers| {
@@ -1227,7 +1216,6 @@ impl AgentClient {
             search_memory_tool: search_memory_tool,
             read_skill_tool: read_skill_tool,
             search_web_tool: search_web_tool,
-            sub_agent_tool: sub_agent_tool,
             browser_tools: browser_tools,
             browser_use_tool: browser_use_tool,
             daytona_tool: daytona_tool,

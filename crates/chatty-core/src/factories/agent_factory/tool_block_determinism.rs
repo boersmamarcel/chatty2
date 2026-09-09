@@ -95,11 +95,9 @@ fn fixture_build_context() -> AgentBuildContext {
         skill_service: None,
         search_settings: None,
         embedding_service: None,
-        allow_sub_agent: false,
         module_agents: Vec::new(),
         gateway_port: None,
         remote_agents: Vec::new(),
-        available_model_ids: Vec::new(),
         conversation_id: None,
     }
 }

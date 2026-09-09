@@ -1,3 +1,4 @@
+use crate::chatty::services::broker_runner;
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::{
@@ -6,11 +7,13 @@ use crate::settings::models::{
 };
 use anyhow::{Context, Result};
 use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
+use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel,
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
-use chatty_core::settings::models::providers_store::ProviderType;
+use chatty_core::settings::models::models_store::ModelsModel;
+use chatty_core::settings::models::providers_store::{ProviderModel, ProviderType};
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_wasm_runtime::{
@@ -736,6 +739,43 @@ pub fn refresh_runtime(cx: &mut App) {
                             .with_credit_guard(credit_guard)
                             .with_usage_collector(usage_collector)
                             .with_paid_modules(paid_modules);
+                    }
+
+                    // ADR-0011 C2: the gateway is also the fleet broker.
+                    // Children register on a socket beside its HTTP port, and
+                    // `local-agent` spawns one per delegated task.
+                    let participants = gateway.participants();
+                    let socket = broker_runner::socket_path();
+                    if broker_runner::serve_socket(participants.clone(), &socket) {
+                        let (workspace_dir, auto_approve, endpoint) = cx
+                            .update(|cx| {
+                                let exec = cx.global::<ExecutionSettingsModel>();
+                                // A worker inherits the desktop's approval
+                                // policy; it has no user to ask.
+                                let auto_approve =
+                                    matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
+                                // The endpoint every worker will share, and
+                                // how many may hold it at once (ADR-0011 C6).
+                                let endpoint = match (
+                                    cx.try_global::<ModelsModel>(),
+                                    cx.try_global::<ProviderModel>(),
+                                ) {
+                                    (Some(models), Some(providers)) => {
+                                        broker_runner::worker_endpoint(models, providers, &settings)
+                                    }
+                                    _ => None,
+                                };
+                                (exec.workspace_dir.clone(), auto_approve, endpoint)
+                            })
+                            .unwrap_or((None, false, None));
+                        gateway =
+                            gateway.with_virtual_agent(Arc::new(broker_runner::local_runner(
+                                participants,
+                                socket,
+                                workspace_dir,
+                                auto_approve,
+                                endpoint,
+                            )));
                     }
 
                     gateway.start().await.map(|_| gateway)

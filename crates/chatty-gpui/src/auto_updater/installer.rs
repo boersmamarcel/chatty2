@@ -34,10 +34,6 @@ pub enum InstallError {
 
     #[error("Invalid update file: {0}")]
     InvalidUpdateFile(String),
-
-    #[error("Extraction failed: {0}")]
-    #[allow(dead_code)]
-    ExtractionFailed(String),
 }
 
 /// Install the release from the given path.

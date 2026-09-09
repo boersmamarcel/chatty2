@@ -328,7 +328,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
     }
 
     fn on_progress(&mut self, progress: InvokeAgentProgress) {
-        (self.emit)(SessionEvent::SubAgent(progress));
+        (self.emit)(SessionEvent::Delegation(progress));
     }
 
     fn on_cancelled(&mut self) {

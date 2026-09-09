@@ -61,6 +61,8 @@ pub mod stream_processor;
 pub mod title_generator;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;
+/// ADR-0012 worker isolation: a `git worktree` per worker (AGE-314 / AGE-301).
+pub mod worker_tree;
 
 pub use a2a_client::{A2aClient, A2aStreamEvent};
 pub use agent_loop_guard::AgentLoopGuard;

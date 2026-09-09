@@ -18,7 +18,7 @@ impl std::fmt::Display for SearchProvider {
 }
 
 /// Settings for the web search tool and other external services
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchSettingsModel {
     /// Master toggle for web search
     #[serde(default)]

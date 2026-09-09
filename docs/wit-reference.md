@@ -1,6 +1,6 @@
 # WIT Interface Reference
 
-> **Package**: `chatty:module@0.1.0`\
+> **Package**: `chatty:module@0.2.0`\
 > **Source**: [`wit/chatty-module.wit`](../wit/chatty-module.wit)
 
 This document describes the WIT (WebAssembly Interface Types) contract between chatty (the host) and WASM modules (guests). Every chatty WASM module must target the `module` world defined here.
@@ -388,8 +388,8 @@ The WIT package uses [semantic versioning](https://semver.org/): `chatty:module@
 
 4. **Deprecation flow**: Mark functions/types as deprecated in comments for one minor version before removing in the next major version.
 
-5. **Multi-version support**: The host should support loading modules targeting `@0.1.x` even after `@0.2.0` is released, via adapter layers.
+5. **Single live version**: The host registers exactly one WIT package version in the linker — there are no adapter layers for older packages, and a module targeting a superseded version fails to instantiate. Bumping the package version means rebuilding every module against it.
 
-### Current Version: `0.1.0`
+### Current Version: `0.2.0`
 
-This is the initial unstable release. The `0.x` series allows breaking changes in minor versions while the interface is being stabilized. Once `1.0.0` is released, the compatibility rules above apply strictly.
+Adds the optional `billing` interface over `0.1.0`, which is no longer loadable. The `0.x` series allows breaking changes in minor versions while the interface is being stabilized. Once `1.0.0` is released, the compatibility rules above apply strictly.

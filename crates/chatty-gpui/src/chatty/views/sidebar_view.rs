@@ -78,13 +78,6 @@ impl SidebarView {
         cx.notify();
     }
 
-    /// Set the collapsed state of the sidebar
-    #[allow(dead_code)]
-    pub fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.is_collapsed = collapsed;
-        cx.notify();
-    }
-
     /// Get the current collapsed state
     pub fn is_collapsed(&self) -> bool {
         self.is_collapsed

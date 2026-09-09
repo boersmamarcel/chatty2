@@ -91,19 +91,19 @@ fn describe(event: &AppEvent) -> String {
             };
             format!("AgentProtocolFollowUp({kind})")
         }
-        AppEvent::SubAgentProgress(text) => format!("SubAgentProgress({text:?})"),
-        AppEvent::SubAgentFinished(text) => format!("SubAgentFinished({text:?})"),
+        AppEvent::DelegationProgress(text) => format!("DelegationProgress({text:?})"),
+        AppEvent::DelegationFinished(text) => format!("DelegationFinished({text:?})"),
         // Rendered as the transcript line it becomes, so the goldens read
         // the same whether the progress arrived typed or as a line.
-        AppEvent::SubAgent(progress) => {
-            let line = super::helpers::sub_agent_line(progress);
+        AppEvent::Delegation(progress) => {
+            let line = super::helpers::delegation_line(progress);
             if matches!(
                 progress,
                 chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
             ) {
-                format!("SubAgentFinished({line:?})")
+                format!("DelegationFinished({line:?})")
             } else {
-                format!("SubAgentProgress({line:?})")
+                format!("DelegationProgress({line:?})")
             }
         }
         // Lifecycle and terminal events, which a turn never produces.

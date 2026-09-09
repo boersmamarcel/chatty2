@@ -12,8 +12,8 @@ use crate::tools::{
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, SubAgentTool, UpdateTodoTool, VerifyCompletionTool,
-    WriteFileTool, WriteTodosTool,
+    ShellSetEnvTool, ShellStatusTool, UpdateTodoTool, VerifyCompletionTool, WriteFileTool,
+    WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -129,7 +129,6 @@ pub(super) struct NativeTools {
     pub search_memory_tool: Option<SearchMemoryTool>,
     pub read_skill_tool: ReadSkillTool,
     pub search_web_tool: Option<SearchWebTool>,
-    pub sub_agent_tool: Option<SubAgentTool>,
     #[cfg(feature = "browser")]
     pub browser_tools: Option<BrowserTools>,
     pub browser_use_tool: Option<BrowserUseTool>,
@@ -252,9 +251,6 @@ impl NativeTools {
         if let Some(t) = self.search_web_tool {
             b = b.tool(t);
         }
-        if let Some(t) = self.sub_agent_tool {
-            b = b.tool(t);
-        }
         #[cfg(feature = "browser")]
         if let Some((nav, snap, shot, console, net, resize)) = self.browser_tools {
             b = b
@@ -315,7 +311,6 @@ macro_rules! native_tools {
         search_memory_tool: $search_memory_tool:expr,
         read_skill_tool: $read_skill_tool:expr,
         search_web_tool: $search_web_tool:expr,
-        sub_agent_tool: $sub_agent_tool:expr,
         browser_tools: $browser_tools:expr,
         browser_use_tool: $browser_use_tool:expr,
         daytona_tool: $daytona_tool:expr,
@@ -367,7 +362,6 @@ macro_rules! native_tools {
             search_memory_tool: $search_memory_tool,
             read_skill_tool: $read_skill_tool,
             search_web_tool: $search_web_tool,
-            sub_agent_tool: $sub_agent_tool,
             #[cfg(feature = "browser")]
             browser_tools: $browser_tools,
             browser_use_tool: $browser_use_tool,
