@@ -487,6 +487,7 @@ mod tests {
                 network_isolation: true,
                 max_agent_turns: 25,
                 memory_enabled: false,
+                warn_on_external_agent: true,
                 embedding_enabled: true,
                 embedding_provider: Some(ProviderType::OpenRouter),
                 embedding_model: Some("text-embedding-3-small".to_string()),

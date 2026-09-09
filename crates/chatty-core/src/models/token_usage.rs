@@ -154,11 +154,6 @@ impl TokenUsage {
         usage
     }
 
-    #[allow(dead_code)]
-    pub fn total_tokens(&self) -> u32 {
-        self.input_tokens + self.output_tokens
-    }
-
     /// The whole prompt across the exchange: uncached + cached + cache-written.
     pub fn prompt_tokens(&self) -> u32 {
         self.input_tokens

@@ -10,9 +10,11 @@
 //! The pieces:
 //!
 //! * [`budget`] — how many workers may hold one model endpoint at a time.
+//! * [`origin`] — whose machine an agent runs on, as the broker serves it.
 //! * [`protocol`] — the frames on the socket. Newline-delimited JSON, not
 //!   A2A: A2A is the broker's public format, a child process is not public.
-//! * [`registry`] — who is registered and where each open task's updates go.
+//! * [`registry`] — who is registered and where each open task's updates go,
+//!   and the way back down to a task parked on a question (AGE-306).
 //! * [`listener`] — the accept loop, and the rule that a closed socket
 //!   deregisters its participant and fails its open tasks.
 //! * [`client`] — the other end of the socket, which a chatty child speaks.
@@ -22,13 +24,20 @@
 //!   (ADR-0011 C2).
 
 mod budget;
+mod origin;
 mod protocol;
 mod registry;
 mod virtual_agent;
 
 pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
-pub use protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantSkill, TaskState};
-pub use registry::{ParticipantRegistry, RegisterError, TaskStream, TaskUpdate};
+pub use origin::AgentOrigin;
+pub use protocol::{
+    BrokerFrame, InputAnswer, InputQuestion, InputRequest, ParticipantCard, ParticipantFrame,
+    ParticipantSkill, TaskInput, TaskState,
+};
+pub use registry::{
+    AnswerError, ParticipantRegistry, RegisterError, RegisteredAgent, TaskStream, TaskUpdate,
+};
 pub use virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
 
 // The socket itself is Unix-only. Everything above it is not, so the
@@ -42,7 +51,7 @@ mod listener;
 mod runner;
 
 #[cfg(unix)]
-pub use client::ParticipantConnection;
+pub use client::{ParticipantConnection, ParticipantReader, ParticipantWriter};
 #[cfg(unix)]
 pub use listener::{bind, serve, serve_connection, unbind};
 #[cfg(unix)]

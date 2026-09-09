@@ -17,7 +17,7 @@ pub struct UserSecret {
 /// injected into every shell session as environment variables so that
 /// scripts can access them via `os.environ["KEY"]` without the LLM
 /// ever seeing the actual values.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UserSecretsModel {
     #[serde(default)]
     pub secrets: Vec<UserSecret>,

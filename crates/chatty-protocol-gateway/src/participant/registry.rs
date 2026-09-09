@@ -22,7 +22,10 @@ use tracing::{debug, info, warn};
 
 use serde_json::Value;
 
-use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
+use super::origin::AgentOrigin;
+use super::protocol::{
+    BrokerFrame, InputRequest, ParticipantCard, ParticipantFrame, TaskInput, TaskState,
+};
 
 /// One update on an open task, as the HTTP side consumes it.
 ///
@@ -36,6 +39,9 @@ pub enum TaskUpdate {
         /// Opaque, forwarded to the A2A status's `metadata` (see
         /// [`ParticipantFrame::Status`](super::protocol::ParticipantFrame)).
         metadata: Option<Value>,
+        /// What an `input-required` task is waiting for; answered through
+        /// [`ParticipantRegistry::answer_task`].
+        input: Option<InputRequest>,
     },
     Artifact {
         text: String,
@@ -51,6 +57,15 @@ pub enum TaskUpdate {
 /// process that has gone away.
 pub type TaskStream = mpsc::UnboundedReceiver<TaskUpdate>;
 
+/// Why an answer could not be delivered.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AnswerError {
+    #[error("task '{0}' is not open on any participant")]
+    UnknownTask(String),
+    #[error("the participant owning task '{0}' is disconnecting")]
+    ParticipantGone(String),
+}
+
 /// Why a registration was refused.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RegisterError {
@@ -60,8 +75,19 @@ pub enum RegisterError {
     DuplicateName(String),
 }
 
+/// A registered agent as the broker serves it: what it says about itself,
+/// plus where the broker knows it came from (ADR-0011 C5).
+#[derive(Debug, Clone)]
+pub struct RegisteredAgent {
+    pub card: ParticipantCard,
+    pub origin: AgentOrigin,
+}
+
 struct Participant {
     card: ParticipantCard,
+    /// Where this registration arrived from. The participant does not get a
+    /// say — see [`AgentOrigin`].
+    origin: AgentOrigin,
     /// Frames queued for this participant's socket writer.
     outbound: mpsc::UnboundedSender<BrokerFrame>,
     /// Open tasks: id → where this task's updates go.
@@ -88,12 +114,17 @@ impl ParticipantRegistry {
 
     /// Take a connection's card and its outbound queue.
     ///
+    /// `origin` is the transport's, not the participant's: a Unix socket on
+    /// this machine registers [`AgentOrigin::Local`], a leased microVM's vsock
+    /// registers [`AgentOrigin::Fleet`].
+    ///
     /// The name is claimed until [`deregister`](Self::deregister); a second
     /// participant offering the same one is refused rather than replacing it,
     /// because replacing would silently strand the first one's open tasks.
     pub fn register(
         &self,
         card: ParticipantCard,
+        origin: AgentOrigin,
         outbound: mpsc::UnboundedSender<BrokerFrame>,
     ) -> Result<String, RegisterError> {
         let name = card.name.trim().to_string();
@@ -112,13 +143,14 @@ impl ParticipantRegistry {
                     name: name.clone(),
                     ..card
                 },
+                origin,
                 outbound,
                 tasks: HashMap::new(),
             },
         );
         drop(inner);
 
-        info!(participant = %name, "Local participant registered");
+        info!(participant = %name, %origin, "Participant registered");
         Ok(name)
     }
 
@@ -139,6 +171,7 @@ impl ParticipantRegistry {
                 state: TaskState::Failed,
                 message: Some(format!("participant '{name}' disconnected")),
                 metadata: None,
+                input: None,
             });
         }
 
@@ -160,16 +193,24 @@ impl ParticipantRegistry {
         self.lock().participants.get(name).map(|p| p.card.clone())
     }
 
-    /// Every card, in [`names`](Self::names) order.
-    pub fn cards(&self) -> Vec<ParticipantCard> {
+    /// Where `name` came from, if it is registered.
+    pub fn origin(&self, name: &str) -> Option<AgentOrigin> {
+        self.lock().participants.get(name).map(|p| p.origin)
+    }
+
+    /// Every registered agent, in [`names`](Self::names) order.
+    pub fn agents(&self) -> Vec<RegisteredAgent> {
         let inner = self.lock();
-        let mut cards: Vec<ParticipantCard> = inner
+        let mut agents: Vec<RegisteredAgent> = inner
             .participants
             .values()
-            .map(|p| p.card.clone())
+            .map(|p| RegisteredAgent {
+                card: p.card.clone(),
+                origin: p.origin,
+            })
             .collect();
-        cards.sort_by(|a, b| a.name.cmp(&b.name));
-        cards
+        agents.sort_by(|a, b| a.card.name.cmp(&b.card.name));
+        agents
     }
 
     /// Hand `text` to `name` as a new task.
@@ -224,6 +265,49 @@ impl ParticipantRegistry {
         }
     }
 
+    /// Whether `task_id` is open on some participant.
+    ///
+    /// The A2A handler asks this to tell a `message/send` that answers a
+    /// parked task from one that starts a new task: only an id the broker
+    /// itself minted, and has not closed, can be the former.
+    pub fn owns_task(&self, task_id: &str) -> bool {
+        self.lock()
+            .participants
+            .values()
+            .any(|p| p.tasks.contains_key(task_id))
+    }
+
+    /// Deliver the answer to a task parked in `input-required`.
+    ///
+    /// Addressed by task id alone: the caller answered on the A2A task it
+    /// was streaming, and a runner's task is served by a worker whose
+    /// participant name the caller never learned. The task stays open — the
+    /// participant's next status un-parks it.
+    pub fn answer_task(&self, task_id: &str, input: TaskInput) -> Result<(), AnswerError> {
+        let mut inner = self.lock();
+        let Some((name, participant)) = inner
+            .participants
+            .iter_mut()
+            .find(|(_, p)| p.tasks.contains_key(task_id))
+        else {
+            return Err(AnswerError::UnknownTask(task_id.to_string()));
+        };
+        let name = name.clone();
+        if participant
+            .outbound
+            .send(BrokerFrame::Input {
+                task_id: task_id.to_string(),
+                input,
+            })
+            .is_err()
+        {
+            return Err(AnswerError::ParticipantGone(task_id.to_string()));
+        }
+        drop(inner);
+        debug!(participant = %name, task = %task_id, "Answer delivered to a parked task");
+        Ok(())
+    }
+
     /// Route one frame from `name`'s socket to the task it names.
     ///
     /// A frame for an unknown task is dropped with a log line rather than
@@ -244,12 +328,14 @@ impl ParticipantRegistry {
                 state,
                 message,
                 metadata,
+                input,
             } => (
                 task_id,
                 TaskUpdate::Status {
                     state,
                     message,
                     metadata,
+                    input,
                 },
                 state.is_terminal(),
             ),
@@ -320,8 +406,17 @@ mod tests {
 
     /// Register `name` and keep its outbound receiver alive for the caller.
     fn register(reg: &ParticipantRegistry, name: &str) -> mpsc::UnboundedReceiver<BrokerFrame> {
+        register_from(reg, name, AgentOrigin::Local)
+    }
+
+    fn register_from(
+        reg: &ParticipantRegistry,
+        name: &str,
+        origin: AgentOrigin,
+    ) -> mpsc::UnboundedReceiver<BrokerFrame> {
         let (tx, rx) = mpsc::unbounded_channel();
-        reg.register(card(name), tx).expect("registration succeeds");
+        reg.register(card(name), origin, tx)
+            .expect("registration succeeds");
         rx
     }
 
@@ -344,7 +439,8 @@ mod tests {
         let reg = ParticipantRegistry::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         assert_eq!(
-            reg.register(card("   "), tx).unwrap_err(),
+            reg.register(card("   "), AgentOrigin::Local, tx)
+                .unwrap_err(),
             RegisterError::MissingName
         );
     }
@@ -356,7 +452,8 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
 
         assert_eq!(
-            reg.register(card("worker-1"), tx).unwrap_err(),
+            reg.register(card("worker-1"), AgentOrigin::Local, tx)
+                .unwrap_err(),
             RegisterError::DuplicateName("worker-1".into())
         );
         // The first participant still owns the name and its queue.
@@ -391,6 +488,7 @@ mod tests {
                 state: TaskState::Working,
                 message: Some("read_file".into()),
                 metadata: None,
+                input: None,
             },
         );
         reg.on_frame(
@@ -408,6 +506,7 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
+                input: None,
             },
         );
 
@@ -493,8 +592,74 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
+                input: None,
             },
         ));
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaches_the_participant_that_owns_the_task() {
+        use super::super::protocol::{InputAnswer, InputQuestion};
+
+        let reg = ParticipantRegistry::new();
+        let mut outbound = register(&reg, "worker-1");
+        let (task_id, mut updates) = reg.submit_task("worker-1", "a".into()).unwrap();
+        let _ = outbound.recv().await;
+
+        // The worker parks the task and says what it is waiting for.
+        reg.on_frame(
+            "worker-1",
+            ParticipantFrame::Status {
+                task_id: task_id.clone(),
+                state: TaskState::InputRequired,
+                message: Some("Which database?".into()),
+                metadata: None,
+                input: Some(InputRequest {
+                    id: "req-1".into(),
+                    questions: vec![InputQuestion {
+                        id: "q1".into(),
+                        question: "Which database?".into(),
+                        options: vec!["Postgres".into(), "SQLite".into()],
+                    }],
+                }),
+            },
+        );
+        let Some(TaskUpdate::Status {
+            state: TaskState::InputRequired,
+            input: Some(request),
+            ..
+        }) = updates.recv().await
+        else {
+            panic!("the caller sees the request behind the parked state");
+        };
+        assert_eq!(request.id, "req-1");
+        assert!(reg.owns_task(&task_id), "a parked task is still open");
+
+        // The answer is addressed by task id alone.
+        let input = TaskInput {
+            request_id: request.id,
+            answers: vec![InputAnswer {
+                id: "q1".into(),
+                answer: "Postgres".into(),
+                custom: false,
+            }],
+        };
+        reg.answer_task(&task_id, input.clone()).unwrap();
+        assert!(matches!(
+            outbound.recv().await,
+            Some(BrokerFrame::Input { task_id: t, input: i }) if t == task_id && i == input
+        ));
+        assert_eq!(
+            reg.open_task_count("worker-1"),
+            1,
+            "answering does not close the task"
+        );
+
+        assert_eq!(
+            reg.answer_task("task-nobody", input).unwrap_err(),
+            AnswerError::UnknownTask("task-nobody".into())
+        );
+        assert!(!reg.owns_task("task-nobody"));
     }
 
     #[test]
@@ -510,11 +675,42 @@ mod tests {
     }
 
     #[test]
-    fn cards_are_listed_in_name_order() {
+    fn agents_are_listed_in_name_order() {
         let reg = ParticipantRegistry::new();
         let _b = register(&reg, "b-worker");
         let _a = register(&reg, "a-worker");
-        let names: Vec<String> = reg.cards().into_iter().map(|c| c.name).collect();
+        let names: Vec<String> = reg
+            .agents()
+            .into_iter()
+            .map(|agent| agent.card.name)
+            .collect();
         assert_eq!(names, vec!["a-worker".to_string(), "b-worker".to_string()]);
+    }
+
+    /// The origin is the transport's answer, and it survives to the listing —
+    /// a hosted worker and a local child are both addressable, and a caller
+    /// has to be able to tell them apart (ADR-0011 C5).
+    #[test]
+    fn each_registration_keeps_the_origin_its_transport_gave_it() {
+        let reg = ParticipantRegistry::new();
+        let _local = register_from(&reg, "child", AgentOrigin::Local);
+        let _hosted = register_from(&reg, "leased-vm", AgentOrigin::Fleet);
+
+        assert_eq!(reg.origin("child"), Some(AgentOrigin::Local));
+        assert_eq!(reg.origin("leased-vm"), Some(AgentOrigin::Fleet));
+        assert_eq!(reg.origin("nobody"), None);
+
+        let listed: Vec<(String, AgentOrigin)> = reg
+            .agents()
+            .into_iter()
+            .map(|agent| (agent.card.name, agent.origin))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("child".to_string(), AgentOrigin::Local),
+                ("leased-vm".to_string(), AgentOrigin::Fleet),
+            ]
+        );
     }
 }

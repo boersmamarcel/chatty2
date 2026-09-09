@@ -4,7 +4,7 @@ use std::collections::HashMap;
 pub const LEGACY_FALLBACK_MODULE_DIR: &str = ".chatty/modules";
 
 /// Settings for the WASM module runtime and protocol gateway.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModuleSettingsModel {
     /// Whether the module runtime is enabled. Defaults to `false`.
     #[serde(default)]

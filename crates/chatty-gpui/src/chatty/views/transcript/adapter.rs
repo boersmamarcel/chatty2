@@ -985,7 +985,7 @@ mod tests {
     /// strip test that has since moved to `chat_view::scroll`.
     #[test]
     fn tally_sentence_matches_linear_1a_order() {
-        let sentence = RunTally {
+        let spans = RunTally {
             edits: 4,
             explore: 6,
             searches: 2,
@@ -995,10 +995,16 @@ mod tests {
             added: 0,
             removed: 0,
         }
-        .sentence();
+        .phrase_spans();
         assert_eq!(
-            sentence,
-            "Edited 4 files, explored 6 files, 2 searches, 1 tool, ran 1 command"
+            spans,
+            vec![
+                (Some("Edited"), " 4 files".to_string()),
+                (Some("explored"), " 6 files".to_string()),
+                (None, "2 searches".to_string()),
+                (None, "1 tool".to_string()),
+                (Some("ran"), " 1 command".to_string()),
+            ]
         );
     }
 

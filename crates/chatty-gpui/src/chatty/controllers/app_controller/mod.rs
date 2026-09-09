@@ -17,7 +17,7 @@ use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
-use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
+use crate::chatty::views::chat_input::{ChatInputEvent, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
     ApprovalState, ClarificationState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
@@ -754,12 +754,6 @@ impl ChattyApp {
             sidebar.set_conversations(convs, cx);
             sidebar.set_total_count(total);
         });
-    }
-
-    /// Get the chat input state entity
-    #[allow(dead_code)]
-    pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
-        self.chat_view.read(cx).chat_input_state().clone()
     }
 }
 
