@@ -519,7 +519,9 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            let client = chatty_core::services::A2aClient::new();
+            // The delegation client: a remote agent's answer takes as long as
+            // it takes, and only silence is a failure (AGE-319).
+            let client = chatty_core::services::A2aClient::for_delegation();
             let stream_result = client.send_message_stream(&config, &prompt).await;
 
             let message = match stream_result {
