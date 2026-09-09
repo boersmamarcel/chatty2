@@ -448,7 +448,6 @@ impl ConversationsStore {
     pub fn active_id(&self) -> Option<&String> {
         self.active_conversation_id.as_ref()
     }
-
 }
 
 impl Default for ConversationsStore {
