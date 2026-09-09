@@ -22,6 +22,7 @@ use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
+use crate::participant::AgentOrigin;
 
 use super::a2a_participant;
 use super::jsonrpc::{
@@ -82,26 +83,36 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
 
     let mut agents: Vec<Value> = Vec::new();
 
+    // Every agent on this card says where it came from (ADR-0011 C5): a
+    // caller cannot tell a child process from a third-party URL by name
+    // alone, and the broker is the only thing that knows.
     for name in &names {
         let mut reg = state.registry.write().await;
         if let Some(module) = reg.get_mut(name)
             && let Ok(card) = module.agent_card()
         {
-            agents.push(agent_card_to_json(&card));
+            agents.push(with_origin(agent_card_to_json(&card), AgentOrigin::Local));
         }
     }
 
     // Registered processes are agents of this gateway too (ADR-0011); a
     // caller reading the aggregated card should see everything it can
     // address, not only what happens to be a WASM module.
-    for card in state.participants.cards() {
-        agents.push(a2a_participant::card_to_json(&card));
+    for agent in state.participants.agents() {
+        agents.push(with_origin(
+            a2a_participant::card_to_json(&agent.card),
+            agent.origin,
+        ));
     }
 
     // The runner has no process until a task arrives, but it is the agent a
-    // caller addresses to get one, so it belongs on the card.
+    // caller addresses to get one, so it belongs on the card. What it spawns
+    // is a child of this machine.
     if let Some(runner) = state.runner.as_ref() {
-        agents.push(a2a_participant::card_to_json(&runner.agent_card()));
+        agents.push(with_origin(
+            a2a_participant::card_to_json(&runner.agent_card()),
+            AgentOrigin::Local,
+        ));
     }
 
     Json(json!({
@@ -109,6 +120,14 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
         "gateway": true,
         "agents": agents,
     }))
+}
+
+/// Tag one agent card with its origin.
+fn with_origin(mut card: Value, origin: AgentOrigin) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert("origin".to_string(), json!(origin.as_str()));
+    }
+    card
 }
 
 async fn forward_remote_a2a_jsonrpc(

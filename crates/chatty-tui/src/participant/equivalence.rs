@@ -35,7 +35,7 @@ use chatty_core::tools::{LOCAL_AGENT_NAME, progress_text_for_event};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
-    BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
+    AgentOrigin, BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
 };
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use rig_agent::tool::{Tool, ToolContext};
@@ -129,6 +129,7 @@ fn spawn_scripted_worker(registry: &ParticipantRegistry, events: Vec<SessionEven
                 description: "a scripted worker".to_string(),
                 ..Default::default()
             },
+            AgentOrigin::Local,
             outbound_tx,
         )
         .expect("the scripted worker registers");

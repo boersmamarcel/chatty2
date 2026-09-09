@@ -305,23 +305,46 @@ conversation.
 
 ### `list_agents`
 
-Returns a combined view of both agent types:
+One flat list of everything addressable, each entry saying whose machine it runs on:
 
 ```json
 {
-  "remote_agents": [
-    { "name": "voucher-agent", "url": "https://...", "has_api_key": true, "enabled": true, "skills": ["..."] }
+  "agents": [
+    { "name": "echo-agent", "origin": "local", "kind": "module", "description": "...", "enabled": true, "skills": ["echo"] },
+    { "name": "leased-vm", "origin": "fleet", "kind": "worker", "description": "...", "enabled": true },
+    { "name": "local-agent", "origin": "local", "kind": "worker", "description": "...", "enabled": true },
+    { "name": "voucher-agent", "origin": "remote_configured", "kind": "remote", "url": "https://...", "enabled": true, "has_api_key": true, "skills": ["..."] }
   ],
-  "local_agents": [
-    { "name": "echo-agent", "version": "0.1.0", "description": "...", "tools": ["echo"], "supports_a2a": true }
-  ],
-  "total": 2,
+  "total": 4,
   "note": "To invoke an agent, use the `invoke_agent` tool..."
 }
 ```
 
-API key values are **never exposed** to the LLM — only `has_api_key: true/false`.
-`supports_a2a` reflects `[protocols].a2a` in the manifest.
+Two sources feed it. **Settings** give the configured remotes and the installed
+modules. The **broker's aggregated card** gives whatever registered since — a worker
+spawned a minute ago is addressable, and only the broker knows it exists. A name in both
+keeps the settings label, because what the user configured is the more informative
+answer. A gateway that is off or slow to answer is not an error: the list is then what
+settings know. API key values are **never exposed** to the LLM — only
+`has_api_key: true/false`.
+
+#### `origin` — whose machine it runs on (ADR-0011 C5)
+
+| Origin | Means | Inside the fleet? |
+|:-------|:------|:------------------|
+| `local` | a process on this machine: a spawned worker, a WASM module | yes |
+| `fleet` | elsewhere in this user's fleet — a leased microVM registering over vsock | yes |
+| `remote_configured` | a URL from Settings → A2A Agents: a third party, chosen deliberately | no |
+| `discovered` | learned from another agent's card rather than configured | no |
+
+The label is a property of the **registration**, not of the card: a participant
+describes itself, and the broker says where it came from, or the label would be worth
+nothing. `AgentOrigin` lives on both sides of the seam — `chatty-protocol-gateway`
+serves it, `chatty-core` reads it — and a test in the gateway (which has `chatty-core`
+as a dev-dependency) pins the two spellings against each other.
+
+Nothing publishes `discovered` yet: chatty has no peer-discovery hop. The label exists
+so that one cannot be added without deciding what it means.
 
 ### `invoke_agent`
 
@@ -336,6 +359,13 @@ tool reports that the gateway is off and points to Settings → Modules). Every 
 streams through `A2aClient::send_message_stream()`; progress (`InvokeAgentProgress`) is
 forwarded to the UI so the user sees intermediate output while the tool call is in
 flight.
+
+**Before a prompt leaves the fleet.** With `warn_on_external_agent` on (execution
+settings, off by default), `invoke_agent` says on the progress channel that the prompt
+and anything quoted in it are about to go to an agent whose origin is not `local` or
+`fleet`, naming the agent, the URL and the origin. It only says so: whether an external
+agent should need an allowlist, a one-time confirmation, or nothing at all is a product
+decision that has not been made, and this is the hook it will hang from.
 
 ### `local-agent` — a chatty agent in its own process
 
