@@ -52,7 +52,7 @@ flowchart TB
 |---------------|---------------|-------------|-------------------|----------------|
 | **Agent loop** | `services/llm_service.rs`, `factories/agent_factory/` | Every chat turn | [M1 ReAct](./modules/m1-react.md) | Already **default**; strategy variants TBD |
 | **LLM tools (~60)** | `tools/` | Tool calls in chat | M1 (action space), M2 (workflow nodes) | Tools ship; topology search offline |
-| **Sub-agents** | `sub_agent_tool`, `invoke_agent_tool`, `list_agents_tool` | Agent delegation | [M2 AFlow](./modules/m2-aflow.md) | Winning IR → `FlowSettingsModel` (planned) |
+| **Sub-agents** | `invoke_agent_tool`, `list_agents_tool` | Agent delegation | [M2 AFlow](./modules/m2-aflow.md) | Winning IR → `FlowSettingsModel` (planned) |
 | **Memory store** | `services/memory_service.rs`, `memory.mv2` | `remember` / `search_memory` | [M4 ACE](./modules/m4-ace.md) | Playbook on same store; scope TBD ([AGE-47](https://linear.app/agents-research/issue/AGE-47)) |
 | **Skills** | `save_skill_tool`, `SKILL.md` files, `[SKILL]` prefix | Procedures in context | M4 ACE (facts vs procedures split) | Self-improving playbook vs manual skills |
 | **Context window** | `token_budget/` + GPUI footer bar | Token fill indicator | M3 cost, M4 prefix-cache | Estimation and compaction ship |
@@ -218,7 +218,7 @@ registry. Execution settings control workspace path, approval mode, and sandbox.
 |--------------|----------|--------------|
 | Search / fetch | `search_web`, `fetch` | M1 WikiEnv adapter (paper fidelity) |
 | Code | `run_command`, sandbox | M2 Programmer operator |
-| Agents | `invoke_agent`, `sub_agent` | M2 Ensemble / Review-and-Revise nodes |
+| Agents | `invoke_agent` | M2 Ensemble / Review-and-Revise nodes |
 | Memory | `remember`, `search_memory` | M4 playbook backing store |
 
 **Research touchpoints (AFlow)**
@@ -226,7 +226,7 @@ registry. Execution settings control workspace path, approval mode, and sandbox.
 | Production substrate | M2 uses it as |
 |---------------------|---------------|
 | `tool_registry` / `tool_collector` | Workflow node targets |
-| `sub_agent_tool` | Ensemble branches |
+| `invoke_agent_tool` | Ensemble branches |
 | `IrRepr` interpreter (planned) | Executes saved topology |
 
 Monty **code mode** (`sandbox/monty_bridge.rs`) could become `PythonRepr` for AFlow.

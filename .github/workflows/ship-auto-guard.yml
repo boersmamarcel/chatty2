@@ -10,6 +10,9 @@ name: Ship-auto guard
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # No labels on a merge group, so the job takes its no-op pass; enforcement
+  # already ran on the PR before it could be queued.
+  merge_group:
 
 permissions:
   contents: read

@@ -60,6 +60,8 @@ The status bar always shows the app version, the working directory and the git b
 
 The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
+`/online` shows where the current conversation runs and, before anything moves, a table of what a move would and would not carry. `/online <server-url>` uploads the conversation's history to that `chatty-server` and continues it there; `/online off` brings it back to this machine. Workspace files, attachments, MCP servers, memory, skills and provider API keys never leave this machine.
+
 ## Shared configuration
 
 `chatty-tui` reads the same settings as the desktop app — providers, models, tools, secrets and memory — so run the desktop app once to set things up, or skip that entirely with `--ollama` / `--openai-compat-url`. Where the files live: [Advanced](./advanced.md).

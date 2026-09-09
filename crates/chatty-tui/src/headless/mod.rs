@@ -92,8 +92,8 @@ pub async fn run_headless(
             AppEvent::TextChunk(text) => {
                 engine.handle_event(AppEvent::TextChunk(text.clone()));
                 // Do not eprint assistant tokens: a parent follows the turn
-                // through the runner's `CHATTY_EVENT` lines, and the final
-                // answer still goes to stdout.
+                // through the runner's event observer, and the final answer
+                // still goes to stdout.
                 response.push_str(&text);
                 text_bytes_this_turn += text.len();
                 if answer_file_required

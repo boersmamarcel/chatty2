@@ -2,7 +2,7 @@
 
 **When to read this:** You want the agent to split a job into parallel or isolated pieces, or you want to drive Chatty from scripts.
 
-A sub-agent is a headless `chatty-tui` process the parent agent launches with a task, waits on, and reads the answer from. Each child has its own conversation, the same configured models and tools, and can launch children of its own.
+A sub-agent is a separate `chatty-tui` process the parent agent hands a task to, waits on, and reads the answer from. Each child has its own conversation, its own workspace copy, and the same configured models and tools. The parent asks for one through its `invoke_agent` tool, addressed to `local-agent`; the child reports its progress back over the local agent broker while it works.
 
 ## Why bother?
 
@@ -17,7 +17,7 @@ Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress 
 
 ## Let the agent decide
 
-With tools on ([Agents & tools](./agents-and-tools.md)), the parent can spawn children itself when a task splits cleanly:
+With tools on ([Agents & tools](./agents-and-tools.md)) and the module runtime enabled ([Extensions](./extensions.md)), the parent can ask for children itself when a task splits cleanly:
 
 ```
 Task: "Refactor all modules and write tests for each"
@@ -29,7 +29,10 @@ Task: "Refactor all modules and write tests for each"
 ```
 
 > [!NOTE]
-> A child runs its own side-effect tools without prompting only when your approval mode is **Auto-approve All**. Under the other modes a headless child has no way to ask you, so keep its tasks to reading, searching and analysis. See [Security & sandboxing](./security.md).
+> A child runs its own side-effect tools without prompting only when your approval mode is **Auto-approve All**. Under the other modes a child has no way to ask you, so keep its tasks to reading, searching and analysis. See [Security & sandboxing](./security.md).
+
+> [!NOTE]
+> Children of one model server queue rather than run all at once, so a local model is not thrashed by a wide fan-out. The limit is `default_endpoint_budget` in your module settings.
 
 ## From the terminal
 

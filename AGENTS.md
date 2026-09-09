@@ -90,9 +90,12 @@ make wasm-modules     # build the echo-agent WASM module (needed by tests)
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
-make docs-check-links # lychee link check (AGE-117)
+make docs-check-links # lychee link check, sources + built site (AGE-117)
 make docs-check-nav   # INDEX.md + SUMMARY.md drift check (AGE-116)
 make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
+make docs-check-leakage      # user guides must not carry contributor material
+make docs-check-reference    # reference tables match tool_registry.rs and friends
+make docs-check       # all of the docs checks above
 make ci               # everything the Rust CI path runs, locally, in order
 ```
 
