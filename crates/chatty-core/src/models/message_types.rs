@@ -67,9 +67,6 @@ pub enum TraceEvent {
         #[allow(dead_code)]
         new_state: ToolCallState,
     },
-    /// Tool call received input
-    #[allow(dead_code)]
-    ToolCallInputReceived { tool_id: String },
     /// Tool call received output
     ToolCallOutputReceived {
         tool_id: String,
