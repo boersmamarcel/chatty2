@@ -46,7 +46,11 @@ env:
 
 jobs:
   triage:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure'
+    # Triage on every CI completion, not only failures: after the nurse pushes
+    # one PR and its CI finishes, the next conflicted PR gets picked up right
+    # away instead of waiting for the hourly schedule. Triage is a few seconds
+    # of runner time and no AI; the nurse job still runs only when triage
+    # picks something.
     runs-on: ubuntu-latest
     outputs:
       pr: ${{ steps.pick.outputs.pr }}
