@@ -32,7 +32,7 @@
 //!
 //! - [`handlers`] — stream-event handlers (tool calls, approvals,
 //!   thinking blocks, floating-approval keyboard shortcuts).
-//! - [`sub_agent`] — sub-agent progress trace and `add_info_message`.
+//! - [`delegation`] — the delegated-agent progress trace and `add_info_message`.
 //! - [`parent_stream`] — locate the parent assistant bubble when a
 //!   sub-agent progress row is last.
 //! - [`history`] — `load_history` (conversation switching).
@@ -40,12 +40,12 @@
 
 #![allow(clippy::collapsible_if)]
 
+mod delegation;
 mod handlers;
 mod history;
 mod parent_stream;
 mod scroll;
 mod start_screen;
-mod sub_agent;
 
 use chatty_core::models::clarification_store::{ClarifyingQuestion, MAX_CLARIFYING_QUESTIONS};
 use chatty_core::services::{AgentTaskSnapshot, AgentTodoStatus};
@@ -62,9 +62,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{ChatInput, ChatInputState, ModelOption, slash_menu_items_with_skills};
+use super::chat_input::{
+    ChatInput, ChatInputState, ModelOption, PrStatusBarView, slash_menu_items_with_skills,
+};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
-use super::message_types::SystemTrace;
+use super::message_types::{ApprovalState, ClarificationState, SystemTrace, TraceItem};
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
@@ -76,8 +78,8 @@ use super::transcript::{
     extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
     format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
     merge_file_changes, new_artifact_view, plan_turn_index, produced_path_is_openable,
-    read_artifact_source, render_typed_block, resolve_artifact_path, tool_file_path,
-    turn_has_work_fold,
+    read_artifact_source, render_typed_block, resolve_artifact_path, retain_last_plan_block,
+    tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -156,7 +158,7 @@ pub struct ChatView {
     /// Index into `messages` of the sub-agent progress row. Retained after
     /// the row is finalized so parent-stream updates skip it. `None` when
     /// this conversation has no progress row.
-    sub_agent_progress_msg_idx: Option<usize>,
+    delegation_progress_msg_idx: Option<usize>,
     /// Animated "Thinking…" indicator entity. Owns its own rotation
     /// timer so the spinner + label keep updating even when no stream
     /// events are arriving (typical while a tool runs silently).
@@ -202,6 +204,9 @@ pub struct ChatView {
     /// Session files-changed bar is unfolded to the per-file list.
     session_bar_expanded: bool,
     elapsed_tick_started: bool,
+    /// GitHub pull request bar above the composer. Owns its own poller;
+    /// `sync_pr_status` only tells it which workspace to watch.
+    pr_status: Entity<PrStatusBarView>,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -449,7 +454,7 @@ impl ChatView {
             streaming_parse_cache: None,
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
-            sub_agent_progress_msg_idx: None,
+            delegation_progress_msg_idx: None,
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
@@ -469,6 +474,7 @@ impl ChatView {
             session_review_dismissed: false,
             session_bar_expanded: false,
             elapsed_tick_started: false,
+            pr_status: cx.new(|_cx| PrStatusBarView::new()),
         }
     }
 
@@ -577,6 +583,9 @@ impl ChatView {
             .collect();
         let traces = self.history_traces(cx);
         let mut turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
+        // A re-plan in a follow-up turn would otherwise paint the same live
+        // snapshot twice; keep only the newest block before filling one in.
+        retain_last_plan_block(&mut turns);
         attach_plan_block(&mut turns, self.plan_snapshot_active());
         turns
     }
@@ -660,7 +669,7 @@ impl ChatView {
     pub fn append_assistant_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let idx = match self.parent_streaming_assistant_index() {
             Some(idx) => idx,
-            None if self.sub_agent_progress_msg_idx.is_some() => {
+            None if self.delegation_progress_msg_idx.is_some() => {
                 // Progress row is last; open a continuation bubble below it.
                 self.start_assistant_message(cx);
                 self.messages.len() - 1
@@ -864,7 +873,7 @@ impl ChatView {
         // not hide the pre-tool parent's tool calls (or the Conversation
         // model's streaming_trace fallback).
         for i in (0..self.messages.len()).rev() {
-            if Some(i) == self.sub_agent_progress_msg_idx {
+            if Some(i) == self.delegation_progress_msg_idx {
                 continue;
             }
             if let Some(ref mut trace) = self.messages[i].live_trace {
@@ -901,6 +910,38 @@ impl ChatView {
         let last = &mut self.messages[idx];
 
         last.live_trace = Some(trace.clone());
+
+        // The agent may be blocked on a request raised while this
+        // conversation was off screen: bring the floating bar / popover back
+        // for it, since `load_history` cleared them.
+        if let Some(conversation_id) = self.conversation_id.clone() {
+            for item in &trace.items {
+                match item {
+                    TraceItem::ApprovalPrompt(approval)
+                        if approval.state == ApprovalState::Pending =>
+                    {
+                        self.pending_approval = Some(PendingApprovalInfo {
+                            id: approval.id.clone(),
+                            command: approval.command.clone(),
+                            is_sandboxed: approval.is_sandboxed,
+                            conversation_id: conversation_id.clone(),
+                        });
+                    }
+                    TraceItem::ClarificationPrompt(clarification)
+                        if clarification.state == ClarificationState::Pending =>
+                    {
+                        self.clarification_inputs_dirty = true;
+                        self.pending_clarification = Some(PendingClarificationInfo {
+                            id: clarification.id.clone(),
+                            conversation_id: conversation_id.clone(),
+                            questions: clarification.questions.clone(),
+                            choices: HashMap::new(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         if trace.has_items() {
             let trace_view = cx.new(|_cx| SystemTraceView::new(trace));
@@ -969,14 +1010,14 @@ impl ChatView {
     pub(super) fn parent_streaming_assistant_index(&self) -> Option<usize> {
         parent_stream::index_of_parent_streaming_assistant(
             &self.messages,
-            self.sub_agent_progress_msg_idx,
+            self.delegation_progress_msg_idx,
         )
     }
 
     /// Last assistant bubble that is not the sub-agent progress row.
     /// Used after the parent stream has already been finalized.
     pub(super) fn parent_assistant_index(&self) -> Option<usize> {
-        parent_stream::index_of_parent_assistant(&self.messages, self.sub_agent_progress_msg_idx)
+        parent_stream::index_of_parent_assistant(&self.messages, self.delegation_progress_msg_idx)
     }
 
     pub(super) fn parent_streaming_message_mut(&mut self) -> Option<&mut DisplayMessage> {
@@ -1486,6 +1527,25 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Tell the PR bar which conversation and workspace it is showing.
+    ///
+    /// Gated on `git_enabled`: with git integration off the bar never
+    /// resolves anything, and turning it off clears an existing bar.
+    fn sync_pr_status(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.try_global::<ExecutionSettingsModel>();
+        let workspace = settings.filter(|s| s.git_enabled).and_then(|settings| {
+            self.chat_input_state
+                .read(cx)
+                .working_dir()
+                .cloned()
+                .or_else(|| settings.workspace_dir.clone().map(PathBuf::from))
+        });
+        let conversation_id = self.conversation_id.clone();
+        self.pr_status.update(cx, |bar, cx| {
+            bar.set_context(conversation_id, workspace, cx);
+        });
+    }
+
     fn ensure_elapsed_tick(&mut self, cx: &mut Context<Self>) {
         if self.elapsed_tick_started || !self.is_thinking_indicator_visible(cx) {
             return;
@@ -1516,6 +1576,7 @@ impl ChatView {
     /// Pre-render side effects: sticky scroll, input clearing, model refresh.
     fn prepare_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_clarification_inputs(window, cx);
+        self.sync_pr_status(cx);
         self.ensure_scroll_handler(cx);
         self.turns = Rc::new(self.typed_turns(cx));
         self.last_settled_assistant_idx = self
@@ -1603,9 +1664,14 @@ impl ChatView {
                 .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
                 .collect();
 
+            // Prefer the model marked default in settings over list order.
+            let default_model_id = models_model
+                .default_model()
+                .map(|m| m.id.clone())
+                .or_else(|| models_list.first().map(|model| model.id.clone()));
+
             self.chat_input_state.update(cx, |state, cx| {
                 if state.available_models() != models_list.as_slice() {
-                    let default_model_id = models_list.first().map(|model| model.id.clone());
                     state.set_available_models(models_list, default_model_id, cx);
                 }
             });
@@ -2248,7 +2314,7 @@ impl ChatView {
     /// the env var is set at process start. Lists per-message render state so
     /// rendering bugs can be diagnosed live without grepping logs.
     ///
-    /// See [`docs/debug_ui.md`](../../../../../../docs/debug_ui.md) for the
+    /// See the Debug how-to (`docs-site/src/dev/guides/debug.md`) for the
     /// field legend.
     fn render_debug_overlay(&self, cx: &App) -> Option<AnyElement> {
         if !*DEBUG_UI_ENABLED {
@@ -2476,6 +2542,9 @@ impl Render for ChatView {
                     .px_4()
                     .pt_2()
                     .pb_4()
+                    .flex()
+                    .flex_col()
+                    .child(self.pr_status.clone())
                     .child({
                         ChatInput::new(self.chat_input_state.clone()).into_any_element()
                     }),

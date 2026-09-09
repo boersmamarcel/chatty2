@@ -1,0 +1,33 @@
+{
+ "model": "llama3.2:latest",
+ "delay_ms": 22,
+ "title": "Release notes PDF",
+ "turns": [
+  {
+   "match": "pdf",
+   "replies": [
+    {
+     "tool_calls": [
+      {
+       "name": "compile_typst",
+       "arguments": {
+        "content": "#set page(paper: \"a5\", margin: 1.6cm)\n#set text(font: \"New Computer Modern\", size: 11pt)\n#align(center)[#text(size: 20pt, weight: \"bold\")[weather-cli 0.2.0]]\n#align(center)[#text(fill: gray)[Release notes — September 2026]]\n#v(0.8cm)\n= Highlights\n- Forecast messages now include the temperature they were derived from.\n- `parse_temperature` accepts a trailing `C` in either case.\n- New `--json` flag prints the forecast as a machine-readable object.\n\n= Compatibility\n#table(\n  columns: (1fr, 1fr),\n  [*Platform*], [*Status*],\n  [macOS 13+], [Supported],\n  [Linux (glibc 2.35+)], [Supported],\n  [Windows 11], [Supported],\n)\n\n= Upgrading\nReplace the binary. There are no configuration changes in this release.\n",
+        "output_path": "release-notes.pdf"
+       }
+      }
+     ]
+    },
+    {
+     "text": "Done — I typeset the release notes with Typst and saved them as `release-notes.pdf` in the workspace. The document has three sections: highlights, a compatibility table and upgrade notes."
+    }
+   ]
+  },
+  {
+   "replies": [
+    {
+     "text": "I only have scripted answers in this demo."
+    }
+   ]
+  }
+ ]
+}

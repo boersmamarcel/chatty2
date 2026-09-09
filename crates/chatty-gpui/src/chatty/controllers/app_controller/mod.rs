@@ -1,29 +1,27 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::models::token_usage::TokenUsage;
+use crate::chatty::models::token_usage::{TokenPricing, TokenUsage};
 use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
-    StreamStatus,
+    StreamStatus, TurnOutcome,
 };
-use crate::chatty::services::StreamChunk;
-use crate::chatty::services::{generate_title, stream_prompt};
+use crate::chatty::services::{AgentTaskSnapshot, generate_title};
 use crate::chatty::token_budget::{
     GlobalTokenBudget, check_pressure, compute_snapshot_background, extract_user_message_text,
     gather_snapshot_inputs, summarize_oldest_half,
 };
-use crate::chatty::views::chat_input::{ChatInputEvent, ChatInputState, ModelOption, SkillEntry};
+use crate::chatty::views::chat_input::{ChatInputEvent, ModelOption, SkillEntry};
 use crate::chatty::views::chat_view::ChatViewEvent;
 use crate::chatty::views::message_types::{
-    ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
-    ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem, friendly_tool_name,
-    is_denial_result,
+    ApprovalState, ClarificationState, SystemTrace, ThinkingState, ToolCallBlock, ToolCallState,
+    ToolSource, TraceItem,
 };
 use crate::chatty::views::sidebar_view::SidebarEvent;
 use crate::chatty::views::{ChatView, SidebarView};
@@ -42,6 +40,9 @@ use chatty_core::exporters::jsonl_exporter::{
 use chatty_core::factories::AgentClient;
 use chatty_core::factories::agent_factory::AgentBuildContext;
 use chatty_core::repositories::{ConversationData, ConversationRepository};
+use chatty_core::session::{
+    AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind, turn_transport,
+};
 use chatty_core::tools::LocalModuleAgentSummary;
 
 mod conversation_ops;
@@ -50,6 +51,8 @@ mod export_ops;
 mod message_ops;
 mod message_ops_internals;
 mod slash_commands;
+
+pub(crate) use conversation_ops_modify::move_ui_enabled;
 
 /// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
 /// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
@@ -189,6 +192,27 @@ fn normalize_workspace_string(path: &str) -> String {
         .to_string()
 }
 
+/// Whether the conversation's agent needs rebuilding because the effective
+/// workspace directory (per-conversation override, else the global setting)
+/// differs from the one the agent was built with. Both sides are
+/// canonicalised before comparing so a raw setting string and an
+/// already-canonical stored value don't look different when they resolve to
+/// the same directory — e.g. a symlinked directory, or `/tmp` on macOS
+/// (finding F1, AGE-215).
+fn agent_workspace_needs_refresh(agent_dir: Option<&Path>, effective_dir: Option<&Path>) -> bool {
+    agent_dir.map(normalize_workspace_path) != effective_dir.map(normalize_workspace_path)
+}
+
+/// The desktop's session policy: settings by value from the global, the
+/// desktop recovery table, and the loop guard on (AGE-195).
+pub(super) fn desktop_session_config(cx: &App) -> AgentSessionConfig {
+    AgentSessionConfig {
+        execution_settings: cx.global::<ExecutionSettingsModel>().clone(),
+        surface: chatty_core::services::StreamSurface::Desktop,
+        loop_guard: true,
+    }
+}
+
 async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
     let conv_id = conv_id.to_string();
 
@@ -219,10 +243,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
 
     let (
         exec_settings,
-        pending_approvals,
-        pending_clarifications,
-        pending_write_approvals,
-        pending_artifacts,
         shell_session,
         user_secrets,
         theme_colors,
@@ -233,15 +253,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             let mut settings = cx
                 .global::<crate::settings::models::ExecutionSettingsModel>()
                 .clone();
-            let approvals = cx
-                .global::<crate::chatty::models::ExecutionApprovalStore>()
-                .get_pending_approvals();
-            let clarifications = cx
-                .global::<crate::chatty::models::ClarificationStore>()
-                .get_pending_clarifications();
-            let write_approvals = cx
-                .global::<crate::chatty::models::WriteApprovalStore>()
-                .get_pending_approvals();
             let conv = cx.global::<ConversationsStore>().get_conversation(&conv_id);
             if let Some(working_dir) = conv.and_then(|c| c.working_dir()) {
                 settings.workspace_dir = Some(
@@ -254,7 +265,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .workspace_dir
                 .as_ref()
                 .map(|dir| normalize_workspace_path(Path::new(dir)));
-            let artifacts = conv.map(|c| c.pending_artifacts());
             let isolation_changed = conv
                 .and_then(|c| c.shell_session())
                 .map(|s| s.network_isolation() != settings.network_isolation)
@@ -289,10 +299,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
                 .cloned();
             (
                 Some(settings),
-                Some(approvals),
-                Some(clarifications),
-                Some(write_approvals),
-                artifacts,
                 session,
                 secrets,
                 Some(colors),
@@ -315,59 +321,65 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         })
         .ok()
         .flatten();
-    let (remote_agents, available_model_ids) = cx
+    let remote_agents = cx
         .update(|cx| {
-            let agents = cx
-                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+            cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                 .map(|m| m.a2a_agent_configs())
-                .unwrap_or_default();
-            let model_ids = cx
-                .try_global::<crate::settings::models::ModelsModel>()
-                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
-                .unwrap_or_default();
-            (agents, model_ids)
+                .unwrap_or_default()
         })
         .unwrap_or_default();
 
-    let (new_agent, new_shell_session, new_progress_slot) =
-        AgentClient::from_model_config_with_tools(
-            &model_config,
-            &provider_config,
-            AgentBuildContext {
-                mcp_tools,
-                exec_settings,
-                pending_approvals,
-                pending_clarifications,
-                pending_write_approvals,
-                pending_artifacts,
-                shell_session,
-                user_secrets,
-                theme_colors,
-                memory_service,
-                skill_service: Some(skill_service),
-                search_settings,
-                embedding_service,
-                allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
-                module_agents,
-                gateway_port,
-                remote_agents,
-                available_model_ids,
-                conversation_id: Some(conv_id.clone()),
-            },
-        )
-        .await?;
+    // The rebuilt agent keeps raising its requests on this conversation's
+    // own session stores (AGE-272).
+    let ctx = AgentBuildContext {
+        mcp_tools,
+        exec_settings,
+        pending_approvals: None,
+        pending_clarifications: None,
+        pending_write_approvals: None,
+        pending_artifacts: None,
+        shell_session,
+        user_secrets,
+        theme_colors,
+        memory_service,
+        skill_service: Some(skill_service),
+        search_settings,
+        embedding_service,
+        module_agents,
+        gateway_port,
+        remote_agents,
+        conversation_id: Some(conv_id.clone()),
+    };
+    let Some(ctx) = cx
+        .update(|cx| {
+            cx.global::<ConversationsStore>()
+                .get_session(&conv_id)
+                .map(|session| session.build_context(ctx))
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    else {
+        warn!(
+            conv_id = %conv_id,
+            "Conversation not found during agent rebuild — skipping"
+        );
+        return Ok(());
+    };
 
-    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-        if let Some(conv) = store.get_conversation_mut(&conv_id) {
-            conv.set_agent(
-                new_agent,
-                model_config.id.clone(),
-                built_workspace_dir.clone(),
+    let built_agent =
+        AgentClient::from_model_config_with_tools(&model_config, &provider_config, ctx).await?;
+
+    cx.update_global::<ConversationsStore, _>(|store, cx| {
+        // The settings the tools were built with are the session's too.
+        let config = desktop_session_config(cx);
+        let Some(session) = store.get_session_mut(&conv_id) else {
+            warn!(
+                conv_id = %conv_id,
+                "Conversation not found during agent rebuild — skipping"
             );
-            if new_shell_session.is_some() {
-                conv.set_shell_session(new_shell_session);
-            }
-            conv.set_invoke_agent_progress_slot(new_progress_slot);
+            return;
+        };
+        session.set_config(config);
+        if session.install_agent(built_agent, model_config.id.clone(), built_workspace_dir) {
             info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
         } else {
             warn!(
@@ -396,7 +408,7 @@ pub struct ChattyApp {
     /// GlobalAgentConfigNotifier's WeakEntity remains upgradeable.
     _mcp_notifier: Entity<AgentConfigNotifier>,
     /// Tool-call IDs whose ToolCallBlocks are visualised via the sub-agent
-    /// progress channel (`invoke_agent` and `sub_agent`) instead of the main trace.
+    /// progress channel (`invoke_agent`) instead of the main trace.
     active_invoke_agent_ids: std::collections::HashSet<String>,
 }
 
@@ -406,6 +418,7 @@ impl ChattyApp {
         cx: &mut Context<Self>,
         conversation_repo: Arc<dyn ConversationRepository>,
     ) -> Self {
+        crate::boot_timing::checkpoint("chattyapp_new_start");
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
             cx.set_global(ConversationsStore::new());
@@ -445,6 +458,7 @@ impl ChattyApp {
 
         // Initialize chat input with available models
         app.initialize_models(cx);
+        crate::boot_timing::checkpoint("chattyapp_new_done");
 
         // is_ready is set by load_conversations_after_models_ready() once disk load completes.
         // Do NOT create an initial conversation here — ConversationsStore is always empty at
@@ -492,6 +506,9 @@ impl ChattyApp {
                 }
                 SidebarEvent::ExportConversation(conv_id) => {
                     app.export_conversation_markdown(conv_id, cx);
+                }
+                SidebarEvent::MoveConversation(conv_id) => {
+                    app.confirm_conversation_move(conv_id, cx);
                 }
                 SidebarEvent::ToggleCollapsed(collapsed) => {
                     // Optional: Could save collapsed state to settings here
@@ -578,6 +595,10 @@ impl ChattyApp {
                 &notifier,
                 |this, _notifier, event: &AgentConfigEvent, cx| {
                     if matches!(event, AgentConfigEvent::RebuildRequired) {
+                        // A stale workspace-scoped service (AGE-240) must not
+                        // survive a settings change that could invalidate it.
+                        chatty_core::factories::agent_factory::invalidate_workspace_services_cache(
+                        );
                         this.rebuild_active_agent(cx);
                     }
                 },
@@ -641,7 +662,9 @@ impl ChattyApp {
             .try_global::<ExecutionSettingsModel>()
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
+        crate::boot_timing::checkpoint("skills_scan_start");
         self.refresh_chat_input_skills(workspace_dir.as_deref(), cx);
+        crate::boot_timing::checkpoint("skills_scan_done");
     }
 
     /// Push the current `ModelsModel` into the chat-input model picker.
@@ -658,7 +681,12 @@ impl ChattyApp {
             .map(|m| ModelOption::new(m.id.clone(), m.name.clone(), m.provider_type.clone()))
             .collect();
 
-        let default_model_id = models_list.first().map(|model| model.id.clone());
+        // The model marked default in Settings → Models & Providers, falling
+        // back to the first in the list when nothing is marked.
+        let default_model_id = models_model
+            .default_model()
+            .map(|m| m.id.clone())
+            .or_else(|| models_list.first().map(|model| model.id.clone()));
 
         let selected_capabilities = {
             let selected_id = chat_view
@@ -727,16 +755,8 @@ impl ChattyApp {
             sidebar.set_total_count(total);
         });
     }
-
-    /// Get the chat input state entity
-    #[allow(dead_code)]
-    pub fn chat_input_state(&self, cx: &App) -> Entity<ChatInputState> {
-        self.chat_view.read(cx).chat_input_state().clone()
-    }
 }
 
-/// Serialize a `Conversation` into a `ConversationData` snapshot suitable for persistence
-/// or export. Returns `None` if history or traces cannot be serialized.
 /// Extract the current theme's chart colors as hex strings.
 ///
 /// These are captured at agent-creation time so that charts saved to disk by the
@@ -760,67 +780,12 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
     })
 }
 
-///
-/// Sets `updated_at` to the current time; all other timestamps are taken from the
-/// conversation itself.
-fn build_conversation_data(conv: &Conversation) -> Option<ConversationData> {
-    let history = match conv.serialize_history() {
-        Ok(h) => h,
-        Err(e) => {
-            error!(conv_id = %conv.id(), error = ?e, "Failed to serialize history in build_conversation_data");
-            return None;
-        }
-    };
-    let traces = match conv.serialize_traces() {
-        Ok(t) => t,
-        Err(e) => {
-            error!(conv_id = %conv.id(), error = ?e, "Failed to serialize traces in build_conversation_data");
-            return None;
-        }
-    };
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    Some(ConversationData {
-        id: conv.id().to_string(),
-        title: conv.title().to_string(),
-        model_id: conv.model_id().to_string(),
-        message_history: history,
-        system_traces: traces,
-        token_usage: conv
-            .serialize_token_usage()
-            .unwrap_or_else(|_| "{}".to_string()),
-        attachment_paths: conv
-            .serialize_attachment_paths()
-            .unwrap_or_else(|_| "[]".to_string()),
-        message_timestamps: conv
-            .serialize_message_timestamps()
-            .unwrap_or_else(|_| "[]".to_string()),
-        message_feedback: conv
-            .serialize_message_feedback()
-            .unwrap_or_else(|_| "[]".to_string()),
-        regeneration_records: conv
-            .serialize_regeneration_records()
-            .unwrap_or_else(|_| "[]".to_string()),
-        created_at: conv
-            .created_at()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-        updated_at: now,
-        working_dir: conv.working_dir().map(|p| p.to_string_lossy().to_string()),
-        agent_task_snapshot: conv.serialize_agent_task_snapshot().unwrap_or(None),
-    })
-}
-
 // ── Tool source classification ───────────────────────────────────────────────
 
 /// Classify a built-in tool call by name into a [`ToolSource`] for data-egress badges.
 ///
 /// Internet-facing tools are classified here. Module agent calls (invoke_agent /
-/// sub_agent) are classified separately by [`classify_agent_source`].
+/// are classified separately by [`classify_agent_source`].
 pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
     chatty_core::models::message_types::classify_tool_source(tool_name)
 }
@@ -856,4 +821,66 @@ pub(super) fn classify_agent_source(agent_name: &str, cx: &App) -> ToolSource {
     }
 
     ToolSource::Local
+}
+
+#[cfg(test)]
+mod tests {
+    // Re-import standard #[test] to shadow gpui::test from `use gpui::*`
+    use core::prelude::rust_2021::test;
+
+    use super::*;
+
+    #[test]
+    fn workspace_refresh_none_vs_none_is_no_refresh() {
+        assert!(!agent_workspace_needs_refresh(None, None));
+    }
+
+    #[test]
+    fn workspace_refresh_some_vs_none_is_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(agent_workspace_needs_refresh(Some(dir.path()), None));
+        assert!(agent_workspace_needs_refresh(None, Some(dir.path())));
+    }
+
+    #[test]
+    fn workspace_refresh_different_directories_is_refresh() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        assert!(agent_workspace_needs_refresh(
+            Some(dir_a.path()),
+            Some(dir_b.path())
+        ));
+    }
+
+    #[test]
+    fn workspace_refresh_same_canonical_directory_is_no_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        // Same directory, spelled two different ways: the tempdir's raw path
+        // and its already-canonicalised form.
+        assert!(!agent_workspace_needs_refresh(
+            Some(dir.path()),
+            Some(&canonical)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_refresh_raw_symlink_vs_canonical_target_is_no_refresh() {
+        let base = tempfile::tempdir().unwrap();
+        let real_dir = base.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let canonical_real = std::fs::canonicalize(&real_dir).unwrap();
+
+        // `link` (raw, unresolved) and the canonical path of the directory it
+        // points to must compare equal — this is the exact F1 regression: a
+        // symlinked workspace directory looked different on every send.
+        assert!(!agent_workspace_needs_refresh(
+            Some(&link),
+            Some(&canonical_real)
+        ));
+    }
 }

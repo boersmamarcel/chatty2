@@ -1,0 +1,4 @@
+StreamStarted
+TextChunk("Hello")
+TextChunk(", world")
+StreamCompleted

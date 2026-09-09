@@ -14,7 +14,7 @@ pub enum ApprovalMode {
 }
 
 /// Settings for code execution tool
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionSettingsModel {
     /// Master toggle for code execution feature
     pub enabled: bool,
@@ -74,6 +74,16 @@ pub struct ExecutionSettingsModel {
     /// Requires an embedding provider and model to be configured.
     #[serde(default)]
     pub embedding_enabled: bool,
+    /// Say so before `invoke_agent` hands a prompt to an agent outside this
+    /// user's fleet — a configured third-party URL, or a card learned from
+    /// one (ADR-0011 C5).
+    ///
+    /// Off by default, and deliberately only a warning: whether an external
+    /// agent should need an allowlist, a one-time confirmation, or nothing at
+    /// all is a product decision that has not been made. This is the hook it
+    /// will hang from.
+    #[serde(default)]
+    pub warn_on_external_agent: bool,
     /// Provider to use for computing embeddings.
     /// Independent of the chat model provider — allows e.g. Anthropic users
     /// to use OpenAI for embeddings while chatting with Claude.
@@ -82,6 +92,14 @@ pub struct ExecutionSettingsModel {
     /// Embedding model identifier (e.g., "text-embedding-3-small").
     #[serde(default)]
     pub embedding_model: Option<String>,
+    /// Offer the per-conversation move between this machine and a hosted
+    /// server (AGE-308). Developer-only until online mode is account-scoped:
+    /// a move carries the transcript and nothing else today — no memory, no
+    /// MCP, no skills — so the default build does not offer it at all.
+    /// Conversations already marked hosted still load and run; this gates
+    /// only the move UI.
+    #[serde(default)]
+    pub hosted_conversations_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -111,9 +129,11 @@ impl Default for ExecutionSettingsModel {
             network_isolation: false,
             max_agent_turns: default_max_agent_turns(),
             memory_enabled: true, // Enabled by default for cross-conversation recall
+            warn_on_external_agent: false,
             embedding_enabled: false, // Opt-in: requires embedding provider
             embedding_provider: None,
             embedding_model: None,
+            hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
         }
     }
 }

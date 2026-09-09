@@ -9,7 +9,7 @@ use rig_core::completion::message::UserContent;
 use crate::models::conversation::RegenerationRecord;
 use crate::models::message_types::{SystemTrace, TraceItem};
 use crate::repositories::ConversationData;
-use crate::services::extract_user_text_lines;
+use crate::services::{extract_user_text_lines, is_persisted_tool_round_trip};
 use crate::settings::models::models_store::ModelConfig;
 
 /// Configuration options for SFT JSONL export
@@ -76,6 +76,12 @@ pub fn conversation_to_sft_jsonl(
     }
 
     for (idx, message) in history.iter().enumerate() {
+        // Tool round-trips are persisted in history (AGE-247). The ChatML
+        // tool messages below are derived from the trace on the final text
+        // message, so the raw ones are skipped rather than emitted twice.
+        if is_persisted_tool_round_trip(&history, idx) {
+            continue;
+        }
         match message {
             Message::User { content } => {
                 let text = extract_user_text_lines(content);
@@ -269,7 +275,10 @@ fn messages_to_chatml_prefix(
         }));
     }
 
-    for msg in history.iter().take(up_to) {
+    for (idx, msg) in history.iter().enumerate().take(up_to) {
+        if is_persisted_tool_round_trip(history, idx) {
+            continue;
+        }
         match msg {
             Message::User { content } => {
                 let text = extract_user_text_lines(content);
@@ -382,6 +391,7 @@ mod tests {
     use super::*;
     use crate::models::conversation::{MessageFeedback, RegenerationRecord};
     use crate::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+    use crate::settings::models::models_store::ModelSource;
     use crate::settings::models::providers_store::ProviderType;
     use rig_core::completion::message::Text;
     use std::collections::HashMap;
@@ -409,6 +419,7 @@ mod tests {
             updated_at: 1700000100,
             working_dir: None,
             agent_task_snapshot: None,
+            mode: None,
         }
     }
 
@@ -425,10 +436,15 @@ mod tests {
             extra_params: HashMap::new(),
             cost_per_million_input_tokens: None,
             cost_per_million_output_tokens: None,
+            cost_per_million_cache_read_tokens: None,
+            cost_per_million_cache_write_tokens: None,
             supports_images: true,
             supports_pdf: true,
             supports_temperature: true,
             max_context_window: None,
+            source: ModelSource::User,
+            is_favorite: false,
+            is_default: false,
         }
     }
 
@@ -667,6 +683,51 @@ mod tests {
         assert_eq!(messages[2]["content"], "file contents");
     }
 
+    /// Tool round-trips persisted with the turn (AGE-247) are not ChatML
+    /// turns: the tool messages come from the trace, and the text an
+    /// assistant wrote before calling a tool must not become its own turn.
+    #[test]
+    fn sft_skips_persisted_tool_round_trips() {
+        let history = vec![
+            user_message("Read the file"),
+            Message::Assistant {
+                id: None,
+                content: vec![
+                    AssistantContent::text("Let me look."),
+                    AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
+                ],
+            },
+            Message::tool_result("call-1", "read_file", "file contents"),
+            assistant_message("Let me look.\n\nHere is the file"),
+        ];
+        let conv = make_conversation_data(
+            "conv-1",
+            "m",
+            history,
+            vec![None, None, None, None],
+            vec![None, None, None, None],
+            vec![RegenerationRecord {
+                message_index: 3,
+                original_text: "Old".to_string(),
+                original_timestamp: 1700000000,
+                regeneration_timestamp: 1700000010,
+            }],
+        );
+
+        let sft = conversation_to_sft_jsonl(&conv, None, &SftExportOptions::default())
+            .unwrap()
+            .unwrap();
+        let messages = sft["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["content"], "Let me look.\n\nHere is the file");
+
+        let dpo = conversation_to_dpo_jsonl(&conv, None).unwrap();
+        let prompt = dpo[0]["prompt"].as_array().unwrap();
+        assert_eq!(prompt.len(), 1);
+        assert_eq!(prompt[0]["role"], "user");
+    }
+
     #[test]
     fn sft_empty_conversation_returns_none() {
         let conv = make_conversation_data("conv-1", "m", vec![], vec![], vec![], vec![]);
@@ -834,6 +895,7 @@ mod tests {
             updated_at: 0,
             working_dir: None,
             agent_task_snapshot: None,
+            mode: None,
         };
         let opts = SftExportOptions::default();
         assert!(conversation_to_sft_jsonl(&conv, None, &opts).is_err());

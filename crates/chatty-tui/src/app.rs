@@ -2,6 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
+use chatty_core::session::HOSTED_DISABLED;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
     MouseEvent, MouseEventKind,
@@ -147,6 +148,14 @@ async fn run_loop(
                             KeyAction::ShowContext => {
                                 engine.add_system_message(engine.context_summary());
                             }
+                            KeyAction::ShowOnlineStatus => {
+                                engine.add_system_message(engine.online_status());
+                            }
+                            KeyAction::SetOnline(target) => {
+                                if let Err(e) = engine.set_online(target).await {
+                                    engine.add_system_message(e.to_string());
+                                }
+                            }
                             KeyAction::CopyLastResponse => {
                                 if let Err(e) = engine.copy_last_response_to_clipboard() {
                                     engine.add_system_message(e.to_string());
@@ -215,6 +224,10 @@ enum KeyAction {
     UpdateCli,
     ShowWorkingDirectory,
     ChangeWorkingDirectory(String),
+    /// `/online` — where this conversation runs, and what a move would carry.
+    ShowOnlineStatus,
+    /// `/online <url>` takes it online; `/online off` brings it back.
+    SetOnline(Option<String>),
 }
 
 fn handle_terminal_event(
@@ -549,6 +562,20 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Update => Some(KeyAction::UpdateCli),
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
+        // AGE-308: the move is developer-only until online mode is
+        // account-scoped. The command stays in the registry so it remains
+        // discoverable for developers; it refuses here.
+        Command::Online(_) if !engine.execution_settings().hosted_conversations_enabled => {
+            engine.add_system_message(HOSTED_DISABLED.to_string());
+            None
+        }
+        // `/online` alone shows the table before anything leaves this machine;
+        // naming a URL is the confirmation. `off` is the way back.
+        Command::Online(None) => Some(KeyAction::ShowOnlineStatus),
+        Command::Online(Some(target)) if target.eq_ignore_ascii_case("off") => {
+            Some(KeyAction::SetOnline(None))
+        }
+        Command::Online(Some(url)) => Some(KeyAction::SetOnline(Some(url))),
         Command::Quit => Some(KeyAction::Quit),
     }
 }
@@ -563,4 +590,101 @@ fn refresh_skills(engine: &ChatEngine, input_state: &mut InputState) {
         .skill_service()
         .list_all_skills_sync(workspace_skills_dir.as_deref());
     input_state.set_available_skills(skills);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::ChatEngineConfig;
+    use chatty_core::services::StreamSurface;
+    use chatty_core::settings::models::models_store::ModelConfig;
+    use chatty_core::settings::models::module_settings::ModuleSettingsModel;
+    use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+    use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
+
+    /// An engine with no conversation and no services — enough to route a
+    /// slash command through `map_command_to_action`.
+    fn test_engine(execution_settings: ExecutionSettingsModel) -> ChatEngine {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+                execution_settings,
+                module_settings: ModuleSettingsModel::default(),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+                surface: StreamSurface::InteractiveTui,
+            },
+            event_tx,
+        )
+    }
+
+    fn last_system_message(engine: &ChatEngine) -> String {
+        engine
+            .transcript
+            .messages
+            .last()
+            .expect("the refusal is shown in the transcript")
+            .text()
+    }
+
+    /// AGE-308: `/online` still parses and still lists, but by default it
+    /// refuses instead of moving anything off this machine.
+    #[test]
+    fn online_is_refused_while_hosted_conversations_are_disabled() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+
+        for command in [
+            Command::Online(None),
+            Command::Online(Some("http://localhost:8081".to_string())),
+            Command::Online(Some("off".to_string())),
+        ] {
+            assert!(
+                map_command_to_action(command, &mut engine).is_none(),
+                "the default build must not act on /online"
+            );
+            assert_eq!(last_system_message(&engine), HOSTED_DISABLED);
+        }
+    }
+
+    /// With the developer setting on, `/online` behaves exactly as it did.
+    #[test]
+    fn online_works_once_hosted_conversations_are_enabled() {
+        let settings = ExecutionSettingsModel {
+            hosted_conversations_enabled: true,
+            ..Default::default()
+        };
+        let mut engine = test_engine(settings);
+
+        assert!(matches!(
+            map_command_to_action(Command::Online(None), &mut engine),
+            Some(KeyAction::ShowOnlineStatus)
+        ));
+        assert!(matches!(
+            map_command_to_action(
+                Command::Online(Some("http://localhost:8081".to_string())),
+                &mut engine
+            ),
+            Some(KeyAction::SetOnline(Some(_)))
+        ));
+        assert!(matches!(
+            map_command_to_action(Command::Online(Some("off".to_string())), &mut engine),
+            Some(KeyAction::SetOnline(None))
+        ));
+    }
 }

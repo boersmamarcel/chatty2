@@ -1,6 +1,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use rig_core::completion::Message;
+
 use super::counter::TokenCounter;
 
 // ── CachedTokenCounts ─────────────────────────────────────────────────────────
@@ -130,6 +132,68 @@ impl CachedTokenCounts {
     #[allow(dead_code)]
     pub fn cached_tool_tokens(&self) -> usize {
         self.tool_tokens
+    }
+}
+
+// ── HistoryTokenCache ────────────────────────────────────────────────────────
+
+/// Per-entry token-count cache for conversation history (AGE-229).
+///
+/// `TokenCounter::count_history()` re-tokenizes the entire history on every
+/// turn even though a turn typically only appends one or two new entries.
+/// This caches each entry's token count keyed by its position and a content
+/// hash, so a turn that only appends new messages recounts just those —
+/// unchanged entries are a hash comparison, not a BPE pass.
+///
+/// # Invalidation
+/// Per-index: an entry whose content hash no longer matches is recounted and
+/// its cache slot overwritten. The cache is also truncated to the current
+/// history length first, so switching to a shorter (or different)
+/// conversation never leaves stale trailing entries.
+#[derive(Clone, Debug, Default)]
+pub struct HistoryTokenCache {
+    /// `(content hash, token count)` per history index.
+    entries: Vec<(u64, usize)>,
+}
+
+impl HistoryTokenCache {
+    /// Create a new, empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Count `history`, reusing cached per-entry counts where the entry at
+    /// that index has not changed since the last call.
+    pub fn count_history(&mut self, history: &[Message], counter: &TokenCounter) -> usize {
+        self.entries.truncate(history.len());
+
+        for (i, message) in history.iter().enumerate() {
+            let hash = hash_message(message);
+            let cache_hit =
+                matches!(self.entries.get(i), Some((cached_hash, _)) if *cached_hash == hash);
+            if !cache_hit {
+                let count = counter.count_message(message);
+                if i < self.entries.len() {
+                    self.entries[i] = (hash, count);
+                } else {
+                    self.entries.push((hash, count));
+                }
+            }
+        }
+
+        self.entries.iter().map(|(_, count)| count).sum()
+    }
+}
+
+/// Content hash for one `Message`, used only for change detection — never
+/// for token counting. Serializing to JSON first (rather than hashing the
+/// struct directly) is cheap even for a large base64 payload: `DefaultHasher`
+/// processes bytes linearly, unlike the BPE encoder this cache exists to
+/// avoid re-running.
+fn hash_message(message: &Message) -> u64 {
+    match serde_json::to_string(message) {
+        Ok(json) => hash_str(&json),
+        Err(_) => 0,
     }
 }
 
@@ -345,5 +409,72 @@ mod tests {
         let h1 = hash_str("alpha");
         let h2 = hash_str("beta");
         assert_ne!(h1, h2);
+    }
+
+    // ── HistoryTokenCache ─────────────────────────────────────────────────────
+
+    fn user_text_message(text: &str) -> Message {
+        use rig_core::completion::message::{Text, UserContent};
+        Message::User {
+            content: vec![UserContent::Text(Text::new(text))],
+        }
+    }
+
+    #[test]
+    fn history_cache_matches_uncached_count() {
+        let c = counter();
+        let history = vec![
+            user_text_message("Hello, world!"),
+            user_text_message("How are you today?"),
+        ];
+        let mut cache = HistoryTokenCache::new();
+        assert_eq!(cache.count_history(&history, &c), c.count_history(&history));
+    }
+
+    #[test]
+    fn history_cache_does_not_recompute_unchanged_entries() {
+        let c = counter();
+        let msg1 = user_text_message("Hello, world!");
+        let msg2 = user_text_message("Another message here.");
+
+        let mut cache = HistoryTokenCache::new();
+        cache.count_history(std::slice::from_ref(&msg1), &c);
+
+        // Corrupt the cached count for entry 0, bypassing count_message. If
+        // appending msg2 caused entry 0 to be recomputed, this corruption
+        // would be silently overwritten with the correct count.
+        cache.entries[0].1 = 999_999;
+
+        let total = cache.count_history(&[msg1.clone(), msg2.clone()], &c);
+        let msg2_tokens = c.count_message(&msg2);
+
+        assert_eq!(
+            total,
+            999_999 + msg2_tokens,
+            "entry 0 must be served from cache, not recomputed"
+        );
+    }
+
+    #[test]
+    fn history_cache_recomputes_a_changed_entry() {
+        let c = counter();
+        let mut cache = HistoryTokenCache::new();
+        cache.count_history(&[user_text_message("Hi")], &c);
+
+        let changed = user_text_message("A much longer message than before.");
+        let total = cache.count_history(std::slice::from_ref(&changed), &c);
+
+        assert_eq!(total, c.count_message(&changed));
+    }
+
+    #[test]
+    fn history_cache_truncates_on_shorter_history() {
+        let c = counter();
+        let mut cache = HistoryTokenCache::new();
+        cache.count_history(&[user_text_message("one"), user_text_message("two")], &c);
+        assert_eq!(cache.entries.len(), 2);
+
+        cache.count_history(&[user_text_message("one")], &c);
+        assert_eq!(cache.entries.len(), 1);
     }
 }

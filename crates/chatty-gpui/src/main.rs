@@ -63,7 +63,7 @@ pub struct MemoryInitSignal(pub tokio::sync::watch::Receiver<bool>);
 impl Global for MemoryInitSignal {}
 
 // Use global singletons from chatty-core
-use chatty_core::{MCP_SERVICE, MCP_UPDATE_SENDER};
+use chatty_core::MCP_UPDATE_SENDER;
 
 /// Flag to prevent theme observer from saving during initialization.
 /// This avoids a race condition where the default theme could overwrite
@@ -80,9 +80,16 @@ actions!(
         PreviousConversation,
         NextConversation,
         DeleteActiveConversation,
-        InstallCli
+        InstallCli,
+        ApprovePendingCommand,
+        DenyPendingCommand
     ]
 );
+
+/// How long provider auto-discovery waits before reaching the network, so it
+/// lands after boot rather than racing the conversation load that gates
+/// "ready to chat" (AGE-163).
+const BACKGROUND_DISCOVERY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 mod actions;
 mod themes;
@@ -112,6 +119,7 @@ fn main() {
         .init();
 
     tracing::info!("Starting Chatty application");
+    boot_timing::checkpoint("logging_ready");
 
     // Initialize Tokio runtime for rig LLM operations
     // rig requires Tokio 1.x runtime for async operations
@@ -120,11 +128,13 @@ fn main() {
     // Enter the runtime context for the entire application
     // This allows async operations to use Tokio's runtime
     let _guard = _tokio_runtime.enter();
+    boot_timing::checkpoint("tokio_ready");
 
     // Initialize all settings repositories (providers, models, MCP, etc.).
     // This must happen before anything accesses the repository singletons.
     chatty_core::init_repositories()
         .expect("Failed to initialize settings repositories (is HOME set?)");
+    boot_timing::checkpoint("repositories_ready");
 
     // Initialize the SQLite conversation repository here, where the Tokio runtime is
     // explicitly set up, so the block_on call is clearly safe and in a known context.
@@ -133,6 +143,7 @@ fn main() {
             .block_on(ConversationSqliteRepository::new())
             .expect("Failed to create SQLite conversation repository"),
     );
+    boot_timing::checkpoint("sqlite_ready");
 
     // ChattyAssets falls back to gpui-component's icon bundle internally; a second
     // `with_assets` call would replace the source rather than chain to it.
@@ -207,7 +218,12 @@ fn main() {
         cx.set_global(settings::models::MarketplaceState::default());
         cx.set_global(settings::models::MemoryBrowserState::default());
 
-        settings::controllers::module_settings_controller::refresh_runtime(cx);
+        // No `refresh_runtime()` here. It would run on *default* module settings,
+        // before providers or module settings have loaded, so it scans the default
+        // module dir and builds a gateway on the noop LLM provider — then both get
+        // redone once models load and once module settings land. Boot paid for a
+        // module scan and a `refresh_windows()` before a window even existed
+        // (AGE-163).
 
         // Initialize agent memory service asynchronously.
         // A watch channel is stored as a global so that conversation creation can await
@@ -326,13 +342,6 @@ fn main() {
             let _ = memory_tx.send(true);
         })
         .detach();
-
-        // Initialize execution approval store for tracking pending approvals
-        cx.set_global(chatty::models::ExecutionApprovalStore::new());
-        cx.set_global(chatty::models::ClarificationStore::new());
-
-        // Initialize write approval store for tracking filesystem write approvals
-        cx.set_global(chatty::models::WriteApprovalStore::new());
 
         // Initialize CLI install state tracking for settings UI feedback
         cx.set_global(cli_installer::CliInstallState::default());
@@ -555,9 +564,6 @@ fn main() {
 
         // Initialize MCP service for managing MCP server connections
         let mcp_service = chatty::services::McpService::new();
-        MCP_SERVICE.set(mcp_service.clone())
-            .map_err(|_| warn!("MCP_SERVICE already initialized"))
-            .ok();
         cx.set_global(mcp_service);
         info!("MCP service initialized");
 
@@ -693,6 +699,13 @@ fn main() {
                             .unwrap_or_else(|| "http://localhost:11434".to_string());
 
                         cx.spawn(async move |cx: &mut AsyncApp| {
+                            // Let boot finish first. This request contends with the
+                            // conversation load that gates "ready to chat", and when
+                            // it wins that race a refused or slow Ollama costs the
+                            // user ~380ms of extra startup for a discovery nobody is
+                            // waiting on (AGE-163). Measured: boots split into a
+                            // ~290ms mode and a ~680ms mode purely on who won.
+                            tokio::time::sleep(BACKGROUND_DISCOVERY_DELAY).await;
                             settings::providers::sync_ollama_models(&ollama_base_url, cx)
                                 .await
                                 .map_err(|e| warn!(error = ?e, "Failed to sync Ollama models"))
@@ -738,10 +751,6 @@ fn main() {
             // Apply execution settings result
             match exec_settings_result {
                 Ok(settings) => {
-                    let approval_mode = settings.approval_mode.clone();
-                    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
-                        approval_mode,
-                    );
                     cx.update(|cx| {
                         info!(
                             enabled = settings.enabled,
@@ -757,10 +766,6 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load execution settings, using defaults");
-                    chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
-                        chatty_core::settings::models::execution_settings::ExecutionSettingsModel::default()
-                            .approval_mode,
-                    );
                     // Defaults will be used (enabled=false); conversations will still load
                 }
             }
@@ -1023,6 +1028,12 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load module settings, using defaults");
+                    // Still scan, on the defaults already in the global: this is
+                    // the one path that would otherwise never call refresh_runtime
+                    // now that the startup call is gone.
+                    cx.update(settings::controllers::module_settings_controller::refresh_runtime)
+                        .map_err(|e| warn!(error = ?e, "Failed to scan modules with default settings"))
+                        .ok();
                 }
             }
         })
@@ -1257,4 +1268,13 @@ fn main() {
         })
         .expect("Failed to open main window");
     });
+
+    // The window is closed and the UI is being torn down, so nothing is going
+    // to use a sandbox container again. Anything a `SandboxManager` drop
+    // queued is a detached task that dies with `_tokio_runtime` a few lines
+    // below, and containers run `sleep infinity` with no `--rm`, so they
+    // would outlive the process. Tear them down synchronously instead.
+    if let Err(e) = _tokio_runtime.block_on(chatty_core::sandbox::shutdown_all()) {
+        warn!(error = %e, "Failed to destroy sandbox containers during shutdown");
+    }
 }

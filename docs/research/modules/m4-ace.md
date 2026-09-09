@@ -49,7 +49,7 @@ Two failure modes to reproduce as negative controls:
 - Context-collapse control reproduces collapse curve
 - Label-free modes including degradation case (FiNER 70.7 → 67.3 without labels)
 
-**Stage B:** AppWorld (primary), Finance (FiNER, Formula) — Marcel posts numbers.
+**Stage B:** AppWorld (primary), Finance (FiNER, Formula) — the human reviewer posts numbers.
 
 ACE vs GEPA rollout comparison → [AGE-21](https://linear.app/agents-research/issue/AGE-21),
 not this module alone.
@@ -74,5 +74,5 @@ not this module alone.
 
 ## Further reading
 
-- [crate-promises-chatty-playbook](../crate-promises-chatty-playbook.md)
+- [`chatty-playbook` README](../../../crates/chatty-playbook/README.md) — crate scope (the pre-Stage-A promise page is [archived](../../archive/research/crate-promises-chatty-playbook.md))
 - [agent-memory.md](../../agent-memory.md)

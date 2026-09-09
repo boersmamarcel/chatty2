@@ -26,6 +26,11 @@ use installer::install_release;
 /// Polling interval for checking updates (1 hour)
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+/// How long the startup update check waits so it lands after boot has settled.
+/// Long enough to stay off the boot path, short enough that an available update
+/// is still surfaced in the session the user just started.
+const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(10);
+
 /// GitHub repository owner
 const GITHUB_OWNER: &str = "boersmamarcel";
 
@@ -348,13 +353,15 @@ impl AutoUpdater {
             "Starting auto-update polling loop"
         );
 
-        // Perform an initial check immediately
-        self.check_for_update(cx);
-
-        // Start the polling loop
+        // The startup check waits out `STARTUP_CHECK_DELAY` rather than firing
+        // here. It used to race the settings, conversation and MCP loads for
+        // network and CPU during the first second of boot, delaying "ready to
+        // chat" for a check nobody is waiting on (AGE-163).
         cx.spawn(async move |cx: &mut AsyncApp| {
+            let mut delay = STARTUP_CHECK_DELAY;
             loop {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(delay).await;
+                delay = POLL_INTERVAL;
 
                 // Trigger update check
                 cx.update(|cx| {

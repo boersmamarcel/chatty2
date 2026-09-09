@@ -21,7 +21,7 @@ Location: `crates/chatty-core/src/settings/models/`.
 | Settings model | Field(s) | Research link | Gate issue | Status |
 |----------------|----------|---------------|------------|--------|
 | `FlowSettingsModel` | `workflow_enabled`, `active_workflow_id` | M2 AFlow IR | [AGE-54](https://linear.app/agents-research/issue/AGE-54) | Not implemented |
-| Playbook storage | scope TBD | M4 ACE | [AGE-47](https://linear.app/agents-research/issue/AGE-47) | **Blocked — Marcel decides** |
+| Playbook storage | scope TBD | M4 ACE | [AGE-47](https://linear.app/agents-research/issue/AGE-47) | **Blocked — human product decision** |
 | Optimizer launcher | CLI vs GPUI vs CI | M2, M3 offline runs | [AGE-44](https://linear.app/agents-research/issue/AGE-44) | **Blocked** |
 | Artifact apply policy | auto / review / export | M2 IR, M3 preamble, M4 deltas | [AGE-45](https://linear.app/agents-research/issue/AGE-45) | **Blocked** |
 | Dataset paths | bundled vs user-supplied | Stage A loaders | [AGE-46](https://linear.app/agents-research/issue/AGE-46) | **Blocked** |
@@ -65,7 +65,7 @@ See `crates/chatty-optimize/src/ablation.rs`.
 
 ## Related
 
-- [Promotion log](./promotion-log.md) — verdict when a mechanism ships as setting vs default
+- [Experiment protocol](./experiment-protocol.md) — how the setting-vs-default verdict is reached
 - [App ↔ research bridge](./app-research-bridge.md) — component-level mapping
 - [Module pages](./modules/index.md)
 - [Chatty agentic product integration (Linear)](https://linear.app/agents-research/project/chatty-agentic-product-integration-d9e57d61-eae2-46c1-a6ee-d8e963741449)

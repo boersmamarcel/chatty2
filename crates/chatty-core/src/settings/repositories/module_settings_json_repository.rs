@@ -16,6 +16,17 @@ impl ModuleSettingsJsonRepository {
     }
 }
 
+/// Test-only constructor for a custom file path (used by unit tests and the
+/// `store_conformance` suite exported behind `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+impl ModuleSettingsJsonRepository {
+    pub fn with_path(file_path: std::path::PathBuf) -> Self {
+        Self {
+            inner: GenericJsonRepository::with_path(file_path),
+        }
+    }
+}
+
 impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
     fn load(&self) -> BoxFuture<'static, RepositoryResult<ModuleSettingsModel>> {
         let path = self.inner.file_path().to_path_buf();
