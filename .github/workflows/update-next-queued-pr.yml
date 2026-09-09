@@ -1,0 +1,59 @@
+name: Update next queued PR
+
+# A one-lane merge queue for a personal-account repository, where GitHub's
+# merge queue is unavailable. The `protect main` ruleset keeps the strict
+# up-to-date policy, so a PR that is behind main cannot merge until its branch
+# is updated. This workflow does that press for the PR at the front of the
+# queue, and only that one, so CI reruns serialize instead of fanning out.
+#
+# The queue is "auto-merge armed, not draft, same-repo head", oldest first.
+# ship-auto-merge.yml arms auto/* PRs; a human arms anything else with
+# `gh pr merge --auto`. Nothing else joins.
+#
+# Closed-system: the token is a fine-grained PAT (AUTO_UPDATE_TOKEN) scoped to
+# this repository with contents + pull-requests write. GITHUB_TOKEN cannot be
+# used: branch updates it makes do not trigger CI on the PR, so the refreshed
+# head would never go green. pull_request_target runs this file from main and
+# checks nothing out, so PR content never reaches the token.
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    types: [auto_merge_enabled]
+  schedule:
+    # Fallback: auto-merge armed by GITHUB_TOKEN (ship-auto-merge) emits no
+    # auto_merge_enabled event, and a PR armed while main is quiet would wait.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-next-queued-pr
+  cancel-in-progress: false
+
+jobs:
+  update-next:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (script only; PR content is never checked out)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/update-next-queued-pr.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Update the branch of the PR at the front of the queue
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::AUTO_UPDATE_TOKEN is not set; see docs/RELEASE_PROCESS.md"
+            exit 1
+          fi
+
+          bash scripts/update-next-queued-pr.sh "$REPO"
