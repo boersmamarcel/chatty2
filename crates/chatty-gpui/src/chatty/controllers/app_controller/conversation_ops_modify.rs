@@ -256,15 +256,13 @@ impl ChattyApp {
                         // The rebuilt agent keeps raising its requests on this
                         // conversation's own session stores (AGE-272).
                         let ctx = AgentBuildContext {
-                                mcp_tools,
+                            mcp_tools,
+                            shell_session,
+                            theme_colors,
+                            conversation_id: Some(conv_id.clone()),
+                            ..AgentBuildContext::from_services(AgentServices {
                                 exec_settings,
-                                pending_approvals: None,
-                                pending_clarifications: None,
-                                pending_write_approvals: None,
-                                pending_artifacts: None,
-                                shell_session,
                                 user_secrets,
-                                theme_colors,
                                 memory_service,
                                 skill_service: Some(skill_service),
                                 search_settings,
@@ -272,7 +270,7 @@ impl ChattyApp {
                                 module_agents,
                                 gateway_port,
                                 remote_agents,
-                                conversation_id: Some(conv_id.clone()),
+                            })
                         };
                         let ctx = cx
                             .update(|cx| {

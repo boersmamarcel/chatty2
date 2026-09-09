@@ -383,23 +383,23 @@ impl ChattyApp {
                             &provider_config,
                             AgentBuildContext {
                                 mcp_tools,
-                                exec_settings,
-                                pending_approvals: None, // the session's (AGE-272)
-                                pending_clarifications: None,
-                                pending_write_approvals: None,
-                                pending_artifacts: None, // set inside Conversation::new
-                                shell_session: None,
-                            user_secrets,
-                            theme_colors,
-                            memory_service,
-                            skill_service: Some(skill_service),
-                            search_settings,
-                            embedding_service,
-                            module_agents,
-                            gateway_port,
-                            remote_agents,
-                            conversation_id: Some(conv_id.clone()),
-                        },
+                                theme_colors,
+                                conversation_id: Some(conv_id.clone()),
+                                // `pending_*` are the session's (AGE-272) and
+                                // `pending_artifacts` is set inside
+                                // `Conversation::new`.
+                                ..AgentBuildContext::from_services(AgentServices {
+                                    exec_settings,
+                                    user_secrets,
+                                    memory_service,
+                                    skill_service: Some(skill_service),
+                                    search_settings,
+                                    embedding_service,
+                                    module_agents,
+                                    gateway_port,
+                                    remote_agents,
+                                })
+                            },
                     )
                     .await?;
                     if let Some(conversation) = session.conversation_mut() {
@@ -541,23 +541,20 @@ impl ChattyApp {
                         match Self::restore_conversation_from_data(
                             &mut session, data, &models, &providers, &mcp_service,
                             AgentBuildContext {
-                                mcp_tools: None,
-                                exec_settings: Some(exec_settings.clone()),
-                                pending_approvals: None, // the session's (AGE-272)
-                                pending_clarifications: None,
-                                pending_write_approvals: None,
-                                pending_artifacts: None,
-                                shell_session: None,
-                                user_secrets,
                                 theme_colors,
-                                memory_service,
-                                skill_service: Some(skill_service),
-                                search_settings,
-                                embedding_service,
-                                module_agents,
-                                gateway_port,
-                                remote_agents,
-                                    conversation_id: Some(conv_id.clone()),
+                                conversation_id: Some(conv_id.clone()),
+                                // `pending_*` are the session's (AGE-272).
+                                ..AgentBuildContext::from_services(AgentServices {
+                                    exec_settings: Some(exec_settings.clone()),
+                                    user_secrets,
+                                    memory_service,
+                                    skill_service: Some(skill_service),
+                                    search_settings,
+                                    embedding_service,
+                                    module_agents,
+                                    gateway_port,
+                                    remote_agents,
+                                })
                             },
                         )
                         .await

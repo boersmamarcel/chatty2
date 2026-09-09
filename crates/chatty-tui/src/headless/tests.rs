@@ -198,7 +198,7 @@ fn extracts_known_paths_for_finalization() {
 mod runner {
     use super::*;
     use crate::engine::{ChatEngineConfig, MessageRole};
-    use chatty_core::factories::agent_factory::AgentBuildContext;
+    use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
     use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
     use chatty_core::settings::models::models_store::{ModelConfig, ModelsModel};
     use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -248,25 +248,7 @@ mod runner {
                 "New Chat".to_string(),
                 &model_config,
                 &provider_config,
-                AgentBuildContext {
-                    mcp_tools: None,
-                    exec_settings: None,
-                    pending_approvals: None,
-                    pending_clarifications: None,
-                    pending_write_approvals: None,
-                    pending_artifacts: None,
-                    shell_session: None,
-                    user_secrets: Vec::new(),
-                    theme_colors: None,
-                    memory_service: None,
-                    skill_service: None,
-                    search_settings: None,
-                    embedding_service: None,
-                    module_agents: Vec::new(),
-                    gateway_port: None,
-                    remote_agents: Vec::new(),
-                    conversation_id: None,
-                },
+                AgentBuildContext::from_services(AgentServices::default()),
             )
             .await
             .expect("conversation should build without network access");

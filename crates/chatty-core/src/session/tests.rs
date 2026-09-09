@@ -14,7 +14,7 @@ use rig_core::completion::Message;
 use rig_core::message::UserContent;
 
 use super::*;
-use crate::factories::agent_factory::AgentBuildContext;
+use crate::factories::agent_factory::{AgentBuildContext, AgentServices};
 use crate::services::RecoveryAction;
 use crate::services::llm_service::StreamChunk;
 use crate::services::{Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios};
@@ -67,23 +67,10 @@ async fn session_with_conversation() -> AgentSession {
         &model_config,
         &provider_config,
         AgentBuildContext {
-            mcp_tools: None,
-            exec_settings: None,
             pending_approvals: Some(handles.pending_approvals),
             pending_clarifications: Some(handles.pending_clarifications),
             pending_write_approvals: Some(handles.pending_write_approvals),
-            pending_artifacts: None,
-            shell_session: None,
-            user_secrets: Vec::new(),
-            theme_colors: None,
-            memory_service: None,
-            skill_service: None,
-            search_settings: None,
-            embedding_service: None,
-            module_agents: Vec::new(),
-            gateway_port: None,
-            remote_agents: Vec::new(),
-            conversation_id: None,
+            ..AgentBuildContext::from_services(AgentServices::default())
         },
     )
     .await

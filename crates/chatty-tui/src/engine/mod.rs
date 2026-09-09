@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
-use chatty_core::factories::agent_factory::AgentBuildContext;
+use chatty_core::factories::agent_factory::{
+    AgentBuildContext, AgentServices, gated_exec_settings,
+};
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
@@ -474,16 +476,19 @@ impl ChatEngine {
     /// for the background path, must happen inside the spawned task rather
     /// than while still borrowing `&self` (AGE-224).
     fn build_agent_context(&self) -> AgentBuildContext {
-        build_agent_context(AgentContextInputs {
-            execution_settings: &self.execution_settings,
-            module_settings: &self.module_settings,
-            user_secrets: &self.user_secrets,
-            memory_service: &self.memory_service,
-            skill_service: &self.skill_service,
-            search_settings: &self.search_settings,
-            embedding_service: &self.embedding_service,
-            remote_agents: &self.remote_agents,
-            module_agents: &self.module_agents,
+        AgentBuildContext::from_services(AgentServices {
+            exec_settings: gated_exec_settings(&self.execution_settings),
+            user_secrets: self.user_secrets.clone(),
+            memory_service: self.memory_service.clone(),
+            skill_service: Some(self.skill_service.clone()),
+            search_settings: self.search_settings.clone(),
+            embedding_service: self.embedding_service.clone(),
+            module_agents: self.module_agents.clone(),
+            gateway_port: self
+                .module_settings
+                .enabled
+                .then_some(self.module_settings.gateway_port),
+            remote_agents: self.remote_agents.clone(),
         })
     }
 
@@ -1126,66 +1131,6 @@ pub fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
         .or_else(|| Some("HEAD (detached)".to_string()))
 }
 
-/// Whether any execution-related setting is enabled — gates whether the
-/// built agent gets `exec_settings` (and thus execution tools) at all.
-fn any_tool_enabled(es: &ExecutionSettingsModel) -> bool {
-    es.enabled
-        || es.filesystem_read_enabled
-        || es.filesystem_write_enabled
-        || es.fetch_enabled
-        || es.git_enabled
-        || es.execute_code_enabled
-}
-
-/// What building an agent needs from the owner, borrowed. The interactive
-/// engine and the headless runner hold the same services (AGE-196), so the
-/// `AgentBuildContext` is assembled in one place from either.
-pub(crate) struct AgentContextInputs<'a> {
-    pub execution_settings: &'a ExecutionSettingsModel,
-    pub module_settings: &'a ModuleSettingsModel,
-    pub user_secrets: &'a [(String, String)],
-    pub memory_service: &'a Option<MemoryService>,
-    pub skill_service: &'a chatty_core::services::SkillService,
-    pub search_settings:
-        &'a Option<chatty_core::settings::models::search_settings::SearchSettingsModel>,
-    pub embedding_service: &'a Option<chatty_core::services::EmbeddingService>,
-    pub remote_agents: &'a [A2aAgentConfig],
-    pub module_agents: &'a [LocalModuleAgentSummary],
-}
-
-/// The services part of the `AgentBuildContext` for a TUI-hosted agent. The
-/// session fills in its stores (`AgentSession::build_context`); `mcp_tools`
-/// is left `None`, since gathering it is async.
-pub(crate) fn build_agent_context(inputs: AgentContextInputs<'_>) -> AgentBuildContext {
-    let exec_settings = if any_tool_enabled(inputs.execution_settings) {
-        Some(inputs.execution_settings.clone())
-    } else {
-        None
-    };
-    AgentBuildContext {
-        mcp_tools: None,
-        exec_settings,
-        pending_approvals: None,
-        pending_clarifications: None,
-        pending_write_approvals: None,
-        pending_artifacts: None,
-        shell_session: None,
-        user_secrets: inputs.user_secrets.to_vec(),
-        theme_colors: None, // no theme colors in TUI
-        memory_service: inputs.memory_service.clone(),
-        skill_service: Some(inputs.skill_service.clone()),
-        search_settings: inputs.search_settings.clone(),
-        embedding_service: inputs.embedding_service.clone(),
-        module_agents: inputs.module_agents.to_vec(),
-        gateway_port: inputs
-            .module_settings
-            .enabled
-            .then_some(inputs.module_settings.gateway_port),
-        remote_agents: inputs.remote_agents.to_vec(),
-        conversation_id: None, // browser feature isn't enabled in the TUI
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,25 +1161,7 @@ mod tests {
             "New Chat".to_string(),
             &model_config,
             &provider_config,
-            AgentBuildContext {
-                mcp_tools: None,
-                exec_settings: None,
-                pending_approvals: None,
-                pending_clarifications: None,
-                pending_write_approvals: None,
-                pending_artifacts: None,
-                shell_session: None,
-                user_secrets: Vec::new(),
-                theme_colors: None,
-                memory_service: None,
-                skill_service: None,
-                search_settings: None,
-                embedding_service: None,
-                module_agents: Vec::new(),
-                gateway_port: None,
-                remote_agents: Vec::new(),
-                conversation_id: None,
-            },
+            AgentBuildContext::from_services(AgentServices::default()),
         )
         .await
         .expect("conversation should build without network access")

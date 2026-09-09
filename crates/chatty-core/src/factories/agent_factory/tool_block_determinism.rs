@@ -14,7 +14,7 @@
 
 use std::process::Command;
 
-use super::{AgentBuildContext, AgentClient};
+use super::{AgentBuildContext, AgentClient, AgentServices};
 use crate::models::clarification_store::ClarificationStore;
 use crate::models::execution_approval_store::ExecutionApprovalStore;
 use crate::models::write_approval_store::WriteApprovalStore;
@@ -82,23 +82,13 @@ fn fixture_provider_config() -> ProviderConfig {
 
 fn fixture_build_context() -> AgentBuildContext {
     AgentBuildContext {
-        mcp_tools: None,
-        exec_settings: Some(fixture_execution_settings()),
         pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
         pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
         pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),
-        pending_artifacts: None,
-        shell_session: None,
-        user_secrets: Vec::new(),
-        theme_colors: None,
-        memory_service: None,
-        skill_service: None,
-        search_settings: None,
-        embedding_service: None,
-        module_agents: Vec::new(),
-        gateway_port: None,
-        remote_agents: Vec::new(),
-        conversation_id: None,
+        ..AgentBuildContext::from_services(AgentServices {
+            exec_settings: Some(fixture_execution_settings()),
+            ..AgentServices::default()
+        })
     }
 }
 
