@@ -96,6 +96,7 @@ make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
 make docs-check-leakage      # user guides must not carry contributor material
 make docs-check-reference    # reference tables match tool_registry.rs and friends
 make docs-check       # all of the docs checks above
+make animations       # re-record README/docs GIFs (scripts/animations/README.md)
 make ci               # everything the Rust CI path runs, locally, in order
 ```
 
@@ -115,6 +116,15 @@ intermittently SIGTRAP under parallel execution on GitHub-hosted runners.
 **If you see a SIGTRAP in CI but tests pass locally, run with
 `--test-threads=1` locally to reproduce.** Root cause is unknown; the
 workaround is documented in `.github/workflows/ci.yml`.
+
+### Disk footgun
+
+A full `cargo test --all-features` needs about 16 GiB of `target/` even with
+the workspace's trimmed dependency debuginfo (`[profile.dev.package.*]` in
+the root `Cargo.toml`); at Cargo's defaults it needs 28+ GiB and can run a
+small disk out of space mid-link. See
+[`docs/build-disk-usage.md`](docs/build-disk-usage.md) before building on a
+constrained sandbox or CI runner.
 
 ### WASM module prebuild
 

@@ -45,9 +45,13 @@ pub mod sandbox;
 pub mod services;
 pub mod session;
 pub mod settings;
+pub mod settings_snapshot;
 pub mod slash_commands;
 pub mod token_budget;
 pub mod tools;
+
+// Re-export the settings snapshot/delta types (AGE-283).
+pub use settings_snapshot::{SettingsDelta, SettingsSnapshot};
 
 // ── GPUI integration (optional feature) ──────────────────────────────────────
 #[cfg(feature = "gpui-globals")]

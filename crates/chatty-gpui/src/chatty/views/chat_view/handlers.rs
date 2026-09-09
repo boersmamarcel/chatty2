@@ -17,7 +17,7 @@
 //!
 //! - Streaming text deltas — see `append_assistant_text` in `mod.rs`.
 //! - History loading / sub-agent progress — see `history.rs` and
-//!   `sub_agent.rs`.
+//!   `delegation.rs`.
 //! - The `Render` path — `mod.rs`.
 
 use gpui::*;
@@ -137,7 +137,7 @@ impl ChatView {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
         let Some(parent_idx) = self.parent_streaming_assistant_index().or_else(|| {
-            if self.sub_agent_progress_msg_idx.is_some() {
+            if self.delegation_progress_msg_idx.is_some() {
                 self.start_assistant_message(cx);
                 Some(self.messages.len() - 1)
             } else {

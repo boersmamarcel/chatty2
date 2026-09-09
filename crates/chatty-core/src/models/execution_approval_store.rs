@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::{mpsc, oneshot};
 
 use parking_lot::Mutex;
@@ -27,31 +26,18 @@ pub struct ApprovalResolution {
     pub approved: bool,
 }
 
-/// Request for user approval to execute a command
-pub struct ExecutionApprovalRequest {
-    /// Unique ID for tracking this request
-    #[allow(dead_code)]
-    pub id: String,
-    /// Command to be executed
-    #[allow(dead_code)]
-    pub command: String,
-    /// Whether execution will be sandboxed
-    #[allow(dead_code)]
-    pub is_sandboxed: bool,
-    /// When the request was created (for timeout tracking)
-    #[allow(dead_code)]
-    pub created_at: SystemTime,
-    /// Channel to send approval decision back to waiting execution
-    pub responder: oneshot::Sender<ApprovalDecision>,
-}
-
 /// Inner state behind `PendingApprovals`: the in-flight requests plus the
 /// per-turn notifier the frontend installs (AGE-246 / D7) so a tool can
 /// announce a new request through the store it was handed, rather than a
 /// process-wide global that the next turn — on any conversation — would
 /// silently overwrite.
+///
+/// Each pending request is just the channel to send its decision back to the
+/// waiting execution; the id/command/is_sandboxed metadata a UI needs is
+/// already carried separately by `ApprovalNotification`, sent at the same
+/// time a request is inserted here.
 pub struct PendingApprovalsState {
-    requests: HashMap<String, ExecutionApprovalRequest>,
+    requests: HashMap<String, oneshot::Sender<ApprovalDecision>>,
     notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
 }
 
@@ -93,17 +79,9 @@ pub async fn request_execution_approval(
     let (tx, rx) = oneshot::channel();
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    let request = ExecutionApprovalRequest {
-        id: request_id.clone(),
-        command: label.to_string(),
-        is_sandboxed,
-        created_at: SystemTime::now(),
-        responder: tx,
-    };
-
     {
         let mut state = pending.lock();
-        state.requests.insert(request_id.clone(), request);
+        state.requests.insert(request_id.clone(), tx);
         match &state.notifier {
             Some(notifier) => {
                 if let Err(e) = notifier.send(ApprovalNotification {
@@ -168,9 +146,9 @@ impl ExecutionApprovalStore {
     /// This is called from GPUI context when user clicks approve/deny button
     pub fn resolve(&self, id: &str, decision: ApprovalDecision) -> bool {
         let mut state = self.pending_requests.lock();
-        if let Some(request) = state.requests.remove(id) {
+        if let Some(responder) = state.requests.remove(id) {
             let approved = matches!(decision, ApprovalDecision::Approved);
-            let _ = request.responder.send(decision);
+            let _ = responder.send(decision);
 
             // Notify stream that approval was resolved
             if let Some(tx) = &self.resolution_notifier {

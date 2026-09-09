@@ -514,12 +514,14 @@ impl ChatEngine {
 
         let label = format!("[remote agent: {}] {}", config.name, prompt);
         self.add_system_message(label);
-        self.transcript.mark_last_as_sub_agent_row();
+        self.transcript.mark_last_as_delegation_row();
 
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            let client = chatty_core::services::A2aClient::new();
+            // The delegation client: a remote agent's answer takes as long as
+            // it takes, and only silence is a failure (AGE-319).
+            let client = chatty_core::services::A2aClient::for_delegation();
             let stream_result = client.send_message_stream(&config, &prompt).await;
 
             let message = match stream_result {
@@ -544,7 +546,8 @@ impl ChatEngine {
                                 } else if state == "working"
                                     && let Some(ref msg) = message
                                 {
-                                    let _ = event_tx.send(AppEvent::SubAgentProgress(msg.clone()));
+                                    let _ =
+                                        event_tx.send(AppEvent::DelegationProgress(msg.clone()));
                                 }
                             }
                             Ok(
@@ -576,7 +579,7 @@ impl ChatEngine {
                 Err(e) => format!("\u{26a0}\u{fe0f} A2A error: {e:#}"),
             };
 
-            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver A2A agent completion event");
             }
         });
@@ -596,7 +599,7 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         self.add_system_message("Launching local sub-agent...".to_string());
-        self.transcript.mark_last_as_sub_agent_row();
+        self.transcript.mark_last_as_delegation_row();
 
         tokio::task::spawn_blocking(move || {
             let message = match super::helpers::run_sub_agent_process(
@@ -617,7 +620,7 @@ impl ChatEngine {
                 Err(e) => format!("Sub-agent failed: {}", e),
             };
 
-            if let Err(e) = event_tx.send(AppEvent::SubAgentFinished(message)) {
+            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver sub-agent completion event");
             }
         });

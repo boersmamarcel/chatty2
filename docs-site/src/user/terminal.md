@@ -55,8 +55,15 @@ The status bar always shows the app version, the working directory and the git b
 | `PageUp` / `PageDown`, `Shift+↑/↓`, mouse wheel | Scroll |
 | `End` | Jump to the bottom and resume auto-scroll |
 | `y` / `n` | Approve or deny a tool prompt |
+| `1`-`9` | Pick an option when the agent asks a clarifying question (`ask_user`) |
+| `t` | Type a custom answer instead of picking an option |
 | `Ctrl+C` | Stop streaming, or quit when idle |
 | `Ctrl+Q` | Quit immediately |
+
+A pending clarifying question replaces the input row and takes over the
+keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
+answered one at a time; press `Esc` while typing a custom answer to go back
+to the options.
 
 The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 

@@ -11,7 +11,7 @@ use super::code_block_component::CodeBlockComponent;
 use super::mermaid_component::MermaidComponent;
 use super::message_math_render::render_math_segments;
 use super::message_parsing::{build_cached_parse_result, build_streaming_parse_result};
-use super::message_types::{AssistantMessage, SystemTrace};
+use super::message_types::SystemTrace;
 use super::parsed_cache::{
     CachedContentSegment, CachedMarkdownSegment, CachedParseResult, ContentCacheKey,
     ParsedContentCache, StreamingParseState,
@@ -43,35 +43,6 @@ pub struct DisplayMessage {
     pub feedback: Option<MessageFeedback>,
     // Index into the conversation's history (parallel arrays) for this message
     pub history_index: Option<usize>,
-}
-
-impl DisplayMessage {
-    /// Create an assistant display message.
-    ///
-    /// Kept as a convenience constructor for future callers (e.g., tests or
-    /// replay/export paths). Current production code builds `DisplayMessage`
-    /// inline during stream processing.
-    #[allow(dead_code)]
-    pub fn from_assistant_message(assistant_msg: &AssistantMessage, cx: &mut App) -> Self {
-        // Only create a trace view if the trace exists AND has items
-        let trace_view = assistant_msg
-            .system_trace
-            .as_ref()
-            .filter(|trace| trace.has_items())
-            .map(|trace| cx.new(|_cx| SystemTraceView::new(trace.clone())));
-
-        Self {
-            role: MessageRole::Assistant,
-            content: assistant_msg.text.clone(),
-            is_streaming: assistant_msg.is_streaming,
-            system_trace_view: trace_view,
-            live_trace: None,
-            is_markdown: true,
-            attachments: Vec::new(),
-            feedback: None,
-            history_index: None,
-        }
-    }
 }
 
 /// Build GPUI elements from pre-parsed cached content.

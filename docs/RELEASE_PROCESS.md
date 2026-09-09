@@ -58,7 +58,21 @@ For low-risk work filed in Linear project **Chatty auto-ship** or **Chatty tech 
    the actor is `github-actions[bot]`. Later `synchronize` events from other same-repo
    actors do not re-arm; if auto-merge is already on, the prepare-release waiter still
    starts.
-3. When required checks are green, auto-merge squash-merges to `main`.
+3. When required checks are green, auto-merge squash-merges to `main`. The ruleset
+   requires the branch to be current with `main`; `update-next-queued-pr.yml` presses
+   "update branch" for the oldest auto-merge-armed PR whenever `main` moves (and every
+   30 min as a fallback), so PRs land one at a time without a human. It needs the
+   `AUTO_UPDATE_TOKEN` secret: a fine-grained PAT scoped to this repo with contents +
+   pull-requests write. `GITHUB_TOKEN` cannot be used because its branch updates do
+   not trigger CI.
+   A PR in that queue is also *in care* of `pr-nurse.yml` (hourly, after any failed CI
+   run, or on dispatch): `scripts/pr-nurse-triage.sh` picks one PR that is conflicted
+   with `main` or has a red required check; a Sonnet session resolves the conflict or
+   fixes the check without committing; the workflow validates the tree (no conflict
+   markers, none of `.github/workflows/`, `RESERVED.md`, `scripts/check-*.sh`,
+   `.cursor/rules/` touched) and pushes a `nurse:` commit with the same token. After
+   two nurse commits on one PR it disarms auto-merge and labels `blocked:human`.
+   Arming auto-merge is the only way into care; the nurse never merges here.
 4. If Actions performed the squash (`GITHUB_TOKEN` does not emit
    `pull_request.closed`), `ship-auto-merge` dispatches `prepare-release`
    (`bump=patch`). Owner merges still use the `pull_request` closed path.
