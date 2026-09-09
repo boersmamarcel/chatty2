@@ -286,10 +286,13 @@ A2A caller. Participants are looked up **first**, so a live process shadows a
 module of the same name.
 
 The socket carries newline-delimited JSON frames (`register`, `task`,
-`status`, `artifact`, `cancel`), which the gateway maps onto the same A2A
+`status`, `artifact`, `cancel`, `input`), which the gateway maps onto the same A2A
 status and artifact updates a module produces. The connection is the liveness
 signal: closing it deregisters the participant and fails every task it still
-owed. The frames and the mapping are documented in
+owed. A worker's `ask_user` parks its task in `input-required` with the
+question attached; the caller answers with `message/send` on the same task id
+and the broker hands the answer down as an `input` frame (AGE-306). The frames
+and the mapping are documented in
 [`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
 
 Opening the socket is opt-in (`ProtocolGateway::with_participant_socket`) and
@@ -386,6 +389,26 @@ beside the broker's own half of the protocol, not in this crate, because a micro
 parent's tool-call trace carries every tool call the child reported, for every
 scripted scenario — how ADR-0011's first kill criterion is checked in CI rather than
 by inspection.
+
+A worker's `ask_user` does not end at the worker. `invoke_agent` re-asks the
+question on its own agent's clarification store: with a human behind it that is
+the ordinary `ask_user` popover, and in a worker it parks that worker's own task
+in `input-required` toward *its* caller, so a question climbs the chain until it
+reaches someone who can answer and the answer descends the same hops
+(ADR-0011 C7). `crates/chatty-tui/src/participant/input_required_chain.rs`
+runs a parent → child → grandchild chain over a real socket and asserts the
+grandchild's question reaches the parent's popover and its answer comes back.
+
+That chain is carried by `message/stream`. A caller that started the task with
+plain `message/send` has a single reply object with no room for a non-terminal
+update, so a worker parking under it is asking someone who cannot hear. The
+broker ends such a task immediately and quotes the question in the failure,
+rather than letting it wait out the worker's clarification timeout (AGE-321) —
+the caller learns what was wanted and can ask again over `message/stream`.
+Holding the task open for `tasks/get` polling would make non-streaming callers
+first-class and is the A2A-shaped answer; it was weighed and not taken, because
+it makes the broker stateful for open tasks and every delegation path here
+streams.
 
 Each worker runs in its own `git worktree` under the conversation's workspace
 (ADR-0012), through `chatty_core::services::worker_tree`.

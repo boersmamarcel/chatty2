@@ -5,8 +5,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
+use crate::models::clarification_store::{PendingClarifications, request_clarification};
 use crate::models::message_types::ToolSource;
-use crate::services::a2a_client::A2aClient;
+use crate::services::a2a_client::{A2aClarificationRequest, A2aClient, A2aStreamEvent};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::agent_origin::AgentOrigin;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
@@ -96,6 +97,14 @@ pub struct InvokeAgentTool {
     /// Whether to say something before handing a prompt to an agent outside
     /// this user's fleet (ADR-0011 C5).
     warn_outside_fleet: bool,
+    /// This agent's own clarification store: where a delegated agent's
+    /// question is re-asked (AGE-306). `None` means nobody here can answer,
+    /// and a question ends the delegation.
+    ///
+    /// Escalating to a human is the only policy (ADR-0011 C7). Whether a
+    /// leader may instead answer for its worker is an open question on the
+    /// ADR; nothing selects such a policy today.
+    clarifications: Option<PendingClarifications>,
 }
 
 impl InvokeAgentTool {
@@ -109,11 +118,21 @@ impl InvokeAgentTool {
             remote_agents,
             module_agents,
             gateway_base_url,
-            client: A2aClient::with_timeout(std::time::Duration::from_secs(300)),
+            client: A2aClient::for_delegation(),
             progress_slot: Arc::new(Mutex::new(None)),
             local_agent: None,
             warn_outside_fleet: false,
+            clarifications: None,
         }
+    }
+
+    /// Re-ask a delegated agent's questions on this agent's own `ask_user`
+    /// surface (AGE-306). The same store the agent's `AskUserTool` holds,
+    /// so a question from below is indistinguishable, to whoever answers,
+    /// from one this agent asked itself.
+    pub fn with_clarifications(mut self, pending: PendingClarifications) -> Self {
+        self.clarifications = Some(pending);
+        self
     }
 
     /// Offer the broker's local-worker agent (ADR-0011 C2), which spawns a
@@ -367,9 +386,11 @@ impl InvokeAgentTool {
 
         while let Some(event) = stream.next().await {
             match event {
-                Ok(crate::services::a2a_client::A2aStreamEvent::StatusUpdate {
+                Ok(A2aStreamEvent::StatusUpdate {
+                    task_id,
                     state,
                     message,
+                    metadata,
                     ..
                 }) => {
                     if state == "failed" {
@@ -379,12 +400,23 @@ impl InvokeAgentTool {
                         && let Some(ref msg) = message
                     {
                         self.send_progress(InvokeAgentProgress::Text(msg.clone()));
+                    } else if state == "input-required"
+                        && let Some(request) =
+                            A2aClarificationRequest::from_status_metadata(metadata.as_ref())
+                        && let Err(e) = self.answer_input_required(config, &task_id, request).await
+                    {
+                        // Dropping the stream on the way out cancels the
+                        // parked task, which reaps the worker.
+                        success = false;
+                        error_msg = Some(e);
+                        break;
                     }
-                    // "completed" — just let the stream end naturally
+                    // "completed" — just let the stream end naturally. An
+                    // "input-required" without a request is an approval
+                    // the worker is waiting on, which the worker settles
+                    // itself; nothing to do here.
                 }
-                Ok(crate::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
-                    text, ..
-                }) => {
+                Ok(A2aStreamEvent::ArtifactUpdate { text, .. }) => {
                     if !text.is_empty() {
                         self.send_progress(InvokeAgentProgress::Text(text.clone()));
                         response.push_str(&text);
@@ -442,6 +474,58 @@ impl InvokeAgentTool {
             },
             success: true,
         })
+    }
+}
+
+impl InvokeAgentTool {
+    /// The delegated task asked a question: get it answered and send the
+    /// answer back down on the same task.
+    ///
+    /// `Err` is the reason the delegation cannot continue, worded for the
+    /// model.
+    async fn answer_input_required(
+        &self,
+        config: &A2aAgentConfig,
+        task_id: &str,
+        request: A2aClarificationRequest,
+    ) -> Result<(), String> {
+        let Some(pending) = self.clarifications.as_ref() else {
+            return Err(format!(
+                "Agent '{}' asked a question and nobody here can answer it: {}",
+                config.name,
+                request
+                    .questions
+                    .first()
+                    .map(|q| q.question.as_str())
+                    .unwrap_or("(no question text)")
+            ));
+        };
+
+        info!(
+            agent = %config.name,
+            task = %task_id,
+            request = %request.id,
+            questions = request.questions.len(),
+            "Delegated agent asked a question; escalating"
+        );
+        let answers = request_clarification(pending, request.questions)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Agent '{}' asked a question that went unanswered: {e}",
+                    config.name
+                )
+            })?;
+
+        self.client
+            .send_task_input(config, task_id, &request.id, &answers)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Agent '{}' asked a question, but the answer could not be delivered: {e:#}",
+                    config.name
+                )
+            })
     }
 }
 

@@ -3,7 +3,8 @@
 //! Routes:
 //! - `GET  /a2a/{module}/.well-known/agent.json` — per-module agent card
 //! - `POST /a2a/{module}` — A2A JSON-RPC (`message/send`, `message/stream`,
-//!   `tasks/get`)
+//!   `tasks/get`); a `message/send` whose `message.taskId` names a task
+//!   parked in `input-required` answers it instead of starting a new one
 //! - `GET  /.well-known/agent.json` — aggregated gateway agent card
 
 use std::sync::Arc;
@@ -256,6 +257,19 @@ async fn handle_message_send(
             );
         }
     };
+
+    // A message addressed to a task the broker holds open is the answer to
+    // a question that task asked (AGE-306), not a new task. Only an id the
+    // broker minted itself can match, so a client that puts its own id on a
+    // fresh message still starts a task.
+    if let Some(task_id) = params
+        .pointer("/message/taskId")
+        .and_then(|v| v.as_str())
+        .filter(|task_id| state.participants.owns_task(task_id))
+    {
+        tracing::info!(task = task_id, "A2A: answering a parked task");
+        return a2a_participant::message_input(&state.participants, id, task_id, &params);
+    }
 
     let content = prompt_text(&params);
 
