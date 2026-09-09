@@ -96,6 +96,7 @@ make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
 make docs-check-leakage      # user guides must not carry contributor material
 make docs-check-reference    # reference tables match tool_registry.rs and friends
 make docs-check       # all of the docs checks above
+make animations       # re-record README/docs GIFs (scripts/animations/README.md)
 make ci               # everything the Rust CI path runs, locally, in order
 ```
 
