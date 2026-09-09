@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::backend::{ExecutionResult, Language, SandboxBackend, SandboxConfig};
 use super::docker::DockerSandbox;
@@ -166,8 +166,11 @@ impl SandboxManager {
                 .is_some_and(|sb| !sb.has_port_exposed(port))
         });
 
-        if needs_recreate && let Some(old) = guard.remove(language) {
-            let _ = old.destroy().await;
+        if needs_recreate
+            && let Some(old) = guard.remove(language)
+            && let Err(e) = old.destroy().await
+        {
+            warn!(?language, error = %e, "failed to destroy sandbox container being recreated");
         }
 
         if !guard.contains_key(language) {
@@ -183,14 +186,14 @@ impl SandboxManager {
         guard[language].execute(code, language).await
     }
 
-    /// Destroy all sandbox containers. Call when the conversation ends.
-    #[allow(dead_code)]
+    /// Destroy all sandbox containers now, awaiting completion.
+    ///
+    /// Dropping the manager does this automatically in the background (see
+    /// `impl Drop` below) — call this instead when a caller wants a graceful,
+    /// awaited shutdown rather than a detached best-effort task, e.g. to
+    /// surface a removal failure to the user.
     pub async fn destroy(&self) -> Result<()> {
-        let mut guard = self.sandboxes.lock().await;
-        for (_, sandbox) in guard.drain() {
-            sandbox.destroy().await?;
-        }
-        Ok(())
+        destroy_all(&self.sandboxes).await
     }
 
     /// Check if Docker is available on this system.
@@ -211,5 +214,115 @@ impl SandboxManager {
     #[allow(dead_code)]
     pub async fn is_monty_available() -> bool {
         MontySandbox::is_available(None).await.unwrap_or(false)
+    }
+}
+
+/// Drain `sandboxes` and destroy every container in it.
+async fn destroy_all(sandboxes: &Mutex<HashMap<Language, Box<dyn SandboxBackend>>>) -> Result<()> {
+    let mut guard = sandboxes.lock().await;
+    for (_, sandbox) in guard.drain() {
+        sandbox.destroy().await?;
+    }
+    Ok(())
+}
+
+impl Drop for SandboxManager {
+    /// Best-effort backstop: `destroy()` is the graceful, awaited path,
+    /// called explicitly by callers that want to know removal succeeded.
+    /// This covers everywhere else a manager's last reference simply goes
+    /// out of scope (a conversation is deleted, its agent is rebuilt on a
+    /// model switch or tool-set change, ...) so a sandbox container never
+    /// outlives every Rust-side reference to it. Runs as a detached task
+    /// since Docker removal is an async HTTP call and `Drop::drop` isn't.
+    fn drop(&mut self) {
+        let sandboxes = self.sandboxes.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            warn!("no Tokio runtime available to destroy sandbox containers on drop");
+            return;
+        };
+        handle.spawn(async move {
+            if let Err(e) = destroy_all(&sandboxes).await {
+                warn!(error = %e, "failed to destroy sandbox container on drop");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::backend::ExecutionResult;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A fake backend that just records whether `destroy()` ran, so these
+    /// tests don't need a real Docker daemon.
+    struct MockBackend {
+        destroyed: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxBackend for MockBackend {
+        async fn execute(&self, _code: &str, _language: &Language) -> Result<ExecutionResult> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        async fn destroy(self: Box<Self>) -> Result<()> {
+            self.destroyed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn has_port_exposed(&self, _port: u16) -> bool {
+            false
+        }
+
+        async fn is_available(_docker_host: Option<&str>) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn manager_with_mock(destroyed: Arc<AtomicBool>) -> SandboxManager {
+        let manager = SandboxManager::new(SandboxConfig::default());
+        manager
+            .sandboxes
+            .try_lock()
+            .expect("uncontended in test setup")
+            .insert(
+                Language::Python,
+                Box::new(MockBackend { destroyed }) as Box<dyn SandboxBackend>,
+            );
+        manager
+    }
+
+    #[tokio::test]
+    async fn explicit_destroy_awaits_completion_and_empties_the_map() {
+        let destroyed = Arc::new(AtomicBool::new(false));
+        let manager = manager_with_mock(destroyed.clone());
+
+        manager.destroy().await.expect("destroy should succeed");
+
+        assert!(destroyed.load(Ordering::SeqCst));
+        assert!(manager.sandboxes.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_manager_destroys_tracked_sandboxes() {
+        let destroyed = Arc::new(AtomicBool::new(false));
+        let manager = manager_with_mock(destroyed.clone());
+
+        drop(manager);
+
+        // Drop spawns a detached task onto the runtime; give it a chance to
+        // run before asserting.
+        for _ in 0..100 {
+            if destroyed.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        assert!(
+            destroyed.load(Ordering::SeqCst),
+            "dropping the manager should destroy its tracked sandboxes in the background"
+        );
     }
 }
