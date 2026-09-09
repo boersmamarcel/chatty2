@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use serde_json::Value;
 
+use super::origin::AgentOrigin;
 use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
 
 /// One update on an open task, as the HTTP side consumes it.
@@ -60,8 +61,19 @@ pub enum RegisterError {
     DuplicateName(String),
 }
 
+/// A registered agent as the broker serves it: what it says about itself,
+/// plus where the broker knows it came from (ADR-0011 C5).
+#[derive(Debug, Clone)]
+pub struct RegisteredAgent {
+    pub card: ParticipantCard,
+    pub origin: AgentOrigin,
+}
+
 struct Participant {
     card: ParticipantCard,
+    /// Where this registration arrived from. The participant does not get a
+    /// say — see [`AgentOrigin`].
+    origin: AgentOrigin,
     /// Frames queued for this participant's socket writer.
     outbound: mpsc::UnboundedSender<BrokerFrame>,
     /// Open tasks: id → where this task's updates go.
@@ -88,12 +100,17 @@ impl ParticipantRegistry {
 
     /// Take a connection's card and its outbound queue.
     ///
+    /// `origin` is the transport's, not the participant's: a Unix socket on
+    /// this machine registers [`AgentOrigin::Local`], a leased microVM's vsock
+    /// registers [`AgentOrigin::Fleet`].
+    ///
     /// The name is claimed until [`deregister`](Self::deregister); a second
     /// participant offering the same one is refused rather than replacing it,
     /// because replacing would silently strand the first one's open tasks.
     pub fn register(
         &self,
         card: ParticipantCard,
+        origin: AgentOrigin,
         outbound: mpsc::UnboundedSender<BrokerFrame>,
     ) -> Result<String, RegisterError> {
         let name = card.name.trim().to_string();
@@ -112,13 +129,14 @@ impl ParticipantRegistry {
                     name: name.clone(),
                     ..card
                 },
+                origin,
                 outbound,
                 tasks: HashMap::new(),
             },
         );
         drop(inner);
 
-        info!(participant = %name, "Local participant registered");
+        info!(participant = %name, %origin, "Participant registered");
         Ok(name)
     }
 
@@ -160,16 +178,24 @@ impl ParticipantRegistry {
         self.lock().participants.get(name).map(|p| p.card.clone())
     }
 
-    /// Every card, in [`names`](Self::names) order.
-    pub fn cards(&self) -> Vec<ParticipantCard> {
+    /// Where `name` came from, if it is registered.
+    pub fn origin(&self, name: &str) -> Option<AgentOrigin> {
+        self.lock().participants.get(name).map(|p| p.origin)
+    }
+
+    /// Every registered agent, in [`names`](Self::names) order.
+    pub fn agents(&self) -> Vec<RegisteredAgent> {
         let inner = self.lock();
-        let mut cards: Vec<ParticipantCard> = inner
+        let mut agents: Vec<RegisteredAgent> = inner
             .participants
             .values()
-            .map(|p| p.card.clone())
+            .map(|p| RegisteredAgent {
+                card: p.card.clone(),
+                origin: p.origin,
+            })
             .collect();
-        cards.sort_by(|a, b| a.name.cmp(&b.name));
-        cards
+        agents.sort_by(|a, b| a.card.name.cmp(&b.card.name));
+        agents
     }
 
     /// Hand `text` to `name` as a new task.
@@ -320,8 +346,17 @@ mod tests {
 
     /// Register `name` and keep its outbound receiver alive for the caller.
     fn register(reg: &ParticipantRegistry, name: &str) -> mpsc::UnboundedReceiver<BrokerFrame> {
+        register_from(reg, name, AgentOrigin::Local)
+    }
+
+    fn register_from(
+        reg: &ParticipantRegistry,
+        name: &str,
+        origin: AgentOrigin,
+    ) -> mpsc::UnboundedReceiver<BrokerFrame> {
         let (tx, rx) = mpsc::unbounded_channel();
-        reg.register(card(name), tx).expect("registration succeeds");
+        reg.register(card(name), origin, tx)
+            .expect("registration succeeds");
         rx
     }
 
@@ -344,7 +379,8 @@ mod tests {
         let reg = ParticipantRegistry::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         assert_eq!(
-            reg.register(card("   "), tx).unwrap_err(),
+            reg.register(card("   "), AgentOrigin::Local, tx)
+                .unwrap_err(),
             RegisterError::MissingName
         );
     }
@@ -356,7 +392,8 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
 
         assert_eq!(
-            reg.register(card("worker-1"), tx).unwrap_err(),
+            reg.register(card("worker-1"), AgentOrigin::Local, tx)
+                .unwrap_err(),
             RegisterError::DuplicateName("worker-1".into())
         );
         // The first participant still owns the name and its queue.
@@ -510,11 +547,42 @@ mod tests {
     }
 
     #[test]
-    fn cards_are_listed_in_name_order() {
+    fn agents_are_listed_in_name_order() {
         let reg = ParticipantRegistry::new();
         let _b = register(&reg, "b-worker");
         let _a = register(&reg, "a-worker");
-        let names: Vec<String> = reg.cards().into_iter().map(|c| c.name).collect();
+        let names: Vec<String> = reg
+            .agents()
+            .into_iter()
+            .map(|agent| agent.card.name)
+            .collect();
         assert_eq!(names, vec!["a-worker".to_string(), "b-worker".to_string()]);
+    }
+
+    /// The origin is the transport's answer, and it survives to the listing —
+    /// a hosted worker and a local child are both addressable, and a caller
+    /// has to be able to tell them apart (ADR-0011 C5).
+    #[test]
+    fn each_registration_keeps_the_origin_its_transport_gave_it() {
+        let reg = ParticipantRegistry::new();
+        let _local = register_from(&reg, "child", AgentOrigin::Local);
+        let _hosted = register_from(&reg, "leased-vm", AgentOrigin::Fleet);
+
+        assert_eq!(reg.origin("child"), Some(AgentOrigin::Local));
+        assert_eq!(reg.origin("leased-vm"), Some(AgentOrigin::Fleet));
+        assert_eq!(reg.origin("nobody"), None);
+
+        let listed: Vec<(String, AgentOrigin)> = reg
+            .agents()
+            .into_iter()
+            .map(|agent| (agent.card.name, agent.origin))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("child".to_string(), AgentOrigin::Local),
+                ("leased-vm".to_string(), AgentOrigin::Fleet),
+            ]
+        );
     }
 }

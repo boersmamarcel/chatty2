@@ -18,6 +18,7 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::origin::AgentOrigin;
 use super::protocol::{BrokerFrame, ParticipantFrame};
 use super::registry::ParticipantRegistry;
 
@@ -145,7 +146,10 @@ fn register_from(
     let ParticipantFrame::Register { card } = frame else {
         return Err("the first frame on a participant connection must be 'register'".to_string());
     };
-    registry.register(card, outbound).map_err(|e| e.to_string())
+    // A Unix socket is this machine, by construction (ADR-0011 C5).
+    registry
+        .register(card, AgentOrigin::Local, outbound)
+        .map_err(|e| e.to_string())
 }
 
 /// Write queued broker frames as newline-delimited JSON until the queue is
