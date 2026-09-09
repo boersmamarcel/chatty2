@@ -1268,4 +1268,13 @@ fn main() {
         })
         .expect("Failed to open main window");
     });
+
+    // The window is closed and the UI is being torn down, so nothing is going
+    // to use a sandbox container again. Anything a `SandboxManager` drop
+    // queued is a detached task that dies with `_tokio_runtime` a few lines
+    // below, and containers run `sleep infinity` with no `--rm`, so they
+    // would outlive the process. Tear them down synchronously instead.
+    if let Err(e) = _tokio_runtime.block_on(chatty_core::sandbox::shutdown_all()) {
+        warn!(error = %e, "Failed to destroy sandbox containers during shutdown");
+    }
 }
