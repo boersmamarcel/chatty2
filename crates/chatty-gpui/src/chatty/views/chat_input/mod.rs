@@ -132,6 +132,11 @@ pub struct ChatInputState {
     last_at_query: Option<String>,
     /// When set, this text is written into the input on the next render frame.
     pending_at_insert: Option<String>,
+    /// When set, this text is written into the input on the next render frame,
+    /// restoring a message whose turn was dropped and rolled back
+    /// (`TurnOutcome::DroppedAndRolledBack`) so the user doesn't lose what
+    /// they typed (AGE-243).
+    pending_restore_text: Option<String>,
 }
 
 impl ChatInputState {
@@ -157,6 +162,7 @@ impl ChatInputState {
             at_menu_scroll_handle: ScrollHandle::new(),
             last_at_query: None,
             pending_at_insert: None,
+            pending_restore_text: None,
         }
     }
 
@@ -356,6 +362,14 @@ impl ChatInputState {
         self.should_clear = true;
     }
 
+    /// Restore `text` into the composer on the next render frame. Used when
+    /// `Conversation::finalize_turn` rolled back the pending user message
+    /// (`TurnOutcome::DroppedAndRolledBack`) so the user doesn't lose what
+    /// they typed (AGE-243).
+    pub fn restore_draft_text(&mut self, text: String) {
+        self.pending_restore_text = Some(text);
+    }
+
     /// Clear the input if needed
     pub fn clear_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.should_clear {
@@ -376,6 +390,13 @@ impl ChatInputState {
         }
         // Apply a pending @ mention insert.
         if let Some(text) = self.pending_at_insert.take() {
+            self.input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.insert(&text, window, cx);
+            });
+        }
+        // Apply a pending rolled-back-turn restore (AGE-243).
+        if let Some(text) = self.pending_restore_text.take() {
             self.input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.insert(&text, window, cx);

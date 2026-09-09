@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rmcp::service::ServiceExt;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -613,23 +613,6 @@ impl McpConnection {
         Ok(())
     }
 
-    /// List available tools from this MCP server, using cache when available
-    pub async fn list_tools(&mut self) -> Result<Vec<rmcp::model::Tool>> {
-        if let Some(ref cached) = self.cached_tools {
-            debug!(server = %self.name, "Returning cached tool list");
-            return Ok(cached.clone());
-        }
-
-        let response = self
-            .service
-            .list_tools(Default::default())
-            .await
-            .with_context(|| format!("Failed to list tools from server: {}", self.name))?;
-
-        self.cached_tools = Some(response.tools.clone());
-        Ok(response.tools)
-    }
-
     /// Gracefully disconnect from the server
     pub async fn disconnect(self) -> Result<()> {
         info!(server = %self.name, "Disconnecting from MCP server");
@@ -646,15 +629,21 @@ impl McpConnection {
 /// Global service for managing MCP server connections
 #[derive(Clone)]
 pub struct McpService {
-    /// Active connections keyed by server name
-    connections: Arc<RwLock<HashMap<String, McpConnection>>>,
+    /// Active connections keyed by server name.
+    ///
+    /// A `BTreeMap` so every enumeration (tool gathering, disconnect) is in
+    /// server-name order. With a `HashMap` the tool-definition block sent to
+    /// the model was ordered by the process's random hasher seed, so it
+    /// differed across restarts and invalidated the provider's prompt cache
+    /// on every launch (AGE-206).
+    connections: Arc<RwLock<BTreeMap<String, McpConnection>>>,
 }
 
 impl McpService {
     /// Create a new MCP service
     pub fn new() -> Self {
         Self {
-            connections: Arc::new(RwLock::new(HashMap::new())),
+            connections: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -790,41 +779,76 @@ impl McpService {
     /// Get all tools from all active servers, grouped by server with their ServerSinks.
     ///
     /// Tool lists are cached after the first successful fetch per server.
+    ///
+    /// Takes only a read lock to snapshot each connection's peer and cached
+    /// state, in `BTreeMap` order (AGE-206); a cold cache is listed via the
+    /// cloned peer outside any lock and the result is written back with a
+    /// brief write lock. No `.await` runs while a write guard is held
+    /// (AGE-228) — previously a cold cache serialised every concurrent
+    /// conversation open behind the network round trip.
     pub async fn get_all_tools_with_sinks(
         &self,
     ) -> Result<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {
-        let mut connections = self.connections.write().await;
-        let mut result = Vec::new();
+        let snapshot: Vec<(
+            String,
+            rmcp::service::ServerSink,
+            Option<Vec<rmcp::model::Tool>>,
+        )> = {
+            let connections = self.connections.read().await;
+            connections
+                .iter()
+                .map(|(name, connection)| {
+                    (
+                        name.clone(),
+                        connection.service.peer().clone(),
+                        connection.cached_tools.clone(),
+                    )
+                })
+                .collect()
+        };
 
-        for (name, connection) in connections.iter_mut() {
-            match connection.list_tools().await {
-                Ok(tools) => {
-                    let server_sink = connection.service.peer().clone();
-                    let tool_count = tools.len();
+        let mut result = Vec::with_capacity(snapshot.len());
 
-                    for tool in &tools {
-                        debug!(
-                            server = %name,
-                            tool_name = %tool.name,
-                            "Retrieved tool from MCP server"
-                        );
+        for (name, server_sink, cached) in snapshot {
+            let tools = match cached {
+                Some(tools) => {
+                    debug!(server = %name, "Returning cached tool list");
+                    tools
+                }
+                None => match server_sink.list_tools(Default::default()).await {
+                    Ok(response) => {
+                        let mut connections = self.connections.write().await;
+                        if let Some(connection) = connections.get_mut(&name) {
+                            connection.cached_tools = Some(response.tools.clone());
+                        }
+                        response.tools
                     }
+                    Err(e) => {
+                        error!(
+                            server = %name,
+                            error = ?e,
+                            "Failed to list tools from MCP server"
+                        );
+                        continue;
+                    }
+                },
+            };
 
-                    result.push((name.clone(), tools, server_sink));
-                    info!(
-                        server = %name,
-                        tool_count = tool_count,
-                        "Retrieved tools with ServerSink"
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        server = %name,
-                        error = ?e,
-                        "Failed to list tools from MCP server"
-                    );
-                }
+            let tool_count = tools.len();
+            for tool in &tools {
+                debug!(
+                    server = %name,
+                    tool_name = %tool.name,
+                    "Retrieved tool from MCP server"
+                );
             }
+
+            result.push((name.clone(), tools, server_sink));
+            info!(
+                server = %name,
+                tool_count = tool_count,
+                "Retrieved tools with ServerSink"
+            );
         }
 
         Ok(result)

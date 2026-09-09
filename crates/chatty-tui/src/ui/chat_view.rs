@@ -19,10 +19,10 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
 
     if !engine.is_ready {
         lines.push(Line::from(Span::styled("Initializing...", theme::muted())));
-    } else if engine.messages.is_empty() {
+    } else if engine.transcript.messages.is_empty() {
         render_welcome_state(&mut lines, engine);
     } else {
-        for msg in &engine.messages {
+        for msg in &engine.transcript.messages {
             render_message(&mut lines, msg);
             lines.push(Line::from("")); // spacing between messages
         }

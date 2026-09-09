@@ -1,0 +1,8 @@
+on_stream_started
+on_chunk(Ok(ToolCallStarted)) -> Continue
+on_chunk(Ok(ToolCallInput)) -> Continue
+on_chunk(Ok(ToolCallResult)) -> Continue
+on_chunk(Ok(Text)) -> Continue
+on_chunk(Ok(Done)) -> Break
+on_stream_ended
+=> loop returned Ok

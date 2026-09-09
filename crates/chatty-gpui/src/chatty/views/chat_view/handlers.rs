@@ -17,7 +17,7 @@
 //!
 //! - Streaming text deltas — see `append_assistant_text` in `mod.rs`.
 //! - History loading / sub-agent progress — see `history.rs` and
-//!   `sub_agent.rs`.
+//!   `delegation.rs`.
 //! - The `Render` path — `mod.rs`.
 
 use gpui::*;
@@ -137,7 +137,7 @@ impl ChatView {
         debug!(tool_id = %id, tool_name = %name, "UI: handle_tool_call_started called");
 
         let Some(parent_idx) = self.parent_streaming_assistant_index().or_else(|| {
-            if self.sub_agent_progress_msg_idx.is_some() {
+            if self.delegation_progress_msg_idx.is_some() {
                 self.start_assistant_message(cx);
                 Some(self.messages.len() - 1)
             } else {
@@ -688,35 +688,21 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Handle approval decision from floating bar
-    pub(super) fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
+    /// Handle approval decision from the floating bar, the plan strip, or the
+    /// approve/deny keyboard shortcuts. A no-op when nothing is pending.
+    pub fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
         if let Some(ref pending) = self.pending_approval {
             let id = pending.id.clone();
 
-            // Try execution approval store first (bash commands)
-            let mut resolved = false;
-            if let Some(store) = cx.try_global::<crate::chatty::models::execution_approval_store::ExecutionApprovalStore>() {
-                use crate::chatty::models::execution_approval_store::ApprovalDecision;
-                resolved = store.resolve(&id, if approved {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Denied
-                });
-            }
-
-            // If not found in execution store, try write approval store (filesystem writes)
-            if !resolved {
-                if let Some(store) = cx.try_global::<crate::chatty::models::WriteApprovalStore>() {
-                    use crate::chatty::models::write_approval_store::WriteApprovalDecision;
-                    store.resolve(
-                        &id,
-                        if approved {
-                            WriteApprovalDecision::Approved
-                        } else {
-                            WriteApprovalDecision::Denied
-                        },
-                    );
-                }
+            // The request was raised on the stores of the conversation whose
+            // agent is waiting (AGE-195), execution or write. For a
+            // conversation running online those stores are on the server, so
+            // an id no local store knows goes over the wire instead (AGE-298).
+            if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>()
+                && !store.resolve_approval(&id, approved)
+            {
+                let send = store.resolve_approval_remotely(&id, approved);
+                cx.background_spawn(send).detach();
             }
 
             // Immediately clear pending approval to hide the bar
@@ -868,14 +854,17 @@ impl ChatView {
         // the stream can push its next chunk straight away.
         self.pending_clarification = None;
 
-        match cx.try_global::<chatty_core::models::ClarificationStore>() {
+        match cx.try_global::<crate::chatty::models::ConversationsStore>() {
             Some(store) => {
-                if !store.resolve(&id, answers.clone()) {
-                    warn!(clarification_id = %id, "No pending clarification to resolve");
+                // No local store holding the id means the question came from a
+                // conversation running online; its answers go over the wire.
+                if !store.resolve_clarification(&id, answers.clone()) {
+                    let send = store.resolve_clarification_remotely(&id, answers.clone());
+                    cx.background_spawn(send).detach();
                 }
             }
             None => {
-                warn!(clarification_id = %id, "ClarificationStore global missing; answers dropped")
+                warn!(clarification_id = %id, "ConversationsStore global missing; answers dropped")
             }
         }
 

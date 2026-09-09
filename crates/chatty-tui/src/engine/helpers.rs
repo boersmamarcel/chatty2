@@ -109,10 +109,9 @@ pub(super) fn run_sub_agent_process(
         if let Some(stderr) = stderr {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                if chatty_core::tools::is_chatty_progress_line(&line) {
-                    continue;
-                }
-                let _ = event_tx.send(AppEvent::SubAgentProgress(line));
+                // Every line is the child's human-readable log now: ADR-0011's
+                // C4 removed the machine lines this used to filter out.
+                let _ = event_tx.send(AppEvent::DelegationProgress(line));
             }
         }
     });
@@ -132,6 +131,35 @@ pub(super) fn run_sub_agent_process(
             "exit code {:?}: sub-agent process failed",
             output.status.code()
         )
+    }
+}
+
+/// The transcript line for a sub-agent progress event.
+pub(crate) fn delegation_line(
+    progress: &chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+) -> String {
+    use chatty_core::models::message_types::ToolSource;
+    use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+    match progress {
+        InvokeAgentProgress::Started {
+            agent_name,
+            prompt,
+            source,
+        } => {
+            let mode = match source {
+                ToolSource::Local => "local",
+                _ => "remote",
+            };
+            format!("[{mode} agent: {agent_name}] {prompt}")
+        }
+        InvokeAgentProgress::Text(text) => text.clone(),
+        InvokeAgentProgress::Finished { success, result } => result.clone().unwrap_or_else(|| {
+            if *success {
+                "Agent completed.".to_string()
+            } else {
+                "Agent failed.".to_string()
+            }
+        }),
     }
 }
 
@@ -210,6 +238,18 @@ mod tests {
         assert_eq!(ChatEngine::parse_command("/copy"), Some(Command::Copy));
         assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
         assert_eq!(ChatEngine::parse_command("/cwd"), Some(Command::Cwd(None)));
+        assert_eq!(
+            ChatEngine::parse_command("/online"),
+            Some(Command::Online(None))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/online http://localhost:8081"),
+            Some(Command::Online(Some("http://localhost:8081".to_string())))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/online off"),
+            Some(Command::Online(Some("off".to_string())))
+        );
         assert_eq!(
             ChatEngine::parse_command("/cd ../workspace"),
             Some(Command::Cwd(Some("../workspace".to_string())))

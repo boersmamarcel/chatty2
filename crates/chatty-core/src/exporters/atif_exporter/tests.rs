@@ -7,7 +7,7 @@ use super::*;
 use crate::models::message_types::{
     SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
 };
-use crate::models::token_usage::TokenUsage;
+use crate::models::token_usage::{ApiCallUsage, TokenUsage};
 use crate::settings::models::models_store::ModelSource;
 use crate::settings::models::providers_store::ProviderType;
 use rig_core::completion::message::{AssistantContent, Text, UserContent};
@@ -41,6 +41,7 @@ fn make_conversation_data(
         updated_at: 1700000100,
         working_dir: None,
         agent_task_snapshot: None,
+        mode: None,
     }
 }
 
@@ -57,6 +58,8 @@ fn make_model_config(provider_type: ProviderType) -> ModelConfig {
         extra_params: HashMap::new(),
         cost_per_million_input_tokens: None,
         cost_per_million_output_tokens: None,
+        cost_per_million_cache_read_tokens: None,
+        cost_per_million_cache_write_tokens: None,
         supports_images: true,
         supports_pdf: true,
         supports_temperature: true,
@@ -447,6 +450,46 @@ fn token_usage_per_step() {
     assert_eq!(result["steps"][1]["metrics"]["completion_tokens"], 200);
 }
 
+/// Tool round-trips persisted with the turn (AGE-247) produce no steps of
+/// their own: the agent step derives calls and observations from the trace,
+/// and the per-turn token usage still lines up with the text answers.
+#[test]
+fn persisted_tool_round_trips_do_not_become_steps() {
+    let mut usage = ConversationTokenUsage::default();
+    usage.add_usage(TokenUsage::new(100, 200));
+
+    let history = vec![
+        user_message("Read it"),
+        Message::Assistant {
+            id: None,
+            content: vec![
+                AssistantContent::text("Let me look."),
+                AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
+            ],
+        },
+        Message::tool_result("call-1", "read_file", "contents"),
+        assistant_message("Let me look.\n\nDone"),
+    ];
+    let conv = make_conversation_data(
+        "id",
+        "m",
+        history,
+        vec![None, None, None, None],
+        usage,
+        vec![vec![], vec![], vec![], vec![]],
+        vec![None, None, None, None],
+        vec![None, None, None, None],
+        vec![],
+    );
+    let result = conversation_to_atif(&conv, None).unwrap();
+    let steps = result["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["source"], "user");
+    assert_eq!(steps[1]["source"], "agent");
+    assert_eq!(steps[1]["message"], "Let me look.\n\nDone");
+    assert_eq!(steps[1]["metrics"]["prompt_tokens"], 100);
+}
+
 #[test]
 fn final_metrics_totals() {
     let mut usage = ConversationTokenUsage::default();
@@ -478,6 +521,54 @@ fn final_metrics_totals() {
     assert_eq!(result["final_metrics"]["total_completion_tokens"], 500);
     assert_eq!(result["final_metrics"]["total_cost_usd"], 0.015);
     assert_eq!(result["final_metrics"]["total_steps"], 4);
+    assert!(
+        result["final_metrics"]["extra"].is_null(),
+        "a provider that reported no cache activity writes no cache block"
+    );
+}
+
+/// `total_prompt_tokens` folds cached tokens in, so without these the export
+/// cannot say whether a prompt was served from cache (AGE-278).
+#[test]
+fn final_metrics_carry_cache_counts_when_the_provider_reported_them() {
+    let mut usage = ConversationTokenUsage::default();
+    usage.add_usage(TokenUsage::from_calls(vec![ApiCallUsage {
+        turn: 1,
+        input_tokens: 100,
+        cache_read_tokens: 0,
+        cache_write_tokens: 900,
+        output_tokens: 10,
+    }]));
+    usage.add_usage(TokenUsage::from_calls(vec![ApiCallUsage {
+        turn: 1,
+        input_tokens: 50,
+        cache_read_tokens: 1_200,
+        cache_write_tokens: 0,
+        output_tokens: 20,
+    }]));
+
+    let conv = make_conversation_data(
+        "id",
+        "m",
+        vec![
+            user_message("Q1"),
+            assistant_message("A1"),
+            user_message("Q2"),
+            assistant_message("A2"),
+        ],
+        vec![None, None, None, None],
+        usage,
+        vec![vec![], vec![], vec![], vec![]],
+        vec![None, None, None, None],
+        vec![None, None, None, None],
+        vec![],
+    );
+    let result = conversation_to_atif(&conv, None).unwrap();
+
+    assert_eq!(result["final_metrics"]["extra"]["cache_read_tokens"], 1_200);
+    assert_eq!(result["final_metrics"]["extra"]["cache_write_tokens"], 900);
+    // 150 uncached + 1200 read + 900 written.
+    assert_eq!(result["final_metrics"]["total_prompt_tokens"], 2_250);
 }
 
 #[test]
@@ -783,6 +874,7 @@ fn malformed_token_usage_defaults_to_zero() {
         updated_at: 0,
         working_dir: None,
         agent_task_snapshot: None,
+        mode: None,
     };
     let result = conversation_to_atif(&conv, None).unwrap();
     assert_eq!(result["final_metrics"]["total_prompt_tokens"], 0);
@@ -807,6 +899,7 @@ fn malformed_message_history_returns_err() {
         updated_at: 0,
         working_dir: None,
         agent_task_snapshot: None,
+        mode: None,
     };
     assert!(conversation_to_atif(&conv, None).is_err());
 }

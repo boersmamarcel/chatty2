@@ -293,5 +293,28 @@ pub fn execution_settings_page() -> SettingPage {
                     )
                     .description("Enable network isolation in sandbox (when available)"),
                 ]),
+            SettingGroup::new()
+                .title("Developer")
+                .description("Unfinished features, off by default. Turn these on only if you are working on them.")
+                .items(vec![
+                    SettingItem::new(
+                        "Hosted Conversations",
+                        SettingField::switch(
+                            |cx: &App| {
+                                cx.global::<ExecutionSettingsModel>().hosted_conversations_enabled
+                            },
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_hosted_conversations(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Offer moving a single conversation to a server and back (sidebar \"Take online…\", \
+                         TUI /online). Incomplete: a move carries the transcript only — memory, MCP servers \
+                         and skills stay on this machine, and the server does not import history yet. \
+                         Conversations already running online keep working either way.",
+                    ),
+                ]),
         ])
 }

@@ -27,7 +27,7 @@ mode or narrow the search — **no third scripting language**.
 | IR interpreter | `chatty-flow` → sub-agent / tool registry | To build |
 | MCTS search | `chatty-optimize` (offline only) | To build |
 | Composition substrate | `sub_agent_tool`, `invoke_agent_tool`, `list_agents_tool` | **Ships** |
-| Monty code mode (future) | `sandbox/monty_bridge.rs` | Interface only; VM not wired |
+| Monty code mode (future) | `sandbox/monty.rs`, `sandbox/monty_bridge.rs` | `MontySandbox` runs stdlib Python via a `python3` subprocess under rlimits (tried before Docker); `ToolBridge` is interface only — the pause/resume tool-call loop is not wired |
 | Saved workflow | Future `FlowSettingsModel` | Gate: product integration |
 
 ```mermaid
@@ -50,7 +50,7 @@ flowchart LR
 - Discovered workflow serializes, reloads, re-executes to same score under warm cache
 
 **Stage B:** HotpotQA / DROP / HumanEval / MBPP / GSM8K / MATH — target ordering (+5.7%
-over best manual design reported in paper; do not treat as binding until Marcel posts numbers).
+over best manual design reported in paper; do not treat as binding until the human reviewer posts numbers).
 
 ## Production landing
 
@@ -72,5 +72,5 @@ over best manual design reported in paper; do not treat as binding until Marcel 
 
 ## Further reading
 
-- [crate-promises-chatty-flow](../crate-promises-chatty-flow.md)
-- [Monty sandbox](../../monty-sandbox.md)
+- [`chatty-flow` README](../../../crates/chatty-flow/README.md) — crate scope (the pre-Stage-A promise page is [archived](../../archive/research/crate-promises-chatty-flow.md))
+- [Sandbox source](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-core/src/sandbox) — `monty.rs`, `monty_bridge.rs`, `manager.rs`

@@ -4,7 +4,7 @@ pub const DEFAULT_REGISTRY_URL: &str = "http://localhost:8080";
 pub const DEFAULT_RUNNER_URL: &str = "http://localhost:8081";
 
 /// Settings for the Hive module registry connection and account.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HiveSettingsModel {
     /// Base URL of the Hive registry.
     #[serde(default = "default_registry_url")]

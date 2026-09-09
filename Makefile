@@ -14,7 +14,8 @@
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
         run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
-        docs-check-nav docs-check-frontmatter animations
+        docs-check-nav docs-check-frontmatter docs-check-leakage \
+        docs-check-reference docs-check animations
 
 help:
 	@echo "Common targets:"
@@ -37,9 +38,12 @@ help:
 	@echo "  make docs-sync     Copy repo markdown into docs-site/src"
 	@echo "  make docs          docs-gen + docs-sync + mdbook build"
 	@echo "  make docs-serve    Local mdBook preview (port 3000)"
-	@echo "  make docs-check-links  Verify markdown links (lychee; AGE-117)"
+	@echo "  make docs-check-links  Verify markdown links in sources (lychee) and on the built site"
 	@echo "  make docs-check-nav    Verify INDEX.md + SUMMARY.md completeness (AGE-116)"
 	@echo "  make docs-check-frontmatter  Validate optional doc YAML frontmatter (AGE-115)"
+	@echo "  make docs-check-leakage  User guides must not carry contributor material"
+	@echo "  make docs-check-reference  Reference tables match tool_registry.rs and friends"
+	@echo "  make docs-check    All of the docs checks above"
 	@echo "  make animations    Re-record the README/docs GIFs (scripts/animations/README.md)"
 	@echo "  make ci            Everything CI runs, in order"
 
@@ -123,12 +127,22 @@ docs-sync:
 docs: docs-gen docs-sync
 	mdbook build docs-site
 	install -m 644 docs/generated/llms.txt docs-site/book/llms.txt
+	install -m 644 docs/generated/llms-full.txt docs-site/book/llms-full.txt
 
 docs-serve: docs-gen docs-sync
 	mdbook serve docs-site --open
 
-docs-check-links:
+docs-check-links: docs
 	bash scripts/check-docs-links.sh
+	bash scripts/check-docs-site-links.sh
+
+docs-check-leakage:
+	bash scripts/check-docs-user-leakage.sh
+
+docs-check-reference:
+	bash scripts/check-docs-reference-drift.sh
+
+docs-check: docs-check-links docs-check-nav docs-check-frontmatter docs-check-leakage docs-check-reference
 
 animations:
 	bash scripts/animations/record.sh --all

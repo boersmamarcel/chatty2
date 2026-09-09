@@ -1,6 +1,16 @@
 use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, ToolResultContent, UserContent};
 use std::sync::LazyLock;
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
+
+/// Fixed token estimate substituted for one non-text content item (image,
+/// document, audio, video, or a non-text tool-result item) instead of
+/// tokenizing its base64/binary payload.
+///
+/// Base64 tokenizes slowly and its length has no relationship to what a
+/// provider actually bills for the underlying media — images are priced per
+/// pixel/tile, not per token of the encoded string (AGE-229).
+const NON_TEXT_CONTENT_TOKENS: usize = 1000;
 
 // ── Static BPE instances ──────────────────────────────────────────────────────
 // CoreBPE construction is expensive (~50 ms first call). Build once globally
@@ -101,18 +111,53 @@ impl TokenCounter {
         self.encoding.bpe().encode_with_special_tokens(text).len()
     }
 
-    /// Count the tokens in a rig `Message` by first serialising it to JSON.
+    /// Count the tokens in a rig `Message`, counting only its text content.
     ///
-    /// JSON is a good proxy for what providers actually tokenize: it captures the
-    /// role field, content-type wrapper, and message text in one pass. This
-    /// consistently over-estimates slightly compared to raw text counting, which is
-    /// the safe direction for a progress bar (avoids false "you have headroom" reads).
-    ///
-    /// Returns 0 if serialisation fails.
+    /// Walks the message's content parts instead of serialising the whole
+    /// message to JSON, so a base64 image or document payload is never
+    /// passed through the BPE encoder: each non-text part counts as a fixed
+    /// [`NON_TEXT_CONTENT_TOKENS`] instead (AGE-229). Text parts (plain
+    /// text, tool-result text, tool-call name/arguments) are counted via BPE
+    /// as before.
     pub fn count_message(&self, message: &Message) -> usize {
-        match serde_json::to_string(message) {
-            Ok(json) => self.count(&json),
-            Err(_) => 0,
+        match message {
+            Message::System { content } => self.count(content),
+            Message::User { content } => content.iter().map(|c| self.count_user_content(c)).sum(),
+            Message::Assistant { content, .. } => content
+                .iter()
+                .map(|c| self.count_assistant_content(c))
+                .sum(),
+        }
+    }
+
+    fn count_user_content(&self, content: &UserContent) -> usize {
+        match content {
+            UserContent::Text(text) => self.count(&text.text),
+            UserContent::ToolResult(tool_result) => tool_result
+                .content
+                .iter()
+                .map(|item| match item {
+                    ToolResultContent::Text(text) => self.count(&text.text),
+                    ToolResultContent::Image(_) | ToolResultContent::Json { .. } => {
+                        NON_TEXT_CONTENT_TOKENS
+                    }
+                })
+                .sum(),
+            UserContent::Image(_)
+            | UserContent::Audio(_)
+            | UserContent::Video(_)
+            | UserContent::Document(_) => NON_TEXT_CONTENT_TOKENS,
+        }
+    }
+
+    fn count_assistant_content(&self, content: &AssistantContent) -> usize {
+        match content {
+            AssistantContent::Text(text) => self.count(&text.text),
+            AssistantContent::ToolCall(tool_call) => {
+                self.count(&tool_call.function.name)
+                    + self.count(&tool_call.function.arguments.to_string())
+            }
+            AssistantContent::Reasoning(_) | AssistantContent::Image(_) => 0,
         }
     }
 
@@ -229,6 +274,70 @@ mod tests {
     fn count_history_empty_slice_is_zero() {
         let c = TokenCounter::for_model("gpt-4");
         assert_eq!(c.count_history(&[]), 0);
+    }
+
+    // ── AGE-229: non-text content counts as a fixed estimate ────────────────
+
+    #[test]
+    fn base64_image_counts_as_fixed_estimate_not_full_bpe() {
+        use rig_core::completion::message::{DocumentSourceKind, Image};
+
+        let c = TokenCounter::for_model("gpt-4");
+        let huge_base64 = "A".repeat(1_000_000); // ~1 MB base64 payload
+        let message = Message::User {
+            content: vec![UserContent::Image(Image {
+                data: DocumentSourceKind::Base64(huge_base64),
+                ..Default::default()
+            })],
+        };
+        assert_eq!(c.count_message(&message), NON_TEXT_CONTENT_TOKENS);
+    }
+
+    #[test]
+    fn tool_result_text_is_bpe_counted_but_tool_result_image_is_fixed() {
+        use rig_core::completion::message::{Image, ToolCallId, ToolResult};
+
+        let c = TokenCounter::for_model("gpt-4");
+
+        let text_result = Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::mint(),
+                provider: None,
+                name: "test_tool".to_string(),
+                content: vec![ToolResultContent::Text(
+                    rig_core::completion::message::Text::new("Hello, world!"),
+                )],
+            })],
+        };
+        assert_eq!(c.count_message(&text_result), 4);
+
+        let image_result = Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::mint(),
+                provider: None,
+                name: "test_tool".to_string(),
+                content: vec![ToolResultContent::Image(Image::default())],
+            })],
+        };
+        assert_eq!(c.count_message(&image_result), NON_TEXT_CONTENT_TOKENS);
+    }
+
+    #[test]
+    fn tool_call_name_and_arguments_are_bpe_counted() {
+        use rig_core::completion::message::{ToolCall, ToolCallId, ToolFunction};
+
+        let c = TokenCounter::for_model("gpt-4");
+        let message = Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::ToolCall(ToolCall::new(
+                ToolCallId::mint(),
+                ToolFunction::new(
+                    "run_command".to_string(),
+                    serde_json::json!({"command": "ls -la"}),
+                ),
+            ))],
+        };
+        assert!(c.count_message(&message) > 0);
     }
 
     #[test]
