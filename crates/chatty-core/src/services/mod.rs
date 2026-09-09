@@ -32,6 +32,7 @@ pub mod embedding_service;
 pub mod error_collector_layer;
 pub mod filesystem_service;
 pub mod git_service;
+pub mod github_pr_service;
 pub mod http_client;
 pub mod llm_service;
 #[cfg(feature = "math-render")]
@@ -52,10 +53,16 @@ pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
 pub mod ssrf_guard;
+/// Scripted stream fixtures for the frontends' characterization tests (AGE-191).
+/// Test-only: enable `chatty-core/test-support` from a dev-dependency.
+#[cfg(any(test, feature = "test-support"))]
+pub mod stream_fixtures;
 pub mod stream_processor;
 pub mod title_generator;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;
+/// ADR-0012 worker isolation: a `git worktree` per worker (AGE-314 / AGE-301).
+pub mod worker_tree;
 
 pub use a2a_client::{A2aClient, A2aStreamEvent};
 pub use agent_loop_guard::AgentLoopGuard;
@@ -74,12 +81,21 @@ pub use memory_query::simplify_memory_query;
 pub use memory_service::MemoryService;
 #[cfg(feature = "mermaid")]
 pub use mermaid_renderer_service::MermaidRendererService;
-pub use message_helpers::{extract_user_text, extract_user_text_lines, gather_mcp_tools};
+pub use message_helpers::{
+    exchange_count, extract_user_text, extract_user_text_lines, gather_mcp_tools,
+    is_persisted_tool_round_trip, is_tool_call_message, is_tool_message, is_tool_result_message,
+};
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;
+#[cfg(any(test, feature = "test-support"))]
+pub use stream_fixtures::{
+    Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
+};
 pub use stream_processor::{
-    ChunkAction, STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE, StreamChunkHandler,
-    install_progress_channel, run_stream_loop,
+    ChunkAction, FollowUpReason, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS,
+    HEADLESS_TRANSPORT_RETRY_ATTEMPTS, RecoveryAction, STALL_TICK, STALL_TIMEOUT,
+    STALLED_STREAM_MESSAGE, StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface,
+    decide_recovery, follow_up_requires_cancel, install_progress_channel, run_stream_loop,
 };
 pub use title_generator::generate_title;

@@ -25,16 +25,18 @@
 use super::*;
 
 impl ChattyApp {
-    /// Restore a single conversation from persisted data
+    /// Restore a single conversation from persisted data onto its session
     ///
-    /// Looks up the model and provider configs, then calls Conversation::from_data()
+    /// Looks up the model and provider configs, then has the session build
+    /// the agent against its own stores (AGE-272).
     async fn restore_conversation_from_data(
+        session: &mut AgentSession,
         data: ConversationData,
         models: &ModelsModel,
         providers: &ProviderModel,
         mcp_service: &crate::chatty::services::McpService,
         mut ctx: AgentBuildContext,
-    ) -> anyhow::Result<Conversation> {
+    ) -> anyhow::Result<()> {
         if let Some(working_dir) = data.working_dir.as_ref()
             && let Some(ref mut exec) = ctx.exec_settings
         {
@@ -70,7 +72,9 @@ impl ChattyApp {
         ctx.mcp_tools = mcp_tools;
 
         // Restore conversation using factory method (bash tool will be created in agent_factory if enabled)
-        Conversation::from_data(data, model_config, provider_config, ctx).await
+        session
+            .restore_conversation(data, model_config, provider_config, ctx)
+            .await
     }
 
     /// Load conversation metadata at startup (fast — no message deserialization).
@@ -310,15 +314,13 @@ impl ChattyApp {
                     let mcp_tools =
                         chatty_core::services::gather_mcp_tools(&mcp_service).await;
 
-                    // Get execution settings, approval stores, user secrets, and theme colors for tools
+                    // Get execution settings, user secrets, and theme colors for tools
                     let (
                         exec_settings,
-                        pending_approvals,
-                        pending_clarifications,
-                        pending_write_approvals,
                         user_secrets,
                         theme_colors,
                         search_settings,
+                        mut session,
                     ) = cx.update(|cx| {
                         let mut settings = cx
                             .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -330,15 +332,9 @@ impl ChattyApp {
                                     .to_string(),
                             );
                         }
-                        let approvals = cx
-                            .global::<crate::chatty::models::ExecutionApprovalStore>()
-                            .get_pending_approvals();
-                        let clarifications = cx
-                            .global::<crate::chatty::models::ClarificationStore>()
-                            .get_pending_clarifications();
-                        let write_approvals = cx
-                            .global::<crate::chatty::models::WriteApprovalStore>()
-                            .get_pending_approvals();
+                        // The conversation's session owns the stores its
+                        // agent's tools raise requests on (AGE-195).
+                        let session = AgentSession::new(desktop_session_config(cx));
                         let secrets = cx
                             .global::<crate::settings::models::UserSecretsModel>()
                             .as_env_pairs();
@@ -348,12 +344,10 @@ impl ChattyApp {
                             .cloned();
                         (
                             Some(settings),
-                            Some(approvals),
-                            Some(clarifications),
-                            Some(write_approvals),
                             secrets,
                             Some(colors),
                             search_cfg,
+                            session,
                         )
                     })?;
 
@@ -371,57 +365,50 @@ impl ChattyApp {
                         .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                         .ok()
                         .flatten();
-                    let (remote_agents, available_model_ids) = cx
+                    let remote_agents = cx
                         .update(|cx| {
-                            let agents = cx
-                                .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
+                            cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                                 .map(|m| m.a2a_agent_configs())
-                                .unwrap_or_default();
-                            let model_ids = cx
-                                .try_global::<crate::settings::models::ModelsModel>()
-                                .map(|m| {
-                                    m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default();
-                            (agents, model_ids)
+                                .unwrap_or_default()
                         })
                         .unwrap_or_default();
 
                     let skill_service = get_skill_service(cx);
 
-                    let mut conversation = Conversation::new(
-                        conv_id.clone(),
-                        title.clone(),
-                        &model_config,
-                        &provider_config,
-                        AgentBuildContext {
-                            mcp_tools,
-                            exec_settings,
-                            pending_approvals,
-                            pending_clarifications,
-                            pending_write_approvals,
-                            pending_artifacts: None, // set inside Conversation::new
-                            shell_session: None,
+                    session
+                        .create_conversation(
+                            conv_id.clone(),
+                            title.clone(),
+                            &model_config,
+                            &provider_config,
+                            AgentBuildContext {
+                                mcp_tools,
+                                exec_settings,
+                                pending_approvals: None, // the session's (AGE-272)
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
+                                pending_artifacts: None, // set inside Conversation::new
+                                shell_session: None,
                             user_secrets,
                             theme_colors,
                             memory_service,
                             skill_service: Some(skill_service),
                             search_settings,
                             embedding_service,
-                            allow_sub_agent: true, // interactive agent: sub-agent tool is allowed
                             module_agents,
                             gateway_port,
                             remote_agents,
-                            available_model_ids,
                             conversation_id: Some(conv_id.clone()),
                         },
                     )
                     .await?;
-                    conversation.set_working_dir(selected_working_dir.clone());
+                    if let Some(conversation) = session.conversation_mut() {
+                        conversation.set_working_dir(selected_working_dir.clone());
+                    }
 
                     // PHASE 3: Add to global store and refresh sidebar with real data
                     cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        store.insert_loaded(conversation);
+                        store.insert_loaded(session);
                         store.set_active_by_id(conv_id.clone());
                     })?;
 
@@ -462,6 +449,9 @@ impl ChattyApp {
                             .as_ref()
                             .map(|path| path.to_string_lossy().to_string()),
                         agent_task_snapshot: None,
+                        // A new conversation is local; taking it online is an
+                        // explicit action on an existing one (AGE-298).
+                        mode: None,
                     };
 
                     repo.save(&conv_id, data)
@@ -520,18 +510,14 @@ impl ChattyApp {
                 .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                 .map(|m| m.a2a_agent_configs())
                 .unwrap_or_default();
-            let available_model_ids = cx
-                .try_global::<crate::settings::models::ModelsModel>()
-                .map(|m| m.models().iter().map(|m| m.id.clone()).collect::<Vec<_>>())
-                .unwrap_or_default();
             cx.spawn(async move |weak, cx| {
                 let models = cx.update_global::<ModelsModel, _>(|m, _| m.clone())?;
                 let providers = cx.update_global::<ProviderModel, _>(|p, _| p.clone())?;
                 let mcp_service = cx.update_global::<crate::chatty::services::McpService, _>(|s, _| s.clone())?;
                 let exec_settings = cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|s, _| s.clone())?;
-                let pending_approvals = cx.update_global::<crate::chatty::models::ExecutionApprovalStore, _>(|s, _| s.get_pending_approvals())?;
-                let pending_clarifications = cx.update_global::<crate::chatty::models::ClarificationStore, _>(|s, _| s.get_pending_clarifications())?;
-                let pending_write_approvals = cx.update_global::<crate::chatty::models::WriteApprovalStore, _>(|s, _| s.get_pending_approvals())?;
+                // The conversation's session owns the stores its agent's tools
+                // raise requests on (AGE-195).
+                let mut session = cx.update(|cx| AgentSession::new(desktop_session_config(cx)))?;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx
                     .update(|cx| extract_theme_chart_colors(cx))
@@ -553,13 +539,13 @@ impl ChattyApp {
                     Ok(Some(data)) => {
                         let embedding_service = get_embedding_service(cx);
                         match Self::restore_conversation_from_data(
-                            data, &models, &providers, &mcp_service,
+                            &mut session, data, &models, &providers, &mcp_service,
                             AgentBuildContext {
                                 mcp_tools: None,
                                 exec_settings: Some(exec_settings.clone()),
-                                pending_approvals: Some(pending_approvals),
-                                pending_clarifications: Some(pending_clarifications),
-                                pending_write_approvals: Some(pending_write_approvals),
+                                pending_approvals: None, // the session's (AGE-272)
+                                pending_clarifications: None,
+                                pending_write_approvals: None,
                                 pending_artifacts: None,
                                 shell_session: None,
                                 user_secrets,
@@ -568,22 +554,20 @@ impl ChattyApp {
                                 skill_service: Some(skill_service),
                                 search_settings,
                                 embedding_service,
-                                allow_sub_agent: true,
                                 module_agents,
                                 gateway_port,
                                 remote_agents,
-                                available_model_ids,
-                                conversation_id: Some(conv_id.clone()),
+                                    conversation_id: Some(conv_id.clone()),
                             },
                         )
                         .await
                         {
-                            Ok(conversation) => {
+                            Ok(()) => {
                                 // Insert and check active state atomically to avoid a TOCTOU
                                 // where the user switches conversations between the insert and check.
                                 let is_still_active = cx
                                     .update_global::<ConversationsStore, _>(|store, _| {
-                                        store.insert_loaded(conversation);
+                                        store.insert_loaded(session);
                                         store.active_id().map(|id| id == &conv_id).unwrap_or(false)
                                     })
                                     .unwrap_or(false);
@@ -634,7 +618,7 @@ impl ChattyApp {
                     conv.model_id().to_string(),
                     conv.streaming_message().cloned(),
                     conv.streaming_trace().cloned(),
-                    conv.streaming_sub_agent_trace().cloned(),
+                    conv.streaming_delegation_trace().cloned(),
                     conv.working_dir().cloned(),
                     conv.agent_task_snapshot().cloned(),
                 )
@@ -644,7 +628,7 @@ impl ChattyApp {
             model_id,
             streaming_content,
             streaming_trace,
-            streaming_sub_agent_trace,
+            streaming_delegation_trace,
             conversation_working_dir,
             agent_task_snapshot,
         )) = minimal_data
@@ -718,10 +702,10 @@ impl ChattyApp {
                         view.restore_live_trace(trace, cx);
                     }
 
-                    if let Some(trace) = streaming_sub_agent_trace {
+                    if let Some(trace) = streaming_delegation_trace {
                         debug!(conv_id = %conv_id, trace_items = trace.items.len(),
                                "Restoring sub-agent progress trace from Conversation model");
-                        view.restore_sub_agent_progress(trace, cx);
+                        view.restore_delegation_progress(trace, cx);
                     }
                 }
             });

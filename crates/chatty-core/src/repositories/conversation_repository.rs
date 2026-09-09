@@ -42,6 +42,11 @@ fn default_none_agent_task_snapshot() -> Option<String> {
     None
 }
 
+/// Default None conversation mode for backward compatibility: absent is Local
+fn default_none_mode() -> Option<String> {
+    None
+}
+
 /// Lightweight conversation metadata used for the sidebar.
 /// Loaded at startup without deserializing full message history.
 #[derive(Debug, Clone)]
@@ -50,6 +55,12 @@ pub struct ConversationMetadata {
     pub title: String,
     pub total_cost: f64,
     pub updated_at: i64,
+    /// JSON-serialized `ConversationMode`; `None` means Local (AGE-298).
+    ///
+    /// Carried in the lightweight layer because the sidebar has to badge a
+    /// conversation that runs online *without* loading it — the whole point of
+    /// this layer is that the list costs no message deserialization.
+    pub mode: Option<String>,
 }
 
 /// Serializable conversation data for persistence
@@ -76,6 +87,8 @@ pub struct ConversationData {
     pub working_dir: Option<String>, // Per-conversation working directory override
     #[serde(default = "default_none_agent_task_snapshot")]
     pub agent_task_snapshot: Option<String>, // JSON-serialized AgentTaskSnapshot
+    #[serde(default = "default_none_mode")]
+    pub mode: Option<String>, // JSON-serialized ConversationMode; None means Local (AGE-298)
 }
 
 impl ConversationData {
@@ -91,12 +104,20 @@ impl ConversationData {
 /// Repository trait for conversation persistence
 pub trait ConversationRepository: Send + Sync + 'static {
     /// Load lightweight metadata for all conversations (fast — no message deserialization)
+    ///
+    /// Ordered newest-`updated_at` first. This layer renders the sidebar, so
+    /// the order is part of the contract and every implementation must honour
+    /// it; the conformance suite asserts it. `load_all` carries no such
+    /// promise.
     fn load_metadata(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationMetadata>>>;
 
     /// Load full data for a single conversation by ID
     fn load_one(&self, id: &str) -> BoxFuture<'static, RepositoryResult<Option<ConversationData>>>;
 
     /// Load all conversations from storage (kept for compatibility/export use cases)
+    ///
+    /// No ordering is promised. Callers that need conversations newest-first
+    /// want `load_metadata`, or must sort for themselves.
     #[allow(dead_code)]
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationData>>>;
 

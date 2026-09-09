@@ -3,7 +3,8 @@
 //! Routes:
 //! - `GET  /a2a/{module}/.well-known/agent.json` — per-module agent card
 //! - `POST /a2a/{module}` — A2A JSON-RPC (`message/send`, `message/stream`,
-//!   `tasks/get`)
+//!   `tasks/get`); a `message/send` whose `message.taskId` names a task
+//!   parked in `input-required` answers it instead of starting a new one
 //! - `GET  /.well-known/agent.json` — aggregated gateway agent card
 
 use std::sync::Arc;
@@ -22,7 +23,9 @@ use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
+use crate::participant::AgentOrigin;
 
+use super::a2a_participant;
 use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
@@ -37,6 +40,20 @@ pub(crate) async fn module_agent_card(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
 ) -> impl IntoResponse {
+    if let Some(card) = state.participants.card(&module_name) {
+        return (StatusCode::OK, Json(a2a_participant::card_to_json(&card))).into_response();
+    }
+
+    if let Some(runner) = state.runner.as_ref()
+        && runner.agent_name() == module_name
+    {
+        return (
+            StatusCode::OK,
+            Json(a2a_participant::card_to_json(&runner.agent_card())),
+        )
+            .into_response();
+    }
+
     let mut reg = state.registry.write().await;
     let module = match reg.get_mut(&module_name) {
         Some(m) => m,
@@ -67,13 +84,36 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
 
     let mut agents: Vec<Value> = Vec::new();
 
+    // Every agent on this card says where it came from (ADR-0011 C5): a
+    // caller cannot tell a child process from a third-party URL by name
+    // alone, and the broker is the only thing that knows.
     for name in &names {
         let mut reg = state.registry.write().await;
         if let Some(module) = reg.get_mut(name)
             && let Ok(card) = module.agent_card()
         {
-            agents.push(agent_card_to_json(&card));
+            agents.push(with_origin(agent_card_to_json(&card), AgentOrigin::Local));
         }
+    }
+
+    // Registered processes are agents of this gateway too (ADR-0011); a
+    // caller reading the aggregated card should see everything it can
+    // address, not only what happens to be a WASM module.
+    for agent in state.participants.agents() {
+        agents.push(with_origin(
+            a2a_participant::card_to_json(&agent.card),
+            agent.origin,
+        ));
+    }
+
+    // The runner has no process until a task arrives, but it is the agent a
+    // caller addresses to get one, so it belongs on the card. What it spawns
+    // is a child of this machine.
+    if let Some(runner) = state.runner.as_ref() {
+        agents.push(with_origin(
+            a2a_participant::card_to_json(&runner.agent_card()),
+            AgentOrigin::Local,
+        ));
     }
 
     Json(json!({
@@ -81,6 +121,14 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
         "gateway": true,
         "agents": agents,
     }))
+}
+
+/// Tag one agent card with its origin.
+fn with_origin(mut card: Value, origin: AgentOrigin) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert("origin".to_string(), json!(origin.as_str()));
+    }
+    card
 }
 
 async fn forward_remote_a2a_jsonrpc(
@@ -210,13 +258,37 @@ async fn handle_message_send(
         }
     };
 
-    // Extract text from params: support both `message.parts[0].text` and plain `message.text`
-    let content = params
-        .pointer("/message/parts/0/text")
-        .or_else(|| params.pointer("/message/text"))
+    // A message addressed to a task the broker holds open is the answer to
+    // a question that task asked (AGE-306), not a new task. Only an id the
+    // broker minted itself can match, so a client that puts its own id on a
+    // fresh message still starts a task.
+    if let Some(task_id) = params
+        .pointer("/message/taskId")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .filter(|task_id| state.participants.owns_task(task_id))
+    {
+        tracing::info!(task = task_id, "A2A: answering a parked task");
+        return a2a_participant::message_input(&state.participants, id, task_id, &params);
+    }
+
+    let content = prompt_text(&params);
+
+    // A registered process shadows a module of the same name: it is live,
+    // and a module is not.
+    if state.participants.is_registered(module_name) {
+        tracing::info!(
+            participant = module_name,
+            "A2A: routing to a local participant"
+        );
+        return a2a_participant::message_send(&state.participants, module_name, id, content).await;
+    }
+
+    if let Some(runner) = state.runner.as_ref()
+        && runner.agent_name() == module_name
+    {
+        tracing::info!(agent = module_name, "A2A: starting a worker");
+        return a2a_participant::runner_message_send(runner.as_ref(), id, content).await;
+    }
 
     let req = ChatRequest {
         messages: vec![Message {
@@ -346,12 +418,22 @@ async fn handle_message_stream(
         }
     };
 
-    let content = params
-        .pointer("/message/parts/0/text")
-        .or_else(|| params.pointer("/message/text"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let content = prompt_text(&params);
+
+    if state.participants.is_registered(module_name) {
+        tracing::info!(
+            participant = module_name,
+            "A2A stream: routing to a local participant"
+        );
+        return a2a_participant::message_stream(&state.participants, module_name, id, content);
+    }
+
+    if let Some(runner) = state.runner.as_ref()
+        && runner.agent_name() == module_name
+    {
+        tracing::info!(agent = module_name, "A2A stream: starting a worker");
+        return a2a_participant::runner_message_stream(runner.as_ref(), id, content).await;
+    }
 
     let task_id = format!("task-{}", crate::gateway::new_id());
     let module_name = module_name.to_string();
@@ -630,6 +712,21 @@ async fn handle_tasks_get(
         INVALID_PARAMS,
         format!("task '{}' not found (stateless gateway)", task_id),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Helper: the prompt out of A2A `message/send` / `message/stream` params
+// ---------------------------------------------------------------------------
+
+/// Support both `message.parts[0].text` (the A2A shape) and a plain
+/// `message.text`, which several clients send.
+fn prompt_text(params: &Value) -> String {
+    params
+        .pointer("/message/parts/0/text")
+        .or_else(|| params.pointer("/message/text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

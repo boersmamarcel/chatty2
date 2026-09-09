@@ -306,6 +306,29 @@ pub fn attach_plan_block(turns: &mut [Turn], has_plan: bool) {
     );
 }
 
+/// Drop every plan block but the most recent one.
+///
+/// `adapt_message` emits a plan block per message that called `write_todos`,
+/// and `render_typed_block` draws every `Block::Plan` from the same live
+/// conversation-level snapshot — so a second block is not a second plan, it is
+/// the same panel painted twice. The todo protocol can legitimately re-plan in
+/// a follow-up turn (AGE-150), which is what makes the duplicate reachable.
+/// The newest block is the one kept, since it belongs to the turn the current
+/// snapshot came from.
+pub fn retain_last_plan_block(turns: &mut [Turn]) {
+    let Some(last) = turns
+        .iter()
+        .rposition(|turn| turn.blocks.iter().any(|b| matches!(b, Block::Plan { .. })))
+    else {
+        return;
+    };
+    for (index, turn) in turns.iter_mut().enumerate() {
+        if index != last {
+            turn.blocks.retain(|b| !matches!(b, Block::Plan { .. }));
+        }
+    }
+}
+
 pub fn plan_turn_index(turns: &[Turn]) -> Option<usize> {
     turns.iter().position(|turn| {
         turn.blocks
@@ -895,6 +918,54 @@ mod tests {
     }
 
     #[test]
+    fn a_replan_in_a_later_turn_leaves_one_plan_block() {
+        // Every Block::Plan renders the same live conversation snapshot, so two
+        // blocks are the same panel drawn twice. The todo protocol can re-plan
+        // in a follow-up turn, which is how a user hit this.
+        let first = assistant_with_tools(vec![sample_tool("p1", "write_todos")]);
+        let second = assistant_with_tools(vec![sample_tool("p2", "write_todos")]);
+        let mut turns = vec![
+            adapt_message(&first, 0, false),
+            adapt_message(&second, 1, false),
+        ];
+
+        let before: usize = turns
+            .iter()
+            .map(|t| {
+                t.blocks
+                    .iter()
+                    .filter(|b| matches!(b, Block::Plan { .. }))
+                    .count()
+            })
+            .sum();
+        assert_eq!(before, 2, "fixture should reproduce the duplicate");
+
+        retain_last_plan_block(&mut turns);
+
+        let plan_turns: Vec<usize> = turns
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.blocks.iter().any(|b| matches!(b, Block::Plan { .. })))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            plan_turns,
+            vec![1],
+            "only the newest turn keeps its plan, got {plan_turns:?}"
+        );
+    }
+
+    #[test]
+    fn retain_last_plan_block_leaves_a_single_plan_alone() {
+        let msg = assistant_with_tools(vec![sample_tool("p", "write_todos")]);
+        let mut turns = vec![adapt_message(&msg, 0, false)];
+        let before = turns[0].blocks.len();
+        retain_last_plan_block(&mut turns);
+        assert_eq!(turns[0].blocks.len(), before, "single plan must survive");
+        assert!(plan_turn_index(&turns).is_some());
+    }
+
+    #[test]
     fn attach_plan_block_is_idempotent() {
         let msg = assistant_with_tools(vec![sample_tool("p", "write_todos")]);
         let mut turns = vec![adapt_message(&msg, 0, false)];
@@ -914,7 +985,7 @@ mod tests {
     /// strip test that has since moved to `chat_view::scroll`.
     #[test]
     fn tally_sentence_matches_linear_1a_order() {
-        let sentence = RunTally {
+        let spans = RunTally {
             edits: 4,
             explore: 6,
             searches: 2,
@@ -924,10 +995,16 @@ mod tests {
             added: 0,
             removed: 0,
         }
-        .sentence();
+        .phrase_spans();
         assert_eq!(
-            sentence,
-            "Edited 4 files, explored 6 files, 2 searches, 1 tool, ran 1 command"
+            spans,
+            vec![
+                (Some("Edited"), " 4 files".to_string()),
+                (Some("explored"), " 6 files".to_string()),
+                (None, "2 searches".to_string()),
+                (None, "1 tool".to_string()),
+                (Some("ran"), " 1 command".to_string()),
+            ]
         );
     }
 

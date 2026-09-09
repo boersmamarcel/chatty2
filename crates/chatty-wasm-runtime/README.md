@@ -20,14 +20,13 @@ instead of this crate directly.
 
 ## WIT versioning
 
-Two `bindgen!` invocations live in `lib.rs`:
+A single `bindgen!` invocation lives in `lib.rs`: `bindings`, generated from
+the repo-root `wit/` directory, which is `chatty:module@0.2.0`.
 
-- `bindings` — current `chatty:module@0.2.0` (path: `wit/`)
-- `bindings_v0_1` — legacy `chatty:module@0.1.0` (path: `wit-v0_1/`)
-
-Both are registered in the linker so older pre-0.2.0 modules continue to
-load. The 0.1.0 and 0.2.0 interfaces are byte-for-byte identical except
-that 0.2.0 adds the optional `billing` interface.
+Only that package version is registered in the linker. A module targeting an
+older package version fails to instantiate — the host exposes exactly one WIT
+version at a time and modules are rebuilt against it, in line with the
+project's no-compatibility-shim policy.
 
 See [`docs/wit-reference.md`](../../docs/wit-reference.md) for the WIT
 schema and [`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md)

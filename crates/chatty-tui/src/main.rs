@@ -2,10 +2,10 @@ mod app;
 mod engine;
 mod events;
 mod headless;
+mod participant;
 mod ui;
 
 use anyhow::{Context, Result, bail};
-use chatty_core::MCP_SERVICE;
 use chatty_core::services::McpService;
 use chatty_core::settings::models::ModelsModel;
 use chatty_core::settings::models::extensions_store::ExtensionsModel;
@@ -16,7 +16,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use engine::{ChatEngine, ChatEngineConfig, detect_git_branch};
+use engine::{ChatEngine, ChatEngineConfig};
 use events::AppEvent;
 
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -36,7 +36,7 @@ chatty-tui provides three operating modes:
                           Keybindings: Enter=send, Ctrl+C=stop/quit, Ctrl+Q=quit,
                           y/n=approve/deny tool calls. Slash commands: /model,
                           /tools, /modules, /add-dir, /agent, /clear(/new), /compact,
-                           /context, /copy, /update, /cwd(/cd).
+                           /context, /copy, /update, /cwd(/cd), /online.
 
   HEADLESS (--headless):  Send a single message via --message, print the full
                           response to stdout, then exit. Useful for scripting
@@ -176,6 +176,36 @@ struct Cli {
     /// For servers that don't need auth, this can be omitted.
     #[arg(long, value_name = "KEY")]
     api_key: Option<String>,
+
+    /// Workspace root for this session, overriding the persisted setting.
+    ///
+    /// Every filesystem, shell and git tool resolves paths against this root.
+    /// Without it a process falls back to the shared `execution_settings.json`
+    /// value, which is why parallel sub-agents all wrote one tree (AGE-314);
+    /// a worker is given its own `git worktree` through this flag.
+    ///
+    /// Example: --workspace /repo/.chatty/worktrees/w1
+    #[arg(long, value_name = "DIR")]
+    workspace: Option<String>,
+
+    /// Run as a participant of the broker listening on this Unix socket.
+    ///
+    /// The process registers, waits for one delegated task, runs it, and
+    /// reports its progress and result over the socket rather than on
+    /// stderr (ADR-0011 / AGE-301). Implies the
+    /// headless turn loop; `--message` is not used, the prompt arrives from
+    /// the broker.
+    ///
+    /// Example: --participant-socket ~/.local/state/chatty/participants.sock
+    #[arg(long, value_name = "PATH")]
+    participant_socket: Option<std::path::PathBuf>,
+
+    /// The name to register under, which is how callers address this worker.
+    ///
+    /// Required with --participant-socket: the broker allocated it before
+    /// spawning this process and is already routing a task to it.
+    #[arg(long, value_name = "NAME", requires = "participant_socket")]
+    participant_name: Option<String>,
 }
 
 #[tokio::main]
@@ -183,7 +213,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
-    if cli.headless || cli.pipe {
+    if cli.headless || cli.pipe || cli.participant_socket.is_some() {
         // Headless/pipe: suppress all logging to keep stdout clean
     } else {
         // Interactive TUI: log to file to avoid corrupting the terminal
@@ -272,6 +302,20 @@ async fn main() -> Result<()> {
         );
     }
 
+    // `--workspace` overrides the persisted setting, at the same precedence as
+    // `--enable` / `--disable` / `--auto-approve`. AGE-314: a sub-agent needs a
+    // root of its own, and the settings file is shared with the parent that
+    // spawned it, so the flag is the only seam that can separate them.
+    if let Some(workspace) = cli.workspace.as_deref() {
+        let path = std::path::Path::new(workspace);
+        if !path.is_dir() {
+            anyhow::bail!("--workspace '{workspace}' is not an existing directory");
+        }
+        let root = std::fs::canonicalize(path)
+            .with_context(|| format!("Failed to resolve --workspace '{workspace}'"))?;
+        execution_settings.workspace_dir = Some(root.to_string_lossy().to_string());
+    }
+
     // Default workspace_dir to CWD at launch so tools have an explicit root
     if execution_settings.workspace_dir.is_none()
         && let Ok(cwd) = std::env::current_dir()
@@ -286,9 +330,6 @@ async fn main() -> Result<()> {
     if cli.auto_approve {
         use chatty_core::settings::models::execution_settings::ApprovalMode;
         execution_settings.approval_mode = ApprovalMode::AutoApproveAll;
-        chatty_core::tools::filesystem_write_tool::set_global_write_approval_mode(
-            ApprovalMode::AutoApproveAll,
-        );
     }
 
     let models = {
@@ -334,15 +375,18 @@ async fn main() -> Result<()> {
     // Route based on mode — headless/pipe load all services eagerly (latency
     // doesn't matter for non-interactive use), while the interactive TUI defers
     // heavy services to a background task so the UI appears instantly.
-    if cli.pipe || cli.headless {
-        // ── Headless / pipe mode: load everything before running ─────────
+    let participant_mode = cli.participant_socket.is_some();
+    let result = if cli.pipe || cli.headless || participant_mode {
+        // ── Headless / pipe / participant: load everything before running ──
         let (user_secrets, mcp_service, memory_service, search_settings) =
             load_deferred_services(&execution_settings).await;
 
         let embedding_service =
             init_embedding_service(&execution_settings, &providers, &memory_service).await;
 
-        let mut engine = ChatEngine::new(
+        // Headless rides the session directly: no engine, no terminal state
+        // (AGE-196).
+        let mut engine = headless::HeadlessRunner::new(
             ChatEngineConfig {
                 model_config,
                 provider_config,
@@ -359,12 +403,19 @@ async fn main() -> Result<()> {
                 module_agents: module_agents.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
             },
             event_tx,
         );
 
         engine.init_conversation().await?;
-        if cli.pipe {
+        if let Some(socket) = cli.participant_socket.as_deref() {
+            let name = cli
+                .participant_name
+                .as_deref()
+                .context("--participant-name is required with --participant-socket")?;
+            participant::run_participant(engine, event_rx, socket, name).await
+        } else if cli.pipe {
             headless::run_pipe(engine, event_rx).await
         } else {
             let message = cli
@@ -391,6 +442,7 @@ async fn main() -> Result<()> {
                 module_agents,
                 is_sub_agent: false,
                 services_loaded: false,
+                surface: chatty_core::services::StreamSurface::InteractiveTui,
             },
             event_tx.clone(),
         );
@@ -416,19 +468,27 @@ async fn main() -> Result<()> {
             )));
         });
 
-        // Detect git branch in a background thread (avoids blocking on subprocess spawn)
-        let git_tx = event_tx;
-        let workspace_dir = engine.execution_settings.workspace_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            let branch = detect_git_branch(workspace_dir.as_deref());
-            let _ = git_tx.send(AppEvent::GitBranchDetected(branch));
-        });
+        // Detect the git branch and its pull request in the background
+        // (avoids blocking on subprocess spawn).
+        engine.refresh_workspace_context();
 
         // Start conversation init immediately (without heavy services).
         // It will be re-initialized once ServicesReady arrives with full context.
         engine.spawn_init_conversation();
         app::run(engine, event_rx).await
+    };
+
+    // The engine (and with it any `SandboxManager`) is gone, but its `Drop`
+    // could only spawn a detached cleanup task, which dies with the runtime
+    // this function returns into. Sandbox containers run `sleep infinity`
+    // with no `--rm`, so tear them down here instead. Headless and
+    // participant runs are short-lived and spawned per task, so this is the
+    // path that would accumulate containers fastest.
+    if let Err(e) = chatty_core::sandbox::shutdown_all().await {
+        warn!(error = %e, "Failed to destroy sandbox containers during shutdown");
     }
+
+    result
 }
 
 /// Load all deferred services concurrently (MCP, memory, user secrets, search settings).
@@ -731,10 +791,6 @@ async fn start_mcp_servers() -> Option<McpService> {
     }
 
     let service = McpService::new();
-    MCP_SERVICE
-        .set(service.clone())
-        .map_err(|_| tracing::warn!("MCP_SERVICE already initialized"))
-        .ok();
 
     let svc = service.clone();
     tokio::spawn(async move {

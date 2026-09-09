@@ -53,7 +53,7 @@ reflective mutation — separates broken code from broken reflection.
 - Rollout accounting splits train vs validation
 - Same optimizer runs against M1 system and M2 `IrRepr` (required before module done)
 
-**Stage B:** HotpotQA, IFBench, HoVer, PUPA — Marcel posts numbers before agents cite them.
+**Stage B:** HotpotQA, IFBench, HoVer, PUPA — the human reviewer posts numbers before agents cite them.
 
 ## Production landing
 

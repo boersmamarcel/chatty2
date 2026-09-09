@@ -311,10 +311,15 @@ pub fn extract_user_message_text(contents: &[rig_core::message::UserContent]) ->
 /// This function must be called on the GPUI thread (inside `cx.update()`).
 /// It both reads globals AND mutates `GlobalTokenBudget::cache` to update the
 /// static-component counts before the blocking task runs.
+///
+/// `history` is borrowed rather than owned so the caller's copy is cloned
+/// (via `to_vec()`) only on the success path, once every other precondition
+/// has already passed — not unconditionally before knowing whether the
+/// snapshot will even be computed (finding B1, AGE-219).
 pub fn gather_snapshot_inputs(
     conv_id: &str,
     user_message_text: String,
-    history: Vec<rig_core::completion::Message>,
+    history: &[rig_core::completion::Message],
     cx: &mut gpui::App,
 ) -> Option<SnapshotInputs> {
     use crate::chatty::models::ConversationsStore;
@@ -373,7 +378,7 @@ pub fn gather_snapshot_inputs(
         model_context_limit,
         response_reserve,
         preamble,
-        history,
+        history: history.to_vec(),
         user_message_text,
         exec_settings,
         mcp_server_count,

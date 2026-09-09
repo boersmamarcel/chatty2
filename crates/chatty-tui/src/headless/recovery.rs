@@ -1,42 +1,13 @@
-//! Stream-error and tool-result recovery heuristics.
+//! Tool-result recovery heuristics.
 //!
-//! Pure functions that classify provider errors and tool-call outputs into
-//! "retry / give up / parse exit code" decisions used by the headless
-//! recovery loop in `mod.rs`.
+//! Pure functions that classify tool-call outputs into "give up / parse exit
+//! code" decisions used by the headless recovery loop in `mod.rs`. Stream
+//! errors are the session's: `AgentSession::recovery_action` applies the
+//! shared policy (`chatty_core::services::decide_recovery`) with the
+//! session's own attempt bookkeeping (AGE-273).
 
 use super::*;
 use crate::engine::{ToolCallInfo, ToolCallState};
-
-pub(super) fn is_retryable_stream_error(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    is_malformed_stream_json_error(&lowered)
-        || lowered.contains("server overloaded")
-        || lowered.contains("service unavailable")
-        || lowered.contains("internal server error")
-        || lowered.contains("invalid status code 500")
-        || lowered.contains("invalid status code 502")
-        || lowered.contains("invalid status code 503")
-        || lowered.contains("invalid status code 504")
-        || lowered.contains("http 500")
-        || lowered.contains("http 502")
-        || lowered.contains("http 503")
-        || lowered.contains("http 504")
-}
-
-pub(super) fn is_malformed_stream_json_error(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("jsonerror")
-        || lowered.contains("eof while parsing")
-        || lowered.contains("failed to parse")
-}
-
-pub(super) fn recovery_attempt_limit_for_error(error: Option<&str>) -> usize {
-    if error.map(is_malformed_stream_json_error).unwrap_or(false) {
-        MAX_MALFORMED_JSON_RECOVERY_ATTEMPTS
-    } else {
-        MAX_STREAM_ERROR_RECOVERY_ATTEMPTS
-    }
-}
 
 pub(super) fn tool_result_looks_failed(tool_call: &ToolCallInfo) -> bool {
     if matches!(tool_call.state, ToolCallState::Error) {

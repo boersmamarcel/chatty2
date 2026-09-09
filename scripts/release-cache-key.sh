@@ -12,16 +12,19 @@
 # pre-bump main commit must still be an exact match on the release tag.
 #
 # Needs cargo, jq, awk and sha256sum (all present on GitHub-hosted runners,
-# Git Bash included on Windows).
+# Git Bash included on Windows). The member list is handed to awk
+# comma-separated: BSD awk on macOS rejects a newline inside a `-v` string
+# ("newline in string"), which left the key empty and the macOS release
+# build without a cache key at all.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-members="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')"
+members="$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].name] | join(",")')"
 hash="$(
   {
     rustc -V
     awk -v members="$members" '
-      BEGIN { n = split(members, m, "\n"); for (i = 1; i <= n; i++) ws[m[i]] = 1 }
+      BEGIN { n = split(members, m, ","); for (i = 1; i <= n; i++) ws[m[i]] = 1 }
       { sub(/\r$/, "") }  # Cargo.lock may be CRLF on a Windows checkout
       /^name = "/ { name = $0; sub(/^name = "/, "", name); sub(/"$/, "", name); in_ws = (name in ws) }
       in_ws && /^version = / { print "version = \"0.0.0\""; next }

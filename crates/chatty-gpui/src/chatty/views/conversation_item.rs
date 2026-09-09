@@ -22,8 +22,11 @@ pub struct ConversationItem {
     on_click: Option<ConversationActionCallback>,
     on_delete: Option<ConversationActionCallback>,
     on_export: Option<ConversationActionCallback>,
+    on_move: Option<ConversationActionCallback>,
     is_collapsed: bool,
     cost_usd: Option<f64>,
+    /// Runs on a `chatty-server` rather than in this process (AGE-298).
+    is_hosted: bool,
 }
 
 impl ConversationItem {
@@ -35,8 +38,10 @@ impl ConversationItem {
             on_click: None,
             on_delete: None,
             on_export: None,
+            on_move: None,
             is_collapsed: false,
             cost_usd: None,
+            is_hosted: false,
         }
     }
 
@@ -73,6 +78,21 @@ impl ConversationItem {
         self.on_export = Some(Arc::new(callback));
         self
     }
+
+    /// Take this conversation online, or bring it back (AGE-298). Which of
+    /// the two the menu offers follows [`hosted`](Self::hosted).
+    pub fn on_move<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, &mut App) + Send + Sync + 'static,
+    {
+        self.on_move = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn hosted(mut self, is_hosted: bool) -> Self {
+        self.is_hosted = is_hosted;
+        self
+    }
 }
 
 impl Collapsible for ConversationItem {
@@ -91,9 +111,12 @@ impl RenderOnce for ConversationItem {
         let id_for_click = self.id.clone();
         let id_for_delete = self.id.clone();
         let id_for_export = self.id.clone();
+        let id_for_move = self.id.clone();
         let on_click = self.on_click.clone();
         let on_delete = self.on_delete.clone();
         let on_export = self.on_export.clone();
+        let on_move = self.on_move.clone();
+        let is_hosted = self.is_hosted;
 
         let bg_color = if self.is_active {
             cx.theme().background
@@ -127,13 +150,30 @@ impl RenderOnce for ConversationItem {
                         }
                     })
                     .child(
-                        div()
-                            .text_sm()
+                        h_flex()
+                            .items_center()
+                            .gap_1()
                             .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .when(self.is_collapsed, |d| d.child("•"))
-                            .when(!self.is_collapsed, |d| d.child(self.title.clone())),
+                            .when(is_hosted, |d| {
+                                // A hosted conversation is badged even when
+                                // the sidebar is collapsed: which machine a
+                                // turn runs on decides what it can reach, so
+                                // it is not a detail to hide behind a hover.
+                                d.child(
+                                    Icon::new(IconName::Globe)
+                                        .size(px(11.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .when(self.is_collapsed, |d| d.child("•"))
+                                    .when(!self.is_collapsed, |d| d.child(self.title.clone())),
+                            ),
                     )
                     .when(!self.is_collapsed && self.cost_usd.is_some(), |parent| {
                         let cost = self.cost_usd.unwrap();
@@ -159,7 +199,10 @@ impl RenderOnce for ConversationItem {
                     }),
             )
             .when(
-                !self.is_collapsed && (on_delete.is_some() || on_export.is_some()),
+                !self.is_collapsed
+                    && (on_delete.is_some()
+                        || on_export.is_some()
+                        || on_move.is_some()),
                 |this| {
                     // "…" button that opens a popover with Download / Delete actions
                     let trigger = Button::new(ElementId::Name(format!("menu-{}", self.id).into()))
@@ -169,6 +212,7 @@ impl RenderOnce for ConversationItem {
 
                     let export_btn_id = SharedString::from(format!("export-{}", self.id));
                     let delete_btn_id = SharedString::from(format!("delete-{}", self.id));
+                    let move_btn_id = SharedString::from(format!("move-{}", self.id));
 
                     this.child(
                         Popover::new(SharedString::from(format!("conv-menu-{}", self.id)))
@@ -177,10 +221,13 @@ impl RenderOnce for ConversationItem {
                             .content(move |_, _window, cx| {
                                 let on_delete = on_delete.clone();
                                 let on_export = on_export.clone();
+                                let on_move = on_move.clone();
                                 let id_del = id_for_delete.clone();
                                 let id_exp = id_for_export.clone();
+                                let id_mov = id_for_move.clone();
                                 let export_btn_id = export_btn_id.clone();
                                 let delete_btn_id = delete_btn_id.clone();
+                                let move_btn_id = move_btn_id.clone();
 
                                 div()
                                     .flex()
@@ -222,6 +269,38 @@ impl RenderOnce for ConversationItem {
                                                 .on_click(move |_event, _window, cx| {
                                                     cx.stop_propagation();
                                                     cb(&id_exp, cx);
+                                                }),
+                                        )
+                                    })
+                                    .when_some(on_move, |this, cb| {
+                                        // The label names the direction, so the
+                                        // menu never asks the user to remember
+                                        // where this conversation runs.
+                                        let label = if is_hosted {
+                                            "Bring back here"
+                                        } else {
+                                            "Take online…"
+                                        };
+                                        this.child(
+                                            Button::new(move_btn_id)
+                                                .ghost()
+                                                .xsmall()
+                                                .w_full()
+                                                .justify_start()
+                                                .child(
+                                                    h_flex()
+                                                        .w_full()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            Icon::new(IconName::Globe)
+                                                                .size(px(12.0)),
+                                                        )
+                                                        .child(div().text_xs().child(label)),
+                                                )
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    cb(&id_mov, cx);
                                                 }),
                                         )
                                     })

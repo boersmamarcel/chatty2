@@ -1,5 +1,7 @@
 # Entity Communication Pattern
 
+**When to read this:** You are wiring a new GPUI view or notifier into `ChattyApp` and need the rule for how entities talk to each other.
+
 ## Design Principle
 
 All entity-to-entity communication in Chatty uses GPUI's `EventEmitter`/`cx.subscribe()` pattern. No `Arc<dyn Fn>` callbacks are used between GPUI entities.
@@ -20,12 +22,13 @@ All entity-to-entity communication in Chatty uses GPUI's `EventEmitter`/`cx.subs
 ChatInputState  ──emit ChatInputEvent──────►  ChattyApp (subscriber)
 SidebarView     ──emit SidebarEvent────────►  ChattyApp (subscriber)
 StreamManager   ──emit StreamManagerEvent──►  ChattyApp (subscriber)
+ChatView        ──emit ChatViewEvent───────►  ChattyApp (subscriber)
 AgentConfigNotifier ──emit AgentConfigEvent─►  ChattyApp (subscriber)
 ModelsNotifier  ──emit ModelsNotifierEvent─►  ChattyApp (subscriber)
 SystemTraceView ──emit TraceEvent──────────►  ChatView  (subscriber)
 ```
 
-5 subscriptions are set up in `ChattyApp::setup_callbacks()`, 1 in `ChatView::new()`.
+The `ChattyApp` subscriptions are wired in `ChattyApp::setup_callbacks()`; `ChatView` subscribes to each `SystemTraceView` it creates.
 
 ## Adding a New Event
 
@@ -74,24 +77,9 @@ cx.subscribe(&self.sidebar_view, |app, _sidebar, event: &SidebarEvent, cx| {
 }).detach();
 ```
 
-Compare with the old callback pattern (removed):
-
-```rust
-// OLD — required: type alias + field + None init + setter + clone chain
-sidebar.update(cx, |sidebar, _cx| {
-    let app = app_entity.clone();
-    sidebar.set_on_select_conversation(move |conv_id, cx| {
-        let app = app.clone();
-        let id = conv_id.to_string();
-        app.update(cx, |app, cx| {
-            app.load_conversation(&id, cx);
-        });
-    });
-});
-```
 
 ## How-to
 
 Task-oriented steps (new file, event enum, `ChattyApp` subscribe, `Render`):
-[Add a desktop GPUI view](https://github.com/boersmamarcel/chatty2/blob/main/docs-site/src/dev/guides/add-gpui-view.md)
+[Add a desktop GPUI view](../docs-site/src/dev/guides/add-gpui-view.md)
 (mdBook: **How-to guides → Add a desktop GPUI view**).

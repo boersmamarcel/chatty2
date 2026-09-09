@@ -46,7 +46,32 @@ impl ProviderType {
             ProviderType::Ollama => (false, false),
         }
     }
+
+    /// How this provider reports cached prompt tokens relative to its input
+    /// count — see [`crate::services::llm_service::UsageSemantics`] doc for
+    /// the two conventions. The match is exhaustive (no `_` arm) so adding a
+    /// provider forces an explicit decision here rather than silently
+    /// inheriting a default.
+    pub fn usage_semantics(&self) -> crate::services::llm_service::UsageSemantics {
+        use crate::services::llm_service::UsageSemantics;
+        match self {
+            // OpenRouter's completion responses are OpenAI-compatible.
+            ProviderType::OpenRouter => UsageSemantics::InputIncludesCache,
+            // Ollama's /api/chat usage is OpenAI-compatible.
+            ProviderType::Ollama => UsageSemantics::InputIncludesCache,
+            // Azure OpenAI speaks the OpenAI Chat Completions wire format.
+            ProviderType::AzureOpenAI => UsageSemantics::InputIncludesCache,
+        }
+    }
 }
+
+/// The Ollama endpoint used when a provider names none — the same default
+/// `provider_builder` falls back to when it builds the client.
+pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+
+/// OpenRouter's endpoint, which is not configurable per provider today but
+/// still needs a stable key to meter (ADR-0011 C6).
+pub const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -79,6 +104,92 @@ impl ProviderConfig {
     pub fn with_base_url(mut self, base_url: String) -> Self {
         self.base_url = Some(base_url);
         self
+    }
+
+    /// A stable key for the model server this provider talks to.
+    ///
+    /// The broker budgets concurrency per endpoint rather than per provider
+    /// or per model (ADR-0011 C6): two providers pointed at one Ollama
+    /// instance are one queue, because they are one process with one set of
+    /// loaded weights.
+    pub fn endpoint_key(&self) -> String {
+        match self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            Some(url) => url.trim_end_matches('/').to_string(),
+            // Azure has no default endpoint — the deployment URL *is* the
+            // configuration — so an unconfigured one is keyed by name rather
+            // than pooled with every other unconfigured Azure provider.
+            None => match self.provider_type {
+                ProviderType::Ollama => DEFAULT_OLLAMA_URL.to_string(),
+                ProviderType::OpenRouter => DEFAULT_OPENROUTER_URL.to_string(),
+                ProviderType::AzureOpenAI => format!("azure-openai:{}", self.name),
+            },
+        }
+    }
+
+    /// How many requests this endpoint serves in parallel, when it says so.
+    ///
+    /// `num_parallel` in `extra_config` is the answer whoever configured the
+    /// provider gave. Failing that, a local Ollama's `OLLAMA_NUM_PARALLEL`
+    /// is read from this process's environment — the desktop and its workers
+    /// inherit the same environment as the server when it was started from a
+    /// user session, so it is right often enough to be worth reading and
+    /// never fabricates a number when it is absent.
+    ///
+    /// `None` means "nothing known", which the caller turns into its
+    /// configured default rather than a guess.
+    pub fn parallel_requests(&self) -> Option<usize> {
+        self.extra_config
+            .get("num_parallel")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .or_else(|| {
+                self.ollama_env_parallel(std::env::var("OLLAMA_NUM_PARALLEL").ok().as_deref())
+            })
+    }
+
+    /// The `OLLAMA_NUM_PARALLEL` half of [`parallel_requests`](Self::parallel_requests),
+    /// split out so it can be tested without touching the process
+    /// environment.
+    fn ollama_env_parallel(&self, raw: Option<&str>) -> Option<usize> {
+        if self.provider_type != ProviderType::Ollama || !self.is_loopback_endpoint() {
+            return None;
+        }
+        raw.and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+    }
+
+    /// Whether this provider's endpoint is served by this machine.
+    ///
+    /// Only then does this process's environment say anything about the
+    /// server's settings; a remote Ollama's parallelism is its own business.
+    fn is_loopback_endpoint(&self) -> bool {
+        let Some(url) = self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        else {
+            // No URL means the loopback default.
+            return true;
+        };
+        let host = url
+            .split_once("://")
+            .map_or(url, |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        // An IPv6 host is bracketed, so the port is whatever follows the
+        // closing bracket; anything else splits on the last colon.
+        let host = match host.find(']') {
+            Some(end) => &host[..=end],
+            None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+        };
+        matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]")
     }
 
     /// Get Azure authentication method from extra_config
@@ -166,6 +277,104 @@ impl ProviderModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::llm_service::UsageSemantics;
+
+    fn ollama(base_url: Option<&str>) -> ProviderConfig {
+        let config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        match base_url {
+            Some(url) => config.with_base_url(url.to_string()),
+            None => config,
+        }
+    }
+
+    #[test]
+    fn an_endpoint_key_is_the_base_url_without_its_trailing_slash() {
+        assert_eq!(
+            ollama(Some("http://box:11434/")).endpoint_key(),
+            "http://box:11434"
+        );
+        assert_eq!(
+            ollama(Some("http://box:11434")).endpoint_key(),
+            "http://box:11434",
+            "two spellings of one server are one queue"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_endpoint_keys_on_the_default_the_client_would_use() {
+        assert_eq!(ollama(None).endpoint_key(), DEFAULT_OLLAMA_URL);
+        assert_eq!(
+            ProviderConfig::new("OpenRouter".into(), ProviderType::OpenRouter).endpoint_key(),
+            DEFAULT_OPENROUTER_URL
+        );
+        assert_eq!(
+            ProviderConfig::new("Prod".into(), ProviderType::AzureOpenAI).endpoint_key(),
+            "azure-openai:Prod",
+            "Azure has no default endpoint, so its providers are not pooled"
+        );
+    }
+
+    #[test]
+    fn a_configured_parallel_count_is_what_the_provider_reports() {
+        let mut config = ollama(Some("http://box:11434"));
+        config
+            .extra_config
+            .insert("num_parallel".to_string(), " 4 ".to_string());
+        assert_eq!(config.parallel_requests(), Some(4));
+
+        config
+            .extra_config
+            .insert("num_parallel".to_string(), "not a number".to_string());
+        assert_eq!(
+            config.parallel_requests(),
+            None,
+            "a value that is not a count says nothing, and nothing is not a guess"
+        );
+
+        config
+            .extra_config
+            .insert("num_parallel".to_string(), "0".to_string());
+        assert_eq!(config.parallel_requests(), None, "zero would be a deadlock");
+    }
+
+    #[test]
+    fn ollama_num_parallel_is_read_only_for_a_local_ollama() {
+        assert_eq!(ollama(None).ollama_env_parallel(Some("4")), Some(4));
+        assert_eq!(
+            ollama(Some("http://localhost:11434")).ollama_env_parallel(Some("4")),
+            Some(4)
+        );
+        assert_eq!(
+            ollama(Some("http://[::1]:11434")).ollama_env_parallel(Some("4")),
+            Some(4)
+        );
+        assert_eq!(
+            ollama(Some("http://box.local:11434")).ollama_env_parallel(Some("4")),
+            None,
+            "this process's environment says nothing about someone else's server"
+        );
+        assert_eq!(
+            ProviderConfig::new("OpenRouter".into(), ProviderType::OpenRouter)
+                .ollama_env_parallel(Some("4")),
+            None,
+            "OLLAMA_NUM_PARALLEL is Ollama's setting"
+        );
+        assert_eq!(ollama(None).ollama_env_parallel(None), None);
+    }
+
+    #[test]
+    fn usage_semantics_is_openai_compatible_for_every_provider() {
+        for provider in [
+            ProviderType::OpenRouter,
+            ProviderType::Ollama,
+            ProviderType::AzureOpenAI,
+        ] {
+            assert_eq!(
+                provider.usage_semantics(),
+                UsageSemantics::InputIncludesCache
+            );
+        }
+    }
 
     #[test]
     fn test_azure_auth_method_default() {
