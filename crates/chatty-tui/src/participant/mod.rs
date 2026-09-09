@@ -16,9 +16,11 @@
 
 #[cfg(test)]
 mod equivalence;
+#[cfg(test)]
+mod input_required_chain;
 
 use anyhow::{Context, Result};
-use chatty_protocol_gateway::worker::{serve_one_task, worker_card};
+use chatty_protocol_gateway::worker::{answer_clarifications, serve_one_task, worker_card};
 use std::path::Path;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -38,10 +40,17 @@ pub async fn run_participant(
         .with_context(|| format!("failed to reach the broker at {}", socket.display()))?;
 
     let card = worker_card(name, env!("CARGO_PKG_VERSION"));
-    serve_one_task(stream, card, move |prompt, sink| async move {
+    serve_one_task(stream, card, move |prompt, sink, inputs| async move {
         // The observer is dropped with the engine, which `run_headless`
         // consumes — that is what closes the shared loop's frame queue.
         engine.set_event_observer(sink);
+        // A question this turn asks goes up the chain as `input-required`;
+        // the answer comes back down here and lands on the store the
+        // turn's `ask_user` is waiting on (AGE-306).
+        tokio::spawn(answer_clarifications(
+            inputs,
+            engine.session.clarifications().clone(),
+        ));
         run_headless(engine, event_rx, prompt).await
     })
     .await

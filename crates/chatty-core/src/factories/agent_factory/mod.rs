@@ -1111,7 +1111,7 @@ impl AgentClient {
         // Ask-the-user tool: only offered when a frontend is listening for the
         // question. Without a pending store the call would block until it
         // times out, so the model must not see the tool at all.
-        let ask_user_tool = pending_clarifications.map(AskUserTool::new);
+        let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
 
         // The broker's local worker exists exactly when the gateway that
         // serves it does (ADR-0011 C2); the gateway publishes it whenever it
@@ -1124,12 +1124,27 @@ impl AgentClient {
         if let Some(name) = local_agent {
             list_agents_tool = list_agents_tool.with_local_worker(name);
         }
+        // With a gateway there is a live participant table to read, not just
+        // the settings snapshot (ADR-0011 C5).
+        if let Some(port) = gateway_port {
+            list_agents_tool = list_agents_tool.with_gateway_port(port);
+        }
 
         // Create invoke_agent tool (always available)
         let mut invoke_agent_tool =
             InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
         if let Some(name) = local_agent {
             invoke_agent_tool = invoke_agent_tool.with_local_agent(name);
+        }
+        invoke_agent_tool = invoke_agent_tool.with_external_agent_warning(
+            exec_settings
+                .as_ref()
+                .is_some_and(|settings| settings.warn_on_external_agent),
+        );
+        // A delegated agent's question is re-asked on this agent's own
+        // `ask_user` surface (ADR-0011 C7), so it needs the same store.
+        if let Some(pending) = pending_clarifications {
+            invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
         }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 
