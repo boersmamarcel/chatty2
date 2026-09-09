@@ -728,6 +728,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
+| `LIVE_SANDBOXES` | `sandbox/manager.rs` | `LazyLock<Mutex<HashMap<u64, SandboxMap>>>` | Holds every live `SandboxManager`'s container map so `shutdown_all()` can destroy them at process exit — a manager's `Drop` can only spawn a detached task, which dies with the runtime |
 
 **Design rule:** service and repository singletons stay centralized in `lib.rs`; domain-local `OnceLock`s stay in the module that owns the behavior to avoid coupling unrelated code.
 

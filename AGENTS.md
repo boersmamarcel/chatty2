@@ -83,7 +83,7 @@ make test-fast        # cargo test -p chatty-core --lib  (quick inner loop)
 make test-tui         # cargo test -p chatty-tui          (TUI changes only)
 make test-gpui        # cargo test -p chatty-gpui         (GPUI changes only)
 make test-gateway     # cargo test -p chatty-protocol-gateway  (gateway changes only)
-make lint             # cargo clippy --all-features -- -D warnings
+make lint             # cargo clippy --all-features -- -D warnings (CI also passes --all-targets, see below)
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
 make wasm-modules     # build the echo-agent WASM module (needed by tests)
@@ -96,6 +96,7 @@ make docs-check-frontmatter  # optional YAML frontmatter schema (AGE-115)
 make docs-check-leakage      # user guides must not carry contributor material
 make docs-check-reference    # reference tables match tool_registry.rs and friends
 make docs-check       # all of the docs checks above
+make animations       # re-record README/docs GIFs (scripts/animations/README.md)
 make ci               # everything the Rust CI path runs, locally, in order
 ```
 
@@ -105,7 +106,7 @@ Or use cargo directly:
 cargo build
 cargo test --all-features -- --test-threads=1
 cargo fmt --check
-cargo clippy --all-features -- -D warnings
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 ### Test-thread footgun
@@ -115,6 +116,15 @@ intermittently SIGTRAP under parallel execution on GitHub-hosted runners.
 **If you see a SIGTRAP in CI but tests pass locally, run with
 `--test-threads=1` locally to reproduce.** Root cause is unknown; the
 workaround is documented in `.github/workflows/ci.yml`.
+
+### Disk footgun
+
+A full `cargo test --all-features` needs about 16 GiB of `target/` even with
+the workspace's trimmed dependency debuginfo (`[profile.dev.package.*]` in
+the root `Cargo.toml`); at Cargo's defaults it needs 28+ GiB and can run a
+small disk out of space mid-link. See
+[`docs/build-disk-usage.md`](docs/build-disk-usage.md) before building on a
+constrained sandbox or CI runner.
 
 ### WASM module prebuild
 
@@ -217,7 +227,16 @@ examples.
    it; chatty-tui does not. If a `Global` impl is missing, add it in
    `crates/chatty-core/src/gpui_globals.rs`.
 
-7. **Large module directories.** Several complex areas have been split
+7. **Sub-agent worktrees.** `sub_agent` tool workers each get their own
+   `git worktree` under `<workspace>/.chatty/worktrees/<name>` on a
+   `sub-agent/<name>` branch (AGE-314), passed to the child via chatty-tui's
+   `--workspace <DIR>` flag. Worktrees are left in place after a worker
+   exits (never auto-removed) and are excluded via `.git/info/exclude`, not
+   `.gitignore` — they won't show in `git status` but can still accumulate
+   on disk. Falls back to the old shared-tree behavior if the workspace
+   isn't a git repo. See CLAUDE.md.
+
+8. **Large module directories.** Several complex areas have been split
    into sub-module directories (`chat_view/`, `chat_input/`,
    `auto_updater/`, `trace_components/`, `transcript/`, etc.). Start
    with the `mod.rs` and its module-level docstring to scope what you
@@ -281,3 +300,17 @@ These are only the non-obvious caveats of a headless cloud build VM.
   `./target/debug/chatty-tui --ollama http://localhost:11434 --model qwen2.5:0.5b --headless -m "..."`.
   The desktop app auto-detects a running local Ollama and lists its models
   with no configuration.
+
+- **Clippy is clean workspace-wide.** `cargo clippy --workspace --all-features --all-targets -- -D warnings`
+  passes (AGE-174). CI added `--all-targets` so tests/benches/examples are
+  linted too — without it, lints inside `tests/` go unreported (a finding sat
+  unnoticed in `chatty-protocol-gateway`'s e2e test until this was added).
+  `make lint`/`make ci` still invoke the pre-`--all-targets` command, so a
+  clean `make lint` no longer guarantees a clean CI clippy; pass
+  `--all-targets` yourself to match CI exactly.
+
+- **Local rustc lints strictly less than CI's.** This VM's default toolchain
+  (1.94.1) can be behind the `stable` CI uses (e.g. 1.98.1) — clippy findings
+  visible only on newer stable (such as redundant glob imports) can pass
+  locally and fail CI. Run `rustup run stable cargo clippy ...` before
+  trusting a green local clippy if CI still fails.

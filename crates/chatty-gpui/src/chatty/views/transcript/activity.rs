@@ -83,18 +83,6 @@ impl RunTally {
         tally
     }
 
-    /// Legacy single-string form (tests / fallbacks). Prefer [`Self::phrase_spans`].
-    pub fn sentence(&self) -> String {
-        self.phrase_spans()
-            .into_iter()
-            .map(|(verb, rest)| match verb {
-                Some(v) => format!("{v}{rest}"),
-                None => rest,
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
     /// Two-tone spans: optional bold verb + muted remainder. Omit zero categories.
     pub fn phrase_spans(&self) -> Vec<(Option<&'static str>, String)> {
         let mut parts = Vec::new();
@@ -364,9 +352,15 @@ mod tests {
         let tally = RunTally::from_tools(&tools);
         assert_eq!(tally.handoffs, 2);
         assert_eq!(tally.explore, 0);
-        assert_eq!(tally.sentence(), "2 browser handoffs");
+        assert_eq!(
+            tally.phrase_spans(),
+            vec![(None, "2 browser handoffs".to_string())]
+        );
 
         let one = RunTally::from_tools(&tools[..1]);
-        assert_eq!(one.sentence(), "1 browser handoff");
+        assert_eq!(
+            one.phrase_spans(),
+            vec![(None, "1 browser handoff".to_string())]
+        );
     }
 }
