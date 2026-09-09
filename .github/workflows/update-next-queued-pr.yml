@@ -27,7 +27,8 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: update-next-queued-pr
@@ -37,6 +38,13 @@ jobs:
   update-next:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout main (script only; PR content is never checked out)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/update-next-queued-pr.sh
+          sparse-checkout-cone-mode: false
+
       - name: Update the branch of the PR at the front of the queue
         env:
           GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
@@ -48,32 +56,4 @@ jobs:
             exit 1
           fi
 
-          # Oldest first. Skip drafts, forks, and PRs with conflicts (DIRTY):
-          # a conflicted PR is the nurse's job, and it must not block the lane.
-          queue="$(gh pr list --repo "$REPO" --state open --limit 100 \
-            --json number,isDraft,createdAt,autoMergeRequest,mergeStateStatus,headRepositoryOwner \
-            --jq '[.[]
-                   | select(.autoMergeRequest != null)
-                   | select(.isDraft == false)
-                   | select(.headRepositoryOwner.login == ("'"$REPO"'" | split("/")[0]))
-                   | select(.mergeStateStatus != "DIRTY")]
-                  | sort_by(.createdAt)
-                  | map({number, state: .mergeStateStatus})')"
-          echo "queue: $queue"
-
-          front="$(jq -r 'first | .number // empty' <<<"$queue")"
-          if [ -z "$front" ]; then
-            echo "Queue is empty; nothing to do."
-            exit 0
-          fi
-          state="$(jq -r 'first | .state' <<<"$queue")"
-
-          case "$state" in
-            BEHIND)
-              gh api --method PUT "repos/$REPO/pulls/$front/update-branch" >/dev/null
-              echo "Updated PR #$front (was BEHIND). CI reruns on the new head; auto-merge lands it when green."
-              ;;
-            *)
-              echo "Front of queue is PR #$front in state $state; its head is current. Nothing to update."
-              ;;
-          esac
+          bash scripts/update-next-queued-pr.sh "$REPO"
