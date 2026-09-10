@@ -99,9 +99,13 @@ umya-spreadsheet = "3.1.0"
 # DOCX (Word documents)
 docx-rs = "0.4.20"
 
-# PPTX (PowerPoint) — ZIP+XML read support plus `pptx` crate write support
+# PPTX (PowerPoint) — `rpptx` reads and renders decks, `pptx` writes them.
+# rpptx is pinned exactly: it is a young crate (0.11.0, first published
+# 2026-07-29) and the artifact panel depends on its rendering output, not just
+# on its API compiling. `default-template` and `system-fonts` stay off — we
+# only read and render, and `to_pdf_deterministic` is the bundled-font path.
 zip = "8"
-roxmltree = "0.21"
+rpptx = { version = "=0.11.0", default-features = false, features = ["render", "system-fonts"] }
 pptx_writer = { package = "pptx", version = "0.1.0" }
 
 # DuckDB — 1.10504+ bundles DuckDB 1.5.4, which builds on MSVC 14.51

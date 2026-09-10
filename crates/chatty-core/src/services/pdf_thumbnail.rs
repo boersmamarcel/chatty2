@@ -127,7 +127,7 @@ fn bind_pdfium() -> Result<PdfiumHandle, PdfThumbnailError> {
     create_pdfium().map_err(|e| PdfThumbnailError::Pdfium(format!("Failed to bind pdfium: {}", e)))
 }
 
-fn path_hash(pdf_path: &Path) -> String {
+pub(crate) fn path_hash(pdf_path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(pdf_path.to_string_lossy().as_bytes());
