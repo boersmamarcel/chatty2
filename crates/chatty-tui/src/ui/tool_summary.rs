@@ -98,12 +98,16 @@ fn summarize_object(map: &serde_json::Map<String, serde_json::Value>) -> String 
         return preview;
     }
 
-    // No recognized key: a compact `key=value` list, widest-first truncation
-    // handled by the caller.
-    map.iter()
+    // No recognized key: a compact `key=value` list. Sorted by key, because
+    // `serde_json::Map` iterates in insertion order when some crate in the
+    // workspace turns on `preserve_order`, and the preview should not depend
+    // on which crates got built alongside this one.
+    let mut pairs: Vec<String> = map
+        .iter()
         .map(|(key, value)| format!("{key}={}", value_preview(value)))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    pairs.sort();
+    pairs.join(" ")
 }
 
 /// A scalar rendered for display, or `None` for objects, arrays and nulls.
@@ -166,8 +170,11 @@ mod tests {
         );
     }
 
+    /// Sorted, so the preview does not change with `serde_json`'s
+    /// `preserve_order` feature (which workspace feature unification can turn
+    /// on without this crate asking for it).
     #[test]
-    fn unrecognized_object_falls_back_to_key_value_pairs() {
+    fn unrecognized_object_falls_back_to_sorted_key_value_pairs() {
         assert_eq!(
             summarize_input(r#"{"status":"done","count":3,"todos":[1,2],"meta":{"a":1}}"#),
             "count=3 meta={…} status=done todos=[2]"
