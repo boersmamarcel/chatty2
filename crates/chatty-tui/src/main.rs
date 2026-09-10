@@ -2,6 +2,10 @@ mod app;
 mod engine;
 mod events;
 mod headless;
+// Participant mode reaches the broker over a Unix socket; there is no Windows
+// equivalent yet, and `chatty_protocol_gateway::worker`'s server half is
+// `#[cfg(unix)]` too.
+#[cfg(unix)]
 mod participant;
 mod ui;
 
@@ -410,11 +414,23 @@ async fn main() -> Result<()> {
 
         engine.init_conversation().await?;
         if let Some(socket) = cli.participant_socket.as_deref() {
-            let name = cli
-                .participant_name
-                .as_deref()
-                .context("--participant-name is required with --participant-socket")?;
-            participant::run_participant(engine, event_rx, socket, name).await
+            #[cfg(unix)]
+            {
+                let name = cli
+                    .participant_name
+                    .as_deref()
+                    .context("--participant-name is required with --participant-socket")?;
+                participant::run_participant(engine, event_rx, socket, name).await
+            }
+            #[cfg(not(unix))]
+            {
+                // `bail!` would return from `main` and skip the shutdown below;
+                // this branch has to hand back an `Err` like every other arm.
+                let _ = (socket, event_rx, engine);
+                Err(anyhow::anyhow!(
+                    "--participant-socket needs a Unix socket, which this platform has not got"
+                ))
+            }
         } else if cli.pipe {
             headless::run_pipe(engine, event_rx).await
         } else {
