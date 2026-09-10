@@ -50,6 +50,8 @@ When the agent produces a document, a card appears in the transcript and the fil
 
   ![Markdown artifact](../assets/animations/artifact_markdown.gif)
 
+- **PowerPoint decks** the agent writes or reads, paged one slide at a time with Prev/Next, and the extracted text a tab away.
+
 When browser tools are on, a live view of the page the agent is driving docks in the same panel: [Agents & tools](./agents-and-tools.md).
 
 ## Tool-call traces
