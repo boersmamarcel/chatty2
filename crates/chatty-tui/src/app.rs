@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::Result;
 use chatty_core::session::HOSTED_DISABLED;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use futures::StreamExt;
@@ -31,7 +31,7 @@ pub async fn run(
     // terminal emulator stuck sending mouse escape sequences.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(io::stdout(), DisableMouseCapture);
+        let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
         previous_hook(info);
     }));
 
@@ -42,10 +42,17 @@ pub async fn run(
         tracing::warn!(error = ?e, "Failed to enable mouse capture; continuing without mouse scroll");
     }
 
+    // Without bracketed paste, a pasted block arrives as individual key events
+    // and every newline in it lands on the `Enter` arm below — pasting 45 lines
+    // sent 45 messages (AGE-341).
+    if let Err(e) = execute!(io::stdout(), EnableBracketedPaste) {
+        tracing::warn!(error = ?e, "Failed to enable bracketed paste; long pastes will arrive as key events");
+    }
+
     let result = run_loop(&mut terminal, &mut engine, &mut event_rx).await;
 
     // Best-effort teardown — ignore errors since we're restoring anyway.
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -241,9 +248,20 @@ fn handle_terminal_event(
             handle_mouse_event(mouse, engine);
             KeyAction::None
         }
+        Event::Paste(text) => {
+            handle_paste(&text, engine, input_state);
+            KeyAction::None
+        }
         Event::Resize(_, _) => KeyAction::None,
         _ => KeyAction::None,
     }
+}
+
+/// Put a paste into the input box: short ones verbatim, long ones behind a
+/// `[Pasted text #N +M lines]` reference the engine can expand on send.
+fn handle_paste(text: &str, engine: &mut ChatEngine, input_state: &mut InputState) {
+    let insert = engine.record_paste(text);
+    input_state.insert_paste(&insert);
 }
 
 /// Route mouse wheel events to chat scroll when the pointer is over the chat area.
@@ -470,7 +488,9 @@ fn handle_key_event(
         // Enter: send message or handle command
         KeyCode::Enter if key.modifiers.is_empty() => {
             if !input_state.is_empty() {
-                let text = input_state.peek_input();
+                // Commands see the paste expanded, so a pasted argument still
+                // reaches the command that was asked for it.
+                let text = engine.expand_pastes(&input_state.peek_input());
                 // /quit and /exit work even while streaming
                 if let Some(Command::Quit) = engine.try_handle_command(&text) {
                     return KeyAction::Quit;
@@ -493,6 +513,7 @@ fn handle_key_event(
         // All other keys: forward to textarea, then refresh @ file list if needed
         _ => {
             input_state.textarea.input(key);
+            input_state.sync_paste_ranges();
             // If the input contains an @ query and we have no files yet, load them.
             // NOTE: we check has_at_query() (not is_at_menu_open()) because the menu
             // cannot be open when the file cache is empty — they depend on each other.
@@ -586,6 +607,10 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             announce_verbose_tools(engine);
             None
         }
+        Command::Paste(arg) => {
+            show_paste(engine, arg.as_deref());
+            None
+        }
         Command::Quit => Some(KeyAction::Quit),
     }
 }
@@ -598,6 +623,20 @@ fn announce_verbose_tools(engine: &mut ChatEngine) {
         "Tool detail: folded summaries. Ctrl+R or /verbose to show full payloads."
     };
     engine.add_system_message(message.to_string());
+}
+
+/// Print an elided paste back to the transcript, so hiding it behind a
+/// reference never means losing sight of what was pasted (AGE-341).
+fn show_paste(engine: &mut ChatEngine, arg: Option<&str>) {
+    let message = match arg.and_then(|arg| arg.trim().trim_start_matches('#').parse::<usize>().ok())
+    {
+        Some(id) => match engine.paste_text(id) {
+            Some(text) => format!("Pasted text #{id}:\n{text}"),
+            None => format!("No paste #{id} in this session."),
+        },
+        None => "Usage: /paste <n>, where n is the number in [Pasted text #n].".to_string(),
+    };
+    engine.add_system_message(message);
 }
 
 /// Load filesystem skills for the engine's current working directory and populate
@@ -706,5 +745,68 @@ mod tests {
             map_command_to_action(Command::Online(Some("off".to_string())), &mut engine),
             Some(KeyAction::SetOnline(None))
         ));
+    }
+
+    fn long_paste(lines: usize) -> String {
+        (1..=lines)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The bug this fixes: without bracketed paste every newline in the paste
+    /// arrived as a bare `Enter` and sent the message (AGE-341).
+    #[test]
+    fn pasting_multiline_text_fills_the_input_instead_of_sending() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        let mut input_state = InputState::new();
+        let pasted = long_paste(45);
+
+        let action =
+            handle_terminal_event(Event::Paste(pasted.clone()), &mut engine, &mut input_state);
+
+        assert!(matches!(action, KeyAction::None));
+        assert!(!engine.is_streaming, "a paste must not start a turn");
+        assert!(
+            engine.transcript.messages.is_empty(),
+            "a paste must not push a user message"
+        );
+        assert_eq!(input_state.peek_input(), "[Pasted text #1 +45 lines]");
+        assert_eq!(engine.expand_pastes(&input_state.peek_input()), pasted);
+    }
+
+    #[test]
+    fn a_short_paste_lands_in_the_input_verbatim() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        let mut input_state = InputState::new();
+
+        handle_terminal_event(
+            Event::Paste("cargo test -p chatty-tui".to_string()),
+            &mut engine,
+            &mut input_state,
+        );
+
+        assert_eq!(input_state.peek_input(), "cargo test -p chatty-tui");
+    }
+
+    /// A reference is only safe to show if the text behind it stays reachable.
+    #[test]
+    fn paste_command_prints_the_elided_text() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        let mut input_state = InputState::new();
+        let pasted = long_paste(7);
+        handle_terminal_event(Event::Paste(pasted.clone()), &mut engine, &mut input_state);
+
+        map_command_to_action(Command::Paste(Some("1".to_string())), &mut engine);
+        assert_eq!(
+            last_system_message(&engine),
+            format!("Pasted text #1:\n{pasted}")
+        );
+
+        map_command_to_action(Command::Paste(Some("99".to_string())), &mut engine);
+        assert_eq!(
+            last_system_message(&engine),
+            "No paste #99 in this session."
+        );
     }
 }

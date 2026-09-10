@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
-use tui_textarea::TextArea;
+use tui_textarea::{AtomicRange, TextArea};
 
 use crate::ui::theme;
 
@@ -15,6 +15,7 @@ use crate::ui::theme;
 pub use chatty_core::at_mention::{
     apply_at_to_input, at_menu_items_for, at_query_from, load_files_for_dir,
 };
+use chatty_core::paste;
 
 /// A single built-in slash command. The catalog lives in
 /// `chatty_core::slash_commands` so it stays in sync with the GPUI desktop app.
@@ -115,6 +116,8 @@ impl InputState {
     pub fn take_input(&mut self) -> String {
         let lines: Vec<String> = self.textarea.lines().to_vec();
         let text = lines.join("\n").trim().to_string();
+        // Drop the paste ranges before the buffer they point into goes away.
+        self.textarea.clear_atomic_ranges();
         // Clear by selecting all and deleting
         self.textarea.select_all();
         self.textarea.cut();
@@ -123,6 +126,42 @@ impl InputState {
         self.at_menu_selected = 0;
         self.at_menu_scroll_offset = 0;
         text
+    }
+
+    /// Insert `text` at the cursor, as the paste store rendered it — either the
+    /// paste itself or a `[Pasted text #N +M lines]` reference (AGE-341).
+    pub fn insert_paste(&mut self, text: &str) {
+        self.textarea.insert_str(text);
+        self.sync_paste_ranges();
+    }
+
+    /// Mark every paste reference in the input atomic.
+    ///
+    /// The cursor then steps over a reference instead of into it, and
+    /// backspace at its edge removes the whole thing — chewing one character
+    /// off the end would leave a token that no longer resolves and would be
+    /// sent to the model literally.
+    pub fn sync_paste_ranges(&mut self) {
+        let ranges: Vec<AtomicRange> = self
+            .textarea
+            .lines()
+            .iter()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                paste::token_spans(line)
+                    .into_iter()
+                    .map(move |(start_col, end_col)| AtomicRange {
+                        row,
+                        start_col,
+                        end_col,
+                    })
+            })
+            .collect();
+
+        // Ranges are derived from the buffer itself, so they are in bounds and
+        // non-overlapping by construction; ignore the validation error rather
+        // than panicking in the middle of a keystroke.
+        let _ = self.textarea.try_set_atomic_ranges(ranges);
     }
 
     /// Get the current input text without clearing
@@ -136,9 +175,11 @@ impl InputState {
     }
 
     pub fn set_input_text(&mut self, text: &str) {
+        self.textarea.clear_atomic_ranges();
         self.textarea.select_all();
         self.textarea.cut();
         self.textarea.insert_str(text);
+        self.sync_paste_ranges();
         self.slash_menu_selected = 0;
         self.slash_menu_scroll_offset = 0;
         self.at_menu_selected = 0;
@@ -503,5 +544,40 @@ mod tests {
             apply_at_to_input("please check @read", "README.md"),
             "please check @README.md "
         );
+    }
+
+    /// The reference behaves as one character: the cursor never lands inside
+    /// it, and backspace at its edge takes all of it. Half a token would be
+    /// sent to the model as literal text.
+    #[test]
+    fn a_paste_reference_is_deleted_whole() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut input = InputState::new();
+        input.insert_paste("look: ");
+        input.insert_paste("[Pasted text #1 +45 lines]");
+        assert_eq!(input.peek_input(), "look: [Pasted text #1 +45 lines]");
+
+        let ranges = input.textarea.atomic_ranges();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start_col, "look: ".chars().count());
+
+        input
+            .textarea
+            .input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        input.sync_paste_ranges();
+
+        assert_eq!(input.peek_input(), "look:");
+        assert!(input.textarea.atomic_ranges().is_empty());
+    }
+
+    #[test]
+    fn taking_the_input_drops_the_paste_ranges() {
+        let mut input = InputState::new();
+        input.insert_paste("[Pasted text #1 +45 lines]");
+
+        assert_eq!(input.take_input(), "[Pasted text #1 +45 lines]");
+        assert!(input.textarea.atomic_ranges().is_empty());
+        assert!(input.is_empty());
     }
 }
