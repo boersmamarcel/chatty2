@@ -39,6 +39,15 @@ pub fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
 }
 
+/// True when `path` looks like a PowerPoint deck (AGE-138). Extension only,
+/// and `.pptx` only — legacy `.ppt` is a different, binary format the PPTX
+/// parser cannot read.
+pub fn is_pptx_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pptx"))
+}
+
 /// Longest edge, in pixels, of an inline attachment thumbnail rendered under a
 /// chat bubble.
 ///
@@ -145,15 +154,17 @@ pub fn is_code_artifact_path(path: &Path) -> bool {
         && artifact_language_for_path(path).is_some()
 }
 
-/// Images, PDFs, and tabular exports stay as full artifact cards — not batched receipts.
+/// Images, PDFs, decks, and tabular exports stay as full artifact cards — not
+/// batched receipts.
 pub fn is_standalone_artifact_path(path: &Path) -> bool {
-    is_image_path(path) || is_pdf_path(path) || is_tabular_path(path)
+    is_image_path(path) || is_pdf_path(path) || is_pptx_path(path) || is_tabular_path(path)
 }
 
 /// Deliverables that earn a transcript artifact receipt card.
 pub fn is_transcript_artifact_receipt(path: &Path) -> bool {
     is_markdown_artifact_path(path)
         || is_pdf_path(path)
+        || is_pptx_path(path)
         || is_image_path(path)
         || is_tabular_path(path)
 }
@@ -216,10 +227,12 @@ pub fn resolve_artifact_path(path: &Path, workspace: Option<&Path>) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Source text for the artifact panel. PDFs are binary — return empty and let
-/// the view render pages / extract text via pdfium.
+/// Source text for the artifact panel. PDFs and `.pptx` decks are binary —
+/// return empty and let the view render pages / slides and extract the text
+/// (pdfium for PDFs, the PPTX parser for decks). Decoding a ZIP as UTF-8 puts
+/// OOXML noise, or nothing at all, in the Source tab.
 pub fn read_artifact_source(path: &Path) -> String {
-    if is_pdf_path(path) || is_image_path(path) {
+    if is_pdf_path(path) || is_pptx_path(path) || is_image_path(path) {
         String::new()
     } else {
         std::fs::read_to_string(path).unwrap_or_default()
@@ -341,7 +354,12 @@ pub fn tool_file_path(input: &str) -> Option<PathBuf> {
     None
 }
 
-/// Write/create tools, Typst PDF compile, and PDF tools that name a `.pdf` path.
+/// Write/create tools, Typst PDF compile, PDF tools that name a `.pdf` path,
+/// and `read_pptx` on a `.pptx`.
+///
+/// `read_pptx` is here for the same reason `pdf_*` is: opening an existing
+/// deck should grow a card the user can click, and the deck is not readable
+/// any other way in the panel (AGE-138).
 ///
 /// Agent plan tools (`write_todos`, …) are not file artifacts — they own the
 /// Plan block and must not auto-open the document panel.
@@ -360,6 +378,9 @@ pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     // Typst always writes a PDF via output_path / saved_path.
     if name == "compile_typst" || name.contains("typst") {
         return tool_file_path(input).is_some_and(|p| is_pdf_path(&p)) || name == "compile_typst";
+    }
+    if name == "read_pptx" {
+        return tool_file_path(input).is_some_and(|p| is_pptx_path(&p));
     }
     name.starts_with("pdf_") && tool_file_path(input).is_some_and(|p| is_pdf_path(&p))
 }
@@ -616,6 +637,53 @@ mod tests {
         assert!(!is_pdf_path(Path::new("notes")));
     }
 
+    /// AGE-138. `.ppt` is deliberately excluded: it is legacy binary, not the
+    /// OOXML zip the parser reads.
+    #[test]
+    fn pptx_extension_is_case_insensitive() {
+        assert!(is_pptx_path(Path::new("/tmp/Deck.PPTX")));
+        assert!(is_pptx_path(Path::new("slides.pptx")));
+        assert!(!is_pptx_path(Path::new("slides.ppt")));
+        assert!(!is_pptx_path(Path::new("notes.md")));
+        assert!(!is_pptx_path(Path::new("slides")));
+    }
+
+    /// A deck is a deliverable and gets its own card, never folded into a
+    /// batched receipt with the text files written alongside it.
+    #[test]
+    fn pptx_is_a_standalone_receipt() {
+        let deck = Path::new("/ws/deck.pptx");
+        assert!(is_transcript_artifact_receipt(deck));
+        assert!(is_standalone_artifact_path(deck));
+    }
+
+    /// Reading an existing deck should grow a card, the way a `pdf_*` tool
+    /// naming a `.pdf` does — that is the only route to the panel for a file
+    /// the agent did not write itself.
+    #[test]
+    fn read_pptx_on_a_deck_is_a_produced_file_tool() {
+        assert!(is_produced_file_tool(
+            "read_pptx",
+            r#"{"path":"decks/q3.pptx"}"#
+        ));
+        // Not every read_pptx call names a deck; a bad path must not mint a card.
+        assert!(!is_produced_file_tool(
+            "read_pptx",
+            r#"{"path":"notes.md"}"#
+        ));
+        assert!(!is_produced_file_tool("read_pptx", r#"{}"#));
+        // read_file on a deck is still not an artifact tool.
+        assert!(!is_produced_file_tool(
+            "read_file",
+            r#"{"path":"decks/q3.pptx"}"#
+        ));
+        // write_pptx already matched on the `write` substring; keep it that way.
+        assert!(is_produced_file_tool(
+            "write_pptx",
+            r#"{"path":"decks/q3.pptx"}"#
+        ));
+    }
+
     #[test]
     fn image_extension_detection() {
         assert!(is_image_path(Path::new("charts/revenue.PNG")));
@@ -682,6 +750,104 @@ mod tests {
         drop(file);
         assert_eq!(read_artifact_source(&pdf), "");
         let _ = std::fs::remove_file(&pdf);
+    }
+
+    /// A `.pptx` is a ZIP; decoding it as UTF-8 is what put OOXML noise in the
+    /// Rendered/Source tabs (AGE-138). The extraction goes through the PPTX
+    /// parser instead, so this function must refuse the path on its extension
+    /// alone.
+    ///
+    /// The fixture is deliberately **valid UTF-8**: binary bytes would make
+    /// this assertion true even without the guard, because
+    /// `read_to_string().unwrap_or_default()` also yields `""` for them. Text
+    /// on a `.pptx` path is the only fixture that can tell the two apart —
+    /// unguarded, it returns `"hello slides"`.
+    #[test]
+    fn read_source_never_decodes_a_pptx_even_when_it_is_valid_utf8() {
+        let dir = std::env::temp_dir();
+        let deck = dir.join("artifact_kind_skip.pptx");
+        let mut file = std::fs::File::create(&deck).expect("create pptx");
+        file.write_all(b"hello slides").expect("write");
+        drop(file);
+        assert_eq!(
+            read_artifact_source(&deck),
+            "",
+            "the extension decides; a .pptx is never read as text"
+        );
+        let _ = std::fs::remove_file(&deck);
+
+        // The same holds for the real thing, which is binary. Both routes feed
+        // the card's peek popover as well as the panel (artifact_card.rs).
+        let binary = dir.join("artifact_kind_skip_binary.pptx");
+        std::fs::write(&binary, b"PK\x03\x04\x00\xff binary").expect("write");
+        assert_eq!(read_artifact_source(&binary), "");
+        let _ = std::fs::remove_file(&binary);
+    }
+
+    /// AGE-138: a real deck written by `write_pptx`. The panel must report the
+    /// deck's slide count from the parser and must not try to decode the ZIP
+    /// as the Source tab's text.
+    ///
+    /// The tool's arguments are deserialized through
+    /// `<WritePptxTool as Tool>::Args` rather than named directly, so this
+    /// fixture needs no widening of `pptx_tool`'s public surface — the args
+    /// type already derives `Deserialize` for the model to call it.
+    #[tokio::test]
+    async fn write_pptx_fixture_reports_slides_and_never_decodes_as_source() {
+        use chatty_core::services::filesystem_service::FileSystemService;
+        use chatty_core::tools::pptx_tool::{WritePptxTool, read_pptx_slides};
+        use rig_agent::tool::{Tool, ToolContext};
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().expect("utf8 tmp"))
+                .await
+                .expect("filesystem service"),
+        );
+        let deck = tmp.path().join("quarterly.pptx");
+
+        let args: <WritePptxTool as Tool>::Args = serde_json::from_value(serde_json::json!({
+            "path": deck.to_str().expect("utf8 path"),
+            "slides": [
+                {
+                    "title": "Agenda",
+                    "shapes": [{
+                        "type": "bullet_list",
+                        "x": 0.8, "y": 1.7, "width": 8.0, "height": 2.2,
+                        "items": ["Revenue", "Roadmap"],
+                    }],
+                },
+                { "title": "Revenue", "shapes": [] },
+            ],
+        }))
+        .expect("write_pptx args");
+
+        WritePptxTool::new(service)
+            .call(&mut ToolContext::new(), args)
+            .await
+            .expect("write deck");
+
+        let slides = read_pptx_slides(&deck, false).expect("parse deck");
+        assert_eq!(slides.len(), 2, "the pager needs the real slide count");
+        assert_eq!(slides[0].title.as_deref(), Some("Agenda"));
+
+        // The Source tab is fed by the parser, never by `read_to_string`.
+        // (`read_source_never_decodes_a_pptx_even_when_it_is_valid_utf8` is
+        // what proves the guard is load-bearing; a binary fixture cannot.)
+        assert_eq!(
+            read_artifact_source(&deck),
+            "",
+            "a .pptx must never be decoded as UTF-8 into the panel"
+        );
+        let bytes = std::fs::read(&deck).expect("read deck bytes");
+        assert!(
+            String::from_utf8(bytes).is_err(),
+            "a real deck is binary; the panel has nothing to decode"
+        );
+
+        // A deck this size opens as its own card in the transcript.
+        assert!(is_transcript_artifact_receipt(&deck));
     }
 
     #[test]
@@ -914,6 +1080,9 @@ mod tests {
         assert!(is_transcript_artifact_receipt(Path::new("report.pdf")));
         assert!(is_transcript_artifact_receipt(Path::new("chart.png")));
         assert!(is_transcript_artifact_receipt(Path::new("data.csv")));
+        assert!(is_transcript_artifact_receipt(Path::new("deck.pptx")));
+        // Legacy binary PowerPoint stays out: nothing can render it.
+        assert!(!is_transcript_artifact_receipt(Path::new("deck.ppt")));
         assert!(!is_transcript_artifact_receipt(Path::new("index.html")));
         assert!(!is_transcript_artifact_receipt(Path::new("main.rs")));
         assert!(!is_transcript_artifact_receipt(Path::new("app.py")));
