@@ -1,0 +1,25 @@
+name: Auto-arm
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  arm:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.sender.login == github.repository_owner ||
+       github.actor == 'github-actions[bot]' ||
+       startsWith(github.event.pull_request.head.ref, 'docs/'))
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" --repo "$REPO" --add-label ship:auto   # hive only: delete this line on chatty2
+          gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.mergeMethod // empty' | grep -q . && exit 0
+          gh pr merge "$PR" --repo "$REPO" --auto --squash
