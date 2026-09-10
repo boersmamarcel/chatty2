@@ -16,6 +16,7 @@ use chatty_core::tools::chart_tool::ChartSpec;
 use chatty_core::tools::data_query_tool::{
     FILE_PREVIEW_MAX_ROWS, TablePreview, load_file_table_preview,
 };
+use chatty_core::tools::pptx_tool::{PptxSlide, pptx_slides_to_text, read_pptx_slides};
 use std::ops::Range;
 use tokio::sync::mpsc;
 
@@ -41,8 +42,8 @@ use super::artifact_header::{
 use super::artifact_kind::{
     ArtifactHeading, ArtifactVersion, ViewAnchor, artifact_format_token,
     artifact_language_for_path, artifact_panel_title, artifact_version, block_index_from_anchor,
-    is_code_artifact_path, is_image_path, is_markdown_artifact_path, is_pdf_path, is_tabular_path,
-    markdown_headings, read_artifact_source, source_line_from_anchor,
+    is_code_artifact_path, is_image_path, is_markdown_artifact_path, is_pdf_path, is_pptx_path,
+    is_tabular_path, markdown_headings, read_artifact_source, source_line_from_anchor,
 };
 use super::diff::DiffHunkList;
 use super::run_pin::{RunPin, RunPinKind};
@@ -115,6 +116,24 @@ enum PdfPreview {
     Error(String),
 }
 
+/// Slide workbench state (AGE-138), next to [`PdfPreview`] rather than a
+/// second entity: `ArtifactView` stays one entity with three slots.
+///
+/// The whole deck is held once, because a deck's extracted text is small and
+/// the parse is a single ZIP walk. Paging is then an index change, not the
+/// re-raster `PdfPreview` needs per page.
+#[derive(Clone, Debug, Default)]
+enum PptxPreview {
+    #[default]
+    Idle,
+    Loading,
+    Ready {
+        slide: usize,
+        slides: Arc<Vec<PptxSlide>>,
+    },
+    Error(String),
+}
+
 #[derive(Clone, Debug, Default)]
 enum TabularPreview {
     #[default]
@@ -145,6 +164,7 @@ pub struct ArtifactView {
     files: Vec<(PathBuf, String, Option<String>)>,
     tab: usize,
     pdf: PdfPreview,
+    pptx: PptxPreview,
     tabular: TabularPreview,
     chart: Option<ChartSpec>,
     browser: BrowserPreview,
@@ -250,6 +270,7 @@ impl ArtifactView {
             files: Vec::new(),
             tab: 0,
             pdf: PdfPreview::Idle,
+            pptx: PptxPreview::Idle,
             tabular: TabularPreview::Idle,
             chart: None,
             browser: BrowserPreview::Idle,
@@ -332,6 +353,7 @@ impl ArtifactView {
         self.path = next_path;
         self.tabular = TabularPreview::Ready(preview);
         self.pdf = PdfPreview::Idle;
+        self.pptx = PptxPreview::Idle;
         self.chart = None;
         self.tab = 0;
         self.stale = false;
@@ -349,6 +371,7 @@ impl ArtifactView {
         self.path = next_path;
         self.chart = Some(spec);
         self.pdf = PdfPreview::Idle;
+        self.pptx = PptxPreview::Idle;
         self.tabular = TabularPreview::Idle;
         self.source.clear();
         self.rendered.clear();
@@ -376,6 +399,7 @@ impl ArtifactView {
         }
         self.path = None;
         self.pdf = PdfPreview::Idle;
+        self.pptx = PptxPreview::Idle;
         self.tabular = TabularPreview::Idle;
         self.chart = None;
         self.source.clear();
@@ -759,13 +783,31 @@ impl ArtifactView {
             self.source.clear();
             self.rendered.clear();
             self.old.clear();
+            self.pptx = PptxPreview::Idle;
             self.tabular = TabularPreview::Idle;
             self.chart = None;
             self.tab = 0;
             self.headings.clear();
             self.start_pdf_load(0, cx);
+        } else if is_pptx_path(&path) {
+            // A deck is binary: `source` arrived empty from
+            // `read_artifact_source`, and both the slide pager and the Source
+            // tab are filled by the parser once `start_pptx_load` returns.
+            self.pdf = PdfPreview::Idle;
+            self.source.clear();
+            self.rendered.clear();
+            // Never diff a deck against binary. `old` only ever carries text a
+            // diff/edit tool reported, which no PPTX tool does, so this keeps
+            // the Diff tab hidden rather than showing ZIP bytes.
+            self.old.clear();
+            self.tabular = TabularPreview::Idle;
+            self.chart = None;
+            self.tab = 0;
+            self.headings.clear();
+            self.start_pptx_load(cx);
         } else if is_tabular_path(&path) {
             self.pdf = PdfPreview::Idle;
+            self.pptx = PptxPreview::Idle;
             self.chart = None;
             self.source = source.clone();
             self.rendered = source.clone();
@@ -774,6 +816,7 @@ impl ArtifactView {
             self.start_tabular_load(path, workspace_root, cx);
         } else if is_image_path(&path) {
             self.pdf = PdfPreview::Idle;
+            self.pptx = PptxPreview::Idle;
             self.tabular = TabularPreview::Idle;
             self.chart = None;
             self.source.clear();
@@ -783,6 +826,7 @@ impl ArtifactView {
             self.headings.clear();
         } else {
             self.pdf = PdfPreview::Idle;
+            self.pptx = PptxPreview::Idle;
             self.tabular = TabularPreview::Idle;
             self.chart = None;
             self.source = source.clone();
@@ -823,6 +867,7 @@ impl ArtifactView {
         self.rendered.clear();
         self.old.clear();
         self.pdf = PdfPreview::Idle;
+        self.pptx = PptxPreview::Idle;
         self.tabular = TabularPreview::Idle;
         self.chart = None;
         self.tab = 0;
@@ -1096,6 +1141,50 @@ impl ArtifactView {
         .detach();
     }
 
+    /// Parse the open deck once (AGE-138), off the main thread.
+    ///
+    /// Fills both halves of the workbench: the slide list the Rendered tab
+    /// pages through, and `source` — the parser's extracted text — for the
+    /// Source tab, which is why the editor's sync generation is invalidated
+    /// on the way out. `read_artifact_source` deliberately hands back `""`
+    /// for a `.pptx`, so without this the Source tab stays blank.
+    fn start_pptx_load(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        self.load_gen = self.load_gen.wrapping_add(1);
+        let load_id = self.load_gen;
+        self.pptx = PptxPreview::Loading;
+        cx.spawn(async move |this, cx| {
+            let outcome = tokio::task::spawn_blocking(move || read_pptx_slides(&path, false)).await;
+            this.update(cx, |this, cx| {
+                if this.load_gen != load_id {
+                    return;
+                }
+                match outcome {
+                    Ok(Ok(slides)) => {
+                        this.source = pptx_slides_to_text(&slides);
+                        // The editor already synced against the empty source
+                        // for this generation; force it to pick the extracted
+                        // text up. `u64::MAX` is the same "never synced"
+                        // sentinel `new()` uses.
+                        this.editor_synced_gen = u64::MAX;
+                        this.pptx = PptxPreview::Ready {
+                            slide: 0,
+                            slides: Arc::new(slides),
+                        };
+                    }
+                    Ok(Err(e)) => this.pptx = PptxPreview::Error(e.to_string()),
+                    Err(e) => this.pptx = PptxPreview::Error(e.to_string()),
+                }
+                cx.notify();
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to apply PPTX preview"))
+            .ok();
+        })
+        .detach();
+    }
+
     fn start_tabular_load(
         &mut self,
         path: PathBuf,
@@ -1148,6 +1237,24 @@ impl ArtifactView {
             return;
         }
         self.start_pdf_load(new_page, cx);
+        cx.notify();
+    }
+
+    /// Same pager semantics as [`Self::turn_pdf_page`] — clamped at both ends,
+    /// no wrap — but the deck is already parsed, so it is only an index move.
+    fn turn_pptx_slide(&mut self, next: bool, cx: &mut Context<Self>) {
+        let PptxPreview::Ready { slide, slides } = &self.pptx else {
+            return;
+        };
+        let new_slide = next_slide_index(*slide, slides.len(), next);
+        if new_slide == *slide {
+            return;
+        }
+        let slides = slides.clone();
+        self.pptx = PptxPreview::Ready {
+            slide: new_slide,
+            slides,
+        };
         cx.notify();
     }
 
@@ -1806,6 +1913,193 @@ fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -
     }
 }
 
+/// Where a Prev/Next click lands: clamped at both ends, never wrapping —
+/// the same rule `turn_pdf_page` applies to pages.
+fn next_slide_index(current: usize, total: usize, next: bool) -> usize {
+    if next {
+        current.saturating_add(1).min(total.saturating_sub(1))
+    } else {
+        current.saturating_sub(1)
+    }
+}
+
+/// The pager's `(label, prev enabled, next enabled)` for a slide.
+///
+/// Split out of the render so the panel's contract — opens on slide 1 with
+/// Prev disabled, Next walks to the last slide and stops — is testable
+/// without a window.
+fn slide_pager(index: usize, total: usize) -> (String, bool, bool) {
+    (
+        format!("Slide {} of {}", index + 1, total),
+        index > 0,
+        index + 1 < total,
+    )
+}
+
+/// One slide as a card: title, body paragraphs (bulleted where the deck said
+/// so), then any tables. Deliberately not a markdown dump of the deck — the
+/// pager above it decides which slide this is.
+fn pptx_slide_card(slide: &PptxSlide, window: &mut Window, cx: &mut App) -> AnyElement {
+    let has_text = slide.title.is_some() || !slide.body.is_empty() || !slide.tables.is_empty();
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap_3()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().border);
+
+    if let Some(title) = &slide.title {
+        card = card.child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.clone()),
+        );
+    }
+
+    for block in &slide.body {
+        let bulleted = block.bulleted;
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(block.lines.iter().map(|line| {
+                    div()
+                        .text_sm()
+                        .line_height(relative(1.5))
+                        .child(if bulleted {
+                            format!("• {line}")
+                        } else {
+                            line.clone()
+                        })
+                })),
+        );
+    }
+
+    if !slide.tables.is_empty() {
+        // Tables come out of the parser as markdown, so reuse the markdown
+        // renderer rather than re-implementing a grid here.
+        let markdown = slide.tables.join("\n\n");
+        let id = ElementId::Name(format!("artifact-pptx-tables-{}", slide.number).into());
+        card = card.child(
+            TextView::markdown(id, markdown, window, cx)
+                .style(document_text_style())
+                .selectable(true),
+        );
+    }
+
+    if !has_text {
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("This slide has no text content."),
+        );
+    }
+
+    card.into_any_element()
+}
+
+/// Slide workbench (AGE-138). Same chrome as [`pdf_rendered_body`]: Prev,
+/// a position label, Next, and one page/slide at a time in a scroller.
+fn pptx_rendered_body(
+    pptx: &PptxPreview,
+    entity: Entity<ArtifactView>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match pptx {
+        PptxPreview::Idle | PptxPreview::Loading => div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("Reading slides…")
+            .into_any_element(),
+        // A deck we cannot parse gets the muted one-liner, never a panic and
+        // never a dump of the ZIP.
+        PptxPreview::Error(message) => div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(message.clone())
+            .into_any_element(),
+        // A valid ZIP with no `ppt/slides/slideN.xml` parses fine and yields
+        // nothing to page through — say so rather than showing "Slide 1 of 0".
+        PptxPreview::Ready { slides, .. } if slides.is_empty() => div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("This presentation has no slides.")
+            .into_any_element(),
+        PptxPreview::Ready { slide, slides } => {
+            let index = (*slide).min(slides.len().saturating_sub(1));
+            let (label, can_prev, can_next) = slide_pager(index, slides.len());
+            let card = pptx_slide_card(&slides[index], window, cx);
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .justify_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("artifact-pptx-prev")
+                                .ghost()
+                                .small()
+                                .label("Prev")
+                                .disabled(!can_prev)
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_, _, cx| {
+                                        entity
+                                            .update(cx, |this, cx| this.turn_pptx_slide(false, cx));
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(label),
+                        )
+                        .child(
+                            Button::new("artifact-pptx-next")
+                                .ghost()
+                                .small()
+                                .label("Next")
+                                .disabled(!can_next)
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_, _, cx| {
+                                        entity
+                                            .update(cx, |this, cx| this.turn_pptx_slide(true, cx));
+                                    }
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("artifact-pptx-slide")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .child(card),
+                )
+                .into_any_element()
+        }
+    }
+}
+
 fn document_text_style() -> TextViewStyle {
     TextViewStyle::default()
         .paragraph_gap(rems(1.15))
@@ -1894,12 +2188,16 @@ impl Render for ArtifactView {
         let entity = cx.entity();
         let is_browser = self.browser_manager.is_some();
         let is_pdf = !is_browser && self.path.as_ref().is_some_and(|path| is_pdf_path(path));
+        // Unlike a PDF, a deck is not opaque: it keeps the tab bar, because
+        // the extracted text under Source is a real second view of it.
+        let is_pptx = !is_browser && self.path.as_ref().is_some_and(|path| is_pptx_path(path));
         let is_chart = !is_browser && self.chart.is_some();
         let is_image = !is_chart && self.path.as_ref().is_some_and(|path| is_image_path(path));
         let is_tabular = matches!(self.tabular, TabularPreview::Ready(_))
             || self.path.as_ref().is_some_and(|path| is_tabular_path(path));
         let path_ref = self.path.clone();
         let pdf = self.pdf.clone();
+        let pptx = self.pptx.clone();
         let tabular = self.tabular.clone();
         let chart = self.chart.clone();
         let browser = self.browser.clone();
@@ -2078,6 +2376,13 @@ impl Render for ArtifactView {
                                             .min_h_0()
                                             .p_2()
                                             .child(tabular_rendered_body(&tabular, cx))
+                                    } else if is_pptx {
+                                        this.flex_1().min_h_0().p_2().child(pptx_rendered_body(
+                                            &pptx,
+                                            entity.clone(),
+                                            window,
+                                            cx,
+                                        ))
                                     } else {
                                         this.flex_1().min_h_0().h_full().child(
                                             artifact_primary_body(
@@ -2410,6 +2715,67 @@ impl EventEmitter<ArtifactViewEvent> for ArtifactView {}
 
 pub fn new_artifact_view(window: &mut Window, cx: &mut App) -> Entity<ArtifactView> {
     cx.new(|cx| ArtifactView::new(window, cx))
+}
+
+/// AGE-138: the slide pager's contract, minus the pixels.
+#[cfg(test)]
+mod pptx_pager_tests {
+    use super::{next_slide_index, slide_pager};
+
+    /// "Rendered shows slide 1, Prev disabled" — the panel opens at index 0.
+    #[test]
+    fn opens_on_slide_one_with_prev_disabled() {
+        let (label, can_prev, can_next) = slide_pager(0, 4);
+        assert_eq!(label, "Slide 1 of 4");
+        assert!(!can_prev, "there is nothing before the first slide");
+        assert!(can_next);
+    }
+
+    /// "Next walks every slide" — and stops on the last one.
+    #[test]
+    fn next_walks_every_slide_then_stops() {
+        let total = 3;
+        let mut index = 0;
+        let mut seen = vec![slide_pager(index, total).0];
+        for _ in 0..5 {
+            index = next_slide_index(index, total, true);
+            seen.push(slide_pager(index, total).0);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                "Slide 1 of 3",
+                "Slide 2 of 3",
+                "Slide 3 of 3",
+                "Slide 3 of 3",
+                "Slide 3 of 3",
+                "Slide 3 of 3",
+            ],
+            "every slide is reachable and the pager clamps at the end"
+        );
+        assert!(
+            !slide_pager(total - 1, total).2,
+            "Next dies on the last slide"
+        );
+    }
+
+    #[test]
+    fn prev_clamps_at_the_first_slide() {
+        assert_eq!(next_slide_index(1, 3, false), 0);
+        assert_eq!(next_slide_index(0, 3, false), 0);
+    }
+
+    /// A deck with one slide has neither button live; an empty one must not
+    /// underflow the `total - 1` clamp.
+    #[test]
+    fn degenerate_decks_do_not_underflow() {
+        let (label, can_prev, can_next) = slide_pager(0, 1);
+        assert_eq!(label, "Slide 1 of 1");
+        assert!(!can_prev);
+        assert!(!can_next);
+        assert_eq!(next_slide_index(0, 0, true), 0);
+        assert_eq!(next_slide_index(0, 0, false), 0);
+    }
 }
 
 #[cfg(test)]

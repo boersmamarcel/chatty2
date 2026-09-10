@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use super::artifact_kind::{is_code_artifact_path, is_markdown_artifact_path};
+use super::artifact_kind::{is_code_artifact_path, is_markdown_artifact_path, is_pptx_path};
 
 /// A tab the header shows, and the view index it selects.
 ///
@@ -50,6 +50,9 @@ pub enum ArtifactHeaderKind {
     Markdown,
     /// Tabular — table and source differ.
     Tabular,
+    /// A `.pptx` deck (AGE-138) — the slide pager and the extracted text
+    /// differ, but there is only one text payload to copy.
+    Slides,
     /// Code, or anything else shown in the editor: the primary view *is* the
     /// source, so a second tab showing the same editor is not a choice.
     Code,
@@ -65,6 +68,7 @@ impl ArtifactHeaderKind {
             return Self::Tabular;
         }
         match path {
+            Some(path) if is_pptx_path(path) => Self::Slides,
             Some(path) if is_markdown_artifact_path(path) => Self::Markdown,
             // Code and unknown types both land in the editor, so they get the
             // same treatment. "Preview" for an unknown type duplicated
@@ -78,7 +82,7 @@ impl ArtifactHeaderKind {
     fn primary_label(self) -> &'static str {
         match self {
             Self::Tabular => "Table",
-            Self::Markdown => "Rendered",
+            Self::Markdown | Self::Slides => "Rendered",
             Self::Code | Self::Opaque => "Source",
         }
     }
@@ -87,7 +91,7 @@ impl ArtifactHeaderKind {
     /// editor. When it does not, offering both is offering the same thing
     /// twice.
     fn primary_differs_from_source(self) -> bool {
-        matches!(self, Self::Markdown | Self::Tabular)
+        matches!(self, Self::Markdown | Self::Tabular | Self::Slides)
     }
 }
 
@@ -118,7 +122,10 @@ pub fn artifact_copy_control(kind: ArtifactHeaderKind) -> ArtifactCopy {
     match kind {
         ArtifactHeaderKind::Opaque => ArtifactCopy::Hidden,
         ArtifactHeaderKind::Markdown | ArtifactHeaderKind::Tabular => ArtifactCopy::Menu,
-        ArtifactHeaderKind::Code => ArtifactCopy::Source,
+        // A deck has exactly one text payload — the extracted text. The
+        // slide pager is not a second one, so a menu would offer the same
+        // string twice (AGE-181).
+        ArtifactHeaderKind::Slides | ArtifactHeaderKind::Code => ArtifactCopy::Source,
     }
 }
 
@@ -171,6 +178,43 @@ mod tests {
         assert_eq!(labels, vec!["Table", "Source"]);
     }
 
+    /// AGE-138: a deck pages slides in the primary view and shows the parser's
+    /// extracted text under Source. Two genuinely different views, so both are
+    /// offered — and the primary one is called "Rendered", as the issue asks.
+    #[test]
+    fn pptx_offers_rendered_and_source() {
+        let tabs = artifact_header_tabs(kind_for("deck.pptx"), false);
+        let labels: Vec<_> = tabs.iter().map(|t| t.label).collect();
+        assert_eq!(labels, vec!["Rendered", "Source"]);
+        assert_eq!(kind_for("DECK.PPTX"), ArtifactHeaderKind::Slides);
+    }
+
+    /// Only when a previous extracted-text version exists — never a binary
+    /// diff. `has_diff` is the caller's answer to that question.
+    #[test]
+    fn pptx_shows_diff_only_when_there_is_a_previous_text() {
+        assert!(
+            !artifact_header_tabs(kind_for("deck.pptx"), false)
+                .iter()
+                .any(|t| t.label == "Diff")
+        );
+        assert!(
+            artifact_header_tabs(kind_for("deck.pptx"), true)
+                .iter()
+                .any(|t| t.label == "Diff")
+        );
+    }
+
+    /// The deck's rendered view is a slide pager, not a second copy of the
+    /// text, so the copy menu would have offered one string under two labels.
+    #[test]
+    fn pptx_gets_a_single_copy_button() {
+        assert_eq!(
+            artifact_copy_control(kind_for("deck.pptx")),
+            ArtifactCopy::Source
+        );
+    }
+
     /// Copy on a PDF or an image wrote an empty string to the clipboard,
     /// because `open()` clears the text for those kinds.
     #[test]
@@ -211,7 +255,14 @@ mod tests {
     /// Every tab the header offers must select a distinct view.
     #[test]
     fn offered_tabs_are_always_distinct_views() {
-        for path in ["form.html", "README.md", "rows.csv", "main.rs", "x.weird"] {
+        for path in [
+            "form.html",
+            "README.md",
+            "rows.csv",
+            "main.rs",
+            "x.weird",
+            "deck.pptx",
+        ] {
             for has_diff in [false, true] {
                 let is_tabular = path.ends_with(".csv");
                 let kind =
