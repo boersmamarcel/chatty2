@@ -177,6 +177,47 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-no-core-reexports.sh
 
+  # The Windows compile, at PR time. `warm-release-cache` below builds Windows
+  # too, but only on pushes to main and only on a cache miss, so the first
+  # reliable signal was release.yml's build-windows — after the merge, and too
+  # late. AGE-339 reached main that way: the broker's participant socket is
+  # `#[cfg(unix)]` and both consumers imported it unconditionally, so
+  # build-windows failed, upload-assets needs all three platforms, and v0.3.62
+  # published with no assets at all.
+  # Step-level `if` (not job-level) so the job still reports success on a
+  # docs-only PR, the way `test` above does.
+  windows:
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Skip compile (no Rust-relevant changes)
+        if: needs.changes.outputs.rust != 'true'
+        run: echo "No compile-relevant files changed; skipping the Windows check."
+
+      - name: Checkout repository
+        if: needs.changes.outputs.rust == 'true'
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        if: needs.changes.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        if: needs.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: windows-ci
+
+      # Desktop app plus the CLI: exactly the crates release.yml's
+      # build-windows job builds. `cargo check`, not `cargo build --release` —
+      # this gate is about what compiles on Windows, and the release profile's
+      # fxc.exe shader pass stays warm-release-cache's job.
+      - name: Check the desktop app and the CLI
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo check -p chatty-gpui -p chatty-tui
+
   # Warm the release-profile caches that release.yml restores. Release runs
   # are restore-only (they must never write default-branch caches), so until
   # this job existed every release built cold on all three platforms. Runs on
