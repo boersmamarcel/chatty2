@@ -11,6 +11,7 @@ use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use chatty_core::paste::PasteStore;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
 use chatty_core::services::{McpService, MemoryService, StreamSurface};
 use chatty_core::session::{
@@ -329,6 +330,9 @@ pub struct ChatEngine {
     /// When true, tool calls render their full input/output payloads instead of
     /// the collapsed one-line summary. Toggled with `Ctrl+R` or `/verbose`.
     pub verbose_tools: bool,
+    /// Long pastes elided out of the input box, kept so they can be expanded
+    /// on send and re-read with `/paste <n>` (AGE-341).
+    pastes: PasteStore,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Monotonically increasing counter to discard stale background init results.
@@ -411,9 +415,26 @@ impl ChatEngine {
             last_content_height: 0,
             last_chat_area: ratatui::layout::Rect::default(),
             verbose_tools: false,
+            pastes: PasteStore::default(),
             event_tx,
             init_generation: 0,
         }
+    }
+
+    /// Record a clipboard paste and return the text to insert into the input
+    /// box: the paste itself when it is short, otherwise a reference.
+    pub fn record_paste(&mut self, text: &str) -> String {
+        self.pastes.insert(text)
+    }
+
+    /// Replace every paste reference in `input` with the text it stands for.
+    pub fn expand_pastes(&self, input: &str) -> String {
+        self.pastes.expand(input)
+    }
+
+    /// The full text of paste `id`, for `/paste <n>`.
+    pub fn paste_text(&self, id: usize) -> Option<&str> {
+        self.pastes.get(id)
     }
 
     /// Flip between the folded tool-call summary and the full payloads.
@@ -676,9 +697,11 @@ impl ChatEngine {
             ..self.session.config().clone()
         });
 
+        // The transcript keeps the `[Pasted text #N …]` reference the user
+        // sees; the model gets the paste in full (AGE-341).
         Some(TurnInput {
             kind,
-            ..TurnInput::text(message)
+            ..TurnInput::text(self.pastes.expand(&message))
         })
     }
 

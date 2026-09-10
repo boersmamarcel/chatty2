@@ -40,6 +40,7 @@ pub mod factories;
 pub use hive_client as hive;
 pub mod install;
 pub mod models;
+pub mod paste;
 pub mod repositories;
 pub mod sandbox;
 pub mod services;

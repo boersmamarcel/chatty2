@@ -117,6 +117,14 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         tui: true,
     },
     SlashCommandSpec {
+        command: "/paste",
+        description: "Show the full text of an elided paste, e.g. /paste 1",
+        insert_text: "/paste ",
+        execute_immediately: false,
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
         command: "/verbose",
         description: "Show or fold full tool-call payloads",
         insert_text: "/verbose",

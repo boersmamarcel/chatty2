@@ -62,6 +62,8 @@ pub enum Command {
     Online(Option<String>),
     /// /verbose — toggle between folded tool-call summaries and full payloads
     Verbose,
+    /// /paste [n] — print the full text of an elided paste
+    Paste(Option<String>),
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -96,6 +98,7 @@ impl ChatEngine {
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
             "/online" => Some(Command::Online(arg)),
             "/verbose" => Some(Command::Verbose),
+            "/paste" => Some(Command::Paste(arg)),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }
