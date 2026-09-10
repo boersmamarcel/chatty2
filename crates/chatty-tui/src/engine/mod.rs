@@ -326,6 +326,9 @@ pub struct ChatEngine {
     /// Bounding rectangle of the chat transcript as of the last render.
     /// Used to route mouse wheel events only when the pointer is over the chat area.
     pub last_chat_area: ratatui::layout::Rect,
+    /// When true, tool calls render their full input/output payloads instead of
+    /// the collapsed one-line summary. Toggled with `Ctrl+R` or `/verbose`.
+    pub verbose_tools: bool,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Monotonically increasing counter to discard stale background init results.
@@ -407,9 +410,17 @@ impl ChatEngine {
             pinned_to_bottom: true,
             last_content_height: 0,
             last_chat_area: ratatui::layout::Rect::default(),
+            verbose_tools: false,
             event_tx,
             init_generation: 0,
         }
+    }
+
+    /// Flip between the folded tool-call summary and the full payloads.
+    /// Returns the new state so the caller can report it.
+    pub fn toggle_verbose_tools(&mut self) -> bool {
+        self.verbose_tools = !self.verbose_tools;
+        self.verbose_tools
     }
 
     pub fn refresh_workspace_context(&mut self) {

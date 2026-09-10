@@ -438,6 +438,12 @@ fn handle_key_event(
         // Ctrl+Q: always quit
         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
 
+        // Ctrl+R: show or fold the full tool-call payloads
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            announce_verbose_tools(engine);
+            KeyAction::None
+        }
+
         // Scroll: PageUp/PageDown, Shift+Up/Down
         KeyCode::PageUp => {
             engine.scroll_up(10);
@@ -576,8 +582,22 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             Some(KeyAction::SetOnline(None))
         }
         Command::Online(Some(url)) => Some(KeyAction::SetOnline(Some(url))),
+        Command::Verbose => {
+            announce_verbose_tools(engine);
+            None
+        }
         Command::Quit => Some(KeyAction::Quit),
     }
+}
+
+/// Flip tool-call detail and tell the user which mode they are now in.
+fn announce_verbose_tools(engine: &mut ChatEngine) {
+    let message = if engine.toggle_verbose_tools() {
+        "Tool detail: full payloads. Ctrl+R or /verbose to fold them again."
+    } else {
+        "Tool detail: folded summaries. Ctrl+R or /verbose to show full payloads."
+    };
+    engine.add_system_message(message.to_string());
 }
 
 /// Load filesystem skills for the engine's current working directory and populate

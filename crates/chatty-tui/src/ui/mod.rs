@@ -9,6 +9,7 @@ mod slash_menu;
 mod status_bar;
 pub mod theme;
 mod tool_picker;
+mod tool_summary;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
