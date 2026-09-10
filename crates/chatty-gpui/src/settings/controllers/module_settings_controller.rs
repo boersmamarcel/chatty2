@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use crate::chatty::services::broker_runner;
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::ModuleSettingsModel;
@@ -743,39 +744,46 @@ pub fn refresh_runtime(cx: &mut App) {
 
                     // ADR-0011 C2: the gateway is also the fleet broker.
                     // Children register on a socket beside its HTTP port, and
-                    // `local-agent` spawns one per delegated task.
-                    let participants = gateway.participants();
-                    let socket = broker_runner::socket_path();
-                    if broker_runner::serve_socket(participants.clone(), &socket) {
-                        let (workspace_dir, auto_approve, endpoint) = cx
-                            .update(|cx| {
-                                let exec = cx.global::<ExecutionSettingsModel>();
-                                // A worker inherits the desktop's approval
-                                // policy; it has no user to ask.
-                                let auto_approve =
-                                    matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
-                                // The endpoint every worker will share, and
-                                // how many may hold it at once (ADR-0011 C6).
-                                let endpoint = match (
-                                    cx.try_global::<ModelsModel>(),
-                                    cx.try_global::<ProviderModel>(),
-                                ) {
-                                    (Some(models), Some(providers)) => {
-                                        broker_runner::worker_endpoint(models, providers, &settings)
-                                    }
-                                    _ => None,
-                                };
-                                (exec.workspace_dir.clone(), auto_approve, endpoint)
-                            })
-                            .unwrap_or((None, false, None));
-                        gateway =
-                            gateway.with_virtual_agent(Arc::new(broker_runner::local_runner(
-                                participants,
-                                socket,
-                                workspace_dir,
-                                auto_approve,
-                                endpoint,
-                            )));
+                    // `local-agent` spawns one per delegated task. Unix only —
+                    // the socket and the runner behind it do not exist on
+                    // Windows, so the gateway there is just the gateway.
+                    #[cfg(unix)]
+                    {
+                        let participants = gateway.participants();
+                        let socket = broker_runner::socket_path();
+                        if broker_runner::serve_socket(participants.clone(), &socket) {
+                            let (workspace_dir, auto_approve, endpoint) = cx
+                                .update(|cx| {
+                                    let exec = cx.global::<ExecutionSettingsModel>();
+                                    // A worker inherits the desktop's approval
+                                    // policy; it has no user to ask.
+                                    let auto_approve =
+                                        matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
+                                    // The endpoint every worker will share, and
+                                    // how many may hold it at once (ADR-0011 C6).
+                                    let endpoint = match (
+                                        cx.try_global::<ModelsModel>(),
+                                        cx.try_global::<ProviderModel>(),
+                                    ) {
+                                        (Some(models), Some(providers)) => {
+                                            broker_runner::worker_endpoint(
+                                                models, providers, &settings,
+                                            )
+                                        }
+                                        _ => None,
+                                    };
+                                    (exec.workspace_dir.clone(), auto_approve, endpoint)
+                                })
+                                .unwrap_or((None, false, None));
+                            gateway =
+                                gateway.with_virtual_agent(Arc::new(broker_runner::local_runner(
+                                    participants,
+                                    socket,
+                                    workspace_dir,
+                                    auto_approve,
+                                    endpoint,
+                                )));
+                        }
                     }
 
                     gateway.start().await.map(|_| gateway)
