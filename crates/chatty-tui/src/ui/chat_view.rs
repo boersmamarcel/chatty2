@@ -24,8 +24,10 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
         render_welcome_state(&mut lines, engine);
     } else {
         let verbose = engine.verbose_tools;
+        // Borders take a column on each side; `inner` is not computed yet.
+        let width = area.width.saturating_sub(2);
         for msg in &engine.transcript.messages {
-            render_message(&mut lines, msg, verbose);
+            render_message(&mut lines, msg, verbose, width);
             lines.push(Line::from("")); // spacing between messages
         }
     }
@@ -252,7 +254,7 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
     ]);
 }
 
-fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool) {
+fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, width: u16) {
     // Role label
     let (label, style) = match msg.role {
         MessageRole::User => ("you", theme::success_bold()),
@@ -275,7 +277,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool) {
                 }
             }
             MessageBlock::ToolCall(tc) => {
-                render_tool_call(lines, tc, verbose);
+                render_tool_call(lines, tc, verbose, width);
             }
         }
     }
@@ -287,17 +289,43 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool) {
     }
 }
 
-fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo, verbose: bool) {
+fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo, verbose: bool, width: u16) {
     if verbose {
         render_tool_call_verbose(lines, tc);
     } else {
-        render_tool_call_collapsed(lines, tc);
+        render_tool_call_collapsed(lines, tc, width);
     }
 }
 
+/// Columns the folded result body indents by (`    ⎿ ` / six spaces).
+const RESULT_INDENT: usize = 6;
+
 /// One header line plus a folded result — what the user sees by default.
-fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
+fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u16) {
     let (icon, tc_style) = tool_state_style(&tc.state);
+    let mut badge = tool_badge_span(tc);
+
+    // Everything on the header that is not the preview: indent, glyph, name,
+    // parens and status word. What is left is the preview's budget.
+    let status_width = match &tc.state {
+        ToolCallState::Running => " running".len(),
+        ToolCallState::Error => " failed".len(),
+        ToolCallState::Success => 0,
+    };
+    let overhead = 6 + tc.name.chars().count() + status_width;
+    let badge_width = badge.as_ref().map_or(0, |b| b.content.chars().count() + 1);
+
+    // On a narrow terminal the badge yields before the preview does — it is the
+    // least identifying part of the header, and a header that wraps loses the
+    // alignment the folded format exists to give.
+    let budget = if usize::from(width).saturating_sub(overhead + badge_width)
+        < tool_summary::INPUT_PREVIEW_MIN
+    {
+        badge = None;
+        usize::from(width).saturating_sub(overhead)
+    } else {
+        usize::from(width).saturating_sub(overhead + badge_width)
+    };
 
     let mut header = vec![
         Span::raw("  "),
@@ -305,11 +333,11 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
         Span::raw(" "),
         Span::styled(tc.name.clone(), theme::tool()),
         Span::styled(
-            format!("({})", tool_summary::summarize_input(&tc.input)),
+            format!("({})", tool_summary::summarize_input(&tc.input, budget)),
             theme::text_subtle(),
         ),
     ];
-    if let Some(badge) = tool_badge_span(tc) {
+    if let Some(badge) = badge {
         header.push(Span::raw(" "));
         header.push(badge);
     }
@@ -330,13 +358,15 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
         return;
     };
 
-    // A failure is the one payload worth reading in full — never fold it.
+    // A failure is the one payload worth reading in full — never fold or clip
+    // it, even though that means long errors wrap.
     if matches!(tc.state, ToolCallState::Error) {
         push_result_lines(lines, tool_summary::output_lines(output), 0, theme::error());
         return;
     }
 
-    let (kept, hidden) = tool_summary::fold(tool_summary::output_lines(output));
+    let body_width = usize::from(width).saturating_sub(RESULT_INDENT);
+    let (kept, hidden) = tool_summary::fold(tool_summary::output_lines(output), body_width);
     push_result_lines(lines, kept, hidden, theme::text_subtle());
 }
 
@@ -358,7 +388,7 @@ fn push_result_lines(
     if hidden > 0 {
         lines.push(Line::from(vec![
             Span::raw("      "),
-            Span::styled(format!("… +{hidden} lines"), theme::muted()),
+            Span::styled(tool_summary::hidden_marker(hidden), theme::muted()),
         ]));
     }
 }
@@ -590,7 +620,7 @@ mod tests {
 
     fn render(tc: &ToolCallInfo, verbose: bool) -> Vec<String> {
         let mut lines = Vec::new();
-        render_tool_call(&mut lines, tc, verbose);
+        render_tool_call(&mut lines, tc, verbose, 80);
         lines.iter().map(line_text).collect()
     }
 
@@ -680,6 +710,44 @@ mod tests {
         assert_eq!(render(&tc, false), vec!["  ✓ update_todo(t1)".to_string()]);
     }
 
+    /// ratatui restarts a wrapped row at column 0, so any collapsed line wider
+    /// than the viewport would break the indent. Only an error body — which is
+    /// never clipped, on purpose — is allowed past the edge.
+    #[test]
+    fn no_collapsed_line_outgrows_the_viewport() {
+        let long_output = (1..=9)
+            .map(|n| format!("a very long line of output number {n} {}", "x".repeat(120)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let calls = [
+            tool_call(
+                r#"{"command":"ls -la /Users/someone/a/deeply/nested/notes/dir"}"#,
+                Some(&long_output),
+                ToolCallState::Success,
+            ),
+            tool_call(
+                r#"{"file_path":"/media/marcel/data/rust/chattyapp/chatty2/crates/chatty-tui/src/ui/chat_view.rs"}"#,
+                None,
+                ToolCallState::Running,
+            ),
+        ];
+
+        for width in [40u16, 52, 80, 120, 200] {
+            let mut lines = Vec::new();
+            for tc in &calls {
+                render_tool_call(&mut lines, tc, false, width);
+            }
+            for line in &lines {
+                assert!(
+                    line.width() <= usize::from(width),
+                    "line {:?} is {} wide at width {width}",
+                    line_text(line),
+                    line.width()
+                );
+            }
+        }
+    }
+
     /// The screenshot in AGE-340: two calls that used to fill the viewport.
     #[test]
     fn collapsed_mode_keeps_the_screenshot_pair_under_eight_lines() {
@@ -701,8 +769,8 @@ mod tests {
         todo.execution_engine = None;
 
         let mut lines = Vec::new();
-        render_tool_call(&mut lines, &shell, false);
-        render_tool_call(&mut lines, &todo, false);
+        render_tool_call(&mut lines, &shell, false, 80);
+        render_tool_call(&mut lines, &todo, false, 80);
 
         assert!(lines.len() <= 8, "rendered {} lines", lines.len());
     }

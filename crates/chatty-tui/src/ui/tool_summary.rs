@@ -4,13 +4,13 @@
 //! plus a few lines of its result. These helpers do the condensing; rendering
 //! and styling stay in [`crate::ui::chat_view`].
 
-/// Maximum width of the argument preview inside the header parentheses.
-/// Keeps `  <glyph> <name>(<args>) [badge]` on one row at 80 columns.
+/// Upper bound on the argument preview, even on a very wide terminal — past
+/// this the preview stops being a glance.
 const INPUT_PREVIEW_MAX: usize = 56;
 
-/// Maximum width of a single folded output line, so one very long line of
-/// stdout cannot wrap into a screenful.
-const OUTPUT_LINE_MAX: usize = 96;
+/// Preview floor, so a narrow terminal still shows something identifying
+/// rather than collapsing to a bare `…`.
+pub const INPUT_PREVIEW_MIN: usize = 12;
 
 /// How many output lines survive folding before the `… +N lines` marker.
 pub const COLLAPSED_OUTPUT_LINES: usize = 3;
@@ -39,9 +39,10 @@ const PRIMARY_OUTPUT_KEYS: &[&str] = &[
 
 /// One-line preview of a tool call's input, for the header parentheses.
 ///
-/// Returns an empty string when there is nothing worth showing, in which case
-/// the caller renders a bare `name()`.
-pub fn summarize_input(input: &str) -> String {
+/// `budget` is how many columns the header has left for it. Returns an empty
+/// string when there is nothing worth showing, in which case the caller
+/// renders a bare `name()`.
+pub fn summarize_input(input: &str, budget: usize) -> String {
     let input = input.trim();
     if input.is_empty() {
         return String::new();
@@ -53,7 +54,7 @@ pub fn summarize_input(input: &str) -> String {
         Err(_) => single_line(input),
     };
 
-    truncate(&summary, INPUT_PREVIEW_MAX)
+    truncate(&summary, budget.clamp(INPUT_PREVIEW_MIN, INPUT_PREVIEW_MAX))
 }
 
 /// The lines of a tool result, unfolded: structured payloads give up their
@@ -77,16 +78,29 @@ pub fn output_lines(output: &str) -> Vec<String> {
     output.lines().map(str::to_string).collect()
 }
 
-/// Fold `lines` to at most [`COLLAPSED_OUTPUT_LINES`], returning the kept lines
-/// and how many were dropped.
-pub fn fold(lines: Vec<String>) -> (Vec<String>, usize) {
+/// Fold `lines` to at most [`COLLAPSED_OUTPUT_LINES`], each clipped to `width`
+/// columns. Returns the kept lines and how many were dropped.
+///
+/// Clipping to the real width matters: ratatui's `Wrap` restarts a wrapped row
+/// at column 0, so an over-long result line would break the indent that makes
+/// the folded block readable.
+pub fn fold(lines: Vec<String>, width: usize) -> (Vec<String>, usize) {
     let hidden = lines.len().saturating_sub(COLLAPSED_OUTPUT_LINES);
     let kept = lines
         .into_iter()
         .take(COLLAPSED_OUTPUT_LINES)
-        .map(|line| truncate(line.trim_end(), OUTPUT_LINE_MAX))
+        .map(|line| truncate(line.trim_end(), width.max(INPUT_PREVIEW_MIN)))
         .collect();
     (kept, hidden)
+}
+
+/// `… +3 lines` / `… +1 line`.
+pub fn hidden_marker(hidden: usize) -> String {
+    if hidden == 1 {
+        "… +1 line".to_string()
+    } else {
+        format!("… +{hidden} lines")
+    }
 }
 
 fn summarize_object(map: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -153,7 +167,10 @@ mod tests {
     #[test]
     fn primary_key_wins_over_the_rest_of_the_object() {
         assert_eq!(
-            summarize_input(r#"{"cwd":"/tmp","command":"ls -la /notes","timeout":30}"#),
+            summarize_input(
+                r#"{"cwd":"/tmp","command":"ls -la /notes","timeout":30}"#,
+                56
+            ),
             "ls -la /notes"
         );
     }
@@ -161,11 +178,11 @@ mod tests {
     #[test]
     fn file_and_url_shapes_use_their_own_keys() {
         assert_eq!(
-            summarize_input(r#"{"file_path":"/src/main.rs","limit":40}"#),
+            summarize_input(r#"{"file_path":"/src/main.rs","limit":40}"#, 56),
             "/src/main.rs"
         );
         assert_eq!(
-            summarize_input(r#"{"url":"https://example.com/a"}"#),
+            summarize_input(r#"{"url":"https://example.com/a"}"#, 56),
             "https://example.com/a"
         );
     }
@@ -176,7 +193,10 @@ mod tests {
     #[test]
     fn unrecognized_object_falls_back_to_sorted_key_value_pairs() {
         assert_eq!(
-            summarize_input(r#"{"status":"done","count":3,"todos":[1,2],"meta":{"a":1}}"#),
+            summarize_input(
+                r#"{"status":"done","count":3,"todos":[1,2],"meta":{"a":1}}"#,
+                56
+            ),
             "count=3 meta={…} status=done todos=[2]"
         );
     }
@@ -184,21 +204,21 @@ mod tests {
     #[test]
     fn non_json_input_is_flattened_to_one_line() {
         assert_eq!(
-            summarize_input("git status\n  --short"),
+            summarize_input("git status\n  --short", 56),
             "git status --short"
         );
     }
 
     #[test]
     fn empty_input_yields_no_preview() {
-        assert_eq!(summarize_input("   "), "");
-        assert_eq!(summarize_input("{}"), "");
+        assert_eq!(summarize_input("   ", 56), "");
+        assert_eq!(summarize_input("{}", 56), "");
     }
 
     #[test]
     fn long_preview_is_truncated_with_an_ellipsis() {
         let long = "a".repeat(200);
-        let preview = summarize_input(&format!(r#"{{"command":"{long}"}}"#));
+        let preview = summarize_input(&format!(r#"{{"command":"{long}"}}"#), 56);
         assert_eq!(preview.chars().count(), INPUT_PREVIEW_MAX);
         assert!(preview.ends_with('…'));
     }
@@ -230,23 +250,37 @@ mod tests {
     #[test]
     fn fold_reports_the_hidden_line_count() {
         let lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
-        let (kept, hidden) = fold(lines);
+        let (kept, hidden) = fold(lines, 80);
         assert_eq!(kept, vec!["line 1", "line 2", "line 3"]);
         assert_eq!(hidden, 6);
     }
 
     #[test]
     fn fold_hides_nothing_when_output_already_fits() {
-        let (kept, hidden) = fold(vec!["only".to_string()]);
+        let (kept, hidden) = fold(vec!["only".to_string()], 80);
         assert_eq!(kept, vec!["only".to_string()]);
         assert_eq!(hidden, 0);
     }
 
     #[test]
-    fn fold_truncates_a_very_long_line() {
-        let (kept, hidden) = fold(vec!["x".repeat(500)]);
-        assert_eq!(kept[0].chars().count(), OUTPUT_LINE_MAX);
+    fn fold_clips_a_long_line_to_the_given_width() {
+        let (kept, hidden) = fold(vec!["x".repeat(500)], 74);
+        assert_eq!(kept[0].chars().count(), 74);
         assert!(kept[0].ends_with('…'));
         assert_eq!(hidden, 0);
+    }
+
+    #[test]
+    fn a_narrow_terminal_still_shows_an_identifying_preview() {
+        assert_eq!(
+            summarize_input(r#"{"command":"cargo build --release"}"#, 0),
+            "cargo build…"
+        );
+    }
+
+    #[test]
+    fn the_hidden_marker_is_singular_for_one_line() {
+        assert_eq!(hidden_marker(1), "… +1 line");
+        assert_eq!(hidden_marker(4), "… +4 lines");
     }
 }
