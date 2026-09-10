@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
@@ -10,7 +10,8 @@ use crate::engine::{
     ChatEngine, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo, ToolCallState,
 };
 use crate::ui::theme;
-use crate::ui::tool_summary;
+use crate::ui::{plan, tool_summary};
+use chatty_core::services::{AgentTaskSnapshot, is_agent_todo_tool, snapshot_from_tool_output};
 
 pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
     // Remember the chat area so mouse wheel events can route correctly.
@@ -264,6 +265,13 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, wi
 
     lines.push(Line::from(Span::styled(format!("[{}]", label), style)));
 
+    // The todo plan is a state, not a stream of events: draw the newest
+    // snapshot once, where the plan was first written, and let every later
+    // `update_todo` rewrite it in place instead of adding two more rows
+    // (AGE-342). Verbose mode still shows the raw calls.
+    let plan = if verbose { None } else { latest_plan(msg) };
+    let mut plan_drawn = false;
+
     // Render blocks in the order they arrived so text and tool calls interleave.
     for block in &msg.blocks {
         match block {
@@ -277,6 +285,18 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, wi
                 }
             }
             MessageBlock::ToolCall(tc) => {
+                // A failed todo call keeps the normal rendering: it is rare,
+                // it is diagnostic, and errors are never hidden (AGE-340).
+                if let Some(snapshot) = plan.as_ref()
+                    && is_agent_todo_tool(&tc.name)
+                    && !matches!(tc.state, ToolCallState::Error)
+                {
+                    if !plan_drawn {
+                        render_plan(lines, snapshot, width);
+                        plan_drawn = true;
+                    }
+                    continue;
+                }
                 render_tool_call(lines, tc, verbose, width);
             }
         }
@@ -286,6 +306,62 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, wi
     let trailing_tool = matches!(msg.blocks.last(), Some(MessageBlock::ToolCall(_)));
     if msg.is_streaming && !trailing_tool {
         lines.push(Line::from(Span::styled("▌", theme::warning())));
+    }
+}
+
+/// The newest task snapshot in this message, which every todo tool returns
+/// alongside its model-directed `message` field.
+fn latest_plan(msg: &DisplayMessage) -> Option<AgentTaskSnapshot> {
+    msg.blocks
+        .iter()
+        .rev()
+        .filter_map(|block| match block {
+            MessageBlock::ToolCall(tc) if is_agent_todo_tool(&tc.name) => tc.output.as_deref(),
+            _ => None,
+        })
+        .find_map(snapshot_from_tool_output)
+}
+
+/// The plan card: one header row plus a row per todo, rewritten in place as
+/// the plan advances. A verified plan keeps only its header — it is finished,
+/// and the steps have served their purpose.
+fn render_plan(lines: &mut Vec<Line>, snapshot: &AgentTaskSnapshot, width: u16) {
+    let width = usize::from(width);
+    for row in plan::plan_rows(snapshot, width, snapshot.verified) {
+        let style = plan_tone_style(row.tone);
+        let mut spans = vec![
+            Span::raw(" ".repeat(row.indent)),
+            Span::styled(row.glyph, style),
+            Span::raw(" "),
+            Span::styled(row.text.clone(), plan_body_style(row.tone)),
+        ];
+        if !row.trailing.is_empty() {
+            spans.push(Span::raw(" ".repeat(row.padding(width))));
+            spans.push(Span::styled(row.trailing.clone(), theme::text_subtle()));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+/// Glyph colour per row meaning.
+fn plan_tone_style(tone: plan::Tone) -> Style {
+    match tone {
+        plan::Tone::Header => theme::tool_bold(),
+        plan::Tone::Done => theme::success(),
+        plan::Tone::Running => theme::accent(),
+        plan::Tone::Pending => theme::muted(),
+        plan::Tone::Blocked => theme::error(),
+        plan::Tone::Subtle => theme::text_subtle(),
+    }
+}
+
+/// Body colour: only the glyph carries the status, so the text stays readable.
+fn plan_body_style(tone: plan::Tone) -> Style {
+    match tone {
+        plan::Tone::Header => theme::text_bold(),
+        plan::Tone::Pending => theme::muted(),
+        plan::Tone::Subtle => theme::text_subtle(),
+        _ => theme::text(),
     }
 }
 
@@ -780,5 +856,235 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    // ── AGE-342: the plan card ──────────────────────────────────────────────
+
+    /// A todo tool's output as the agent task controller serializes it: the
+    /// model-directed `message` plus the whole plan.
+    fn todo_output(todos: &str) -> String {
+        plan_output(todos, false)
+    }
+
+    fn plan_output(todos: &str, verified: bool) -> String {
+        format!(
+            r#"{{"message":"Todo marked done. Start the next pending todo.","should_ask_user":false,"snapshot":{{"goal":"Read and summarize all files in the workspace","write_todos_called":true,"verified":{verified},"evidence":[],"todos":[{todos}]}}}}"#
+        )
+    }
+
+    fn todo(id: &str, title: &str, status: &str) -> String {
+        format!(r#"{{"id":"{id}","title":"{title}","description":"d","status":"{status}"}}"#)
+    }
+
+    fn todo_call(name: &str, output: Option<&str>) -> ToolCallInfo {
+        ToolCallInfo {
+            id: format!("call-{name}"),
+            name: name.to_string(),
+            input: r#"{"id":"t1","status":"done"}"#.to_string(),
+            output: output.map(str::to_string),
+            state: match output {
+                Some(_) => ToolCallState::Success,
+                None => ToolCallState::Running,
+            },
+            source: ToolSource::Local,
+            execution_engine: None,
+        }
+    }
+
+    fn assistant_with(blocks: Vec<MessageBlock>) -> DisplayMessage {
+        DisplayMessage {
+            role: MessageRole::Assistant,
+            blocks,
+            is_streaming: false,
+        }
+    }
+
+    fn render_msg(msg: &DisplayMessage, verbose: bool, width: u16) -> Vec<String> {
+        let mut lines = Vec::new();
+        render_message(&mut lines, msg, verbose, width);
+        lines.iter().map(line_text).collect()
+    }
+
+    /// The AGE-342 screenshot: twelve rows for three todos, because every
+    /// state change was its own event. One card, rewritten in place, instead.
+    #[test]
+    fn a_whole_plan_collapses_into_one_card() {
+        let first = todo_output(&format!(
+            "{},{},{}",
+            todo("t1", "List workspace files", "done"),
+            todo("t2", "Read all text files", "pending"),
+            todo("t3", "Summarize findings", "pending")
+        ));
+        let latest = todo_output(&format!(
+            "{},{},{}",
+            todo("t1", "List workspace files", "done"),
+            todo("t2", "Read all text files", "in_progress"),
+            todo("t3", "Summarize findings", "pending")
+        ));
+        let msg = assistant_with(vec![
+            MessageBlock::ToolCall(todo_call("write_todos", Some(&first))),
+            MessageBlock::ToolCall(todo_call("update_todo", Some(&first))),
+            MessageBlock::ToolCall(todo_call("update_todo", Some(&latest))),
+        ]);
+
+        let rendered = render_msg(&msg, false, 80);
+
+        assert_eq!(rendered[0], "[assistant]");
+        assert_eq!(
+            rendered.len(),
+            5,
+            "one header plus three steps: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("update_todo")),
+            "no tool row survives: {rendered:?}"
+        );
+        assert!(rendered[1].starts_with("  ▣ Plan · Read and summarize all files"));
+        assert!(rendered[1].ends_with("1/3"));
+        assert_eq!(rendered[2], "     ✔ List workspace files");
+        assert_eq!(rendered[3], "     ▸ Read all text files");
+        assert_eq!(rendered[4], "     ○ Summarize findings");
+    }
+
+    /// The card shows the newest snapshot, wherever in the turn it arrived.
+    #[test]
+    fn the_card_is_drawn_where_the_plan_was_written() {
+        let plan = todo_output(&todo("t1", "Collect merged PRs", "in_progress"));
+        let msg = assistant_with(vec![
+            MessageBlock::Text("Planning.\n".to_string()),
+            MessageBlock::ToolCall(todo_call("write_todos", Some(&plan))),
+            MessageBlock::ToolCall(tool_call(
+                r#"{"command":"gh pr list"}"#,
+                Some("#1 a pr"),
+                ToolCallState::Success,
+            )),
+        ]);
+
+        let rendered = render_msg(&msg, false, 80);
+
+        assert_eq!(rendered[1], "Planning.");
+        assert!(rendered[3].starts_with("  ▣ Plan"), "{rendered:?}");
+        assert!(rendered[4].contains("Collect merged PRs"));
+        assert!(
+            rendered[5].contains("shell_execute(gh pr list)"),
+            "{rendered:?}"
+        );
+    }
+
+    /// `blocked_reason` is the user's business; the model's `reflection` and
+    /// the protocol `message` are not.
+    #[test]
+    fn a_blocked_step_shows_its_reason_and_nothing_else() {
+        let plan = todo_output(
+            r#"{"id":"t1","title":"Fetch the changelog template","description":"d","status":"blocked","blocked_reason":"repo has no docs/template.md","reflection":"I should have checked first"}"#,
+        );
+        let msg = assistant_with(vec![MessageBlock::ToolCall(todo_call(
+            "update_todo",
+            Some(&plan),
+        ))]);
+
+        let rendered = render_msg(&msg, false, 80);
+
+        assert!(rendered[1].ends_with("0/1 · 1 blocked"), "{rendered:?}");
+        assert!(rendered[2].starts_with("     ✖ Fetch the changelog template"));
+        assert!(rendered[2].ends_with("blocked"));
+        assert_eq!(rendered[3], "       repo has no docs/template.md");
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line.contains("should have checked")),
+            "reflection is the model's note to itself: {rendered:?}"
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line.contains("Start the next pending")),
+            "protocol nudges stay out of the transcript: {rendered:?}"
+        );
+    }
+
+    /// A finished plan keeps its header only — it has served its purpose.
+    #[test]
+    fn a_verified_plan_collapses_to_its_header() {
+        let plan = plan_output(&todo("t1", "List workspace files", "done"), true);
+        let msg = assistant_with(vec![MessageBlock::ToolCall(todo_call(
+            "verify_completion",
+            Some(&plan),
+        ))]);
+
+        let rendered = render_msg(&msg, false, 80);
+
+        assert_eq!(rendered.len(), 2, "{rendered:?}");
+        assert!(rendered[1].starts_with("  ✔ Plan ·"));
+        assert!(rendered[1].ends_with("1/1 verified"));
+    }
+
+    /// Errors are never hidden — the AGE-340 invariant holds for plan tools.
+    #[test]
+    fn a_failed_todo_call_still_shows_its_error() {
+        let plan = todo_output(&todo("t1", "List workspace files", "pending"));
+        let mut failed = todo_call("update_todo", Some("write_todos must be called first"));
+        failed.state = ToolCallState::Error;
+        let msg = assistant_with(vec![
+            MessageBlock::ToolCall(failed),
+            MessageBlock::ToolCall(todo_call("write_todos", Some(&plan))),
+        ]);
+
+        let rendered = render_msg(&msg, false, 80);
+
+        assert_eq!(rendered[1], "  ✗ update_todo(t1) failed");
+        assert_eq!(rendered[2], "    ⎿ write_todos must be called first");
+        assert!(rendered[3].starts_with("  ▣ Plan"), "{rendered:?}");
+    }
+
+    /// `/verbose` still hands over the raw payloads, plan tools included.
+    #[test]
+    fn verbose_mode_keeps_the_raw_todo_calls() {
+        let plan = todo_output(&todo("t1", "List workspace files", "done"));
+        let msg = assistant_with(vec![MessageBlock::ToolCall(todo_call(
+            "write_todos",
+            Some(&plan),
+        ))]);
+
+        let rendered = render_msg(&msg, true, 80);
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("[tool: write_todos]"))
+        );
+        assert!(rendered.iter().any(|line| line.contains("\"snapshot\"")));
+        assert!(!rendered.iter().any(|line| line.contains("▣ Plan")));
+    }
+
+    /// A wrapped row would restart at column 0 and destroy the card's indent.
+    #[test]
+    fn no_plan_row_outgrows_the_viewport() {
+        let plan = todo_output(&format!(
+            "{},{}",
+            todo(
+                "t1",
+                "Read every single file in the workspace and write down what each one contains",
+                "done"
+            ),
+            r#"{"id":"t2","title":"Summarize the findings into one short paragraph for the user","description":"d","status":"blocked","blocked_reason":"the workspace turned out to hold a binary file that cannot be decoded as UTF-8 text"}"#
+        ));
+        let msg = assistant_with(vec![MessageBlock::ToolCall(todo_call(
+            "write_todos",
+            Some(&plan),
+        ))]);
+
+        for width in [40u16, 52, 80, 120, 200] {
+            let mut lines = Vec::new();
+            render_message(&mut lines, &msg, false, width);
+            for line in &lines {
+                assert!(
+                    line.width() <= usize::from(width),
+                    "line {:?} is {} wide at width {width}",
+                    line_text(line),
+                    line.width()
+                );
+            }
+        }
     }
 }

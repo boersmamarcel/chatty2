@@ -5,6 +5,7 @@ mod clarification;
 mod hint_bar;
 mod input;
 mod model_picker;
+mod plan;
 mod slash_menu;
 mod status_bar;
 pub mod theme;

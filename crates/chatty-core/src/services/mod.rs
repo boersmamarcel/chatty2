@@ -68,7 +68,7 @@ pub use a2a_client::{A2aClient, A2aStreamEvent};
 pub use agent_loop_guard::AgentLoopGuard;
 pub use agent_task_controller::{
     AgentTaskController, AgentTaskResponse, AgentTaskSnapshot, AgentTodo, AgentTodoStatus,
-    is_protocol_follow_up_text,
+    is_agent_todo_tool, is_protocol_follow_up_text, snapshot_from_tool_output,
 };
 pub use context_shaper::{ContextShaperSettings, ShapedContext, shape_context};
 pub use embedding_service::EmbeddingService;

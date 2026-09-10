@@ -15,6 +15,7 @@ use chatty_core::models::message_types::{
     classify_initial_execution_engine, classify_tool_source, detect_execution_engine,
     predict_execution_engine,
 };
+use chatty_core::services::{AgentTaskSnapshot, is_agent_todo_tool, snapshot_from_tool_output};
 
 use super::{DisplayMessage, MessageRole, ToolCallInfo, ToolCallState};
 
@@ -27,6 +28,10 @@ pub struct Transcript {
     /// Tracks `invoke_agent` tool call IDs to suppress their
     /// ToolCallBlock rendering (progress goes through the sub-agent channel).
     active_invoke_agent_ids: HashSet<String>,
+    /// Latest plan snapshot, for the status bar's live position. Cleared when
+    /// a new user turn starts, which is when `AgentTaskController` resets the
+    /// plan it mirrors (AGE-342).
+    pub plan: Option<AgentTaskSnapshot>,
 }
 
 impl Transcript {
@@ -38,9 +43,11 @@ impl Transcript {
         self.messages.clear();
         self.delegation_msg_idx = None;
         self.active_invoke_agent_ids.clear();
+        self.plan = None;
     }
 
     pub fn push_user(&mut self, text: String) {
+        self.plan = None;
         self.messages
             .push(DisplayMessage::with_text(MessageRole::User, text));
     }
@@ -154,12 +161,19 @@ impl Transcript {
             // invoke_agent result — the delegation progress already handled
             return;
         }
+        let mut plan = None;
         if let Some(last) = self.streaming_assistant_mut()
             && let Some(tc) = last.tool_call_mut(id)
         {
             tc.execution_engine = detect_execution_engine(&tc.name, &result);
+            if is_agent_todo_tool(&tc.name) {
+                plan = snapshot_from_tool_output(&result);
+            }
             tc.output = Some(result);
             tc.state = ToolCallState::Success;
+        }
+        if plan.is_some() {
+            self.plan = plan;
         }
     }
 
