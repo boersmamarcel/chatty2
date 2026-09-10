@@ -708,7 +708,13 @@ fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {
         );
     }
 
-    // Default: use first model
+    // No --model: the model marked default in the desktop settings UI, which
+    // is the only place the marker can be set. Falling straight through to
+    // list order here meant the TUI silently ignored it (#583).
+    if let Some(config) = models.default_model() {
+        return Ok(config.clone());
+    }
+
     Ok(all_models[0].clone())
 }
 
@@ -972,6 +978,73 @@ fn inject_discovered(
         let mut mc = ModelConfig::new(id, dm.display_name, provider_type.clone(), dm.identifier);
         mc.supports_images = dm.supports_vision;
         models_list.push(mc);
+    }
+}
+
+#[cfg(test)]
+mod resolve_model_tests {
+    use super::{Cli, resolve_model};
+    use chatty_core::settings::models::ModelsModel;
+    use chatty_core::settings::models::models_store::ModelConfig;
+    use chatty_core::settings::models::providers_store::ProviderType;
+    use clap::Parser;
+
+    fn store(ids: &[&str]) -> ModelsModel {
+        let mut store = ModelsModel::new();
+        for id in ids {
+            store.add_model(ModelConfig::new(
+                id.to_string(),
+                id.to_string(),
+                ProviderType::OpenRouter,
+                format!("vendor/{id}"),
+            ));
+        }
+        store
+    }
+
+    fn cli(args: &[&str]) -> Cli {
+        let mut argv = vec!["chatty-tui"];
+        argv.extend_from_slice(args);
+        Cli::parse_from(argv)
+    }
+
+    /// #583: the marker is set in the desktop settings UI, and the TUI used
+    /// to fall straight through to list order and ignore it.
+    #[test]
+    fn no_model_flag_prefers_the_marked_default_over_list_order() {
+        let mut models = store(&["first", "second"]);
+        assert!(models.set_default("second"));
+
+        let resolved = resolve_model(&cli(&[]), &models).expect("a model resolves");
+
+        assert_eq!(resolved.id, "second");
+    }
+
+    #[test]
+    fn no_model_flag_and_no_marker_still_takes_the_first_model() {
+        let models = store(&["first", "second"]);
+
+        let resolved = resolve_model(&cli(&[]), &models).expect("a model resolves");
+
+        assert_eq!(resolved.id, "first");
+    }
+
+    /// An explicit --model is the user speaking about this session; it wins
+    /// over the persisted marker.
+    #[test]
+    fn an_explicit_model_flag_beats_the_marked_default() {
+        let mut models = store(&["first", "second"]);
+        assert!(models.set_default("second"));
+
+        let resolved =
+            resolve_model(&cli(&["--model", "first"]), &models).expect("a model resolves");
+
+        assert_eq!(resolved.id, "first");
+    }
+
+    #[test]
+    fn no_models_configured_is_an_error() {
+        assert!(resolve_model(&cli(&[]), &ModelsModel::new()).is_err());
     }
 }
 
