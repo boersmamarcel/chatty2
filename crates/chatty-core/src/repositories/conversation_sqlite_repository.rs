@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+use tokio::sync::OnceCell;
 use tracing::info;
 
 use super::conversation_repository::{
@@ -43,48 +45,99 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, "ALTER TABLE conversations ADD COLUMN mode TEXT;"),
 ];
 
+/// Creates the database directory, opens the pool and applies any pending
+/// migrations. Called at most once per [`LazyPool`], from whichever query
+/// runs first.
+async fn open_pool(db_path: PathBuf) -> RepositoryResult<SqlitePool> {
+    if let Some(parent) = db_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?;
+
+    ConversationSqliteRepository::run_migrations(&pool).await?;
+
+    info!(path = %db_path.display(), "Opened SQLite conversation database");
+
+    Ok(pool)
+}
+
+/// A connection pool that is opened on first use rather than on construction.
+///
+/// Opening it creates the database file, runs migrations and pays several
+/// `fsync`s. Doing that eagerly put disk I/O on the desktop binary's
+/// pre-`Application::run` path, where it delayed the first frame for work
+/// nothing had asked for yet (AGE-161). Every repository method goes through
+/// [`LazyPool::get`], so the cost now lands on the first query — in the
+/// desktop app the sidebar's `load_metadata`, which already runs inside a
+/// spawned task.
+///
+/// Concurrent first callers are serialised by `OnceCell`, so the pool is
+/// opened (and the migrations applied) exactly once.
+#[derive(Clone)]
+struct LazyPool {
+    db_path: PathBuf,
+    cell: Arc<OnceCell<SqlitePool>>,
+}
+
+impl LazyPool {
+    fn new(db_path: PathBuf) -> Self {
+        Self {
+            db_path,
+            cell: Arc::new(OnceCell::new()),
+        }
+    }
+
+    /// The pool, opening it if this is the first call.
+    ///
+    /// A failed open is not cached: the next query retries, so a transient
+    /// failure (e.g. the config directory not yet writable) doesn't poison
+    /// the repository for the rest of the session.
+    async fn get(&self) -> RepositoryResult<SqlitePool> {
+        self.cell
+            .get_or_try_init(|| open_pool(self.db_path.clone()))
+            .await
+            .cloned()
+    }
+}
+
 /// SQLite-backed repository for conversations.
 ///
 /// Uses WAL journal mode for concurrent reads during background saves.
-/// `SqlitePool` is internally reference-counted and cheap to clone.
+/// The pool is opened lazily — see [`LazyPool`] — and is internally
+/// reference-counted and cheap to clone.
 pub struct ConversationSqliteRepository {
-    pool: SqlitePool,
+    pool: LazyPool,
 }
 
 impl ConversationSqliteRepository {
-    /// Open (or create) the SQLite database at the platform-specific config path.
-    pub async fn new() -> RepositoryResult<Self> {
-        Self::open(Self::db_path()?).await
+    /// Bind the repository to the SQLite database at the platform-specific
+    /// config path, without touching the disk.
+    ///
+    /// Costs a `dirs::config_dir()` lookup and nothing else, so it is safe to
+    /// call on a latency-sensitive path; the pool opens on the first query.
+    pub fn deferred() -> RepositoryResult<Self> {
+        Ok(Self {
+            pool: LazyPool::new(Self::db_path()?),
+        })
     }
 
-    /// Open (or create) the SQLite database at an arbitrary path. Test-only:
-    /// used by unit tests and the `store_conformance` suite exported behind
-    /// `test-support` to run against an isolated database per test.
+    /// As [`Self::deferred`], at an arbitrary path. Test-only: used by unit
+    /// tests and the `store_conformance` suite exported behind `test-support`
+    /// to run against an isolated database per test.
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn with_path(db_path: PathBuf) -> RepositoryResult<Self> {
-        Self::open(db_path).await
-    }
-
-    async fn open(db_path: PathBuf) -> RepositoryResult<Self> {
-        if let Some(parent) = db_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+    pub fn deferred_with_path(db_path: PathBuf) -> Self {
+        Self {
+            pool: LazyPool::new(db_path),
         }
-
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
-            .await?;
-
-        Self::run_migrations(&pool).await?;
-
-        info!(path = %db_path.display(), "Opened SQLite conversation database");
-
-        Ok(Self { pool })
     }
 
     /// Create the schema_version table if absent, then apply any pending migrations.
@@ -153,6 +206,7 @@ impl ConversationRepository for ConversationSqliteRepository {
     fn load_metadata(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationMetadata>>> {
         let pool = self.pool.clone();
         Box::pin(async move {
+            let pool = pool.get().await?;
             let rows = sqlx::query(
                 "SELECT id, title, total_cost, updated_at, mode
                  FROM conversations
@@ -180,6 +234,7 @@ impl ConversationRepository for ConversationSqliteRepository {
         let pool = self.pool.clone();
         let id = id.to_string();
         Box::pin(async move {
+            let pool = pool.get().await?;
             let row = sqlx::query(
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
@@ -215,6 +270,7 @@ impl ConversationRepository for ConversationSqliteRepository {
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationData>>> {
         let pool = self.pool.clone();
         Box::pin(async move {
+            let pool = pool.get().await?;
             let rows = sqlx::query(
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
@@ -253,6 +309,7 @@ impl ConversationRepository for ConversationSqliteRepository {
         let pool = self.pool.clone();
         let total_cost = data.total_cost();
         Box::pin(async move {
+            let pool = pool.get().await?;
             sqlx::query(
                 "INSERT INTO conversations
                     (id, title, model_id, message_history, system_traces, token_usage,
@@ -303,11 +360,81 @@ impl ConversationRepository for ConversationSqliteRepository {
         let pool = self.pool.clone();
         let id = id.to_string();
         Box::pin(async move {
+            let pool = pool.get().await?;
             sqlx::query("DELETE FROM conversations WHERE id = ?")
                 .bind(&id)
                 .execute(&pool)
                 .await?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repositories::store_conformance::sample_conversation;
+
+    /// The point of `deferred`: constructing the repository must not create
+    /// the database, its directory, or a connection — that work belongs to
+    /// the first query (AGE-161).
+    #[tokio::test]
+    async fn deferred_touches_no_disk_until_the_first_query() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_dir = dir.path().join("chatty");
+        let db_path = db_dir.join("conversations.db");
+
+        let repo = ConversationSqliteRepository::deferred_with_path(db_path.clone());
+        assert!(
+            !db_dir.exists(),
+            "constructing the repository must not create the database directory"
+        );
+        assert!(
+            !repo.pool.cell.initialized(),
+            "constructing the repository must not open a connection pool"
+        );
+
+        let metadata = repo
+            .load_metadata()
+            .await
+            .expect("the first query opens the pool and applies migrations");
+
+        assert!(metadata.is_empty(), "a fresh database has no conversations");
+        assert!(
+            db_path.exists(),
+            "the first query must create the database file"
+        );
+        assert!(
+            repo.pool.cell.initialized(),
+            "the first query must leave the pool open for reuse"
+        );
+    }
+
+    /// Clones share one `OnceCell`, so a query through any clone opens the
+    /// pool for all of them. A per-clone cell would open a second pool (and
+    /// re-run migrations) behind the app's back.
+    #[tokio::test]
+    async fn clones_share_one_lazily_opened_pool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo =
+            ConversationSqliteRepository::deferred_with_path(dir.path().join("conversations.db"));
+        let clone = repo.clone();
+
+        clone
+            .save("conv-a", sample_conversation("conv-a", "First", 1_000))
+            .await
+            .expect("save through the clone");
+
+        assert!(
+            repo.pool.cell.initialized(),
+            "opening the pool through a clone must initialise the original's cell"
+        );
+        assert!(
+            repo.load_one("conv-a")
+                .await
+                .expect("load through the original")
+                .is_some(),
+            "both handles must see the same database"
+        );
     }
 }

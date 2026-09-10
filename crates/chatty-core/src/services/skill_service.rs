@@ -205,6 +205,29 @@ pub fn list_skills_from_dir(dir: &Path) -> Vec<(String, String)> {
     skills
 }
 
+/// Workspace skills first, then global skills, deduplicated by name so a
+/// workspace skill shadows a global one of the same name.
+fn list_all_skills_from_dirs(
+    workspace_skills_dir: Option<&Path>,
+    global_skills_dir: &Path,
+) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    let workspace_skills = workspace_skills_dir
+        .map(list_skills_from_dir)
+        .unwrap_or_default();
+    let global_skills = list_skills_from_dir(global_skills_dir);
+
+    for (name, desc) in workspace_skills.into_iter().chain(global_skills) {
+        if seen.insert(name.clone()) {
+            result.push((name, desc));
+        }
+    }
+
+    result
+}
+
 impl SkillService {
     /// Create a new `SkillService`.
     ///
@@ -237,30 +260,40 @@ impl SkillService {
     ///
     /// Workspace skills are listed first, followed by global skills.  Duplicate
     /// names are deduplicated (workspace takes precedence).
+    ///
+    /// This walks the filesystem on the calling thread. Callers on a
+    /// latency-sensitive path (the desktop app builds its window on the main
+    /// thread) want [`Self::list_all_skills`] instead.
     pub fn list_all_skills_sync(
         &self,
         workspace_skills_dir: Option<&Path>,
     ) -> Vec<(String, String)> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
+        list_all_skills_from_dirs(workspace_skills_dir, &self.global_skills_dir)
+    }
 
-        let workspace_skills = workspace_skills_dir
-            .map(list_skills_from_dir)
-            .unwrap_or_default();
-        for (name, desc) in workspace_skills {
-            if seen.insert(name.clone()) {
-                result.push((name, desc));
-            }
-        }
-
-        let global_skills = list_skills_from_dir(&self.global_skills_dir);
-        for (name, desc) in global_skills {
-            if seen.insert(name.clone()) {
-                result.push((name, desc));
-            }
-        }
-
-        result
+    /// List all skills from the workspace and global directories, off the
+    /// calling thread.
+    ///
+    /// Same result as [`Self::list_all_skills_sync`], but the directory walk
+    /// runs on a blocking-pool thread so it cannot stall the caller. The
+    /// desktop app populates its slash-command picker this way rather than
+    /// scanning the filesystem while it is constructing the window (AGE-161).
+    ///
+    /// Takes the workspace directory by value because the walk outlives the
+    /// call.
+    pub async fn list_all_skills(
+        &self,
+        workspace_skills_dir: Option<PathBuf>,
+    ) -> Vec<(String, String)> {
+        let global_skills_dir = self.global_skills_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            list_all_skills_from_dirs(workspace_skills_dir.as_deref(), &global_skills_dir)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = ?e, "Skill listing task failed; reporting no skills");
+            Vec::new()
+        })
     }
 
     /// Load skill hits from both the workspace and global directories.
@@ -555,5 +588,44 @@ mod tests {
         assert_eq!(shared.1, "Workspace description.");
         // global-only should also be present
         assert!(skills.iter().any(|(n, _)| n == "global-only"));
+    }
+
+    /// The async listing exists to move the filesystem walk off the caller's
+    /// thread (AGE-161), not to change what it finds: it must agree with the
+    /// sync listing element for element, ordering included.
+    #[tokio::test]
+    async fn list_all_skills_matches_the_sync_listing() {
+        let global_tmp = tempfile::tempdir().unwrap();
+        let workspace_tmp = tempfile::tempdir().unwrap();
+
+        for (dir, name, desc) in [
+            (global_tmp.path(), "shared-skill", "Global description"),
+            (global_tmp.path(), "global-only", "Global only"),
+            (
+                workspace_tmp.path(),
+                "shared-skill",
+                "Workspace description",
+            ),
+            (workspace_tmp.path(), "workspace-only", "Workspace only"),
+        ] {
+            let skill_dir = dir.join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\ndescription: {desc}.\n---"),
+            )
+            .unwrap();
+        }
+
+        let mut service = SkillService::new(None);
+        service.global_skills_dir = global_tmp.path().to_path_buf();
+
+        let sync = service.list_all_skills_sync(Some(workspace_tmp.path()));
+        let asynchronous = service
+            .list_all_skills(Some(workspace_tmp.path().to_path_buf()))
+            .await;
+
+        assert_eq!(sync, asynchronous);
+        assert_eq!(sync.len(), 3, "shared-skill must be deduplicated");
     }
 }

@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
@@ -391,6 +391,15 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     Ok(())
 }
 
+/// Ticket for the newest `refresh_chat_input_skills` call.
+///
+/// The scan runs off the main thread, so two refreshes in flight at once —
+/// boot's, and the one a conversation load or a working-directory change
+/// raises for its own workspace — can finish in either order. Only the result
+/// carrying the current ticket reaches the picker, so a slow earlier scan
+/// can't overwrite a newer workspace's skills.
+static SKILLS_REFRESH_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// Global state to hold the main ChattyApp entity
 pub type GlobalChattyApp = crate::global_entity::GlobalWeakEntity<ChattyApp>;
 
@@ -660,9 +669,7 @@ impl ChattyApp {
             .try_global::<ExecutionSettingsModel>()
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
-        crate::boot_timing::checkpoint("skills_scan_start");
         self.refresh_chat_input_skills(workspace_dir.as_deref(), cx);
-        crate::boot_timing::checkpoint("skills_scan_done");
     }
 
     /// Push the current `ModelsModel` into the chat-input model picker.
@@ -713,8 +720,14 @@ impl ChattyApp {
         });
     }
 
-    /// Synchronously load filesystem skills for `workspace_dir` (and the global skills dir)
+    /// Load filesystem skills for `workspace_dir` (and the global skills dir)
     /// and push them into the chat-input picker so they appear in the `/` menu.
+    ///
+    /// The directory walk runs in a spawned task rather than inline. This is
+    /// called from `ChattyApp::new`, so scanning here would put filesystem I/O
+    /// on the window-construction path and delay the first frame by however
+    /// long the user's skills directories take to read (AGE-161). The picker
+    /// simply populates a frame or two later.
     fn refresh_chat_input_skills(&self, workspace_dir: Option<&Path>, cx: &mut Context<Self>) {
         let skill_service = cx
             .try_global::<chatty_core::services::SkillService>()
@@ -722,25 +735,39 @@ impl ChattyApp {
             .unwrap_or_else(|| chatty_core::services::SkillService::new(None));
 
         let workspace_skills_dir = workspace_dir.map(|d| d.join(".claude").join("skills"));
-
-        let raw_skills = skill_service.list_all_skills_sync(workspace_skills_dir.as_deref());
-
-        let entries: Vec<SkillEntry> = raw_skills
-            .into_iter()
-            .map(|(name, description)| SkillEntry { name, description })
-            .collect();
-
-        debug!(
-            count = entries.len(),
-            "Refreshed skills for slash-command picker"
-        );
-
         let chat_view = self.chat_view.clone();
-        chat_view.update(cx, |view, cx| {
-            view.chat_input_state().update(cx, |state, cx| {
-                state.set_available_skills(entries, cx);
-            });
-        });
+        let generation = SKILLS_REFRESH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+        cx.spawn(async move |_this, cx| {
+            crate::boot_timing::checkpoint("skills_scan_start");
+            let raw_skills = skill_service.list_all_skills(workspace_skills_dir).await;
+            crate::boot_timing::checkpoint("skills_scan_done");
+
+            if SKILLS_REFRESH_GENERATION.load(Ordering::SeqCst) != generation {
+                debug!("Discarding a superseded skill listing");
+                return;
+            }
+
+            let entries: Vec<SkillEntry> = raw_skills
+                .into_iter()
+                .map(|(name, description)| SkillEntry { name, description })
+                .collect();
+
+            debug!(
+                count = entries.len(),
+                "Refreshed skills for slash-command picker"
+            );
+
+            chat_view
+                .update(cx, |view, cx| {
+                    view.chat_input_state().update(cx, |state, cx| {
+                        state.set_available_skills(entries, cx);
+                    });
+                })
+                .map_err(|e| debug!(error = ?e, "Failed to push skills into the chat input"))
+                .ok();
+        })
+        .detach();
     }
 
     /// Refresh the sidebar with the latest conversation list from the metadata store

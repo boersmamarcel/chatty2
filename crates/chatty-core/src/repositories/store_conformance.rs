@@ -218,9 +218,10 @@ pub fn sample_conversation(id: &str, title: &str, updated_at: i64) -> Conversati
 
 /// Conformance for [`ConversationRepository`]. Unlike the settings
 /// repositories above, this takes an already-constructed `repo` rather than
-/// a `make` factory: `ConversationSqliteRepository`'s constructor is async
-/// (it opens a pool and runs migrations), so a synchronous factory closure
-/// doesn't fit.
+/// a `make` factory: an implementation is free to open its backing store
+/// asynchronously (`ConversationSqliteRepository` opens its pool and runs
+/// migrations on the first query), so a synchronous factory closure that has
+/// to hand back a ready store doesn't fit.
 ///
 /// Exercises create, read (including a missing id), list ordering (newest
 /// `updated_at` first, for both `load_all` and `load_metadata`), update
@@ -678,9 +679,7 @@ mod tests {
     async fn conversation_sqlite_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("conversations.db");
-        let repo = ConversationSqliteRepository::with_path(db_path)
-            .await
-            .expect("open sqlite repository");
+        let repo = ConversationSqliteRepository::deferred_with_path(db_path);
         conformance_conversation(repo).await;
     }
 
