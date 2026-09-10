@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use parking_lot::Mutex;
 
-use crate::models::execution_approval_store::ApprovalNotification;
+use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 
 /// Decision for a filesystem write approval request
 #[derive(Clone, Debug)]
@@ -119,12 +119,14 @@ pub type PendingWriteApprovals = Arc<Mutex<PendingWriteApprovalsState>>;
 /// Per-agent store for pending filesystem write approval requests
 pub struct WriteApprovalStore {
     pending_requests: PendingWriteApprovals,
+    resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
 impl WriteApprovalStore {
     pub fn new() -> Self {
         Self {
             pending_requests: Arc::new(Mutex::new(PendingWriteApprovalsState::new())),
+            resolution_notifier: None,
         }
     }
 
@@ -133,18 +135,42 @@ impl WriteApprovalStore {
         self.pending_requests.clone()
     }
 
-    /// Set the notifier for the current turn: it lives on `PendingWriteApprovals`
-    /// itself, since that is the handle `request_write_approval` actually holds
-    /// (AGE-246 / D7).
-    pub fn set_notifier(&mut self, tx: mpsc::UnboundedSender<ApprovalNotification>) {
-        self.pending_requests.lock().notifier = Some(tx);
+    /// Set the notification channels for the current turn. The request
+    /// notifier lives on `PendingWriteApprovals` itself, since that is the
+    /// handle `request_write_approval` actually holds (AGE-246 / D7); the
+    /// resolution notifier lives here, since that is what `resolve` holds.
+    ///
+    /// Both, and not just the first: a store that can announce a request but
+    /// not its answer leaves every client that learns the outcome from the
+    /// event stream stuck on a live prompt (AGE-346). This mirrors
+    /// `ExecutionApprovalStore::set_notifiers` because the two stores feed
+    /// one stream and one UI.
+    pub fn set_notifiers(
+        &mut self,
+        approval_tx: mpsc::UnboundedSender<ApprovalNotification>,
+        resolution_tx: mpsc::UnboundedSender<ApprovalResolution>,
+    ) {
+        self.pending_requests.lock().notifier = Some(approval_tx);
+        self.resolution_notifier = Some(resolution_tx);
     }
 
-    /// Resolve an approval request by ID
+    /// Resolve an approval request by ID, returning whether it existed.
     pub fn resolve(&self, id: &str, decision: WriteApprovalDecision) -> bool {
         let mut state = self.pending_requests.lock();
         if let Some(request) = state.requests.remove(id) {
+            let approved = matches!(decision, WriteApprovalDecision::Approved);
             let _ = request.responder.send(decision);
+
+            // Tell the stream the prompt is answered. Both decisions, not
+            // just denial: a client that only hears about denials cannot
+            // retire an approved prompt (AGE-346).
+            if let Some(tx) = &self.resolution_notifier {
+                let _ = tx.send(ApprovalResolution {
+                    id: id.to_string(),
+                    approved,
+                });
+            }
+
             true
         } else {
             false
@@ -155,5 +181,73 @@ impl WriteApprovalStore {
 impl Default for WriteApprovalStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::models::execution_settings::ApprovalMode;
+    use crate::tools::filesystem_write_tool::request_write_approval;
+
+    fn a_write() -> WriteOperation {
+        WriteOperation::WriteFile {
+            path: "/tmp/notes.md".to_string(),
+            is_overwrite: false,
+            content_preview: "hello".to_string(),
+        }
+    }
+
+    /// AGE-346. The store could announce a write prompt but not its answer:
+    /// `set_notifier` wired only the request side, so `resolve` had nowhere to
+    /// report to and no `ApprovalResolved` ever reached the stream. A client
+    /// that learns the outcome from the wire — chatty-web does; gpui resolves
+    /// its own card on click and so never saw this — was left with a live
+    /// prompt over a tool that had already run.
+    ///
+    /// Both decisions, because the old shape failed both. It only *looked*
+    /// like an approve-only bug: the denial that appeared to work was an
+    /// execution approval, whose store has always notified.
+    #[tokio::test]
+    async fn resolving_a_write_approval_notifies_the_stream() {
+        for (decision, expected) in [
+            (WriteApprovalDecision::Approved, true),
+            (WriteApprovalDecision::Denied, false),
+        ] {
+            let mut store = WriteApprovalStore::new();
+            let (approval_tx, mut approvals) = mpsc::unbounded_channel();
+            let (resolution_tx, mut resolutions) = mpsc::unbounded_channel();
+            store.set_notifiers(approval_tx, resolution_tx);
+
+            let pending = store.get_pending_approvals();
+            let waiter = tokio::spawn(async move {
+                request_write_approval(&pending, &ApprovalMode::AlwaysAsk, a_write()).await
+            });
+
+            let requested = approvals.recv().await.expect("the prompt is announced");
+
+            assert!(store.resolve(&requested.id, decision));
+
+            let resolved = resolutions
+                .recv()
+                .await
+                .expect("the answer is announced too");
+            assert_eq!(resolved.id, requested.id);
+            assert_eq!(resolved.approved, expected);
+            assert_eq!(waiter.await.unwrap().unwrap(), expected);
+        }
+    }
+
+    /// Resolving an id the store never held must not invent a resolution:
+    /// a client would retire a prompt that is still parked.
+    #[tokio::test]
+    async fn an_unknown_id_notifies_nothing() {
+        let mut store = WriteApprovalStore::new();
+        let (approval_tx, _approvals) = mpsc::unbounded_channel();
+        let (resolution_tx, mut resolutions) = mpsc::unbounded_channel();
+        store.set_notifiers(approval_tx, resolution_tx);
+
+        assert!(!store.resolve("never-issued", WriteApprovalDecision::Approved));
+        assert!(resolutions.try_recv().is_err());
     }
 }

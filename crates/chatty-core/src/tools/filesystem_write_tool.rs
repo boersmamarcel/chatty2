@@ -773,9 +773,11 @@ mod tests {
         let mut store_b = WriteApprovalStore::new();
 
         let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-        store_a.set_notifier(tx_a);
+        let (resolution_tx_a, _resolution_rx_a) = tokio::sync::mpsc::unbounded_channel();
+        store_a.set_notifiers(tx_a, resolution_tx_a);
         let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
-        store_b.set_notifier(tx_b);
+        let (resolution_tx_b, _resolution_rx_b) = tokio::sync::mpsc::unbounded_channel();
+        store_b.set_notifiers(tx_b, resolution_tx_b);
 
         let pending_a = store_a.get_pending_approvals();
         let waiter = tokio::spawn({
@@ -815,9 +817,11 @@ mod tests {
         let mut store_b = WriteApprovalStore::new();
 
         let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-        store_a.set_notifier(tx_a);
+        let (resolution_tx_a, _resolution_rx_a) = tokio::sync::mpsc::unbounded_channel();
+        store_a.set_notifiers(tx_a, resolution_tx_a);
         let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
-        store_b.set_notifier(tx_b);
+        let (resolution_tx_b, _resolution_rx_b) = tokio::sync::mpsc::unbounded_channel();
+        store_b.set_notifiers(tx_b, resolution_tx_b);
 
         let op = || WriteOperation::DeleteFile {
             path: "/tmp/x".to_string(),

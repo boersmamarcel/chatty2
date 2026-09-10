@@ -491,11 +491,14 @@ impl AgentSession {
         }
 
         // Fresh channels per turn, installed on the stores the tools hold
-        // (AGE-246 / D7). Write approvals share the execution channel and UI.
+        // (AGE-246 / D7). Write approvals share the execution channels and
+        // UI — *both* channels: sharing only the request one meant an
+        // answered write prompt never reached the stream (AGE-346).
         let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
         let (resolution_tx, resolution_rx) = tokio::sync::mpsc::unbounded_channel();
         let (clarification_tx, clarification_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.write_approvals.set_notifier(approval_tx.clone());
+        self.write_approvals
+            .set_notifiers(approval_tx.clone(), resolution_tx.clone());
         self.execution_approvals
             .set_notifiers(approval_tx, resolution_tx);
         self.clarifications.set_notifier(clarification_tx);
