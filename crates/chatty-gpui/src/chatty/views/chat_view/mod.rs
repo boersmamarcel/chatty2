@@ -235,7 +235,17 @@ impl EventEmitter<ChatViewEvent> for ChatView {}
 /// Hash of everything about a turn that changes how tall it renders.
 ///
 /// Lengths and flags, never contents: this runs for every turn every frame.
-fn turn_fingerprint(turn: &Turn, activity_expanded: &HashMap<u64, bool>) -> u64 {
+///
+/// `plan` is here because a `Block::Plan` carries no content of its own — the
+/// to-do panel is drawn from the live snapshot (`block_render.rs`), and it swings
+/// from nothing at all to a row per todo. Hashing only the block would leave that
+/// growth invisible, and the list would keep positioning later turns from the
+/// height the plan turn had before the todos arrived (AGE-338).
+fn turn_fingerprint(
+    turn: &Turn,
+    activity_expanded: &HashMap<u64, bool>,
+    plan: Option<&AgentTaskSnapshot>,
+) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -275,7 +285,10 @@ fn turn_fingerprint(turn: &Turn, activity_expanded: &HashMap<u64, bool>) -> u64 
             }
             Block::ArtifactBatch { files, .. } => files.len().hash(&mut hasher),
             Block::Approval { approval, .. } => {
-                std::mem::discriminant(&approval.state).hash(&mut hasher)
+                std::mem::discriminant(&approval.state).hash(&mut hasher);
+                // The card is as tall as the command inside its alert, and a
+                // heredoc runs to many lines.
+                approval.command.len().hash(&mut hasher);
             }
             Block::Clarification { clarification, .. } => {
                 // The summary gains an answer line per question once the user
@@ -284,10 +297,31 @@ fn turn_fingerprint(turn: &Turn, activity_expanded: &HashMap<u64, bool>) -> u64 
                 clarification.answers.len().hash(&mut hasher);
             }
             Block::Error { message, .. } => message.len().hash(&mut hasher),
-            Block::Diff { .. }
-            | Block::Artifact { .. }
-            | Block::TablePreview { .. }
-            | Block::Plan { .. } => {}
+            Block::Plan { .. } => {
+                // Renders as nothing until `write_todos` lands, then as one row
+                // per todo — all of it out-of-band state the block never carries.
+                match plan {
+                    Some(snapshot) => {
+                        snapshot.write_todos_called.hash(&mut hasher);
+                        snapshot.verification_skipped.hash(&mut hasher);
+                        snapshot.todos.len().hash(&mut hasher);
+                        for todo in &snapshot.todos {
+                            std::mem::discriminant(&todo.status).hash(&mut hasher);
+                            todo.title.len().hash(&mut hasher);
+                            todo.blocked_reason
+                                .as_ref()
+                                .map(String::len)
+                                .hash(&mut hasher);
+                            todo.reflection.as_ref().map(String::len).hash(&mut hasher);
+                        }
+                    }
+                    None => false.hash(&mut hasher),
+                }
+            }
+            // Fixed once emitted: their content cannot change under a cached
+            // measurement. Listed one by one so a new block type has to make
+            // this choice deliberately rather than inherit silence.
+            Block::Diff { .. } | Block::Artifact { .. } | Block::TablePreview { .. } => {}
         }
     }
     hasher.finish()
@@ -1693,7 +1727,13 @@ impl ChatView {
         let next: Vec<u64> = self
             .turns
             .iter()
-            .map(|turn| turn_fingerprint(turn, &self.activity_expanded))
+            .map(|turn| {
+                turn_fingerprint(
+                    turn,
+                    &self.activity_expanded,
+                    self.agent_task_snapshot.as_ref(),
+                )
+            })
             .collect();
         let previous = std::mem::replace(&mut self.transcript_fingerprints, next);
         let next = &self.transcript_fingerprints;
@@ -2580,5 +2620,152 @@ impl Render for ChatView {
         } else {
             root.child(column).into_any_element()
         }
+    }
+}
+
+/// The fingerprint's whole job is to change when a turn's height can change.
+/// These pin the cases that used to slip through and let a stale measurement
+/// position the turns below (AGE-338).
+#[cfg(test)]
+mod fingerprint_tests {
+    // Named imports, not a glob: `use gpui::*` in the parent shadows the built-in
+    // `#[test]` with `gpui::test`, and the attribute then expands into itself.
+    use super::{
+        AgentTaskSnapshot, AgentTodoStatus, ApprovalState, Block, HashMap, Turn, TurnRole,
+        turn_fingerprint,
+    };
+    use crate::chatty::views::transcript::BlockId;
+    use chatty_core::models::message_types::ApprovalBlock;
+    use chatty_core::services::AgentTodo;
+
+    fn turn_with(blocks: Vec<Block>) -> Turn {
+        Turn {
+            id: 1,
+            message_index: 0,
+            role: TurnRole::Assistant,
+            blocks,
+            elapsed: None,
+            collapsed: false,
+            streaming: true,
+        }
+    }
+
+    fn todo(title: &str, status: AgentTodoStatus) -> AgentTodo {
+        AgentTodo {
+            id: title.to_string(),
+            title: title.to_string(),
+            description: String::new(),
+            status,
+            blocked_reason: None,
+            reflection: None,
+        }
+    }
+
+    fn snapshot(todos: Vec<AgentTodo>) -> AgentTaskSnapshot {
+        AgentTaskSnapshot {
+            goal: None,
+            todos,
+            write_todos_called: true,
+            verified: false,
+            verification_reason: None,
+            evidence: Vec::new(),
+            verification_skipped: false,
+        }
+    }
+
+    fn approval(command: &str) -> Block {
+        Block::Approval {
+            id: BlockId(2),
+            approval: ApprovalBlock {
+                id: "a1".into(),
+                command: command.into(),
+                is_sandboxed: false,
+                state: ApprovalState::Pending,
+                created_at: std::time::SystemTime::UNIX_EPOCH,
+            },
+        }
+    }
+
+    fn fp(turn: &Turn, plan: Option<&AgentTaskSnapshot>) -> u64 {
+        turn_fingerprint(turn, &HashMap::new(), plan)
+    }
+
+    #[test]
+    fn unchanged_input_hashes_equal() {
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let plan = snapshot(vec![todo(
+            "Determine invoice vouching inputs",
+            AgentTodoStatus::Pending,
+        )]);
+        assert_eq!(fp(&turn, Some(&plan)), fp(&turn, Some(&plan)));
+    }
+
+    #[test]
+    fn the_todo_panel_appearing_changes_the_fingerprint() {
+        // Renders as an empty div until the snapshot arrives, then as a panel.
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let plan = snapshot(vec![todo(
+            "Run vouching command safely",
+            AgentTodoStatus::Pending,
+        )]);
+        assert_ne!(fp(&turn, None), fp(&turn, Some(&plan)));
+    }
+
+    #[test]
+    fn write_todos_not_yet_called_differs_from_called() {
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let mut plan = snapshot(vec![todo(
+            "Verify vouching outcome",
+            AgentTodoStatus::Pending,
+        )]);
+        let called = fp(&turn, Some(&plan));
+        plan.write_todos_called = false;
+        assert_ne!(called, fp(&turn, Some(&plan)));
+    }
+
+    #[test]
+    fn adding_a_todo_changes_the_fingerprint() {
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let one = snapshot(vec![todo("first", AgentTodoStatus::Pending)]);
+        let two = snapshot(vec![
+            todo("first", AgentTodoStatus::Pending),
+            todo("second", AgentTodoStatus::Pending),
+        ]);
+        assert_ne!(fp(&turn, Some(&one)), fp(&turn, Some(&two)));
+    }
+
+    #[test]
+    fn completing_a_todo_changes_the_fingerprint() {
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let pending = snapshot(vec![todo("first", AgentTodoStatus::Pending)]);
+        let done = snapshot(vec![todo("first", AgentTodoStatus::Done)]);
+        assert_ne!(fp(&turn, Some(&pending)), fp(&turn, Some(&done)));
+    }
+
+    #[test]
+    fn a_todo_that_wraps_to_another_line_changes_the_fingerprint() {
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let short = snapshot(vec![todo("ship", AgentTodoStatus::Pending)]);
+        let long = snapshot(vec![todo(&"ship ".repeat(40), AgentTodoStatus::Pending)]);
+        assert_ne!(fp(&turn, Some(&short)), fp(&turn, Some(&long)));
+    }
+
+    #[test]
+    fn a_blocked_reason_changes_the_fingerprint() {
+        let turn = turn_with(vec![Block::Plan { id: BlockId(1) }]);
+        let plain = snapshot(vec![todo("first", AgentTodoStatus::Blocked)]);
+        let mut with_reason = snapshot(vec![todo("first", AgentTodoStatus::Blocked)]);
+        with_reason.todos[0].blocked_reason = Some("needs a credential".into());
+        assert_ne!(fp(&turn, Some(&plain)), fp(&turn, Some(&with_reason)));
+    }
+
+    #[test]
+    fn a_longer_approval_command_changes_the_fingerprint() {
+        // The alert grows with the command; a heredoc runs to many lines.
+        let short = turn_with(vec![approval("ls")]);
+        let long = turn_with(vec![approval(
+            "python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
+        )]);
+        assert_ne!(fp(&short, None), fp(&long, None));
     }
 }
