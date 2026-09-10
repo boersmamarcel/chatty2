@@ -43,9 +43,11 @@ chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key 
 
 An empty interactive session shows what is active: model and context window, workspace and git branch, enabled tool groups, internet capabilities (fetch, search, browser, cloud sandbox, MCP) and runtime features (memory, modules, remote agents). MCP, memory and embeddings load in the background — badges show `⟳` (for example `[MCP ⟳]`) and the status bar reads *loading services…* until they are ready.
 
-The status bar always shows the app version, the working directory and the git branch when you are inside a repository, plus the branch's pull request (`#591 open ✓`) when git integration is on. Footer hints switch to `Ctrl+C stop` while a reply streams. A scrollbar appears when the transcript overflows; scrolling up unpins auto-scroll, `End` re-pins it.
+The status bar always shows the app version, the working directory and the git branch when you are inside a repository, plus the branch's pull request (`#591 open ✓`) when git integration is on. Footer hints switch to `Ctrl+C stop` while a reply streams. A scrollbar appears when the transcript overflows; scrolling up unpins auto-scroll, `End` re-pins it. While the agent works through a multi-step plan, the status bar also shows its position (`●▸○ Plan 1 of 3 · <step title>`), cleared when you send the next message.
 
 Tool calls in the transcript are folded by default — the tool and its main argument on one line, the result trimmed to a few lines with a `… +N lines` marker. Errors are always shown in full. Press `Ctrl+R` or run `/verbose` to switch to the full, untrimmed input/output for every tool call; the footer hint shows which mode is active.
+
+A multi-step plan renders as a single card instead — a goal, a progress count and one line per step (pending, in progress, done, blocked, with its reason) — redrawn in place as the plan advances rather than logging each update as its own row. `/verbose` still shows the raw plan tool calls.
 
 ## Keys
 
