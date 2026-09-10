@@ -7,7 +7,11 @@ use chatty_core::services::github_pr_service::{CheckState, PrState};
 
 use crate::APP_VERSION;
 use crate::engine::ChatEngine;
-use crate::ui::theme;
+use crate::ui::{plan, theme};
+
+/// Widest the status indicator gets (`● loading services…`), reserved so the
+/// plan segment never pushes it off the bar.
+const STATUS_INDICATOR_WIDTH: usize = 20;
 
 fn pr_state_label(state: PrState) -> &'static str {
     match state {
@@ -90,6 +94,20 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
             theme::muted(),
         ));
         spans.push(Span::styled(" │ ", theme::muted()));
+    }
+
+    // Where the agent is in its plan, so the position survives scrolling past
+    // the plan card (AGE-342).
+    if let Some(snapshot) = engine.transcript.plan.as_ref() {
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let budget = usize::from(area.width).saturating_sub(used + STATUS_INDICATOR_WIDTH + 3);
+        if budget >= plan::MIN_STATUS_WIDTH {
+            spans.push(Span::styled(
+                plan::status_line(snapshot, budget),
+                theme::text_subtle(),
+            ));
+            spans.push(Span::styled(" │ ", theme::muted()));
+        }
     }
 
     // Status indicator

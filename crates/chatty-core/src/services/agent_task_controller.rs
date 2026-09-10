@@ -410,6 +410,21 @@ fn snapshot(state: &AgentTaskState) -> AgentTaskSnapshot {
     }
 }
 
+/// Whether `name` is one of the tools that own the agent's plan.
+///
+/// These render as the plan card, not as individual tool calls (AGE-342).
+pub fn is_agent_todo_tool(name: &str) -> bool {
+    name.contains("todo") || name == "verify_completion"
+}
+
+/// The plan snapshot a todo tool returned alongside its model-directed
+/// `message`, so a frontend can render the plan's state without threading the
+/// controller through to the UI.
+pub fn snapshot_from_tool_output(output: &str) -> Option<AgentTaskSnapshot> {
+    let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    serde_json::from_value(value.get("snapshot")?.clone()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
