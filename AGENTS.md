@@ -117,6 +117,16 @@ intermittently SIGTRAP under parallel execution on GitHub-hosted runners.
 `--test-threads=1` locally to reproduce.** Root cause is unknown; the
 workaround is documented in `.github/workflows/ci.yml`.
 
+### Windows footgun
+
+`ci.yml` never compiles for Windows on a PR — `windows-latest` only runs in
+`warm-release-cache`, which is gated `if: push && ref == main` (a cache
+warmer, not a required check). A Windows-only compile error (e.g. code that
+should be `#[cfg(unix)]`, like the broker/participant modules, AGE-339) rides
+straight to `main` and isn't caught until `build-windows` fails during a
+release, shipping an assetless tag. If you touch platform-conditional code,
+don't trust a green PR as proof Windows still builds.
+
 ### Disk footgun
 
 A full `cargo test --all-features` needs about 16 GiB of `target/` even with
