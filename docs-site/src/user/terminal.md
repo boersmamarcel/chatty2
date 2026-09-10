@@ -45,6 +45,8 @@ An empty interactive session shows what is active: model and context window, wor
 
 The status bar always shows the app version, the working directory and the git branch when you are inside a repository, plus the branch's pull request (`#591 open ✓`) when git integration is on. Footer hints switch to `Ctrl+C stop` while a reply streams. A scrollbar appears when the transcript overflows; scrolling up unpins auto-scroll, `End` re-pins it.
 
+Tool calls in the transcript are folded by default — the tool and its main argument on one line, the result trimmed to a few lines with a `… +N lines` marker. Errors are always shown in full. Press `Ctrl+R` or run `/verbose` to switch to the full, untrimmed input/output for every tool call; the footer hint shows which mode is active.
+
 ## Keys
 
 | Key | Action |
@@ -59,6 +61,7 @@ The status bar always shows the app version, the working directory and the git b
 | `t` | Type a custom answer instead of picking an option |
 | `Ctrl+C` | Stop streaming, or quit when idle |
 | `Ctrl+Q` | Quit immediately |
+| `Ctrl+R` / `/verbose` | Toggle full tool-call payloads on or off |
 
 A pending clarifying question replaces the input row and takes over the
 keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
