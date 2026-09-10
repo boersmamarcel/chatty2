@@ -34,22 +34,62 @@ pub(super) fn relaunch_linux_process() -> std::io::Result<()> {
 /// 1. Polls for app exit with 0.2 s intervals (up to 10 s total)
 /// 2. Mounts the downloaded .dmg with `hdiutil` (`-noverify` — checksum already validated)
 /// 3. Rsyncs the new .app bundle over the current installation
-/// 4. (if relaunch) Relaunches via direct binary execution (bypasses Gatekeeper)
-/// 5. Post-install: clears quarantine attrs, re-signs adhoc bundles, resets LS cache, unmounts DMG
+/// 4. Clears quarantine attrs and, for an unsigned or ad-hoc bundle only, re-signs it
+/// 5. (if relaunch) Relaunches via direct binary execution (bypasses Gatekeeper)
+/// 6. Post-install: resets the Launch Services cache, unmounts the DMG
 #[cfg(target_os = "macos")]
 pub fn launch_macos_install_helper(
     dmg_path: &std::path::Path,
     app_bundle: &std::path::Path,
     relaunch: bool,
 ) {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    let script = render_macos_install_script(
+        &dmg_path.to_string_lossy(),
+        &app_bundle.to_string_lossy(),
+        relaunch,
+    );
+    spawn_macos_install_helper(script, dmg_path);
+}
 
-    let dmg = dmg_path.to_string_lossy();
-    let bundle = app_bundle.to_string_lossy();
+/// Bash snippet that classifies the code signature on an app bundle, printing
+/// `adhoc`, `signed` or `unsigned` on stdout.
+///
+/// It lives in its own constant, interpolated into the install script, so the unit
+/// tests can run the shipped logic against fixture `codesign -dv` output.
+///
+/// The distinction matters: `codesign -dv` prints `Signature=adhoc` for an ad-hoc
+/// signature but `Signature size=NNNN` for a real one. Matching on the `Signature=`
+/// prefix classifies every Developer ID bundle as unsigned, and the updater then
+/// ad-hoc re-signs the notarized bundle it just installed — which strips the Team ID
+/// off `Contents/Frameworks/libpdfium.dylib`, so the hardened runtime's library
+/// validation refuses to let the app `dlopen` its own pdfium (AGE-337).
+#[cfg(any(target_os = "macos", all(test, unix)))]
+const MACOS_SIGNATURE_CLASSIFIER_SH: &str = r#"# Print the bundle's signature state: adhoc | signed | unsigned.
+classify_signature() {
+    local codesign_out
+    if ! codesign_out=$(codesign -dv "$1" 2>&1); then
+        # codesign exits non-zero when the object carries no signature at all.
+        echo "unsigned"
+        return 0
+    fi
+    if printf '%s\n' "$codesign_out" | grep -qx 'Signature=adhoc'; then
+        echo "adhoc"
+        return 0
+    fi
+    if printf '%s\n' "$codesign_out" | grep -Eq '^(TeamIdentifier=|Signature size=)'; then
+        echo "signed"
+        return 0
+    fi
+    echo "unsigned"
+}"#;
+
+/// Render the macOS install helper script. Separated from
+/// [`launch_macos_install_helper`] so its step order can be asserted in tests.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn render_macos_install_script(dmg: &str, bundle: &str, relaunch: bool) -> String {
     let relaunch_flag = if relaunch { "true" } else { "false" };
 
-    let script = format!(
+    format!(
         r#"#!/bin/bash
 set -e
 
@@ -62,6 +102,8 @@ LOG_FILE="$HOME/Library/Logs/chatty_update.log"
 log() {{
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }}
+
+{classifier}
 
 log "=== Chatty Update Installation Started ==="
 log "DMG: $DMG_PATH"
@@ -221,8 +263,29 @@ fi
 # Clear quarantine attributes so Gatekeeper won't block future launches.
 xattr -cr "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "No quarantine attributes to clear"
 
+# Re-sign an unsigned or ad-hoc bundle so future Finder/Spotlight launches work.
+# This runs BEFORE the relaunch on purpose: rewriting signatures underneath a live
+# process makes that process's later dlopen of Contents/Frameworks/libpdfium.dylib
+# fail with "mapping process and mapped file have different Team IDs".
+SIGNATURE_STATE=$(classify_signature "$APP_BUNDLE")
+log "Bundle signature state: $SIGNATURE_STATE"
+if [ "$SIGNATURE_STATE" = "signed" ]; then
+    log "Bundle carries a real signature; leaving it untouched"
+else
+    log "Re-signing $SIGNATURE_STATE bundle for future Gatekeeper compatibility..."
+    # Sign nested Mach-O objects one by one, then the bundle. Deep signing is
+    # deprecated and can leave the bundle and the libraries it loads on
+    # different identities.
+    for NESTED in "$APP_BUNDLE"/Contents/Frameworks/*.dylib "$APP_BUNDLE"/Contents/MacOS/*; do
+        [ -f "$NESTED" ] || continue
+        codesign --force --sign - "$NESTED" >> "$LOG_FILE" 2>&1 \
+            || log "WARNING: Re-signing failed for $NESTED"
+    done
+    codesign --force --sign - "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "WARNING: Re-signing failed"
+fi
+
 if [ "$RELAUNCH" = "true" ]; then
-    # Relaunch the app IMMEDIATELY — don't wait for codesign/lsregister.
+    # Relaunch the app IMMEDIATELY — lsregister and the unmount can wait.
     # Direct binary execution bypasses Gatekeeper, so those steps are only
     # needed for future Finder/Spotlight launches and can run after relaunch.
     log "Relaunching app..."
@@ -253,13 +316,6 @@ fi
 # --- Post-install housekeeping (non-blocking) ---
 # These tasks prepare the bundle for future Finder/Spotlight launches.
 
-# Re-sign adhoc/unsigned bundles for future Gatekeeper compatibility
-SIGNATURE=$(codesign -dv "$APP_BUNDLE" 2>&1 | grep "Signature=" | cut -d= -f2)
-if [ "$SIGNATURE" = "adhoc" ] || [ -z "$SIGNATURE" ]; then
-    log "Re-signing adhoc bundle for future Gatekeeper compatibility..."
-    codesign --force --deep --sign - "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || log "WARNING: Re-signing failed"
-fi
-
 # Reset Launch Services cache so Finder shows the new version
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || true
 
@@ -271,7 +327,16 @@ log "=== Update Installation Completed Successfully ==="
 "#,
         dmg = dmg,
         bundle = bundle,
-    );
+        classifier = MACOS_SIGNATURE_CLASSIFIER_SH,
+    )
+}
+
+/// Write the rendered helper to /tmp and spawn it detached, so it outlives the
+/// app process it is about to replace.
+#[cfg(target_os = "macos")]
+fn spawn_macos_install_helper(script: String, dmg_path: &std::path::Path) {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     let script_path = std::path::PathBuf::from("/tmp/chatty_update_helper.sh");
 
@@ -309,5 +374,163 @@ log "=== Update Installation Completed Successfully ==="
         Err(e) => {
             error!(error = ?e, "Failed to launch macOS install helper");
         }
+    }
+}
+
+/// Tests for the macOS install helper. They run the shipped bash verbatim, so they
+/// need a POSIX shell — hence `unix` rather than `macos`: the logic is identical on
+/// the Linux CI runner that executes them.
+#[cfg(all(test, unix))]
+mod macos_install_script_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Run `classify_signature` from [`MACOS_SIGNATURE_CLASSIFIER_SH`] against a
+    /// fixture, with a stub `codesign` on `PATH` that replays `output` on stderr
+    /// (where the real one writes it) and exits with `exit_code`.
+    fn classify(output: &str, exit_code: i32) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let stub = dir.path().join("codesign");
+        let mut file = std::fs::File::create(&stub).expect("create stub");
+        write!(
+            file,
+            "#!/bin/bash\ncat <<'CODESIGN_FIXTURE' >&2\n{output}\nCODESIGN_FIXTURE\nexit {exit_code}\n"
+        )
+        .expect("write stub");
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+        drop(file);
+
+        let script = dir.path().join("classify.sh");
+        std::fs::write(
+            &script,
+            format!("{MACOS_SIGNATURE_CLASSIFIER_SH}\nclassify_signature \"$1\"\n"),
+        )
+        .expect("write script");
+
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .arg("/Applications/chatty.app")
+            .env("PATH", path)
+            .output()
+            .expect("run classifier");
+        assert!(out.status.success(), "classifier exited non-zero");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
+
+    /// The regression: a Developer ID bundle prints `Signature size=NNNN`, never
+    /// `Signature=`, and must be left alone. Re-signing it ad-hoc strips the Team ID
+    /// off the bundled pdfium and breaks every PDF tool (AGE-337).
+    #[test]
+    fn developer_id_bundle_classifies_as_signed() {
+        let fixture = "\
+Executable=/Applications/chatty.app/Contents/MacOS/Chatty
+Identifier=com.chatty.app
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20500 size=1234 flags=0x10000(runtime) hashes=30+7 location=embedded
+Signature size=9068
+Info.plist entries=9
+TeamIdentifier=4C4C44FA55
+Sealed Resources version=2 rules=13 files=42";
+        assert_eq!(classify(fixture, 0), "signed");
+    }
+
+    #[test]
+    fn adhoc_bundle_classifies_as_adhoc() {
+        let fixture = "\
+Executable=/Applications/chatty.app/Contents/MacOS/Chatty
+Identifier=com.chatty.app
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=1234 flags=0x2(adhoc) hashes=30+7 location=embedded
+Signature=adhoc
+Info.plist entries=9
+TeamIdentifier=not set
+Sealed Resources version=2 rules=13 files=42";
+        assert_eq!(classify(fixture, 0), "adhoc");
+    }
+
+    #[test]
+    fn unsigned_bundle_classifies_as_unsigned() {
+        let fixture = "/Applications/chatty.app: code object is not signed at all";
+        assert_eq!(classify(fixture, 1), "unsigned");
+    }
+
+    /// Signatures must be settled before the app is running again: rewriting them
+    /// underneath a live process is what produced the "different Team IDs" dlopen
+    /// failure on the first PDF tool call after an update.
+    #[test]
+    fn resign_happens_before_relaunch() {
+        let script =
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true);
+        let resign = script
+            .find(r#"SIGNATURE_STATE=$(classify_signature "$APP_BUNDLE")"#)
+            .expect("script classifies the signature");
+        let relaunch = script
+            .find(r#"log "Relaunching app...""#)
+            .expect("script relaunches the app");
+        assert!(
+            resign < relaunch,
+            "re-sign must precede the relaunch (re-sign at {resign}, relaunch at {relaunch})"
+        );
+    }
+
+    /// `--deep` is deprecated and can leave the bundle and its dylibs on different
+    /// identities — the nested objects are signed one by one instead.
+    #[test]
+    fn script_does_not_deep_sign() {
+        let script =
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true);
+        assert!(
+            !script.contains("--deep"),
+            "install helper must not use codesign --deep"
+        );
+    }
+
+    /// The helper is generated, never linted — parse it here so a broken edit to
+    /// the embedded bash fails the build instead of a user's update.
+    #[test]
+    fn rendered_script_is_valid_bash() {
+        for relaunch in [true, false] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("helper.sh");
+            std::fs::write(
+                &path,
+                render_macos_install_script(
+                    "/tmp/chatty.dmg",
+                    "/Applications/chatty.app",
+                    relaunch,
+                ),
+            )
+            .expect("write script");
+            let out = std::process::Command::new("bash")
+                .arg("-n")
+                .arg(&path)
+                .output()
+                .expect("run bash -n");
+            assert!(
+                out.status.success(),
+                "rendered script (relaunch={relaunch}) is not valid bash: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn script_interpolates_its_arguments() {
+        let script =
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", false);
+        assert!(script.contains(r#"DMG_PATH="/tmp/chatty.dmg""#));
+        assert!(script.contains(r#"APP_BUNDLE="/Applications/chatty.app""#));
+        assert!(script.contains(r#"RELAUNCH="false""#));
     }
 }
