@@ -68,9 +68,11 @@ keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
 answered one at a time; press `Esc` while typing a custom answer to go back
 to the options.
 
-The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
+The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
 `/online` shows where the current conversation runs and, before anything moves, a table of what a move would and would not carry. `/online <server-url>` uploads the conversation's history to that `chatty-server` and continues it there; `/online off` brings it back to this machine. Workspace files, attachments, MCP servers, memory, skills and provider API keys never leave this machine.
+
+Pasting more than 6 lines or 800 characters replaces the pasted text in the input box with a short reference, `[Pasted text #1 +45 lines]`, so a stack trace or log dump doesn't fill the screen — shorter pastes (a URL, a path, a one-line error) are inserted as-is. The model still receives the full text when you send the message. Run `/paste 1` to print a reference's full text back to the transcript. The reference acts as a single character: the cursor steps over it, and backspace at its edge removes the whole thing.
 
 ## Shared configuration
 
