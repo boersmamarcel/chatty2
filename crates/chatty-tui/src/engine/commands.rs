@@ -60,6 +60,8 @@ pub enum Command {
     /// /online [url|off] — show where this conversation runs, take it online,
     /// or bring it back (AGE-298)
     Online(Option<String>),
+    /// /verbose — toggle between folded tool-call summaries and full payloads
+    Verbose,
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -93,6 +95,7 @@ impl ChatEngine {
             "/update" => Some(Command::Update),
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
             "/online" => Some(Command::Online(arg)),
+            "/verbose" => Some(Command::Verbose),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }

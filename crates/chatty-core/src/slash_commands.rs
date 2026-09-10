@@ -117,6 +117,14 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         tui: true,
     },
     SlashCommandSpec {
+        command: "/verbose",
+        description: "Show or fold full tool-call payloads",
+        insert_text: "/verbose",
+        execute_immediately: true,
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
         command: "/update",
         description: "Trigger CLI auto-update (if installed)",
         insert_text: "/update",

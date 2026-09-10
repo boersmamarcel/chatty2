@@ -10,6 +10,7 @@ use crate::engine::{
     ChatEngine, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo, ToolCallState,
 };
 use crate::ui::theme;
+use crate::ui::tool_summary;
 
 pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
     // Remember the chat area so mouse wheel events can route correctly.
@@ -22,8 +23,9 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
     } else if engine.transcript.messages.is_empty() {
         render_welcome_state(&mut lines, engine);
     } else {
+        let verbose = engine.verbose_tools;
         for msg in &engine.transcript.messages {
-            render_message(&mut lines, msg);
+            render_message(&mut lines, msg, verbose);
             lines.push(Line::from("")); // spacing between messages
         }
     }
@@ -250,7 +252,7 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
     ]);
 }
 
-fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
+fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool) {
     // Role label
     let (label, style) = match msg.role {
         MessageRole::User => ("you", theme::success_bold()),
@@ -273,7 +275,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
                 }
             }
             MessageBlock::ToolCall(tc) => {
-                render_tool_call(lines, tc);
+                render_tool_call(lines, tc, verbose);
             }
         }
     }
@@ -285,21 +287,98 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage) {
     }
 }
 
-fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
-    let (icon, tc_style, status) = match &tc.state {
-        ToolCallState::Running => ("⟳", theme::warning(), "running"),
-        ToolCallState::Success => ("✓", theme::success(), "completed"),
-        ToolCallState::Error => ("✗", theme::error(), "failed"),
+fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo, verbose: bool) {
+    if verbose {
+        render_tool_call_verbose(lines, tc);
+    } else {
+        render_tool_call_collapsed(lines, tc);
+    }
+}
+
+/// One header line plus a folded result — what the user sees by default.
+fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
+    let (icon, tc_style) = tool_state_style(&tc.state);
+
+    let mut header = vec![
+        Span::raw("  "),
+        Span::styled(icon, tc_style),
+        Span::raw(" "),
+        Span::styled(tc.name.clone(), theme::tool()),
+        Span::styled(
+            format!("({})", tool_summary::summarize_input(&tc.input)),
+            theme::text_subtle(),
+        ),
+    ];
+    if let Some(badge) = tool_badge_span(tc) {
+        header.push(Span::raw(" "));
+        header.push(badge);
+    }
+    match &tc.state {
+        ToolCallState::Running => {
+            header.push(Span::raw(" "));
+            header.push(Span::styled("running", tc_style));
+        }
+        ToolCallState::Error => {
+            header.push(Span::raw(" "));
+            header.push(Span::styled("failed", tc_style));
+        }
+        ToolCallState::Success => {}
+    }
+    lines.push(Line::from(header));
+
+    let Some(output) = tc.output.as_ref() else {
+        return;
+    };
+
+    // A failure is the one payload worth reading in full — never fold it.
+    if matches!(tc.state, ToolCallState::Error) {
+        push_result_lines(lines, tool_summary::output_lines(output), 0, theme::error());
+        return;
+    }
+
+    let (kept, hidden) = tool_summary::fold(tool_summary::output_lines(output));
+    push_result_lines(lines, kept, hidden, theme::text_subtle());
+}
+
+/// Result body under the header: `⎿` on the first row, aligned after that,
+/// closed by a `… +N lines` marker when anything was folded away.
+fn push_result_lines(
+    lines: &mut Vec<Line>,
+    body: Vec<String>,
+    hidden: usize,
+    style: ratatui::style::Style,
+) {
+    for (index, line) in body.into_iter().enumerate() {
+        let prefix = if index == 0 { "    ⎿ " } else { "      " };
+        lines.push(Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(line, style),
+        ]));
+    }
+    if hidden > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("      "),
+            Span::styled(format!("… +{hidden} lines"), theme::muted()),
+        ]));
+    }
+}
+
+/// Full input and output payloads, pretty-printed. Reached via `Ctrl+R`.
+fn render_tool_call_verbose(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
+    let (icon, tc_style) = tool_state_style(&tc.state);
+    let status = match &tc.state {
+        ToolCallState::Running => "running",
+        ToolCallState::Success => "completed",
+        ToolCallState::Error => "failed",
     };
 
     let mut header = vec![Span::styled(
         format!("  [tool: {}] ", tc.name),
         theme::tool(),
     )];
-    if let Some(engine) = tc.execution_engine {
-        header.push(engine_badge_span(engine_location_label(engine)));
-    } else {
-        header.push(source_badge_span(&tc.source));
+    if let Some(badge) = tool_badge_span(tc) {
+        header.push(badge);
+        header.push(Span::raw(" "));
     }
     header.extend([
         Span::styled(icon, tc_style),
@@ -316,6 +395,14 @@ fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo) {
             _ => ("output", theme::text_subtle()),
         };
         render_tool_payload(lines, label, output, out_style);
+    }
+}
+
+fn tool_state_style(state: &ToolCallState) -> (&'static str, ratatui::style::Style) {
+    match state {
+        ToolCallState::Running => ("⟳", theme::warning()),
+        ToolCallState::Success => ("✓", theme::success()),
+        ToolCallState::Error => ("✗", theme::error()),
     }
 }
 
@@ -357,23 +444,27 @@ fn tool_payload_lines(content: &str) -> Vec<String> {
     display.lines().map(str::to_string).collect()
 }
 
-fn source_badge_span(source: &chatty_core::models::message_types::ToolSource) -> Span<'static> {
-    match source {
-        chatty_core::models::message_types::ToolSource::Local => Span::raw(""),
+/// Where the call ran, as a badge — `None` when it ran locally with no engine
+/// worth naming.
+fn tool_badge_span(tc: &ToolCallInfo) -> Option<Span<'static>> {
+    if let Some(engine) = tc.execution_engine {
+        return Some(Span::styled(
+            format!("[{}]", engine_location_label(engine)),
+            theme::muted(),
+        ));
+    }
+    match &tc.source {
+        chatty_core::models::message_types::ToolSource::Local => None,
         chatty_core::models::message_types::ToolSource::HiveCloud => {
-            Span::styled("[remote] ", theme::accent())
+            Some(Span::styled("[remote]", theme::accent()))
         }
         chatty_core::models::message_types::ToolSource::Internet { .. } => {
-            Span::styled("[remote] ", theme::warning())
+            Some(Span::styled("[remote]", theme::warning()))
         }
         chatty_core::models::message_types::ToolSource::ExternalService { .. } => {
-            Span::styled("[remote] ", theme::accent())
+            Some(Span::styled("[remote]", theme::accent()))
         }
     }
-}
-
-fn engine_badge_span(label: &str) -> Span<'static> {
-    Span::styled(format!("[{}] ", label), theme::muted())
 }
 
 fn engine_location_label(
@@ -485,24 +576,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_tool_call_shows_input_and_error_blocks() {
-        let tc = ToolCallInfo {
+    fn tool_call(input: &str, output: Option<&str>, state: ToolCallState) -> ToolCallInfo {
+        ToolCallInfo {
             id: "call-1".to_string(),
             name: "shell_execute".to_string(),
-            input: r#"{"command":"pwd"}"#.to_string(),
-            output: Some("Failed to spawn shell process".to_string()),
-            state: ToolCallState::Error,
+            input: input.to_string(),
+            output: output.map(str::to_string),
+            state,
             source: ToolSource::Local,
             execution_engine: Some(ExecutionEngine::Shell),
-        };
+        }
+    }
+
+    fn render(tc: &ToolCallInfo, verbose: bool) -> Vec<String> {
         let mut lines = Vec::new();
+        render_tool_call(&mut lines, tc, verbose);
+        lines.iter().map(line_text).collect()
+    }
 
-        render_tool_call(&mut lines, &tc);
+    #[test]
+    fn verbose_mode_shows_input_and_error_blocks() {
+        let tc = tool_call(
+            r#"{"command":"pwd"}"#,
+            Some("Failed to spawn shell process"),
+            ToolCallState::Error,
+        );
 
-        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
         assert_eq!(
-            rendered,
+            render(&tc, true),
             vec![
                 "  [tool: shell_execute] [shell (local)] ✗ failed".to_string(),
                 "    input".to_string(),
@@ -513,6 +614,97 @@ mod tests {
                 "      Failed to spawn shell process".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn collapsed_mode_folds_a_long_result_behind_one_header() {
+        let stdout = (1..=9)
+            .map(|n| format!("DIR entry-{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tc = tool_call(
+            r#"{"command":"ls -la /notes","cwd":"/notes"}"#,
+            Some(&stdout),
+            ToolCallState::Success,
+        );
+
+        assert_eq!(
+            render(&tc, false),
+            vec![
+                "  ✓ shell_execute(ls -la /notes) [shell (local)]".to_string(),
+                "    ⎿ DIR entry-1".to_string(),
+                "      DIR entry-2".to_string(),
+                "      DIR entry-3".to_string(),
+                "      … +6 lines".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_mode_never_folds_an_error() {
+        let tc = tool_call(
+            r#"{"command":"pwd"}"#,
+            Some("line 1\nline 2\nline 3\nline 4\nline 5"),
+            ToolCallState::Error,
+        );
+
+        assert_eq!(
+            render(&tc, false),
+            vec![
+                "  ✗ shell_execute(pwd) [shell (local)] failed".to_string(),
+                "    ⎿ line 1".to_string(),
+                "      line 2".to_string(),
+                "      line 3".to_string(),
+                "      line 4".to_string(),
+                "      line 5".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_mode_shows_a_running_call_without_a_result() {
+        let tc = tool_call(r#"{"command":"cargo test"}"#, None, ToolCallState::Running);
+
+        assert_eq!(
+            render(&tc, false),
+            vec!["  ⟳ shell_execute(cargo test) [shell (local)] running".to_string()]
+        );
+    }
+
+    #[test]
+    fn collapsed_mode_drops_the_badge_separator_when_there_is_no_badge() {
+        let mut tc = tool_call(r#"{"id":"t1"}"#, None, ToolCallState::Success);
+        tc.name = "update_todo".to_string();
+        tc.execution_engine = None;
+
+        assert_eq!(render(&tc, false), vec!["  ✓ update_todo(t1)".to_string()]);
+    }
+
+    /// The screenshot in AGE-340: two calls that used to fill the viewport.
+    #[test]
+    fn collapsed_mode_keeps_the_screenshot_pair_under_eight_lines() {
+        let shell = tool_call(
+            r#"{"command":"ls /notes/KPMG"}"#,
+            Some(
+                r#"{"stdout":"DIR .obsidian\nDIR 00-meta\nDIR 01-maps\nDIR 02-domains\nDIR 03-projects\nDIR 04-decisions","exit_code":0,"truncated":false}"#,
+            ),
+            ToolCallState::Success,
+        );
+        let mut todo = tool_call(
+            r#"{"id":"t1","status":"done"}"#,
+            Some(
+                r#"{"message":"Todo marked done.","snapshot":{"goal":"Set up the repository","todos":[{"id":"t1"},{"id":"t2"},{"id":"t3"}]}}"#,
+            ),
+            ToolCallState::Success,
+        );
+        todo.name = "update_todo".to_string();
+        todo.execution_engine = None;
+
+        let mut lines = Vec::new();
+        render_tool_call(&mut lines, &shell, false);
+        render_tool_call(&mut lines, &todo, false);
+
+        assert!(lines.len() <= 8, "rendered {} lines", lines.len());
     }
 
     fn line_text(line: &Line<'_>) -> String {

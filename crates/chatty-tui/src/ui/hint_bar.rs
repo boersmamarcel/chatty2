@@ -20,10 +20,15 @@ pub fn render_hint_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
         Span::styled(" to select", theme::muted()),
     ];
 
-    let right_text = if engine.is_streaming {
-        "Ctrl+C stop  ·  Ctrl+Q quit"
+    let tool_detail = if engine.verbose_tools {
+        "Ctrl+R fold tools"
     } else {
-        "Ctrl+Q quit"
+        "Ctrl+R expand tools"
+    };
+    let right_text = if engine.is_streaming {
+        format!("{tool_detail}  ·  Ctrl+C stop  ·  Ctrl+Q quit")
+    } else {
+        format!("{tool_detail}  ·  Ctrl+Q quit")
     };
     let right = Span::styled(right_text, theme::muted());
 
