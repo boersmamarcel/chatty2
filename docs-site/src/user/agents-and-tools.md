@@ -24,7 +24,7 @@ You send a message
 
 Tool calls, inputs, outputs and reasoning render as collapsible trace blocks beside the reply ([Chatting](./chatting.md)).
 
-For multi-step work the agent writes a **plan** first: a goal and an ordered to-do list. A **To-dos** card appears in the transcript and updates in place (pending, in progress, done, blocked) with a progress counter. Scroll past it and a compact **Plan N of M** strip pins to the top of the transcript — click to unfold the plan, or press `Esc` to dismiss the overlay without cancelling the run. The agent ticks steps off as it goes and runs a verification step before its final reply.
+For multi-step work the agent writes a **plan** first: a goal and an ordered to-do list. A **To-dos** card appears in the transcript and updates in place (pending, in progress, done, blocked) with a progress counter. Scroll past it and a compact **Plan N of M** strip pins to the top of the transcript — click to unfold the plan, or press `Esc` to dismiss the overlay without cancelling the run. The agent ticks steps off as it goes and runs a verification step before its final reply. In the terminal interface the card renders inline in the transcript instead, and its position also appears in the status bar — see [Terminal interface](./terminal.md).
 
 The agent can also pause mid-turn to ask up to 4 clarifying questions, each with pre-made options plus a free-text answer (`ask_user`). It shows up as a card above the chat input; pick an option or type your own answer, then submit. Questions you leave blank are sent as unanswered so the agent knows what it still doesn't know. In the terminal interface it replaces the input row instead — see [Terminal interface](./terminal.md).
 
