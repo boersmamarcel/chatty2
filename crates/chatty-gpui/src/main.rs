@@ -5,9 +5,12 @@
 //    for the entire app lifetime.
 // 2. Initialize logging / panic handler.
 // 3. Run first-launch installation tasks (see chatty_core::install).
-// 4. Boot GPUI, register globals, async-load settings/providers/models.
-// 5. Construct the `ChattyApp` root entity and open the main window.
-// 6. Spawn the auto-updater background task.
+// 4. Boot GPUI and register the globals the first frame reads.
+// 5. Construct the `ChattyApp` root entity and open the main window. This
+//    draws the first frame synchronously, so it comes before anything that
+//    reads a file, touches the network or spawns a task (AGE-161).
+// 6. Spawn everything else: the settings / providers / models loads, MCP,
+//    extensions, the agent memory service and the auto-updater.
 //
 // What does NOT live here:
 //   - Any view rendering (see `chatty/views/`).
@@ -136,20 +139,19 @@ fn main() {
         .expect("Failed to initialize settings repositories (is HOME set?)");
     boot_timing::checkpoint("repositories_ready");
 
-    // Initialize the SQLite conversation repository here, where the Tokio runtime is
-    // explicitly set up, so the block_on call is clearly safe and in a known context.
-    let conversation_repo: Arc<dyn ConversationRepository> = Arc::new(
-        _tokio_runtime
-            .block_on(ConversationSqliteRepository::new())
-            .expect("Failed to create SQLite conversation repository"),
-    );
-    boot_timing::checkpoint("sqlite_ready");
-
     // ChattyAssets falls back to gpui-component's icon bundle internally; a second
     // `with_assets` call would replace the source rather than chain to it.
     let app = Application::new().with_assets(ChattyAssets);
 
     app.run(move |cx| {
+        // ── Before the window ────────────────────────────────────────────────
+        //
+        // Only what the first frame needs: `gpui_component::init`, the theme
+        // registry (which applies its baked-in default theme now and loads the
+        // theme pack in the background), and the globals the root view's render
+        // tree and `ChattyApp::new` read. Every one of these is a constructor
+        // with no I/O in it. Anything that reads a file, touches the network or
+        // spawns a task belongs after `open_window` (AGE-161) — add it there.
         boot_timing::checkpoint("main_to_run");
 
         cx.activate(true);
@@ -162,30 +164,6 @@ fn main() {
 
         // Initialize theme system
         init_themes(cx);
-
-        // Load general settings asynchronously without blocking startup
-        cx.spawn(async move |cx: &mut AsyncApp| {
-            let repo = chatty_core::general_settings_repository();
-            match repo.load().await {
-                Ok(settings) => {
-                    cx.update(|cx| {
-                        // Update global settings
-                        cx.set_global(settings);
-
-                        // Apply theme from loaded settings
-                        apply_theme_from_settings(cx);
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to apply theme from loaded settings"))
-                    .ok();
-                }
-                Err(e) => {
-                    warn!(error = ?e, "Failed to load general settings, using default settings");
-                    // Mark initialization complete even on error so the observer can save future changes
-                    THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
-                }
-            }
-        })
-        .detach();
 
         // Initialize providers model with empty state - will be populated async
         cx.set_global(settings::models::ProviderModel::new());
@@ -225,11 +203,138 @@ fn main() {
         // module scan and a `refresh_windows()` before a window even existed
         // (AGE-163).
 
-        // Initialize agent memory service asynchronously.
-        // A watch channel is stored as a global so that conversation creation can await
-        // completion, preventing a race where the agent would be built without memory tools.
+        // Initialize CLI install state tracking for settings UI feedback
+        cx.set_global(cli_installer::CliInstallState::default());
+
+        // Initialize SkillService global (no embedding initially — keyword-only scoring).
+        // Replaced by a version with embedding once the memory task below has
+        // initialised the EmbeddingService.
+        cx.set_global(chatty_core::services::SkillService::new(None));
+
+        // Initialize token tracking settings with defaults
+        cx.set_global(settings::models::TokenTrackingSettings::default());
+
+        // Initialize the token budget watch channel global used by the context bar
+        cx.set_global(chatty::token_budget::GlobalTokenBudget::new());
+
+        // Initialize models notifier entity for event subscriptions (strong global
+        // keeps it alive for the app lifetime so Settings mutations can notify).
+        let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
+        cx.set_global(settings::models::GlobalModelsNotifier::new(models_notifier));
+
+        // Initialize StreamManager entity for tracking active LLM streams per conversation
+        // Store a strong Entity reference in the global to prevent garbage collection
+        // when the initialization closure's local variables go out of scope.
+        let stream_manager = cx.new(|_cx| chatty::models::StreamManager::new());
+        cx.set_global(chatty::models::GlobalStreamManager::new(stream_manager));
+
+        // Initialize error store and notifier
+        cx.set_global(chatty::models::ErrorStore::new(100)); // Max 100 entries
+
+        let error_notifier = cx.new(|_cx| chatty::models::ErrorNotifier::new());
+        cx.set_global(chatty::models::GlobalErrorNotifier::new(
+            error_notifier.downgrade(),
+        ));
+
+        // Initialize global settings window state
+        cx.set_global(settings::controllers::GlobalSettingsWindow::default());
+
+        // Initialize global models list view state
+        cx.set_global(settings::views::models_page::GlobalModelsListView::default());
+
+        // Initialize auto-updater with current version from Cargo.toml
+        let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
+        cx.set_global(updater.clone());
+
+        // Initialize math renderer service for LaTeX math rendering
+        let math_renderer = chatty::services::MathRendererService::new();
+        cx.set_global(math_renderer);
+        info!("Math renderer service initialized");
+
+        // Initialize mermaid renderer service for diagram rendering
+        let mermaid_renderer = chatty::services::MermaidRendererService::new();
+        cx.set_global(mermaid_renderer);
+        info!("Mermaid renderer service initialized");
+
+        // Initialize MCP service for managing MCP server connections
+        let mcp_service = chatty::services::McpService::new();
+        cx.set_global(mcp_service);
+        info!("MCP service initialized");
+
+        // The signal conversation creation waits on before building an agent,
+        // so that it never builds one without memory tools. Only the channel is
+        // created here — the memory service is opened by a task below. This is
+        // a `try_global` read (`await_memory_service`), so an absent global
+        // wouldn't panic, it would silently skip the wait; the global goes in
+        // before the window for the same reason `GlobalStreamManager` does.
         let (memory_tx, memory_rx) = tokio::sync::watch::channel(false);
         cx.set_global(MemoryInitSignal(memory_rx));
+
+        // ── The window ───────────────────────────────────────────────────────
+        //
+        // `open_window` draws its first frame synchronously, so everything
+        // below it lands after first paint.
+
+        // register actions
+        register_actions(cx);
+
+        // Set up native macOS menu bar (macOS only)
+        #[cfg(target_os = "macos")]
+        set_app_menus(cx);
+
+        // Get platform-specific window options for main window
+        let options = settings::utils::window_utils::get_main_window_options();
+
+        boot_timing::checkpoint("run_to_open_window");
+
+        // The conversation pool opens on the first query — the sidebar's
+        // metadata load, inside a spawn — not here and not before
+        // `Application::run` (AGE-161).
+        let repo: Arc<dyn ConversationRepository> = Arc::new(
+            ConversationSqliteRepository::deferred()
+                .expect("Failed to resolve the SQLite conversation database path"),
+        );
+        cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| ChattyApp::new(window, cx, repo.clone()));
+
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("Failed to open main window");
+
+        // ── After the window has painted ─────────────────────────────────────
+        //
+        // Settings, MCP, extensions, the updater and the memory service all load
+        // asynchronously and patch their globals when they arrive; the views
+        // already render the defaults set above and refresh on notify.
+
+        // Load general settings asynchronously without blocking startup
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = chatty_core::general_settings_repository();
+            match repo.load().await {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        // Update global settings
+                        cx.set_global(settings);
+
+                        // Apply theme from loaded settings
+                        apply_theme_from_settings(cx);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to apply theme from loaded settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load general settings, using default settings");
+                    // Mark initialization complete even on error so the observer can save future changes
+                    THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
+                }
+            }
+        })
+        .detach();
+
+        // Initialize the agent memory service itself. `MemoryInitSignal` is
+        // already in place (above the window), so a conversation created while
+        // this is still running finds the receiver and waits rather than
+        // building an agent with no memory tools.
         cx.spawn(async move |cx: &mut AsyncApp| {
             // Check if memory is enabled in settings
             let memory_enabled = cx
@@ -343,19 +448,6 @@ fn main() {
         })
         .detach();
 
-        // Initialize CLI install state tracking for settings UI feedback
-        cx.set_global(cli_installer::CliInstallState::default());
-
-        // Initialize SkillService global (no embedding initially — keyword-only scoring).
-        // Replaced by a version with embedding once EmbeddingService is initialised above.
-        cx.set_global(chatty_core::services::SkillService::new(None));
-
-        // Initialize token tracking settings with defaults
-        cx.set_global(settings::models::TokenTrackingSettings::default());
-
-        // Initialize the token budget watch channel global used by the context bar
-        cx.set_global(chatty::token_budget::GlobalTokenBudget::new());
-
         // Pre-warm expensive lazy statics in background to avoid first-use stutter.
         // BPE tokenizers (~50ms each) would otherwise stutter on the first message;
         // the mermaid font database (~200-500ms) would stutter on the first diagram.
@@ -390,11 +482,6 @@ fn main() {
             }
         })
         .detach();
-
-        // Initialize models notifier entity for event subscriptions (strong global
-        // keeps it alive for the app lifetime so Settings mutations can notify).
-        let models_notifier = cx.new(|_cx| settings::models::ModelsNotifier::new());
-        cx.set_global(settings::models::GlobalModelsNotifier::new(models_notifier));
 
         // Create MCP update channel and spawn listener that updates global + emits event
         let (mcp_tx, mut mcp_rx) = tokio::sync::mpsc::channel::<
@@ -461,20 +548,6 @@ fn main() {
         })
         .detach();
 
-        // Initialize StreamManager entity for tracking active LLM streams per conversation
-        // Store a strong Entity reference in the global to prevent garbage collection
-        // when the initialization closure's local variables go out of scope.
-        let stream_manager = cx.new(|_cx| chatty::models::StreamManager::new());
-        cx.set_global(chatty::models::GlobalStreamManager::new(stream_manager));
-
-        // Initialize error store and notifier
-        cx.set_global(chatty::models::ErrorStore::new(100)); // Max 100 entries
-
-        let error_notifier = cx.new(|_cx| chatty::models::ErrorNotifier::new());
-        cx.set_global(chatty::models::GlobalErrorNotifier::new(
-            error_notifier.downgrade(),
-        ));
-
         // Spawn background thread to consume errors from tracing layer
         // Bridge sync channel to tokio channel
         let (error_tx, mut error_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -511,16 +584,6 @@ fn main() {
         })
         .detach();
 
-        // Initialize global settings window state
-        cx.set_global(settings::controllers::GlobalSettingsWindow::default());
-
-        // Initialize global models list view state
-        cx.set_global(settings::views::models_page::GlobalModelsListView::default());
-
-        // Initialize auto-updater with current version from Cargo.toml
-        let updater = AutoUpdater::new(env!("CARGO_PKG_VERSION"));
-        cx.set_global(updater.clone());
-
         // Check if a previous update installation failed (macOS only)
         updater.check_previous_update_status(cx);
 
@@ -531,16 +594,6 @@ fn main() {
         // On Linux this re-copies chatty-tui after an AppImage auto-update;
         // on macOS/Windows the symlink / installer already keeps it in sync.
         cli_installer::update_cli_if_installed(cx);
-
-        // Initialize math renderer service for LaTeX math rendering
-        let math_renderer = chatty::services::MathRendererService::new();
-        cx.set_global(math_renderer);
-        info!("Math renderer service initialized");
-
-        // Initialize mermaid renderer service for diagram rendering
-        let mermaid_renderer = chatty::services::MermaidRendererService::new();
-        cx.set_global(mermaid_renderer);
-        info!("Mermaid renderer service initialized");
 
         // Clean up old SVG cache files from previous sessions in a background thread.
         // This is pure filesystem I/O with no dependencies — safe to run off the main thread.
@@ -561,11 +614,6 @@ fn main() {
         std::thread::spawn(|| {
             chatty_core::auth::azure_auth::augment_gui_app_path();
         });
-
-        // Initialize MCP service for managing MCP server connections
-        let mcp_service = chatty::services::McpService::new();
-        cx.set_global(mcp_service);
-        info!("MCP service initialized");
 
         // Load providers, models, and execution settings concurrently (dependency tier 1).
         // Conversations depend on all three being loaded (dependency tier 2).
@@ -1247,26 +1295,6 @@ fn main() {
             .ok();
         })
         .detach();
-
-        // register actions
-        register_actions(cx);
-
-        // Set up native macOS menu bar (macOS only)
-        #[cfg(target_os = "macos")]
-        set_app_menus(cx);
-
-        // Get platform-specific window options for main window
-        let options = settings::utils::window_utils::get_main_window_options();
-
-        boot_timing::checkpoint("run_to_open_window");
-
-        let repo = conversation_repo.clone();
-        cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| ChattyApp::new(window, cx, repo.clone()));
-
-            cx.new(|cx| Root::new(view, window, cx))
-        })
-        .expect("Failed to open main window");
     });
 
     // The window is closed and the UI is being torn down, so nothing is going
@@ -1276,5 +1304,118 @@ fn main() {
     // would outlive the process. Tear them down synchronously instead.
     if let Err(e) = _tokio_runtime.block_on(chatty_core::sandbox::shutdown_all()) {
         warn!(error = %e, "Failed to destroy sandbox containers during shutdown");
+    }
+}
+
+#[cfg(test)]
+mod boot_order_tests {
+    //! Structural guards on this file's own source, not behavioural tests.
+    //!
+    //! "The window paints before the settings/MCP/updater work completes"
+    //! (AGE-161) can't be asserted from a unit test — a test harness has no
+    //! GPUI platform, no window and no frame. What *can* be pinned is the
+    //! source-order property that produces it, which is also the property a
+    //! later change would silently undo: heavy work registered above
+    //! `open_window` runs before the first frame is drawn.
+
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    fn source_before(needle: &str) -> &'static str {
+        let at = MAIN_RS
+            .find(needle)
+            .unwrap_or_else(|| panic!("main.rs no longer contains `{needle}`"));
+        &MAIN_RS[..at]
+    }
+
+    /// Nothing is on screen until `Application::run` boots GPUI, so a
+    /// `block_on` before it is dead time the user watches — that is where the
+    /// SQLite open and its migrations used to sit. The `block_on` that tears
+    /// sandbox containers down *after* `run` returns is deliberate and is not
+    /// covered by this test.
+    #[test]
+    fn nothing_blocks_before_application_run() {
+        let before_run = source_before("app.run(move |cx| {");
+        assert!(
+            !before_run.contains("block_on("),
+            "main() must not block before Application::run — open the resource \
+             lazily and let the first use pay for it instead"
+        );
+        assert!(
+            !before_run.contains("ConversationSqliteRepository::new"),
+            "the conversation pool must not be opened before Application::run"
+        );
+    }
+
+    /// `cx.open_window` draws its first frame synchronously, so any task or
+    /// thread started above it runs before the user sees anything.
+    #[test]
+    fn the_window_opens_before_any_work_is_started() {
+        let before_window = source_before("cx.open_window(");
+        for spawner in [
+            "cx.spawn(",
+            "std::thread::spawn(",
+            "updater.check_previous_update_status(",
+            "updater.start_polling(",
+            "cli_installer::update_cli_if_installed(",
+        ] {
+            assert!(
+                !before_window.contains(spawner),
+                "`{spawner}` is registered before the window opens; move it \
+                 below `cx.open_window` so it lands after first paint"
+            );
+        }
+    }
+
+    /// The globals the first frame reads, and the ones `ChattyApp::new`
+    /// subscribes to, must exist by the time `open_window` draws.
+    ///
+    /// The two failure modes differ. A missing `cx.global::<T>()` read
+    /// (`GeneralSettingsModel`, `ExecutionSettingsModel`, `ExtensionsModel`,
+    /// `ErrorStore`, `AutoUpdater` — the five hard reads in the first frame's
+    /// render tree that main.rs owns) panics on the first paint, which at
+    /// least announces itself. The rest are `try_global` reads that fail
+    /// *silently*: `GlobalStreamManager` and `GlobalModelsNotifier` would skip
+    /// their subscription, leaving streams and the model picker dead, and
+    /// `MemoryInitSignal` would skip the memory-ready wait and build an agent
+    /// with no memory tools. `ConversationsStore` is the sixth hard read and
+    /// is deliberately absent from this list — `ChattyApp::new` sets it, which
+    /// still runs before the frame is drawn.
+    /// Each needle must match the *registration* and nothing else — matching
+    /// `MemoryInitSignal`'s type definition, say, would leave this test
+    /// passing no matter where the `set_global` moved to. The exactly-once
+    /// count is what keeps that from happening silently.
+    #[test]
+    fn globals_the_first_frame_needs_are_set_before_the_window() {
+        let before_window = source_before("cx.open_window(");
+        for global in [
+            "GeneralSettingsModel::default()",
+            "ExecutionSettingsModel::default()",
+            "ExtensionsModel::default()",
+            "ErrorStore::new(",
+            "AutoUpdater::new(",
+            "GlobalStreamManager::new(",
+            "GlobalModelsNotifier::new(",
+            "cx.set_global(MemoryInitSignal(",
+        ] {
+            assert_eq!(
+                before_window.matches(global).count(),
+                1,
+                "`{global}` must appear exactly once above `cx.open_window` — \
+                 zero means it now lands after the window, where the first \
+                 frame (or a subscription set up while building it) can't see \
+                 it; more than one means the needle matches something other \
+                 than the registration and no longer proves anything"
+            );
+        }
+    }
+
+    /// The window is built from a repository that has not touched the disk
+    /// yet; the sidebar's metadata load opens the pool inside its own spawn.
+    #[test]
+    fn the_window_is_built_on_a_deferred_repository() {
+        assert!(
+            MAIN_RS.contains("ConversationSqliteRepository::deferred()"),
+            "the main window must be handed a deferred conversation repository"
+        );
     }
 }
