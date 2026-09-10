@@ -1,9 +1,31 @@
 name: Auto-arm
+
+# Every PR the owner opens enters the automation by itself: GitHub auto-merge
+# (squash) lands it once the required checks are green and the branch is
+# current, and the one-lane queue (update-next-queued-pr.yml) keeps the front
+# of the queue current. Nobody has to remember to arm a PR. Hold a PR back by
+# opening it as a draft; it is armed when marked ready for review.
+#
+# No labels here. On this repository `ship:auto` means "cut a patch release",
+# and ship-auto-guard.yml fails any PR carrying it that is not on an `auto/*`
+# branch — so labelling every PR would block every ordinary one. The release
+# path stays opt-in through the ship skill (`/ship AGE-NNN release`).
+#
+# Arms with AUTO_UPDATE_TOKEN, not GITHUB_TOKEN: a merge attributed to
+# github-actions[bot] pushes main without triggering the workflows that
+# listen for it (docs sync, release dispatch).
+#
+# Closed-system: same-repo head only. The sender must be the repository owner
+# or github-actions[bot], or the branch must be one of the docs bots' `docs/*`
+# branches (they open PRs as the Claude GitHub App).
+
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
+
 permissions:
   contents: read
+
 jobs:
   arm:
     if: >-
@@ -14,12 +36,36 @@ jobs:
        startsWith(github.event.pull_request.head.ref, 'docs/'))
     runs-on: ubuntu-latest
     steps:
-      - env:
+      - name: Arm auto-merge (squash)
+        env:
           GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh pr edit "$PR" --repo "$REPO" --add-label ship:auto   # hive only: delete this line on chatty2
-          gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.mergeMethod // empty' | grep -q . && exit 0
-          gh pr merge "$PR" --repo "$REPO" --auto --squash
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::AUTO_UPDATE_TOKEN is not set on this repository"; exit 1; }
+
+          armed="$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.mergeMethod // empty')"
+          if [ -n "$armed" ]; then
+            echo "PR #$PR: auto-merge already armed ($armed)."
+            exit 0
+          fi
+
+          if gh pr merge "$PR" --repo "$REPO" --auto --squash; then
+            echo "PR #$PR: auto-merge armed (squash). The queue keeps it current; GitHub lands it when the required checks are green."
+            exit 0
+          fi
+
+          # GitHub refuses to arm auto-merge on a PR that is already CLEAN
+          # (every required check green, branch current). A docs-only PR can
+          # reach that before this job runs, because the `test` job takes its
+          # cheap path in seconds. Merging now is the same outcome.
+          state="$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq '.mergeStateStatus')"
+          if [ "$state" = "CLEAN" ]; then
+            gh pr merge "$PR" --repo "$REPO" --squash
+            echo "PR #$PR: already green and current; squash-merged."
+            exit 0
+          fi
+
+          echo "::error::Could not arm auto-merge on PR #$PR (mergeStateStatus=$state). Check that 'Allow auto-merge' is on under Settings > General."
+          exit 1
