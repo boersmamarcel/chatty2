@@ -695,3 +695,159 @@ async fn a_hosted_turn_is_recorded_by_the_local_session() {
     assert!(matches!(messages[0], Message::User { .. }));
     assert!(matches!(messages[1], Message::Assistant { .. }));
 }
+
+// ── The turn's notification wiring (AGE-362) ─────────────────────────────────
+
+/// AGE-346 gave `WriteApprovalStore` a resolution notifier and `prepare_turn`
+/// the line that installs it. These cover the line, not just the store: delete
+/// `self.write_approvals.set_notifiers(..)` and the first two fail. Without
+/// them that deletion is silent, which is exactly how the original bug shipped.
+///
+/// Ids come off the turn's own `approval_rx` rather than out of the stores'
+/// pending maps, so each test also says something true about the request side:
+/// a parked prompt is announced to the turn that is running.
+mod turn_notification_wiring {
+    use super::*;
+    use crate::models::execution_approval_store::{ApprovalDecision, request_execution_approval};
+    use crate::models::write_approval_store::{WriteApprovalDecision, WriteOperation};
+    use crate::settings::models::execution_settings::ApprovalMode;
+    use crate::tools::filesystem_write_tool::request_write_approval;
+
+    /// Park a real write-approval request, and return the id the turn was told
+    /// about. Going through `request_write_approval` keeps this honest about
+    /// how a tool actually asks.
+    async fn park_write_approval(session: &AgentSession, turn: &mut PreparedTurn) -> String {
+        let pending = session.write_approvals().get_pending_approvals();
+        tokio::spawn(async move {
+            let _ = request_write_approval(
+                &pending,
+                &ApprovalMode::AlwaysAsk,
+                WriteOperation::DeleteFile {
+                    path: "/tmp/x".to_string(),
+                },
+            )
+            .await;
+        });
+        next_request(turn, "write").await
+    }
+
+    async fn park_execution_approval(session: &AgentSession, turn: &mut PreparedTurn) -> String {
+        let pending = session.execution_approvals().get_pending_approvals();
+        tokio::spawn(async move {
+            let _ = request_execution_approval(
+                &pending,
+                &ApprovalMode::AlwaysAsk,
+                "rm -rf /tmp/x",
+                false,
+            )
+            .await;
+        });
+        next_request(turn, "execution").await
+    }
+
+    /// Every wait in here is bounded. A regression in the wiring means nothing
+    /// is ever sent, and an unbounded `recv().await` would turn that into a
+    /// hung suite rather than a failing test -- which is worse than no test,
+    /// because CI reports it as a timeout with nothing to read.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+    async fn next_resolution(
+        turn: &mut PreparedTurn,
+        what: &str,
+    ) -> crate::models::execution_approval_store::ApprovalResolution {
+        tokio::time::timeout(BUDGET, turn.resolution_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}: the turn was never told"))
+            .unwrap_or_else(|| panic!("the resolution channel closed before {what}"))
+    }
+
+    async fn next_request(turn: &mut PreparedTurn, what: &str) -> String {
+        tokio::time::timeout(BUDGET, turn.approval_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for the {what} prompt to be announced"))
+            .expect("the approval channel stays open for the turn")
+            .id
+    }
+
+    fn prepare(session: &mut AgentSession, text: &str) -> PreparedTurn {
+        session
+            .prepare_turn(TurnInput::text(text), Arc::new(AtomicBool::new(false)))
+            .expect("the turn prepares")
+    }
+
+    #[tokio::test]
+    async fn a_resolved_write_approval_reaches_the_turn_that_is_running() {
+        for (decision, expected) in [
+            (WriteApprovalDecision::Approved, true),
+            (WriteApprovalDecision::Denied, false),
+        ] {
+            let mut session = session_with_conversation().await;
+            let mut turn = prepare(&mut session, "edit the file");
+
+            let id = park_write_approval(&session, &mut turn).await;
+            assert!(session.write_approvals().resolve(&id, decision));
+
+            let resolution = next_resolution(&mut turn, "the write approval's answer").await;
+            assert_eq!(resolution.id, id);
+            assert_eq!(resolution.approved, expected);
+        }
+    }
+
+    /// One channel, both stores. The turn holds a single `resolution_rx` and
+    /// the client cannot tell which store answered — nor should it have to.
+    #[tokio::test]
+    async fn both_approval_stores_report_to_the_same_receiver() {
+        let mut session = session_with_conversation().await;
+        let mut turn = prepare(&mut session, "do both");
+
+        let write_id = park_write_approval(&session, &mut turn).await;
+        assert!(
+            session
+                .write_approvals()
+                .resolve(&write_id, WriteApprovalDecision::Approved)
+        );
+        let first = next_resolution(&mut turn, "the write answer").await;
+        assert_eq!(first.id, write_id);
+
+        // The execution store has always reported; this asserts the two have
+        // not drifted onto separate channels.
+        let exec_id = park_execution_approval(&session, &mut turn).await;
+        assert!(
+            session
+                .execution_approvals()
+                .resolve(&exec_id, ApprovalDecision::Denied)
+        );
+        let second = next_resolution(&mut turn, "the execution answer").await;
+        assert_eq!(second.id, exec_id);
+        assert!(!second.approved);
+    }
+
+    /// AGE-246 / D7: the channels are per turn. An answer given during the
+    /// second turn must not reach the first turn's receiver. The execution
+    /// store has this property covered; the write store never did.
+    #[tokio::test]
+    async fn a_new_turn_replaces_the_previous_turns_receiver() {
+        let mut session = session_with_conversation().await;
+        let mut first = prepare(&mut session, "one");
+
+        // `finish_turn` is what ends a turn -- it clears the cancel flag that
+        // `is_turn_active` reads, which `cancel()` deliberately does not.
+        // The first turn is never driven here; only its channels matter.
+        session.finish_turn(None, Vec::new());
+        let mut second = prepare(&mut session, "two");
+
+        let id = park_write_approval(&session, &mut second).await;
+        assert!(
+            session
+                .write_approvals()
+                .resolve(&id, WriteApprovalDecision::Approved)
+        );
+
+        let resolution = next_resolution(&mut second, "the running turn's answer").await;
+        assert_eq!(resolution.id, id);
+        assert!(
+            first.resolution_rx.try_recv().is_err(),
+            "the previous turn's receiver must not see the new turn's answer"
+        );
+    }
+}
