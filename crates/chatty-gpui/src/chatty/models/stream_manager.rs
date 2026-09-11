@@ -7,13 +7,30 @@ use std::time::{Duration, Instant};
 use gpui::{EventEmitter, Task};
 use tracing::{debug, warn};
 
-/// Minimum interval between batched TextChunk events (~200fps).
-/// At 5ms each flush triggers one re-render cycle — fast enough for
-/// responsive sustained streaming while avoiding per-character layout
-/// thrashing. The *first* text chunk in a stream is always emitted
-/// immediately (see `has_emitted_first_chunk`) so time-to-first-token
-/// is not delayed by this interval.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(5);
+/// Minimum interval between batched TextChunk events, and the period of the
+/// background flush timer that backstops it (AGE-166).
+///
+/// 5ms (~200fps) exceeded every real display's refresh rate for no benefit,
+/// while still round-tripping through `ConversationsStore::append_streaming_content`
+/// and `StreamManager::handle_chunk` on every single raw LLM chunk. 20ms
+/// (~50fps) sits in the ~16-33ms band a 30-60Hz display can actually paint,
+/// and keeps the emitted TextChunk rate comfortably under the ~60/s budget.
+/// The *first* text chunk in a stream is always emitted immediately (see
+/// `has_emitted_first_chunk`) so time-to-first-token is not delayed by this
+/// interval, and `ensure_flush_timer` flushes on this same cadence even when
+/// no further chunk arrives, so a pause mid-interval still paints instead of
+/// waiting for the next token.
+pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Whether buffered text should flush now: the first chunk of a turn always
+/// flushes immediately (protects time-to-first-token); after that, at most
+/// once per `FLUSH_INTERVAL`. Shared by `StreamManager`'s own UI-facing
+/// batching below and by `DesktopSink`'s upstream batching
+/// (`message_ops_internals.rs`), so the two hot paths this issue coalesces
+/// implement one flush policy, not two (AGE-166).
+pub(crate) fn should_flush_text(is_first_chunk: bool, since_last_flush: Duration) -> bool {
+    is_first_chunk || since_last_flush >= FLUSH_INTERVAL
+}
 
 use crate::chatty::services::StreamChunk;
 use chatty_core::models::token_usage::{ApiCallUsage, TokenUsage};
@@ -152,6 +169,12 @@ pub struct StreamManager {
     /// stream is removed so a late `StreamEnded` can still be recognised as
     /// stale.
     current_epoch: HashMap<String, u64>,
+    /// Background timer that flushes any buffered text every `FLUSH_INTERVAL`,
+    /// so a pause mid-interval still paints instead of waiting for the next
+    /// chunk to trigger the elapsed check (AGE-166). Spawned lazily on the
+    /// first stream and stops itself once no streams remain, so an idle app
+    /// doesn't keep waking the foreground executor at ~50Hz forever.
+    flush_timer: Option<Task<()>>,
 }
 
 impl EventEmitter<StreamManagerEvent> for StreamManager {}
@@ -163,7 +186,45 @@ impl StreamManager {
             pending_resolved_ids: HashMap::new(),
             next_epoch: 1,
             current_epoch: HashMap::new(),
+            flush_timer: None,
         }
+    }
+
+    /// Start the periodic flush timer the first time a stream needs it. The
+    /// timer stops itself and clears `flush_timer` once no streams remain;
+    /// this call transparently respawns it on the next stream (see
+    /// `flush_timer`'s docs).
+    fn ensure_flush_timer(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.flush_timer.is_some() {
+            return;
+        }
+        self.flush_timer = Some(cx.spawn(async move |entity, cx| {
+            loop {
+                cx.background_executor().timer(FLUSH_INTERVAL).await;
+                let should_continue = entity
+                    .update(cx, |sm, cx| {
+                        let conv_ids: Vec<String> = sm.streams.keys().cloned().collect();
+                        for conv_id in conv_ids {
+                            sm.flush_pending_text(&conv_id, cx);
+                        }
+                        if sm.streams.is_empty() {
+                            // Nothing left to flush — stop ticking rather than
+                            // spinning at FLUSH_INTERVAL for the rest of the
+                            // process's life. `ensure_flush_timer` respawns
+                            // this on the next `register_stream` /
+                            // `register_pending_stream` (AGE-166 review).
+                            sm.flush_timer = None;
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Claim the next epoch for `conv_id` and record it as current.
@@ -197,6 +258,8 @@ impl StreamManager {
         pending_artifacts: Option<PendingArtifacts>,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.ensure_flush_timer(cx);
+
         // Cancel existing stream if any — emit StreamEnded so subscribers
         // (app_controller) can transition Running tool calls to Cancelled.
         if let Some(mut existing) = self.streams.remove(&conv_id) {
@@ -257,6 +320,8 @@ impl StreamManager {
         pending_artifacts: Option<PendingArtifacts>,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.ensure_flush_timer(cx);
+
         // Cancel any existing pending stream — emit StreamEnded so subscribers
         // (app_controller) can transition Running tool calls to Cancelled.
         if let Some(mut existing) = self.streams.remove("__pending__") {
@@ -360,29 +425,27 @@ impl StreamManager {
     ///
     /// Text chunks use a hybrid strategy: the *first* chunk is emitted immediately
     /// (zero latency), then subsequent chunks are batched and emitted only when
-    /// `FLUSH_INTERVAL` (5ms, ~200fps) has elapsed. All other chunk types are forwarded
-    /// immediately without delay.
+    /// `FLUSH_INTERVAL` has elapsed (`should_flush_text`), backstopped by
+    /// `ensure_flush_timer` for a mid-interval pause. Every other chunk type
+    /// flushes any buffered text first, then is forwarded immediately without
+    /// delay — otherwise a tool-start row could paint before the sentence
+    /// that preceded it (AGE-166).
     pub fn handle_chunk(
         &mut self,
         conv_id: &str,
         chunk: StreamChunk,
         cx: &mut gpui::Context<Self>,
     ) {
+        if !matches!(chunk, StreamChunk::Text(_)) {
+            self.flush_pending_text(conv_id, cx);
+        }
         match chunk {
             StreamChunk::Text(text) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.pending_text.push_str(&text);
-                    if !state.has_emitted_first_chunk {
-                        // First chunk → emit immediately for minimal time-to-first-token
+                    let is_first = !state.has_emitted_first_chunk;
+                    if should_flush_text(is_first, state.last_flush.elapsed()) {
                         state.has_emitted_first_chunk = true;
-                        let batch = std::mem::take(&mut state.pending_text);
-                        state.last_flush = Instant::now();
-                        cx.emit(StreamManagerEvent::TextChunk {
-                            conversation_id: conv_id.to_string(),
-                            text: batch,
-                        });
-                    } else if state.last_flush.elapsed() >= FLUSH_INTERVAL {
-                        // Subsequent chunks → respect the flush interval to avoid thrashing
                         let batch = std::mem::take(&mut state.pending_text);
                         state.last_flush = Instant::now();
                         cx.emit(StreamManagerEvent::TextChunk {
@@ -498,8 +561,8 @@ impl StreamManager {
                 // Don't finalize yet — caller should call finalize_stream()
             }
             StreamChunk::Error(error) => {
-                // Flush any buffered text before emitting StreamEnded
-                self.flush_pending_text(conv_id, cx);
+                // Buffered text was already flushed above (any non-text chunk
+                // flushes first), so it lands before this StreamEnded.
                 // StreamStatus stays a display string (AGE-244 / D5's typed
                 // `kind` is for recovery decisions, made in on_chunk before
                 // this point; nothing downstream of StreamManager re-classifies).
@@ -809,6 +872,11 @@ pub type GlobalStreamManager = crate::global_entity::GlobalStrongEntity<StreamMa
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::AppContext as _;
+
     use super::*;
 
     // -------------------------------------------------------------------
@@ -967,5 +1035,335 @@ mod tests {
         mgr.set_trace("conv-1", Some(trace.clone()));
 
         assert_eq!(mgr.streams.get("conv-1").unwrap().trace_json, Some(trace));
+    }
+
+    // -------------------------------------------------------------------
+    // AGE-166: raise the TextChunk flush interval to ~16-33ms, add a timer
+    // flush, and flush pending text before any non-text event.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn flush_interval_is_in_the_16_to_33ms_display_refresh_band() {
+        assert!(
+            FLUSH_INTERVAL >= Duration::from_millis(16)
+                && FLUSH_INTERVAL <= Duration::from_millis(33),
+            "FLUSH_INTERVAL={FLUSH_INTERVAL:?} should sit in the ~16-33ms band a 30-60Hz \
+             display can actually paint"
+        );
+    }
+
+    #[test]
+    fn should_flush_text_is_true_for_the_first_chunk_regardless_of_elapsed_time() {
+        assert!(should_flush_text(true, Duration::ZERO));
+    }
+
+    #[test]
+    fn should_flush_text_waits_for_the_interval_after_the_first_chunk() {
+        assert!(!should_flush_text(false, Duration::ZERO));
+        assert!(!should_flush_text(false, FLUSH_INTERVAL / 2));
+        assert!(should_flush_text(false, FLUSH_INTERVAL));
+        assert!(should_flush_text(false, FLUSH_INTERVAL * 2));
+    }
+
+    /// Register a stream, subscribe to every `StreamManagerEvent` it emits,
+    /// and return the entity plus the running capture.
+    fn subscribed_manager(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::Entity<StreamManager>,
+        Rc<RefCell<Vec<StreamManagerEvent>>>,
+    ) {
+        let manager = cx.update(|cx| cx.new(|_cx| StreamManager::new()));
+        let events: Rc<RefCell<Vec<StreamManagerEvent>>> = Rc::default();
+        let sink = events.clone();
+        cx.update(|cx| {
+            cx.subscribe(&manager, move |_mgr, event: &StreamManagerEvent, _cx| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        (manager, events)
+    }
+
+    /// Under a token flood arriving faster than `FLUSH_INTERVAL`, the
+    /// emitted `TextChunk` rate must stay near the ~60/s budget — not the
+    /// once-per-raw-chunk rate a naive forward would produce. This can't
+    /// rely on wall-clock sleeping in a test (the flush gate reads real
+    /// `Instant::now()`), so the flood is sent with no real time elapsing
+    /// between chunks (worst case for a naive implementation) and the
+    /// simulated clock is advanced to let the periodic flush timer do the
+    /// rate-limiting — the same backstop a real sustained flood relies on
+    /// when tokens arrive faster than the timer.
+    ///
+    /// The step size is a **literal** 1ms, deliberately not derived from
+    /// `FLUSH_INTERVAL`: an earlier version of this test advanced the clock
+    /// in `FLUSH_INTERVAL`-sized steps for a fixed number of iterations,
+    /// which summed to "1 simulated second" only because 50 × 20ms = 1s by
+    /// construction — the assertion was really "≤60 flushes per 50 loop
+    /// iterations", true for *any* interval, so reverting `FLUSH_INTERVAL`
+    /// to the pre-fix 5ms (200/s) still passed. A 1ms step is far finer
+    /// than anything in the issue's own ~16-33ms band, so however often the
+    /// *real* `FLUSH_INTERVAL` constant actually fires within this literal
+    /// 1-second window is what gets counted below (verified: reverting to
+    /// 5ms here does fail this assertion, at ~200 emitted TextChunks).
+    #[gpui::test]
+    async fn text_chunk_rate_stays_capped_under_a_token_flood(cx: &mut gpui::TestAppContext) {
+        let (manager, events) = subscribed_manager(cx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream("conv-flood".into(), task, cancel_flag, None, cx);
+            });
+        });
+
+        const STEP: Duration = Duration::from_millis(1);
+        const STEPS: u32 = 1000; // 1000 * 1ms literal = 1 simulated second
+        const CHUNKS_PER_STEP: u32 = 5; // 5000 raw chunks/s — a real flood
+        for _ in 0..STEPS {
+            cx.update(|cx| {
+                manager.update(cx, |mgr, cx| {
+                    for _ in 0..CHUNKS_PER_STEP {
+                        mgr.handle_chunk("conv-flood", StreamChunk::Text("x".into()), cx);
+                    }
+                });
+            });
+            cx.executor().advance_clock(STEP);
+            cx.run_until_parked();
+        }
+
+        let text_chunk_count = events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, StreamManagerEvent::TextChunk { .. }))
+            .count();
+        eprintln!(
+            "AGE-166 measured: {text_chunk_count} TextChunk events for {} raw chunks over \
+             1 simulated second at FLUSH_INTERVAL={FLUSH_INTERVAL:?} \
+             (run with --nocapture to see this on a passing run)",
+            STEPS * CHUNKS_PER_STEP
+        );
+        // 60 is the acceptance criterion's own number. Real observed count
+        // at FLUSH_INTERVAL=20ms is ~51 (1 immediate + ~50 periodic); the
+        // gap to 60 is this test's margin against wall-clock creep on a
+        // loaded runner nudging a handful of per-chunk immediate flushes
+        // (state.last_flush.elapsed(), real time) past the periodic timer's
+        // own (simulated-clock) cadence.
+        assert!(
+            text_chunk_count <= 60,
+            "TextChunk emitted {text_chunk_count} times over one simulated second of a \
+             {CHUNKS_PER_STEP}-chunk-per-ms token flood ({} raw chunks); want <= ~60/s",
+            STEPS * CHUNKS_PER_STEP
+        );
+    }
+
+    /// A pause mid-interval (no further chunks) must still paint: the
+    /// background flush timer, not just the per-chunk elapsed check, is what
+    /// flushes it.
+    #[gpui::test]
+    async fn a_pause_mid_interval_is_flushed_by_the_timer(cx: &mut gpui::TestAppContext) {
+        let (manager, events) = subscribed_manager(cx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream("conv-pause".into(), task, cancel_flag, None, cx);
+                // First chunk flushes immediately; second is buffered and
+                // would sit there until the next chunk without the timer.
+                mgr.handle_chunk("conv-pause", StreamChunk::Text("Working".into()), cx);
+                mgr.handle_chunk("conv-pause", StreamChunk::Text(" on it".into()), cx);
+            });
+        });
+
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|e| matches!(e, StreamManagerEvent::TextChunk { .. }))
+                .count(),
+            1,
+            "only the immediate first-chunk flush should have happened yet"
+        );
+
+        // No further chunk arrives — just let simulated time pass.
+        cx.executor().advance_clock(FLUSH_INTERVAL * 2);
+        cx.run_until_parked();
+
+        let text_chunks: Vec<String> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                StreamManagerEvent::TextChunk { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text_chunks,
+            vec!["Working".to_string(), " on it".to_string()],
+            "the paused chunk must be painted by the timer, not stranded until the next token"
+        );
+    }
+
+    /// A tool-start event must never be visible before the buffered text
+    /// that preceded it: `handle_chunk` flushes pending text before any
+    /// non-text chunk.
+    #[gpui::test]
+    async fn tool_start_never_precedes_its_buffered_text(cx: &mut gpui::TestAppContext) {
+        let (manager, events) = subscribed_manager(cx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream("conv-order".into(), task, cancel_flag, None, cx);
+                // First chunk flushes immediately (has_emitted_first_chunk
+                // becomes true); the second arrives well within
+                // FLUSH_INTERVAL and stays buffered — with no
+                // flush-before-non-text-event fix, the tool-start below
+                // would be visible before this second chunk of text.
+                mgr.handle_chunk("conv-order", StreamChunk::Text("Let me".into()), cx);
+                mgr.handle_chunk("conv-order", StreamChunk::Text(" check that.".into()), cx);
+                mgr.handle_chunk(
+                    "conv-order",
+                    StreamChunk::ToolCallStarted {
+                        id: "call-1".into(),
+                        name: "read_file".into(),
+                    },
+                    cx,
+                );
+            });
+        });
+
+        let kinds: Vec<&str> = events
+            .borrow()
+            .iter()
+            .map(|e| match e {
+                StreamManagerEvent::StreamStarted { .. } => "StreamStarted",
+                StreamManagerEvent::TextChunk { .. } => "TextChunk",
+                StreamManagerEvent::ToolCallStarted { .. } => "ToolCallStarted",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["StreamStarted", "TextChunk", "TextChunk", "ToolCallStarted"],
+            "buffered text must flush before the tool call that followed it"
+        );
+    }
+
+    /// `ensure_flush_timer` must not spin at `FLUSH_INTERVAL` on the GPUI
+    /// foreground executor for the rest of the process once every stream
+    /// has ended — it should stop and let the next stream respawn it.
+    #[gpui::test]
+    async fn flush_timer_stops_once_no_streams_remain(cx: &mut gpui::TestAppContext) {
+        let (manager, _events) = subscribed_manager(cx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream("conv-solo".into(), task, cancel_flag, None, cx);
+                assert!(
+                    mgr.flush_timer.is_some(),
+                    "registering a stream must start the background timer"
+                );
+                mgr.finalize_stream("conv-solo", cx);
+            });
+        });
+
+        // Let the timer's next tick observe the now-empty stream map and
+        // stop itself.
+        cx.executor().advance_clock(FLUSH_INTERVAL);
+        cx.run_until_parked();
+
+        manager.update(cx, |mgr, _cx| {
+            assert!(
+                mgr.flush_timer.is_none(),
+                "the background timer must stop once no stream remains, not spin forever"
+            );
+        });
+    }
+
+    /// AGE-166 acceptance criterion #4 substitute: `samply`/`cargo-flamegraph`
+    /// are not installed in this sandbox and `perf_event_paranoid` blocks
+    /// unprivileged sampling, so a real flamegraph of a live LLM stream
+    /// driving the actual desktop window isn't obtainable here. This
+    /// measures the two numbers the issue actually asks for — the emitted
+    /// TextChunk notify rate, and `handle_chunk` / `flush_pending_text`
+    /// self-time — directly, with a wall-clock timing wrapper around the
+    /// same flood `text_chunk_rate_stays_capped_under_a_token_flood` drives,
+    /// run in `--release` so the numbers aren't inflated by debug
+    /// assertions. `#[ignore]`d: a timing measurement, not a correctness
+    /// assertion fit for every CI run.
+    ///
+    /// Run: `cargo test --release -p chatty-gpui --all-features -- \
+    /// --ignored --nocapture age_166_measured_self_time_and_notify_rate`
+    #[gpui::test]
+    #[ignore]
+    async fn age_166_measured_self_time_and_notify_rate(cx: &mut gpui::TestAppContext) {
+        let (manager, events) = subscribed_manager(cx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream("conv-profile".into(), task, cancel_flag, None, cx);
+            });
+        });
+
+        // handle_chunk self-time under sustained real-world load: chunks
+        // arrive faster than any real display refresh, so almost every call
+        // takes the cheap buffer-only path (should_flush_text says no) —
+        // that's exactly the shape the rate test's flood exercises, and
+        // timing it directly with real Instant::now() around each call
+        // gives wall time actually spent inside handle_chunk, not a
+        // synthetic count.
+        const RAW_CHUNKS: u32 = 200_000;
+        let mut handle_chunk_total = Duration::ZERO;
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                for _ in 0..RAW_CHUNKS {
+                    let start = Instant::now();
+                    mgr.handle_chunk("conv-profile", StreamChunk::Text("x".into()), cx);
+                    handle_chunk_total += start.elapsed();
+                }
+            });
+        });
+        let notify_count = events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, StreamManagerEvent::TextChunk { .. }))
+            .count();
+
+        // flush_pending_text self-time in isolation: same call, always with
+        // something real to flush, so this isn't measuring an empty no-op.
+        const FLUSH_CALLS: u32 = 200_000;
+        let mut flush_total = Duration::ZERO;
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                for _ in 0..FLUSH_CALLS {
+                    if let Some(state) = mgr.streams.get_mut("conv-profile") {
+                        state.pending_text.push_str("some buffered text to flush");
+                    }
+                    let start = Instant::now();
+                    mgr.flush_pending_text("conv-profile", cx);
+                    flush_total += start.elapsed();
+                }
+            });
+        });
+
+        eprintln!(
+            "AGE-166 measured (release build):\n\
+             \x20\x20handle_chunk self-time:       {RAW_CHUNKS} calls, {handle_chunk_total:?} \
+             total, {:.1} ns/call avg (a tight, no-clock-advance flood, so all but a \
+             handful of calls take the cheap buffer-only path — {notify_count} of these \
+             {RAW_CHUNKS} calls actually flushed/emitted a TextChunk)\n\
+             \x20\x20flush_pending_text self-time: {FLUSH_CALLS} calls, {flush_total:?} \
+             total, {:.1} ns/call avg (each call has real text to flush, so this is the \
+             cx.emit path's own cost, isolated)\n\
+             \x20\x20TextChunk notify rate under a sustained flood (separate test, \
+             simulated-clock-driven): see \
+             text_chunk_rate_stays_capped_under_a_token_flood — its own printed/asserted \
+             count is the measured rate at FLUSH_INTERVAL={FLUSH_INTERVAL:?}",
+            handle_chunk_total.as_nanos() as f64 / RAW_CHUNKS as f64,
+            flush_total.as_nanos() as f64 / FLUSH_CALLS as f64,
+        );
     }
 }
