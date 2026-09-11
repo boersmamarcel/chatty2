@@ -43,10 +43,30 @@ fn policy() -> TurnPolicy {
     }
 }
 
+/// A network-free model: Ollama client construction is purely local.
+fn unpriced_model() -> ModelConfig {
+    ModelConfig::new(
+        "m1".to_string(),
+        "Test Model".to_string(),
+        ProviderType::Ollama,
+        "llama3.2".to_string(),
+    )
+}
+
+fn ollama_provider() -> ProviderConfig {
+    ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
+}
+
 /// A session around a real, network-free `Conversation`: Ollama client
 /// construction is purely local, and the agent is built against the
 /// session's own store handles, as a frontend would.
 async fn session_with_conversation() -> AgentSession {
+    session_with_model(&unpriced_model()).await
+}
+
+/// [`session_with_conversation`] on a given model (its prices decide what a
+/// turn costs, AGE-351).
+async fn session_with_model(model_config: &ModelConfig) -> AgentSession {
     // Agent construction resolves the MCP repository (for the always-on
     // list_mcp tool); `init_repositories()` only resolves paths and is a
     // no-op after the first call.
@@ -54,18 +74,11 @@ async fn session_with_conversation() -> AgentSession {
 
     let mut session = AgentSession::new(config());
     let handles = session.approval_handles();
-    let model_config = ModelConfig::new(
-        "m1".to_string(),
-        "Test Model".to_string(),
-        ProviderType::Ollama,
-        "llama3.2".to_string(),
-    );
-    let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
     let conversation = Conversation::new(
         "c1".to_string(),
         "New Chat".to_string(),
-        &model_config,
-        &provider_config,
+        model_config,
+        &ollama_provider(),
         AgentBuildContext {
             pending_approvals: Some(handles.pending_approvals),
             pending_clarifications: Some(handles.pending_clarifications),
@@ -694,6 +707,313 @@ async fn a_hosted_turn_is_recorded_by_the_local_session() {
     assert_eq!(messages.len(), 2, "user message and reply: {messages:?}");
     assert!(matches!(messages[0], Message::User { .. }));
     assert!(matches!(messages[1], Message::Assistant { .. }));
+}
+
+// ── Conversation totals and pricing at the turn barrier (AGE-351) ────────────
+
+mod totals_and_pricing {
+    use super::*;
+    use crate::models::token_usage::ApiCallUsage;
+    use crate::repositories::{ConversationRepository, ConversationSqliteRepository};
+
+    /// A priced model, with the cache rates set so all four prices are
+    /// exercised: $3/M input, $15/M output, $0.30/M cache read, $3.75/M
+    /// cache write.
+    fn priced_model() -> ModelConfig {
+        let mut model = unpriced_model();
+        model.cost_per_million_input_tokens = Some(3.0);
+        model.cost_per_million_output_tokens = Some(15.0);
+        model.cost_per_million_cache_read_tokens = Some(0.3);
+        model.cost_per_million_cache_write_tokens = Some(3.75);
+        model
+    }
+
+    fn call(turn: u32, input: u32, read: u32, write: u32, output: u32) -> ApiCallUsage {
+        ApiCallUsage {
+            turn,
+            input_tokens: input,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            output_tokens: output,
+        }
+    }
+
+    /// A turn with `tool_calls` tool round-trips, then a reply, then the
+    /// per-call usage records and the provider's aggregate, as rig emits
+    /// them.
+    fn tool_turn(tool_calls: usize, calls: Vec<ApiCallUsage>) -> Scenario {
+        let mut items = Vec::new();
+        for i in 0..tool_calls {
+            let id = format!("call-{i}");
+            items.push(ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                id: id.clone(),
+                name: "read_file".into(),
+            }));
+            items.push(ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                id,
+                result: "ok".into(),
+            }));
+        }
+        items.push(ScriptedItem::Chunk(StreamChunk::Text("Done.".into())));
+        let aggregate = TokenUsage::from_calls(calls.clone());
+        for call in calls {
+            items.push(ScriptedItem::Chunk(StreamChunk::ApiCallUsage(call)));
+        }
+        items.push(ScriptedItem::Chunk(StreamChunk::TurnUsage(ApiCallUsage {
+            turn: 0,
+            input_tokens: aggregate.input_tokens,
+            cache_read_tokens: aggregate.cache_read_tokens,
+            cache_write_tokens: aggregate.cache_write_tokens,
+            output_tokens: aggregate.output_tokens,
+        })));
+        items.push(ScriptedItem::Chunk(StreamChunk::Done));
+        Scenario {
+            name: "tool_turn",
+            progress: Vec::new(),
+            items,
+        }
+    }
+
+    /// Run a scripted turn to completion and finish it, as an owner would.
+    async fn complete_turn(session: &mut AgentSession, scenario: Scenario) -> Vec<SessionEvent> {
+        let events = run_turn(session, TurnInput::text("go"), scenario).await;
+        for event in &events {
+            session.apply(event);
+        }
+        assert!(matches!(
+            session.finish_turn(None, vec![]),
+            Some(TurnOutcome::Persisted)
+        ));
+        events
+    }
+
+    /// Three turns with two, one and one tool calls: the four calls are on
+    /// the lifetime total, the token total is the sum of the turns' usage,
+    /// and the context fill is the last call's prompt — not the sum of the
+    /// turn's requests, and not the output.
+    async fn three_turns_four_tool_calls(session: &mut AgentSession) {
+        complete_turn(
+            session,
+            tool_turn(
+                2,
+                vec![call(1, 1_000, 0, 2_000, 100), call(2, 200, 2_000, 0, 400)],
+            ),
+        )
+        .await;
+        complete_turn(session, tool_turn(1, vec![call(1, 300, 2_000, 0, 50)])).await;
+        complete_turn(
+            session,
+            tool_turn(
+                1,
+                vec![call(1, 400, 2_000, 100, 60), call(2, 50, 2_100, 0, 20)],
+            ),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn three_turns_and_four_tool_calls_report_the_totals() {
+        let mut session = session_with_conversation().await;
+        three_turns_four_tool_calls(&mut session).await;
+
+        let conversation = session.conversation().unwrap();
+        assert_eq!(conversation.tool_call_count(), 4);
+        let usage = conversation.token_usage();
+        assert_eq!(usage.message_usages.len(), 3, "one usage per turn");
+        assert_eq!(
+            usage.total_input_tokens,
+            usage
+                .message_usages
+                .iter()
+                .map(|u| u.input_tokens)
+                .sum::<u32>()
+        );
+        assert_eq!(usage.total_input_tokens, 1_000 + 200 + 300 + 400 + 50);
+        assert_eq!(usage.total_output_tokens, 100 + 400 + 50 + 60 + 20);
+        assert_eq!(usage.total_cache_read_tokens, 2_000 + 2_000 + 2_000 + 2_100);
+        assert_eq!(usage.total_cache_write_tokens, 2_000 + 100);
+        assert_eq!(
+            conversation.context_tokens(),
+            50 + 2_100,
+            "the last call's prompt: input + cache read + cache write, no output"
+        );
+    }
+
+    /// The numbers chatty-gpui's `price_usage` produced for this usage on
+    /// this model before pricing moved into the session — hand-computed from
+    /// the same formula it applied (`TokenUsage::calculate_cost` with the
+    /// model's four prices): 1_200 input × $3/M + 500 output × $15/M +
+    /// 2_000 cache read × $0.30/M + 2_000 cache write × $3.75/M.
+    const GPUI_COST_FOR_FIXED_USAGE: f64 = 0.0036 + 0.0075 + 0.0006 + 0.0075;
+
+    #[tokio::test]
+    async fn a_priced_model_costs_the_turn_in_the_session() {
+        let mut session = session_with_model(&priced_model()).await;
+        complete_turn(
+            &mut session,
+            tool_turn(
+                1,
+                vec![call(1, 1_000, 0, 2_000, 100), call(2, 200, 2_000, 0, 400)],
+            ),
+        )
+        .await;
+
+        let usage = session.conversation().unwrap().token_usage();
+        let turn_cost = usage.message_usages[0]
+            .estimated_cost_usd
+            .expect("a priced model costs the turn");
+        assert!(turn_cost > 0.0);
+        assert!(
+            (turn_cost - GPUI_COST_FOR_FIXED_USAGE).abs() < 1e-12,
+            "session cost {turn_cost} must equal what gpui computed ({GPUI_COST_FOR_FIXED_USAGE})"
+        );
+        assert!((usage.total_estimated_cost_usd - GPUI_COST_FOR_FIXED_USAGE).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn a_model_without_prices_leaves_the_cost_none_and_the_total_unchanged() {
+        let mut session = session_with_conversation().await;
+        complete_turn(&mut session, tool_turn(1, vec![call(1, 1_000, 0, 0, 100)])).await;
+
+        let usage = session.conversation().unwrap().token_usage();
+        assert_eq!(usage.message_usages[0].estimated_cost_usd, None);
+        assert_eq!(usage.total_estimated_cost_usd, 0.0);
+
+        // Half a price is no price: the same rule gpui applied.
+        let mut input_only = unpriced_model();
+        input_only.cost_per_million_input_tokens = Some(3.0);
+        let mut session = session_with_model(&input_only).await;
+        complete_turn(&mut session, tool_turn(0, vec![call(1, 1_000, 0, 0, 100)])).await;
+        let usage = session.conversation().unwrap().token_usage();
+        assert_eq!(usage.message_usages[0].estimated_cost_usd, None);
+        assert_eq!(usage.total_estimated_cost_usd, 0.0);
+    }
+
+    /// A model switch installs the new model's prices with its agent, so the
+    /// next turn is costed at the new rates.
+    #[tokio::test]
+    async fn a_model_switch_switches_the_prices() {
+        let mut session = session_with_conversation().await;
+        assert!(session.conversation().unwrap().pricing().is_none());
+
+        let ctx = session.build_context(AgentBuildContext::from_services(AgentServices::default()));
+        let built = crate::factories::AgentClient::from_model_config_with_tools(
+            &priced_model(),
+            &ollama_provider(),
+            ctx,
+        )
+        .await
+        .expect("the agent builds without network access");
+        assert!(session.install_agent(built, &priced_model(), None));
+        assert_eq!(session.conversation().unwrap().model_id(), "m1");
+        assert_eq!(
+            session.conversation().unwrap().pricing(),
+            priced_model().token_pricing().as_ref()
+        );
+
+        complete_turn(
+            &mut session,
+            tool_turn(0, vec![call(1, 1_000_000, 0, 0, 0)]),
+        )
+        .await;
+        let usage = session.conversation().unwrap().token_usage();
+        assert!((usage.total_estimated_cost_usd - 3.0).abs() < 1e-9);
+    }
+
+    /// "Reloading the app reports the same numbers": the totals go through
+    /// the row and come back on a restored conversation. A headless GPUI app
+    /// cannot be driven here, so this is the store round trip the app does
+    /// on open — save, reopen the store, restore the conversation.
+    #[tokio::test]
+    async fn the_totals_survive_a_store_round_trip() {
+        let mut session = session_with_model(&priced_model()).await;
+        three_turns_four_tool_calls(&mut session).await;
+        let conversation = session.conversation().unwrap();
+        let expected = (
+            conversation.tool_call_count(),
+            conversation.context_tokens(),
+            conversation.token_usage().total_estimated_cost_usd,
+        );
+        assert!(expected.2 > 0.0);
+        let data = conversation
+            .to_conversation_data()
+            .expect("the row serializes");
+        assert_eq!((data.tool_call_count, data.context_tokens), (4, 2_150));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("conversations.db");
+        ConversationSqliteRepository::deferred_with_path(db_path.clone())
+            .save("c1", data)
+            .await
+            .expect("save");
+
+        // A fresh handle, as a restarted app would open.
+        let reopened = ConversationSqliteRepository::deferred_with_path(db_path);
+        let metadata = reopened.load_metadata().await.expect("load_metadata");
+        assert_eq!(
+            (
+                metadata[0].tool_call_count,
+                metadata[0].context_tokens,
+                metadata[0].total_cost
+            ),
+            expected,
+            "the sidebar layer reports the same numbers"
+        );
+        let row = reopened
+            .load_one("c1")
+            .await
+            .expect("load_one")
+            .expect("the row exists");
+
+        let mut restored = AgentSession::new(config());
+        restored
+            .restore_conversation(
+                row,
+                &priced_model(),
+                &ollama_provider(),
+                AgentBuildContext::from_services(AgentServices::default()),
+            )
+            .await
+            .expect("the conversation restores");
+        let conversation = restored.conversation().unwrap();
+        assert_eq!(
+            (
+                conversation.tool_call_count(),
+                conversation.context_tokens(),
+                conversation.token_usage().total_estimated_cost_usd
+            ),
+            expected,
+            "the restored conversation reports the same numbers"
+        );
+    }
+
+    /// A row from before the totals existed restores with both at 0.
+    #[tokio::test]
+    async fn a_pre_migration_row_restores_with_zero_totals() {
+        let row: ConversationData = serde_json::from_value(serde_json::json!({
+            "id": "old-1",
+            "title": "Old",
+            "model_id": "m1",
+            "message_history": "[]",
+            "system_traces": "[]",
+            "created_at": 1,
+            "updated_at": 2,
+        }))
+        .expect("an old row still loads");
+        let mut session = AgentSession::new(config());
+        session
+            .restore_conversation(
+                row,
+                &unpriced_model(),
+                &ollama_provider(),
+                AgentBuildContext::from_services(AgentServices::default()),
+            )
+            .await
+            .expect("an old conversation opens without error");
+        let conversation = session.conversation().unwrap();
+        assert_eq!(conversation.tool_call_count(), 0);
+        assert_eq!(conversation.context_tokens(), 0);
+    }
 }
 
 // ── The turn's notification wiring (AGE-362) ─────────────────────────────────

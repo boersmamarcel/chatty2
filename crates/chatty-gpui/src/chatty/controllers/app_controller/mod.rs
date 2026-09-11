@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use tracing::{debug, error, info, warn};
 
 use crate::MemoryInitSignal;
-use crate::chatty::models::token_usage::{TokenPricing, TokenUsage};
+use crate::chatty::models::token_usage::TokenUsage;
 use crate::chatty::models::{
     Conversation, ConversationsStore, GlobalStreamManager, MessageFeedback, StreamManagerEvent,
     StreamStatus, TurnOutcome,
@@ -377,7 +377,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             return;
         };
         session.set_config(config);
-        if session.install_agent(built_agent, model_config.id.clone(), built_workspace_dir) {
+        if session.install_agent(built_agent, &model_config, built_workspace_dir) {
             info!(conv_id = %conv_id, "Agent successfully rebuilt with updated tool set");
         } else {
             warn!(
