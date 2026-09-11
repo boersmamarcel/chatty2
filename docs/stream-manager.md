@@ -30,7 +30,8 @@ GlobalStreamManager (GPUI global, strong reference)
         │     ├── pending_artifacts: Option<PendingArtifacts>
         │     └── text batching buffer (pending_text, last_flush)
         ├── pending_resolved_ids: HashMap<String, Arc<Mutex<Option<String>>>>
-        └── current_epoch: HashMap<String, u64>
+        ├── current_epoch: HashMap<String, u64>
+        └── flush_timer: Option<Task<()>>          ← background flush, see below
 
 ConversationsStore (GPUI global)
   └── HashMap<String, Conversation>
@@ -77,7 +78,7 @@ cx.subscribe(&manager, |app, _mgr, event: &StreamManagerEvent, cx| {
 | Event | Emitted by | Handler action |
 |-------|-----------|----------------|
 | `StreamStarted` | `register_stream`, `register_pending_stream` | Marks the conversation as streaming; sets `ChatInputState.is_streaming = true` (deferred) |
-| `TextChunk` | `handle_chunk` (batched; first chunk immediate, then every 5 ms) | `ChatView.append_assistant_text()` |
+| `TextChunk` | `handle_chunk` (batched; first chunk immediate, then at most every `FLUSH_INTERVAL` = 20ms, backstopped by a background timer — see [Text accumulation](#text-accumulation-two-batched-sinks-not-a-pass-through) below) | `ChatView.append_assistant_text()` |
 | `ToolCallStarted` / `ToolCallInput` / `ToolCallResult` / `ToolCallError` | `handle_chunk` | `ChatView.handle_tool_call_*()` |
 | `ApprovalRequested` / `ApprovalResolved` | `handle_chunk` | `ChatView.handle_approval_*()` |
 | `ClarificationRequested` | `handle_chunk` | Records the block on the conversation's streaming trace (so it survives a switch), then `ChatView.handle_clarification_requested()` |
@@ -94,17 +95,50 @@ next stream synchronously right after `finalize_stream` returns, but the event i
 delivered on the next effect flush; the handler ignores a `StreamEnded` whose epoch is
 not the conversation's current one, so turn N's end cannot tear down turn N+1.
 
-## Text accumulation: single source of truth
+## Text accumulation: two batched sinks, not a pass-through
+
+`Conversation.streaming_message` (inside `ConversationsStore`) is still the single
+source of truth for the accumulated response text — that part of the design is
+unchanged. What changed (AGE-166) is that *neither* sink is fed one raw LLM chunk
+at a time any more, because a raw stream can yield far faster than any display
+repaints:
 
 ```
-StreamChunk::Text("hello")
+raw SessionEvent::Text chunks, arriving as fast as the provider sends them
     │
-    ├──► ConversationsStore: conv.append_streaming_content("hello")
-    │    Read when switching back to a background conversation,
-    │    and at finalisation to move the full response into history.
+    ▼
+DesktopSink.text_batch: TextBatch          (message_ops_internals.rs)
+    buffers every raw chunk; flushes the whole accumulated batch as ONE
+    SessionEvent::Text when `should_flush_text` says so — the turn's first
+    chunk immediately (protects time-to-first-token), then at most once per
+    FLUSH_INTERVAL. A non-text event (tool call, approval, TurnEnded, …)
+    flushes first, unconditionally, before it is applied/forwarded.
     │
-    └──► StreamManager: handle_chunk() emits TextChunk (pass-through only)
+    │  one coalesced batch, not one call per raw chunk
+    ▼
+    ├──► ConversationsStore (one `update_global`): conv.append_streaming_content(batch)
+    │    Read when switching back to a background conversation, and at
+    │    finalisation to move the full response into history.
+    │
+    └──► StreamManager.handle_chunk() (one entity update)
+             buffers again into StreamState.pending_text and emits TextChunk
+             when `should_flush_text` says so, backstopped by a background
+             `flush_timer` (`ensure_flush_timer`) that flushes on the same
+             FLUSH_INTERVAL cadence even if no further chunk ever arrives —
+             so a pause mid-interval still paints instead of waiting for the
+             next token. Any non-text chunk flushes pending text first too,
+             so a tool-start row can never appear before the sentence that
+             preceded it.
 ```
+
+Both `DesktopSink` and `StreamManager` apply the *same* flush policy
+(`should_flush_text` in `stream_manager.rs`, `pub(crate)` so
+`message_ops_internals.rs` can share it) rather than two independently-tuned
+ones. `DesktopSink`'s batching exists to cut how often the hot path pays for an
+`update_global` + a `StreamManager` entity update; `StreamManager`'s own
+batching is what still governs the UI-facing `TextChunk` emission rate (and is
+where the timer backstop and the flush-before-non-text-event rule live, since
+it is the one owner of a GPUI `Context` that can schedule a periodic task).
 
 At finalisation, `finalize_completed_stream` / `finalize_stopped_stream` read the
 accumulated text from `Conversation.streaming_message`, call
@@ -141,13 +175,16 @@ sequenceDiagram
     CA->>CV: start_assistant_message()
     CA->>LLM: stream_prompt()
 
-    loop Each chunk from LLM
-        LLM-->>CA: StreamChunk::Text
-        CA->>CS: conv.append_streaming_content(text)
-        CA->>SM: handle_chunk(conv_id, chunk)
-        SM-->>CA: TextChunk { conv_id, text }
-        CA->>CV: append_assistant_text(text)
+    loop Each raw chunk from LLM
+        LLM-->>CA: SessionEvent::Text
+        CA->>CA: DesktopSink.text_batch.push(text)
+        Note over CA: buffered; only flushed per<br/>should_flush_text (first chunk,<br/>then every FLUSH_INTERVAL)
     end
+    Note over CA,SM: On flush (first chunk, every FLUSH_INTERVAL,<br/>or before a non-text event):
+    CA->>CS: conv.append_streaming_content(batch)
+    CA->>SM: handle_chunk(conv_id, Text(batch))
+    SM-->>CA: TextChunk { conv_id, text } (own batching + timer backstop)
+    CA->>CV: append_assistant_text(text)
 
     LLM-->>CA: StreamChunk::Done
     CA->>CV: extract_current_trace()
