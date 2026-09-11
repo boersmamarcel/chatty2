@@ -213,10 +213,13 @@ pub fn sample_conversation(id: &str, title: &str, updated_at: i64) -> Conversati
             r#"{"kind":"hosted","server_url":"http://localhost:8081","remote_id":"remote-1"}"#
                 .to_string(),
         ),
-        // Derived from `updated_at` so two samples carry two different values
-        // and a store that swaps or drops one column fails the suite.
-        tool_call_count: 4 + (updated_at % 1_000) as u32,
-        context_tokens: 12_345 + (updated_at % 1_000) as u32,
+        // Derived from `updated_at / 1_000` (the suite's samples differ only
+        // in the thousands place) so two samples carry two different values,
+        // and kept far apart from each other so a store that swaps
+        // `tool_call_count` and `context_tokens` — or returns one
+        // conversation's totals for another — fails the suite.
+        tool_call_count: 4 + (updated_at / 1_000) as u32,
+        context_tokens: 12_345 + (updated_at / 1_000) as u32,
     }
 }
 
@@ -256,6 +259,13 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
     assert!(missing.is_none(), "load_one for a missing id must be None");
 
     let conv_b = sample_conversation("conv-b", "Second", 2_000);
+    assert_ne!(
+        (conv_a.tool_call_count, conv_a.context_tokens),
+        (conv_b.tool_call_count, conv_b.context_tokens),
+        "sample_conversation must derive different totals per sample, or a \
+         store that returns one conversation's totals for another would \
+         still pass this suite"
+    );
     repo.save("conv-b", conv_b.clone())
         .await
         .expect("save conv-b");
