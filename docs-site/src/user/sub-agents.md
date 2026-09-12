@@ -56,6 +56,14 @@ chatty-tui --headless -m "List all TODO comments in src/" | chatty-tui --pipe
 
 `--auto-approve` skips approval prompts for scripted runs; `--enable` / `--disable` pick tool groups per run. Install, modes and keys: [Terminal interface](./terminal.md).
 
+Add `--broker` to let that terminal leader spawn sub-agents of its own — without it, only the desktop app can delegate to `local-agent`:
+
+```bash
+chatty-tui --headless --broker -m "Refactor the auth module and write tests"
+```
+
+`--broker` works with `--headless`, `--pipe`, and the interactive TUI, and is Unix only.
+
 ## Next
 
 - [Terminal interface](./terminal.md)
