@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::participant::{
-    InputRequest, ParticipantCard, ParticipantRegistry, TaskInput, TaskState, TaskStream,
-    TaskUpdate, VirtualAgent, WorkerHandle,
+    DelegatedTask, InputRequest, ParticipantCard, ParticipantRegistry, TaskInput, TaskState,
+    TaskStream, TaskUpdate, VirtualAgent, WorkerHandle,
 };
 
 use super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, json_rpc_error, json_rpc_ok};
@@ -131,9 +131,9 @@ impl RunningTask {
     }
 }
 
-/// Submit `prompt` to an already-registered participant.
-fn submit(registry: &ParticipantRegistry, name: &str, prompt: String) -> Option<RunningTask> {
-    let (task_id, updates) = registry.submit_task(name, prompt)?;
+/// Submit `task` to an already-registered participant.
+fn submit(registry: &ParticipantRegistry, name: &str, task: DelegatedTask) -> Option<RunningTask> {
+    let (task_id, updates) = registry.submit_task(name, task)?;
     Some(RunningTask {
         guard: TaskGuard::new(registry.clone(), name.to_string(), task_id.clone()),
         task_id,
@@ -142,12 +142,9 @@ fn submit(registry: &ParticipantRegistry, name: &str, prompt: String) -> Option<
     })
 }
 
-/// Start a worker for `prompt` and submit the task to it.
-async fn spawn(runner: &dyn VirtualAgent, prompt: String) -> Result<RunningTask, String> {
-    let (worker, updates) = runner
-        .run_task(prompt)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+/// Start a worker for `task` and submit it.
+async fn spawn(runner: &dyn VirtualAgent, task: DelegatedTask) -> Result<RunningTask, String> {
+    let (worker, updates) = runner.run_task(task).await.map_err(|e| format!("{e:#}"))?;
     let task_id = worker
         .task_id()
         .expect("run_task sets the task id before returning")
@@ -173,9 +170,9 @@ pub(crate) async fn message_send(
     registry: &ParticipantRegistry,
     name: &str,
     id: Option<Value>,
-    prompt: String,
+    task: DelegatedTask,
 ) -> Response {
-    match submit(registry, name, prompt) {
+    match submit(registry, name, task) {
         Some(task) => send_task(id, task).await,
         None => json_rpc_error(
             StatusCode::OK,
@@ -190,9 +187,9 @@ pub(crate) async fn message_send(
 pub(crate) async fn runner_message_send(
     runner: &dyn VirtualAgent,
     id: Option<Value>,
-    prompt: String,
+    task: DelegatedTask,
 ) -> Response {
-    match spawn(runner, prompt).await {
+    match spawn(runner, task).await {
         Ok(task) => send_task(id, task).await,
         Err(reason) => {
             warn!(agent = runner.agent_name(), %reason, "Could not start a worker");
@@ -282,9 +279,9 @@ pub(crate) fn message_stream(
     registry: &ParticipantRegistry,
     name: &str,
     id: Option<Value>,
-    prompt: String,
+    task: DelegatedTask,
 ) -> Response {
-    match submit(registry, name, prompt) {
+    match submit(registry, name, task) {
         Some(task) => stream_task(id, task),
         None => failed_stream(
             id,
@@ -298,9 +295,9 @@ pub(crate) fn message_stream(
 pub(crate) async fn runner_message_stream(
     runner: &dyn VirtualAgent,
     id: Option<Value>,
-    prompt: String,
+    task: DelegatedTask,
 ) -> Response {
-    match spawn(runner, prompt).await {
+    match spawn(runner, task).await {
         Ok(task) => stream_task(id, task),
         Err(reason) => {
             warn!(agent = runner.agent_name(), %reason, "Could not start a worker");

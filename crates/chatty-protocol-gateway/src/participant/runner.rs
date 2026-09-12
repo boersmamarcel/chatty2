@@ -39,7 +39,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 use super::budget::{EndpointBudget, EndpointPermit};
-use super::protocol::{ParticipantCard, ParticipantSkill};
+use super::protocol::{DelegatedTask, ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
 use super::virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
 
@@ -228,14 +228,14 @@ impl LocalRunner {
         }
     }
 
-    /// Spawn a worker and hand it `prompt`.
+    /// Spawn a worker and hand it `task`.
     ///
     /// The returned [`Worker`] owns the child process: dropping it reaps the
     /// child and runs the workspace's `on_exit`, so a caller that hangs up
     /// mid-task does not leak a process or an uncommitted worktree. It is
     /// returned alongside the task's update stream rather than owning it, so
     /// the caller can read updates while still holding the process handle.
-    pub async fn run_task(&self, prompt: String) -> Result<(Worker, TaskStream)> {
+    pub async fn run_task(&self, task: DelegatedTask) -> Result<(Worker, TaskStream)> {
         // Before the name, the workspace and the process: a queued task that
         // had already claimed those would be holding a worktree open for as
         // long as it waits.
@@ -276,7 +276,7 @@ impl LocalRunner {
 
         let (task_id, updates) = self
             .registry
-            .submit_task(&name, prompt)
+            .submit_task(&name, task)
             .ok_or_else(|| anyhow!("worker '{name}' disconnected before it could be given work"))?;
         worker.task_id = Some(task_id.clone());
 
@@ -371,9 +371,9 @@ impl VirtualAgent for LocalRunner {
         LocalRunner::registry(self)
     }
 
-    fn run_task(&self, prompt: String) -> WorkerFuture<'_> {
+    fn run_task(&self, task: DelegatedTask) -> WorkerFuture<'_> {
         Box::pin(async move {
-            let (worker, updates) = LocalRunner::run_task(self, prompt).await?;
+            let (worker, updates) = LocalRunner::run_task(self, task).await?;
             Ok((Box::new(worker) as Box<dyn WorkerHandle>, updates))
         })
     }
@@ -564,13 +564,13 @@ mod tests {
         let mut outbound = register_when_asked(registry.clone(), "local-agent-0");
 
         let (worker, _updates) = runner
-            .run_task("summarise foo.rs".into())
+            .run_task(DelegatedTask::new("summarise foo.rs"))
             .await
             .expect("the worker registered, so the task is delegated");
 
         assert_eq!(worker.name(), "local-agent-0");
         assert!(worker.task_id().is_some());
-        let BrokerFrame::Task { text, task_id } = outbound.recv().await.unwrap() else {
+        let BrokerFrame::Task { text, task_id, .. } = outbound.recv().await.unwrap() else {
             panic!("the worker is sent a task frame");
         };
         assert_eq!(text, "summarise foo.rs");
@@ -583,7 +583,7 @@ mod tests {
         let runner = runner(registry, "echo 'no model configured' >&2; exit 3");
 
         let error = runner
-            .run_task("anything".into())
+            .run_task(DelegatedTask::new("anything"))
             .await
             .expect_err("a child that exits cannot take a task");
         let text = format!("{error:#}");
@@ -602,7 +602,7 @@ mod tests {
             runner(registry, "sleep 30").with_registration_timeout(Duration::from_millis(150));
 
         let error = runner
-            .run_task("anything".into())
+            .run_task(DelegatedTask::new("anything"))
             .await
             .expect_err("a child that never registers fails the task");
         assert!(
@@ -636,7 +636,7 @@ mod tests {
         });
         let _outbound = register_when_asked(registry, "local-agent-0");
 
-        let (worker, _updates) = runner.run_task("work".into()).await.unwrap();
+        let (worker, _updates) = runner.run_task(DelegatedTask::new("work")).await.unwrap();
         assert!(
             !released.load(Ordering::Relaxed),
             "the workspace is held while the worker is alive"
@@ -657,7 +657,7 @@ mod tests {
         }));
 
         let error = runner
-            .run_task("work".into())
+            .run_task(DelegatedTask::new("work"))
             .await
             .expect_err("ADR-0012 isolation that was asked for and failed is not silently skipped");
         assert!(format!("{error:#}").contains("worktree"), "{error:#}");
@@ -669,7 +669,7 @@ mod tests {
         let runner = runner(registry.clone(), "sleep 30");
         let mut outbound = register_when_asked(registry.clone(), "local-agent-0");
 
-        let (worker, mut updates) = runner.run_task("work".into()).await.unwrap();
+        let (worker, mut updates) = runner.run_task(DelegatedTask::new("work")).await.unwrap();
         let _ = outbound.recv().await;
         assert_eq!(registry.open_task_count("local-agent-0"), 1);
 
@@ -700,13 +700,13 @@ mod tests {
             .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
             .collect();
 
-        let first = runner.run_task("a".into()).await.unwrap();
-        let second = runner.run_task("b".into()).await.unwrap();
+        let first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
+        let second = runner.run_task(DelegatedTask::new("b")).await.unwrap();
         assert_eq!(budget.in_flight(ENDPOINT), 2, "the budget is spent");
 
         let third = tokio::spawn({
             let runner = Arc::clone(&runner);
-            async move { runner.run_task("c".into()).await }
+            async move { runner.run_task(DelegatedTask::new("c")).await }
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -741,10 +741,13 @@ mod tests {
             .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
             .collect();
 
-        let _first = runner.run_task("a".into()).await.unwrap();
-        let second = tokio::time::timeout(Duration::from_secs(5), runner.run_task("b".into()))
-            .await
-            .expect("no budget, no queue");
+        let _first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            runner.run_task(DelegatedTask::new("b")),
+        )
+        .await
+        .expect("no budget, no queue");
         assert!(second.is_ok());
         assert_eq!(runner.queue_depth(), 0);
         assert!(runner.endpoint().is_none());

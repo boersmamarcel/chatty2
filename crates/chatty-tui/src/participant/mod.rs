@@ -40,7 +40,9 @@ pub async fn run_participant(
         .with_context(|| format!("failed to reach the broker at {}", socket.display()))?;
 
     let card = worker_card(name, env!("CARGO_PKG_VERSION"));
-    serve_one_task(stream, card, move |prompt, sink, inputs| async move {
+    // A desktop worker runs as whoever launched it; the task's bearer is
+    // for a hosted worker (AGE-371) and is not read here.
+    serve_one_task(stream, card, move |task, sink, inputs| async move {
         // The observer is dropped with the engine, which `run_headless`
         // consumes — that is what closes the shared loop's frame queue.
         engine.set_event_observer(sink);
@@ -51,7 +53,7 @@ pub async fn run_participant(
             inputs,
             engine.session.clarifications().clone(),
         ));
-        run_headless(engine, event_rx, prompt).await
+        run_headless(engine, event_rx, task.text).await
     })
     .await
 }

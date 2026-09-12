@@ -24,7 +24,8 @@ use serde_json::Value;
 
 use super::origin::AgentOrigin;
 use super::protocol::{
-    BrokerFrame, InputRequest, ParticipantCard, ParticipantFrame, TaskInput, TaskState,
+    BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
+    TaskState,
 };
 
 /// One update on an open task, as the HTTP side consumes it.
@@ -213,11 +214,11 @@ impl ParticipantRegistry {
         agents
     }
 
-    /// Hand `text` to `name` as a new task.
+    /// Hand `task` to `name` as a new task.
     ///
     /// Returns the task's id and its update stream, or `None` if the
     /// participant is not registered or its socket writer has already gone.
-    pub fn submit_task(&self, name: &str, text: String) -> Option<(String, TaskStream)> {
+    pub fn submit_task(&self, name: &str, task: DelegatedTask) -> Option<(String, TaskStream)> {
         let task_id = format!(
             "task-{}-{}",
             crate::gateway::new_id(),
@@ -231,7 +232,8 @@ impl ParticipantRegistry {
             .outbound
             .send(BrokerFrame::Task {
                 task_id: task_id.clone(),
-                text,
+                text: task.text,
+                bearer: task.bearer,
             })
             .is_err()
         {
@@ -394,6 +396,7 @@ impl ParticipantRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::TaskBearer;
     use super::*;
 
     fn card(name: &str) -> ParticipantCard {
@@ -467,18 +470,24 @@ mod tests {
         let mut outbound = register(&reg, "worker-1");
 
         let (task_id, mut updates) = reg
-            .submit_task("worker-1", "summarise foo.rs".into())
+            .submit_task(
+                "worker-1",
+                DelegatedTask::new("summarise foo.rs").with_bearer(Some(TaskBearer::new("tok"))),
+            )
             .expect("the participant is registered");
 
         let BrokerFrame::Task {
             task_id: sent,
             text,
+            bearer,
         } = outbound.recv().await.unwrap()
         else {
             panic!("expected a task frame");
         };
         assert_eq!(sent, task_id);
         assert_eq!(text, "summarise foo.rs");
+        // The caller's bearer rides the frame to the worker (AGE-371).
+        assert_eq!(bearer, Some(TaskBearer::new("tok")));
         assert_eq!(reg.open_task_count("worker-1"), 1);
 
         reg.on_frame(
@@ -541,8 +550,12 @@ mod tests {
         let reg = ParticipantRegistry::new();
         let _outbound = register(&reg, "worker-1");
 
-        let (_a, mut first) = reg.submit_task("worker-1", "a".into()).unwrap();
-        let (_b, mut second) = reg.submit_task("worker-1", "b".into()).unwrap();
+        let (_a, mut first) = reg
+            .submit_task("worker-1", DelegatedTask::new("a"))
+            .unwrap();
+        let (_b, mut second) = reg
+            .submit_task("worker-1", DelegatedTask::new("b"))
+            .unwrap();
 
         reg.deregister("worker-1");
 
@@ -565,14 +578,19 @@ mod tests {
     #[test]
     fn a_task_for_an_unregistered_participant_is_not_accepted() {
         let reg = ParticipantRegistry::new();
-        assert!(reg.submit_task("nobody", "hello".into()).is_none());
+        assert!(
+            reg.submit_task("nobody", DelegatedTask::new("hello"))
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn cancelling_forgets_the_task_and_tells_the_participant() {
         let reg = ParticipantRegistry::new();
         let mut outbound = register(&reg, "worker-1");
-        let (task_id, mut updates) = reg.submit_task("worker-1", "a".into()).unwrap();
+        let (task_id, mut updates) = reg
+            .submit_task("worker-1", DelegatedTask::new("a"))
+            .unwrap();
         let _ = outbound.recv().await;
 
         reg.cancel_task("worker-1", &task_id);
@@ -603,7 +621,9 @@ mod tests {
 
         let reg = ParticipantRegistry::new();
         let mut outbound = register(&reg, "worker-1");
-        let (task_id, mut updates) = reg.submit_task("worker-1", "a".into()).unwrap();
+        let (task_id, mut updates) = reg
+            .submit_task("worker-1", DelegatedTask::new("a"))
+            .unwrap();
         let _ = outbound.recv().await;
 
         // The worker parks the task and says what it is waiting for.

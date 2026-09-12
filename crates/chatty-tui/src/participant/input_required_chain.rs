@@ -173,7 +173,7 @@ async fn grandchild(broker: &Broker) {
     tokio::spawn(serve_one_task(
         stream,
         card,
-        |_prompt, sink, inputs| async move {
+        |_task, sink, inputs| async move {
             let store = scripted_session(&sink, inputs);
             sink(&SessionEvent::TurnStarted);
             tool_started(&sink, "ask_user");
@@ -201,7 +201,7 @@ async fn child(broker: &Broker) {
     tokio::spawn(serve_one_task(
         stream,
         card,
-        move |prompt, sink, inputs| async move {
+        move |task, sink, inputs| async move {
             let store = scripted_session(&sink, inputs);
             let tool = InvokeAgentTool::new(vec![], vec![], Some(port))
                 .with_local_agent(GRANDCHILD)
@@ -213,7 +213,7 @@ async fn child(broker: &Broker) {
                     &mut ToolContext::new(),
                     InvokeAgentArgs {
                         agent: GRANDCHILD.to_string(),
-                        prompt,
+                        prompt: task.text,
                     },
                 )
                 .await
