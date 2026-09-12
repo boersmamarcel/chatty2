@@ -74,7 +74,7 @@ With **Settings → Internet** on, the agent can search the web (Tavily or Brave
 
 ![Web fetch](../assets/animations/webfetch.gif)
 
-The browser tools drive a real Chrome on your machine, so the agent can look at what it just built instead of guessing: it renders the page, screenshots it, spots the problem, fixes it, and re-checks. While it works, a live view of the page docks beside the chat; you can click and type in it, and take control at any moment.
+The browser tools drive a real Chrome on your machine, so the agent can look at what it just built instead of guessing: it renders the page, screenshots it, spots the problem, fixes it, and re-checks. While it works, a live view of the page docks beside the chat; you can click and type in it, and take control at any moment. **Hand back & continue** gives the browser back to the agent and tells it to take a fresh look at the page and carry on from there.
 
 One limit worth knowing: the screenshot reaches the model on its **next** turn, not inside the tool result. In practice the agent captures the screenshot, finishes its turn, and reviews the image on the turn after. Say *keep going* if it stops after capturing.
 
