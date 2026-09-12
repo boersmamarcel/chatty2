@@ -753,6 +753,7 @@ mod tests {
                 provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
                 execution_settings,
                 module_settings: ModuleSettingsModel::default(),
+                broker_port: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,

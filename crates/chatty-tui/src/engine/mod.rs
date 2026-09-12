@@ -266,6 +266,9 @@ pub struct ChatEngine {
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
     pub module_settings: ModuleSettingsModel,
+    /// The `--broker` leader's own gateway port, held apart from
+    /// `module_settings` so `/modules` can never persist it (AGE-382).
+    pub broker_port: Option<u16>,
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
@@ -345,6 +348,9 @@ pub struct ChatEngineConfig {
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
     pub module_settings: ModuleSettingsModel,
+    /// The `--broker` leader's own gateway port, held apart from
+    /// `module_settings` so `/modules` can never persist it (AGE-382).
+    pub broker_port: Option<u16>,
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
@@ -381,6 +387,7 @@ impl ChatEngine {
             provider_config: config.provider_config,
             execution_settings: config.execution_settings,
             module_settings: config.module_settings,
+            broker_port: config.broker_port,
             models: config.models,
             providers: config.providers,
             mcp_service: config.mcp_service,
@@ -516,10 +523,10 @@ impl ChatEngine {
             search_settings: self.search_settings.clone(),
             embedding_service: self.embedding_service.clone(),
             module_agents: self.module_agents.clone(),
-            gateway_port: self
+            gateway_port: self.broker_port.or(self
                 .module_settings
                 .enabled
-                .then_some(self.module_settings.gateway_port),
+                .then_some(self.module_settings.gateway_port)),
             remote_agents: self.remote_agents.clone(),
         })
     }
@@ -1219,6 +1226,7 @@ mod tests {
                 ),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
+                broker_port: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,
@@ -1386,6 +1394,7 @@ mod tests {
                 ),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
+                broker_port: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,
