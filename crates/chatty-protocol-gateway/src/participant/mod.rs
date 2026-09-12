@@ -32,8 +32,8 @@ mod virtual_agent;
 pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
 pub use origin::AgentOrigin;
 pub use protocol::{
-    BrokerFrame, InputAnswer, InputQuestion, InputRequest, ParticipantCard, ParticipantFrame,
-    ParticipantSkill, TaskInput, TaskState,
+    BrokerFrame, DelegatedTask, InputAnswer, InputQuestion, InputRequest, ParticipantCard,
+    ParticipantFrame, ParticipantSkill, TaskBearer, TaskInput, TaskState,
 };
 pub use registry::{
     AnswerError, ParticipantRegistry, RegisterError, RegisteredAgent, TaskStream, TaskUpdate,

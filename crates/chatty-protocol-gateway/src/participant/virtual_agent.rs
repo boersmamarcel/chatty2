@@ -22,7 +22,7 @@ use std::pin::Pin;
 use anyhow::Result;
 use serde_json::Value;
 
-use super::protocol::ParticipantCard;
+use super::protocol::{DelegatedTask, ParticipantCard};
 use super::registry::{ParticipantRegistry, TaskStream};
 
 /// The worker behind one task, reaped when this is dropped.
@@ -71,11 +71,11 @@ pub trait VirtualAgent: Send + Sync {
     /// serves, so a started worker is reachable by name like any other.
     fn registry(&self) -> &ParticipantRegistry;
 
-    /// Start a worker and hand it `prompt`.
+    /// Start a worker and hand it `task`.
     ///
     /// Returns once the worker has registered and the task has been
     /// submitted, so the handle's `task_id` is set. The update stream is
     /// returned alongside the handle rather than owned by it, so the caller
     /// can read updates while still holding the thing that reaps the worker.
-    fn run_task(&self, prompt: String) -> WorkerFuture<'_>;
+    fn run_task(&self, task: DelegatedTask) -> WorkerFuture<'_>;
 }

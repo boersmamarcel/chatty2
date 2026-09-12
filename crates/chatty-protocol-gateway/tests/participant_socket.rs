@@ -165,6 +165,15 @@ impl StubParticipant {
     /// Wait for a task, then answer it: two progress updates, one artifact,
     /// and a terminal `completed`.
     async fn answer_one_task(&mut self, answer: &str) -> String {
+        self.answer_one_task_frame(answer).await["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// [`answer_one_task`](Self::answer_one_task), returning the whole task
+    /// frame for a test that wants more than its text.
+    async fn answer_one_task_frame(&mut self, answer: &str) -> Value {
         let task = self.next_frame().await;
         assert_eq!(task["type"], "task");
         let task_id = task["taskId"].as_str().unwrap().to_string();
@@ -192,7 +201,7 @@ impl StubParticipant {
         }))
         .await;
 
-        task["text"].as_str().unwrap().to_string()
+        task
     }
 }
 
@@ -409,6 +418,37 @@ async fn message_send_returns_the_participants_answer() {
 
     assert_eq!(stub_task.await.unwrap(), "what is six times seven");
     assert_eq!(answer, "42");
+}
+
+/// AGE-371: the caller's bearer rides the task frame to the worker, and a
+/// caller without one puts nothing on the wire.
+#[tokio::test]
+async fn the_callers_bearer_reaches_the_worker_on_the_task_frame() {
+    let harness = Harness::start().await;
+
+    let mut stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+    let stub_task = tokio::spawn(async move { stub.answer_one_task_frame("ok").await });
+    let mut agent = harness.agent("stub-worker");
+    // `invoke_agent` puts `api_key` on the request as `Authorization: Bearer`.
+    agent.api_key = Some("eyJ.user.token".to_string());
+    A2aClient::new()
+        .send_message(&agent, "who am I")
+        .await
+        .expect("message/send succeeds");
+    let task = stub_task.await.unwrap();
+    assert_eq!(task["bearer"], "eyJ.user.token");
+
+    let mut stub = StubParticipant::register(&harness.socket, "other-worker").await;
+    let stub_task = tokio::spawn(async move { stub.answer_one_task_frame("ok").await });
+    A2aClient::new()
+        .send_message(&harness.agent("other-worker"), "who am I")
+        .await
+        .expect("message/send succeeds");
+    let task = stub_task.await.unwrap();
+    assert!(
+        task.get("bearer").is_none(),
+        "no bearer on the request, none on the frame: {task}"
+    );
 }
 
 /// AGE-321: a worker that asks a question under `message/send` ends the task

@@ -13,7 +13,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -23,7 +23,7 @@ use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
-use crate::participant::AgentOrigin;
+use crate::participant::{AgentOrigin, DelegatedTask, TaskBearer};
 
 use super::a2a_participant;
 use super::jsonrpc::{
@@ -208,6 +208,7 @@ async fn forward_remote_a2a_jsonrpc(
 pub(crate) async fn a2a_jsonrpc(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
+    headers: HeaderMap,
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if body.jsonrpc != "2.0" {
@@ -219,11 +220,20 @@ pub(crate) async fn a2a_jsonrpc(
         );
     }
 
+    // The caller's bearer goes with the task to whichever worker runs it
+    // (AGE-371): the broker validates nothing here — a hosted worker checks
+    // it as the tenant boundary, a local one ignores it.
+    let bearer = caller_bearer(&headers);
+
     match body.method.as_str() {
-        "message/send" => handle_message_send(&module_name, body.id, body.params, &state).await,
-        "message/stream" => handle_message_stream(&module_name, body.id, body.params, &state)
-            .await
-            .into_response(),
+        "message/send" => {
+            handle_message_send(&module_name, body.id, body.params, bearer, &state).await
+        }
+        "message/stream" => {
+            handle_message_stream(&module_name, body.id, body.params, bearer, &state)
+                .await
+                .into_response()
+        }
         "tasks/get" => handle_tasks_get(&module_name, body.id, body.params).await,
         method => json_rpc_error(
             StatusCode::OK,
@@ -242,6 +252,7 @@ async fn handle_message_send(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
+    bearer: Option<TaskBearer>,
     state: &GatewayState,
 ) -> axum::response::Response {
     use chatty_wasm_runtime::{ChatRequest, Message, Role};
@@ -280,14 +291,16 @@ async fn handle_message_send(
             participant = module_name,
             "A2A: routing to a local participant"
         );
-        return a2a_participant::message_send(&state.participants, module_name, id, content).await;
+        let task = DelegatedTask::new(content).with_bearer(bearer);
+        return a2a_participant::message_send(&state.participants, module_name, id, task).await;
     }
 
     if let Some(runner) = state.runner.as_ref()
         && runner.agent_name() == module_name
     {
         tracing::info!(agent = module_name, "A2A: starting a worker");
-        return a2a_participant::runner_message_send(runner.as_ref(), id, content).await;
+        let task = DelegatedTask::new(content).with_bearer(bearer);
+        return a2a_participant::runner_message_send(runner.as_ref(), id, task).await;
     }
 
     let req = ChatRequest {
@@ -402,6 +415,7 @@ async fn handle_message_stream(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
+    bearer: Option<TaskBearer>,
     state: &GatewayState,
 ) -> axum::response::Response {
     use chatty_wasm_runtime::{ChatRequest, Message, Role};
@@ -425,14 +439,16 @@ async fn handle_message_stream(
             participant = module_name,
             "A2A stream: routing to a local participant"
         );
-        return a2a_participant::message_stream(&state.participants, module_name, id, content);
+        let task = DelegatedTask::new(content).with_bearer(bearer);
+        return a2a_participant::message_stream(&state.participants, module_name, id, task);
     }
 
     if let Some(runner) = state.runner.as_ref()
         && runner.agent_name() == module_name
     {
         tracing::info!(agent = module_name, "A2A stream: starting a worker");
-        return a2a_participant::runner_message_stream(runner.as_ref(), id, content).await;
+        let task = DelegatedTask::new(content).with_bearer(bearer);
+        return a2a_participant::runner_message_stream(runner.as_ref(), id, task).await;
     }
 
     let task_id = format!("task-{}", crate::gateway::new_id());
@@ -712,6 +728,23 @@ async fn handle_tasks_get(
         INVALID_PARAMS,
         format!("task '{}' not found (stateless gateway)", task_id),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Helper: the caller's `Authorization: Bearer` token, if any (AGE-371)
+// ---------------------------------------------------------------------------
+
+/// What the A2A client put in `Authorization`, as a task bearer. Anything
+/// that is not a bearer scheme is treated as no token: the worker that gets
+/// the task decides what an absent bearer means, not this router.
+fn caller_bearer(headers: &HeaderMap) -> Option<TaskBearer> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty())
+        .map(TaskBearer::new)
 }
 
 // ---------------------------------------------------------------------------

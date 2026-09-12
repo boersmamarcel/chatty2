@@ -40,8 +40,8 @@ use tracing::{debug, info, warn};
 
 use super::{InputReceiver, TaskMapper};
 use crate::participant::{
-    BrokerFrame, ParticipantCard, ParticipantConnection, ParticipantFrame, ParticipantReader,
-    ParticipantSkill,
+    BrokerFrame, DelegatedTask, ParticipantCard, ParticipantConnection, ParticipantFrame,
+    ParticipantReader, ParticipantSkill,
 };
 
 #[cfg(doc)]
@@ -78,9 +78,10 @@ pub fn worker_card(name: &str, version: &str) -> ParticipantCard {
 /// a vsock stream from inside a microVM (AGE-307). Which one it is changes
 /// nothing below this line, which is the property C8 is built on.
 ///
-/// `run` is handed the task's prompt, the sink its turn's events must go
-/// to, and the receiver the broker's answers to the turn's questions arrive
-/// on; its `Err` becomes the task's failure message. It must not outlive the
+/// `run` is handed the task — its prompt and, when the caller presented one,
+/// their bearer (AGE-371) — the sink its turn's events must go to, and the
+/// receiver the broker's answers to the turn's questions arrive on; its
+/// `Err` becomes the task's failure message. It must not outlive the
 /// sink it was given — the sink is what closes the frame queue, and a copy
 /// left alive in a detached task would hold the terminal status behind it.
 /// Dropping the future that owns it, which is what awaiting `run` does, is
@@ -88,7 +89,7 @@ pub fn worker_card(name: &str, version: &str) -> ParticipantCard {
 pub async fn serve_one_task<S, F, Fut>(stream: S, card: ParticipantCard, run: F) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
-    F: FnOnce(String, EventSink, InputReceiver) -> Fut,
+    F: FnOnce(DelegatedTask, EventSink, InputReceiver) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     let mut connection = ParticipantConnection::register_over(stream, card)
@@ -99,7 +100,7 @@ where
         "Registered with the broker"
     );
 
-    let (task_id, prompt) = match next_task(&mut connection).await? {
+    let (task_id, task) = match next_task(&mut connection).await? {
         Some(task) => task,
         None => {
             debug!("The broker closed the socket before sending a task");
@@ -141,7 +142,7 @@ where
     let (inputs_tx, inputs_rx) = mpsc::unbounded_channel();
     let reader = tokio::spawn(forward_inputs(reader, task_id.clone(), inputs_tx));
 
-    let outcome = run(prompt, sink, inputs_rx).await;
+    let outcome = run(task, sink, inputs_rx).await;
     reader.abort();
 
     // The sink died with the future that owned it, which closed the queue and
@@ -211,10 +212,16 @@ async fn forward_inputs(
 }
 
 /// Read frames until a task arrives, or the broker closes the socket.
-async fn next_task(connection: &mut ParticipantConnection) -> Result<Option<(String, String)>> {
+async fn next_task(
+    connection: &mut ParticipantConnection,
+) -> Result<Option<(String, DelegatedTask)>> {
     while let Some(frame) = connection.next_frame().await? {
         match frame {
-            BrokerFrame::Task { task_id, text } => return Ok(Some((task_id, text))),
+            BrokerFrame::Task {
+                task_id,
+                text,
+                bearer,
+            } => return Ok(Some((task_id, DelegatedTask { text, bearer }))),
             BrokerFrame::Cancel { task_id } => {
                 debug!(task = %task_id, "Ignoring a cancel for a task that never started")
             }

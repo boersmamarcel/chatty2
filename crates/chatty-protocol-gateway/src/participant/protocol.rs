@@ -116,6 +116,66 @@ pub struct InputAnswer {
     pub custom: bool,
 }
 
+/// The caller's bearer token, carried to the worker that runs their task
+/// (AGE-371).
+///
+/// A hosted worker validates it exactly as an HTTP request's bearer is
+/// validated and runs the task as that user; a local worker has no use for
+/// it and ignores it. It rides the task frame, never the worker's
+/// environment: a microVM may serve successive users, and the identity
+/// belongs to the turn, not the machine.
+///
+/// `Debug` prints nothing of it, and `serde` sees straight through to the
+/// string — the socket between broker and worker is the one place it is
+/// meant to be in the clear.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskBearer(String);
+
+impl TaskBearer {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// The token itself. Named so the read is visible at the call site.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for TaskBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TaskBearer([redacted])")
+    }
+}
+
+/// Work for a worker: the prompt, and whose task it is.
+///
+/// What [`BrokerFrame::Task`] carries past its id, in one value so the
+/// broker's submit path, a virtual agent's `run_task` and the worker's turn
+/// all take the same thing and a bearer cannot be dropped between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedTask {
+    pub text: String,
+    /// `None` for a caller that presented no bearer — a desktop parent
+    /// delegating to a local worker. A hosted worker refuses such a task.
+    pub bearer: Option<TaskBearer>,
+}
+
+impl DelegatedTask {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            bearer: None,
+        }
+    }
+
+    pub fn with_bearer(mut self, bearer: Option<TaskBearer>) -> Self {
+        self.bearer = bearer;
+        self
+    }
+}
+
 /// The answers for a parked task: A2A `message/send` on the same task id,
 /// in the broker's vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,9 +266,16 @@ pub enum BrokerFrame {
     /// broker closes the connection after this frame.
     Rejected { reason: String },
     /// Work. Answer with `Status` / `Artifact` frames carrying this `taskId`
-    /// and end with a terminal state.
+    /// and end with a terminal state. `bearer` is the caller's token when
+    /// they presented one (AGE-371); absent on the wire otherwise, so a
+    /// broker and a worker from either side of that change still agree.
     #[serde(rename_all = "camelCase")]
-    Task { task_id: String, text: String },
+    Task {
+        task_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bearer: Option<TaskBearer>,
+    },
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
     Cancel { task_id: String },
@@ -319,11 +386,46 @@ mod tests {
         let json = serde_json::to_value(BrokerFrame::Task {
             task_id: "task-1".into(),
             text: "do it".into(),
+            bearer: None,
         })
         .unwrap();
         assert_eq!(json["type"], "task");
         assert_eq!(json["taskId"], "task-1");
         assert_eq!(json["text"], "do it");
+        assert!(
+            json.get("bearer").is_none(),
+            "a task without a bearer is the frame it was before AGE-371"
+        );
+    }
+
+    #[test]
+    fn a_task_frame_carries_the_bearer_and_reads_one_without() {
+        let json = serde_json::to_value(BrokerFrame::Task {
+            task_id: "task-1".into(),
+            text: "do it".into(),
+            bearer: Some(TaskBearer::new("eyJ.token")),
+        })
+        .unwrap();
+        assert_eq!(json["bearer"], "eyJ.token");
+
+        let old: BrokerFrame =
+            serde_json::from_str(r#"{"type":"task","taskId":"t","text":"x"}"#).unwrap();
+        let BrokerFrame::Task { bearer, .. } = old else {
+            panic!("expected a task frame");
+        };
+        assert!(bearer.is_none());
+    }
+
+    #[test]
+    fn the_bearer_does_not_debug_print() {
+        let frame = BrokerFrame::Task {
+            task_id: "t".into(),
+            text: "x".into(),
+            bearer: Some(TaskBearer::new("secret-token")),
+        };
+        let printed = format!("{frame:?}");
+        assert!(!printed.contains("secret-token"), "{printed}");
+        assert!(printed.contains("[redacted]"));
     }
 
     #[test]
