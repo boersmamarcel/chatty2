@@ -61,7 +61,7 @@ use crate::models::conversation::{Conversation, TurnOutcome};
 use crate::models::execution_approval_store::{ExecutionApprovalStore, PendingApprovals};
 use crate::models::message_types::{
     ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, ToolCallBlock,
-    ToolCallState, classify_initial_execution_engine, classify_tool_source,
+    ToolCallState, TraceItem, classify_initial_execution_engine, classify_tool_source,
     detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
 };
 use crate::models::token_usage::TokenUsage;
@@ -299,18 +299,20 @@ impl AgentSession {
 
     /// Install a rebuilt agent on the owned conversation: the client, the
     /// shell session the factory reused or created, and the progress slot.
-    /// For owners that cannot hold the session across the build (the desktop
-    /// builds inside a global). Returns false when there is no conversation.
+    /// The model it was built for comes with it, so a model switch also
+    /// switches the prices the next turn is costed at (AGE-351). For owners
+    /// that cannot hold the session across the build (the desktop builds
+    /// inside a global). Returns false when there is no conversation.
     pub fn install_agent(
         &mut self,
         built: BuiltAgent,
-        model_id: String,
+        model: &ModelConfig,
         workspace_dir: Option<PathBuf>,
     ) -> bool {
         let Some(conversation) = self.conversation.as_mut() else {
             return false;
         };
-        conversation.set_agent(Arc::new(built.client), model_id, workspace_dir);
+        conversation.set_agent(Arc::new(built.client), model, workspace_dir);
         if built.shell_session.is_some() {
             conversation.set_shell_session(built.shell_session);
         }
@@ -772,6 +774,13 @@ impl AgentSession {
     /// answers); `None` persists the trace the session recorded from the
     /// turn's events, when it has anything in it (AGE-274).
     ///
+    /// This is also the turn barrier for the conversation's totals (AGE-351):
+    /// the turn's usage is costed at the bound model's prices — here and
+    /// nowhere else, so every frontend gets the same `estimated_cost_usd` —
+    /// and its tool calls, counted from the trace the session recorded, go
+    /// onto the lifetime total. A model without prices leaves the turn's
+    /// cost `None` and the conversation's total unchanged.
+    ///
     /// Returns `None` when there is no conversation or no turn to finish: a
     /// second call for the same turn is a no-op, so an owner that finalizes
     /// on both `Cancelled` and `TurnEnded` commits once. A
@@ -797,12 +806,29 @@ impl AgentSession {
             .streaming_message()
             .cloned()
             .unwrap_or_default();
+        // Counted from the session's own record of the turn, which every
+        // owner feeds (`apply` / `note_tool_started`), whichever trace it
+        // chooses to persist.
+        let tool_calls = conversation
+            .streaming_trace()
+            .map(|trace| {
+                trace
+                    .items
+                    .iter()
+                    .filter(|item| matches!(item, TraceItem::ToolCall(_)))
+                    .count() as u32
+            })
+            .unwrap_or(0);
         let outcome = conversation.finalize_turn(response, artifacts, trace);
         conversation.set_streaming_message(None);
         conversation.set_streaming_trace(None);
         conversation.set_streaming_delegation_trace(None);
 
-        if let Some(usage) = self.last_turn_usage.take() {
+        conversation.add_tool_calls(tool_calls);
+        if let Some(mut usage) = self.last_turn_usage.take() {
+            if let Some(pricing) = conversation.pricing() {
+                usage.calculate_cost(pricing);
+            }
             conversation.add_token_usage(usage);
         }
 

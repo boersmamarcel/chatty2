@@ -115,24 +115,35 @@ impl ConversationsStore {
         // title/cost change after a turn, and none of them knows where the
         // conversation runs. It is set by a move, through
         // [`set_conversation_mode`](Self::set_conversation_mode), and read
-        // back from the row on the next load.
-        let mode = self
-            .get_conversation(id)
-            .map(|conversation| conversation.mode().clone());
+        // back from the row on the next load. The turn totals (AGE-351) are
+        // taken from the loaded conversation the same way: the session
+        // accumulates them at the turn barrier, and the row carries them.
+        let loaded = self.get_conversation(id).map(|conversation| {
+            (
+                conversation.mode().clone(),
+                conversation.tool_call_count(),
+                conversation.context_tokens(),
+            )
+        });
         if let Some(entry) = self.metadata.iter_mut().find(|m| m.id == id) {
             entry.title = title.to_string();
             entry.total_cost = total_cost;
             entry.updated_at = updated_at;
-            if let Some(mode) = mode {
+            if let Some((mode, tool_call_count, context_tokens)) = loaded {
                 entry.mode = serialize_mode(&mode);
+                entry.tool_call_count = tool_call_count;
+                entry.context_tokens = context_tokens;
             }
         } else {
+            let (mode, tool_call_count, context_tokens) = loaded.unwrap_or_default();
             self.metadata.push(ConversationMetadata {
                 id: id.to_string(),
                 title: title.to_string(),
                 total_cost,
                 updated_at,
-                mode: mode.as_ref().and_then(serialize_mode),
+                mode: serialize_mode(&mode),
+                tool_call_count,
+                context_tokens,
             });
         }
         // Keep sorted: most recently updated first

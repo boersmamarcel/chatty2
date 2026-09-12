@@ -213,6 +213,13 @@ pub fn sample_conversation(id: &str, title: &str, updated_at: i64) -> Conversati
             r#"{"kind":"hosted","server_url":"http://localhost:8081","remote_id":"remote-1"}"#
                 .to_string(),
         ),
+        // Derived from `updated_at / 1_000` (the suite's samples differ only
+        // in the thousands place) so two samples carry two different values,
+        // and kept far apart from each other so a store that swaps
+        // `tool_call_count` and `context_tokens` — or returns one
+        // conversation's totals for another — fails the suite.
+        tool_call_count: 4 + (updated_at / 1_000) as u32,
+        context_tokens: 12_345 + (updated_at / 1_000) as u32,
     }
 }
 
@@ -224,9 +231,10 @@ pub fn sample_conversation(id: &str, title: &str, updated_at: i64) -> Conversati
 /// to hand back a ready store doesn't fit.
 ///
 /// Exercises create, read (including a missing id), list ordering (newest
-/// `updated_at` first, for both `load_all` and `load_metadata`), update
-/// (re-saving an existing id replaces it rather than duplicating it), and
-/// delete.
+/// `updated_at` first, for both `load_all` and `load_metadata`), the
+/// per-row totals the metadata layer carries (`total_cost`,
+/// `tool_call_count`, `context_tokens`; AGE-351), update (re-saving an
+/// existing id replaces it rather than duplicating it), and delete.
 pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
     let conv_a = sample_conversation("conv-a", "First", 1_000);
     repo.save("conv-a", conv_a.clone())
@@ -251,6 +259,13 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
     assert!(missing.is_none(), "load_one for a missing id must be None");
 
     let conv_b = sample_conversation("conv-b", "Second", 2_000);
+    assert_ne!(
+        (conv_a.tool_call_count, conv_a.context_tokens),
+        (conv_b.tool_call_count, conv_b.context_tokens),
+        "sample_conversation must derive different totals per sample, or a \
+         store that returns one conversation's totals for another would \
+         still pass this suite"
+    );
     repo.save("conv-b", conv_b.clone())
         .await
         .expect("save conv-b");
@@ -269,10 +284,29 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
     );
     assert_eq!(metadata[0].title, "Second");
     assert_eq!(metadata[1].id, "conv-a");
+    // The totals are columns of the row, read without deserializing it: the
+    // metadata layer must report exactly what was saved, per conversation.
+    for (entry, saved) in [(&metadata[0], &conv_b), (&metadata[1], &conv_a)] {
+        assert_eq!(
+            entry.total_cost,
+            saved.total_cost(),
+            "load_metadata must carry the saved cost"
+        );
+        assert_eq!(
+            entry.tool_call_count, saved.tool_call_count,
+            "load_metadata must carry the saved tool_call_count"
+        );
+        assert_eq!(
+            entry.context_tokens, saved.context_tokens,
+            "load_metadata must carry the saved context_tokens"
+        );
+    }
 
     let mut conv_a_updated = conv_a.clone();
     conv_a_updated.title = "First (edited)".to_string();
     conv_a_updated.updated_at = 3_000;
+    conv_a_updated.tool_call_count = 40;
+    conv_a_updated.context_tokens = 20_000;
     repo.save("conv-a", conv_a_updated.clone())
         .await
         .expect("update conv-a");
@@ -287,6 +321,19 @@ pub async fn conformance_conversation<R: ConversationRepository>(repo: R) {
         by_id(&after_update)["conv-a"].title,
         "First (edited)",
         "an updated conversation must come back with the new value"
+    );
+    let metadata = repo
+        .load_metadata()
+        .await
+        .expect("load_metadata after update");
+    let conv_a_meta = metadata
+        .iter()
+        .find(|m| m.id == "conv-a")
+        .expect("conv-a is listed");
+    assert_eq!(
+        (conv_a_meta.tool_call_count, conv_a_meta.context_tokens),
+        (40, 20_000),
+        "an update must replace the totals on the metadata row, not keep the old ones"
     );
 
     repo.delete("conv-b").await.expect("delete conv-b");

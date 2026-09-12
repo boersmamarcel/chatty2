@@ -301,7 +301,7 @@ impl ChattyApp {
                             debug!("Updating conversation model");
                             if session.install_agent(
                                 built_agent,
-                                model_config.id.clone(),
+                                &model_config,
                                 built_workspace_dir,
                             ) {
                                 Ok(())

@@ -192,8 +192,8 @@ sequenceDiagram
     SM-->>CA: StreamEnded { Completed }
     CA->>CIS: set_streaming(false)
     CA->>CV: finalize_assistant_message()
-    CA->>CS: Read streaming_message, finalize_response()
-    CA->>CA: Generate title, calculate cost, persist
+    CA->>CS: session.finish_turn() — commits the reply, prices the usage (AGE-351)
+    CA->>CA: Generate title, persist
 ```
 
 > [!NOTE]

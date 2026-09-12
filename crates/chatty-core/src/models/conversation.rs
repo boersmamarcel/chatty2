@@ -11,7 +11,7 @@ use rig_core::completion::message::{AssistantContent, Text, UserContent};
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;
 use crate::models::message_types::{SystemTrace, ToolSource, TraceItem};
-use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
+use crate::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::services::AgentTaskSnapshot;
 use crate::services::is_tool_result_message;
@@ -126,6 +126,15 @@ pub struct Conversation {
     /// Regeneration records capturing original responses before replacement (DPO preference pairs)
     regeneration_records: Vec<RegenerationRecord>,
     token_usage: ConversationTokenUsage,
+    /// Tool calls made over the conversation's lifetime, accumulated at the
+    /// turn barrier (AGE-351).
+    tool_call_count: u32,
+    /// Prompt size of the last completed API call (AGE-351).
+    context_tokens: u32,
+    /// What a turn on the bound model is costed at; `None` when the model
+    /// has no prices, in which case turns carry no cost (AGE-351). Bound
+    /// with the agent, so it follows a model switch.
+    pricing: Option<TokenPricing>,
     created_at: SystemTime,
     updated_at: SystemTime,
     /// Partial streaming message being composed (None if no active stream)
@@ -207,6 +216,9 @@ impl Conversation {
             entries: Vec::new(),
             regeneration_records: Vec::new(),
             token_usage: ConversationTokenUsage::new(),
+            tool_call_count: 0,
+            context_tokens: 0,
+            pricing: model_config.token_pricing(),
             created_at: now,
             updated_at: now,
             streaming_message: None,
@@ -329,6 +341,9 @@ impl Conversation {
             entries,
             regeneration_records,
             token_usage,
+            tool_call_count: data.tool_call_count,
+            context_tokens: data.context_tokens,
+            pricing: model_config.token_pricing(),
             created_at,
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
@@ -654,6 +669,8 @@ impl Conversation {
             model_id: self.model_id.clone(),
             entries: self.entries.clone(),
             token_usage: self.token_usage.clone(),
+            tool_call_count: self.tool_call_count,
+            context_tokens: self.context_tokens,
             regeneration_records: self.regeneration_records.clone(),
             created_at: self.created_at,
             working_dir: self.working_dir.clone(),
@@ -815,15 +832,18 @@ impl Conversation {
         self.updated_at = SystemTime::now();
     }
 
-    /// Set the agent and model ID synchronously (for model switching without blocking)
+    /// Set the agent and model synchronously (for model switching without
+    /// blocking). The model's prices come with it, so the next turn is
+    /// costed at the new model's rates.
     pub fn set_agent(
         &mut self,
         agent: Arc<AgentClient>,
-        model_id: String,
+        model_config: &ModelConfig,
         agent_workspace_dir: Option<PathBuf>,
     ) {
         self.agent = agent;
-        self.model_id = model_id;
+        self.model_id = model_config.id.clone();
+        self.pricing = model_config.token_pricing();
         self.agent_workspace_dir = agent_workspace_dir;
         self.updated_at = SystemTime::now();
     }
@@ -833,8 +853,36 @@ impl Conversation {
         &self.token_usage
     }
 
-    /// Add token usage for the most recent exchange
+    /// What a turn on the bound model is costed at, if it has prices.
+    pub fn pricing(&self) -> Option<&TokenPricing> {
+        self.pricing.as_ref()
+    }
+
+    /// Tool calls made over the conversation's lifetime (AGE-351).
+    pub fn tool_call_count(&self) -> u32 {
+        self.tool_call_count
+    }
+
+    /// Prompt size of the last completed API call: `input + cache_read +
+    /// cache_write`, output excluded (AGE-351). 0 until a turn reports usage.
+    pub fn context_tokens(&self) -> u32 {
+        self.context_tokens
+    }
+
+    /// Count a turn's tool calls into the lifetime total (AGE-351).
+    pub fn add_tool_calls(&mut self, count: u32) {
+        self.tool_call_count = self.tool_call_count.saturating_add(count);
+    }
+
+    /// Add token usage for the most recent exchange. The exchange's last
+    /// request is the one whose prompt is the current context fill; a record
+    /// without per-request usage holds the provider's aggregate as its one
+    /// stand-in, so its exchange prompt total is used the same way.
     pub fn add_token_usage(&mut self, usage: TokenUsage) {
+        self.context_tokens = usage
+            .last_call()
+            .map(|call| call.prompt_tokens())
+            .unwrap_or_else(|| usage.prompt_tokens());
         self.token_usage.add_usage(usage);
         self.updated_at = SystemTime::now();
     }
@@ -927,6 +975,8 @@ pub struct ConversationSnapshot {
     pub model_id: String,
     pub entries: Vec<MessageEntry>,
     pub token_usage: ConversationTokenUsage,
+    pub tool_call_count: u32,
+    pub context_tokens: u32,
     pub regeneration_records: Vec<RegenerationRecord>,
     pub created_at: SystemTime,
     pub working_dir: Option<PathBuf>,
@@ -974,6 +1024,8 @@ impl ConversationSnapshot {
                         .context("Failed to serialize conversation mode")?,
                 ),
             },
+            tool_call_count: self.tool_call_count,
+            context_tokens: self.context_tokens,
         })
     }
 }
@@ -1251,6 +1303,8 @@ mod tests {
             model_id: "model-1".to_string(),
             entries,
             token_usage,
+            tool_call_count: 7,
+            context_tokens: 4_321,
             regeneration_records: vec![RegenerationRecord {
                 message_index: 1,
                 original_text: "before".to_string(),
@@ -1294,6 +1348,8 @@ mod tests {
         assert_eq!(data.message_feedback, r#"["ThumbsUp",null]"#);
         assert!(data.regeneration_records.contains("before"));
         assert!(data.token_usage.contains("\"total_input_tokens\":11"));
+        assert_eq!(data.tool_call_count, 7);
+        assert_eq!(data.context_tokens, 4_321);
 
         // Stamped at build time, not copied from `created_at`.
         assert!(data.updated_at >= data.created_at);
@@ -1344,6 +1400,9 @@ mod tests {
         });
         let data: ConversationData = serde_json::from_value(row).expect("an old row still loads");
         assert!(data.mode.is_none());
+        // AGE-351: the totals default to 0 on a row from before they existed.
+        assert_eq!(data.tool_call_count, 0);
+        assert_eq!(data.context_tokens, 0);
         let mode = data
             .mode
             .as_deref()
