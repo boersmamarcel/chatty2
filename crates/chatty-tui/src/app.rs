@@ -12,7 +12,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use crate::engine::{ChatEngine, Command, NavigableList};
+use crate::engine::{ChatEngine, Command, EngineAction, NavigableList};
 use crate::events::AppEvent;
 use crate::ui::{self, InputState};
 
@@ -71,11 +71,19 @@ async fn run_loop(
     let tick_rate = Duration::from_millis(100);
     let mut tick_interval = tokio::time::interval(tick_rate);
 
+    // Whether the next loop iteration needs to redraw. Starts `true` so the
+    // first frame always renders; after that, only a terminal event or an
+    // engine event that reports `EngineAction::Redraw` sets it again — a bare
+    // tick with nothing new to show does not force a rebuild (AGE-168).
+    let mut dirty = true;
+
     loop {
-        // Render
-        terminal.draw(|frame| {
-            ui::render(frame, engine, &mut input_state);
-        })?;
+        if dirty {
+            terminal.draw(|frame| {
+                ui::render(frame, engine, &mut input_state);
+            })?;
+            dirty = false;
+        }
 
         // Multiplex event sources
         tokio::select! {
@@ -83,6 +91,7 @@ async fn run_loop(
             maybe_event = crossterm_events.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
+                        dirty = true;
                         match handle_terminal_event(event, engine, &mut input_state) {
                             KeyAction::Quit => return Ok(()),
                             KeyAction::SwitchModel(query) => {
@@ -202,16 +211,84 @@ async fn run_loop(
                     }
                 }
             }
-            // Async app events (streaming, lifecycle)
+            // Async app events (streaming, lifecycle). Drain whatever else is
+            // already queued behind this one — coalescing consecutive
+            // `TextChunk`s — so a fast stream produces one redraw per drained
+            // batch instead of one per chunk (AGE-168).
             Some(event) = event_rx.recv() => {
-                engine.handle_event(event);
+                if drain_and_coalesce_events(engine, event, event_rx) {
+                    dirty = true;
+                }
             }
-            // Tick for animations (streaming cursor blink)
-            _ = tick_interval.tick() => {
-                // Just redraw on tick for animations
+            // Tick for animations (streaming cursor blink). Idle ticks are
+            // free: `dirty` only flips back on when a terminal or engine
+            // event actually changed something to show (AGE-168).
+            _ = tick_interval.tick() => {}
+        }
+    }
+}
+
+/// Time budget for draining events already queued behind the one that woke
+/// the loop. Bounds how long a single burst can hold off the terminal-input
+/// and tick branches of the `select!` above (AGE-168).
+const DRAIN_TIME_SLICE: Duration = Duration::from_millis(16);
+
+/// Apply one event to the engine, returning whether it asked for a redraw.
+fn apply_engine_event(engine: &mut ChatEngine, event: AppEvent) -> bool {
+    matches!(engine.handle_event(event), EngineAction::Redraw)
+}
+
+/// Apply `first`, then drain whatever is already queued behind it in
+/// `event_rx` — merging consecutive `TextChunk`s into one appended update —
+/// until the channel is empty or the time slice runs out. Non-text events
+/// are applied individually, in the order they arrived: they are never
+/// reordered or merged across, so interleaved tool calls and approvals still
+/// land on the transcript exactly where they did before (AGE-168).
+///
+/// Returns whether any applied event asked for a redraw.
+fn drain_and_coalesce_events(
+    engine: &mut ChatEngine,
+    first: AppEvent,
+    event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + DRAIN_TIME_SLICE;
+    let mut dirty = false;
+    let mut pending_text: Option<String> = None;
+    let mut next = Some(first);
+
+    loop {
+        let event = match next.take() {
+            Some(event) => event,
+            None => {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                match event_rx.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            }
+        };
+
+        match event {
+            AppEvent::TextChunk(text) => match &mut pending_text {
+                Some(buf) => buf.push_str(&text),
+                None => pending_text = Some(text),
+            },
+            other => {
+                if let Some(text) = pending_text.take() {
+                    dirty |= apply_engine_event(engine, AppEvent::TextChunk(text));
+                }
+                dirty |= apply_engine_event(engine, other);
             }
         }
     }
+
+    if let Some(text) = pending_text.take() {
+        dirty |= apply_engine_event(engine, AppEvent::TextChunk(text));
+    }
+
+    dirty
 }
 
 enum KeyAction {
@@ -807,6 +884,100 @@ mod tests {
         assert_eq!(
             last_system_message(&engine),
             "No paste #99 in this session."
+        );
+    }
+
+    /// AGE-168: a fast burst of `TextChunk`s must drain and coalesce in one
+    /// call instead of needing one `drain_and_coalesce_events` call (and so
+    /// one `terminal.draw`) per chunk — the bounded-draw-rate acceptance
+    /// criterion, exercised at the unit that the main loop calls once per
+    /// `select!` iteration.
+    #[test]
+    fn draining_a_burst_absorbs_every_queued_chunk_in_one_call() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        engine.transcript.start_assistant();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for n in 1..=49 {
+            tx.send(AppEvent::TextChunk(format!("chunk{n} "))).unwrap();
+        }
+
+        let dirty =
+            drain_and_coalesce_events(&mut engine, AppEvent::TextChunk("chunk0 ".into()), &mut rx);
+
+        assert!(dirty, "text chunks must ask for a redraw");
+        assert!(
+            rx.try_recv().is_err(),
+            "every already-queued chunk must be drained in the one call"
+        );
+        let expected: String = (0..=49).map(|n| format!("chunk{n} ")).collect();
+        assert_eq!(
+            engine.transcript.messages.last().unwrap().text(),
+            expected,
+            "coalescing must not change the resulting text"
+        );
+    }
+
+    /// AGE-168: coalescing merges consecutive `TextChunk`s only — tool calls
+    /// and approvals interleaved with text must keep their relative order and
+    /// must not be merged across, so visual correctness survives the change.
+    #[test]
+    fn draining_preserves_order_of_interleaved_tool_and_approval_events() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        engine.transcript.start_assistant();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(AppEvent::ToolCallStarted {
+            id: "t1".to_string(),
+            name: "read_file".to_string(),
+        })
+        .unwrap();
+        tx.send(AppEvent::TextChunk("b".to_string())).unwrap();
+        tx.send(AppEvent::ApprovalRequested {
+            id: "a1".to_string(),
+            command: "rm -rf /tmp/x".to_string(),
+            is_sandboxed: false,
+        })
+        .unwrap();
+        tx.send(AppEvent::TextChunk("c".to_string())).unwrap();
+
+        let dirty =
+            drain_and_coalesce_events(&mut engine, AppEvent::TextChunk("a".into()), &mut rx);
+
+        assert!(dirty);
+        let last = engine.transcript.messages.last().unwrap();
+        assert_eq!(
+            last.blocks.len(),
+            3,
+            "text/tool/text — never merged across the tool call"
+        );
+        assert!(matches!(&last.blocks[0], crate::engine::MessageBlock::Text(t) if t == "a"));
+        assert!(
+            matches!(&last.blocks[1], crate::engine::MessageBlock::ToolCall(tc) if tc.id == "t1")
+        );
+        // "b" and "c" land in the same trailing block: the approval in between
+        // does not open a new text block, so they coalesce together.
+        assert!(matches!(&last.blocks[2], crate::engine::MessageBlock::Text(t) if t == "bc"));
+        assert_eq!(
+            engine.pending_approval.as_ref().map(|a| a.id.as_str()),
+            Some("a1"),
+            "the approval must still be recorded, in order, alongside the text"
+        );
+    }
+
+    /// AGE-168: events the engine reports no visible change for (here,
+    /// `TurnMessages`, which only updates trace bookkeeping) must not mark
+    /// the loop dirty — this is what lets an idle tick skip its redraw.
+    #[test]
+    fn apply_engine_event_does_not_mark_dirty_for_a_no_op_event() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        engine.transcript.start_assistant();
+
+        let dirty = apply_engine_event(&mut engine, AppEvent::TurnMessages(Vec::new()));
+
+        assert!(
+            !dirty,
+            "an event with no visible effect must not force a redraw"
         );
     }
 }
