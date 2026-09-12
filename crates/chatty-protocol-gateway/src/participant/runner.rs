@@ -1,11 +1,13 @@
 //! Spawning a chatty child and exposing it as an A2A participant.
 //!
-//! ADR-0011's C2. The broker publishes one *virtual* agent — `local-agent` by
-//! default — that is not a connected process but a factory: a task addressed
-//! to it spawns a child, waits for that child to register over the
-//! participant socket, and routes the task to it. To the caller it is an A2A
-//! agent like any other, which is the whole point: one fan-out path for the
-//! parent, whoever ends up serving the task.
+//! ADR-0011's C2. The broker publishes *virtual* agents — `local-agent` by
+//! default; a named team of them under C10 — each of which is not a
+//! connected process but a factory: a task addressed to it spawns a child,
+//! waits for that child to register over the participant socket, and routes
+//! the task to it. To the caller it is an A2A agent like any other, which is
+//! the whole point: one fan-out path for the parent, whoever ends up serving
+//! the task. Two runners differ only in name and argv (`--model`,
+//! `--disable`), so one binary serves every role.
 //!
 //! # Lifetime
 //!
@@ -141,6 +143,14 @@ impl LocalRunner {
     /// Rename the virtual agent callers address.
     pub fn with_agent_name(mut self, name: impl Into<String>) -> Self {
         self.agent_name = name.into();
+        self
+    }
+
+    /// The card's description: what this runner's workers run — their
+    /// model and tool set — so a caller reading the card can choose between
+    /// runners rather than guess (ADR-0011 C10).
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
         self
     }
 
@@ -760,5 +770,98 @@ mod tests {
         assert_eq!(card.name, "local-agent");
         assert_eq!(card.skills[0].name, "delegate");
         assert!(!card.description.is_empty());
+    }
+
+    /// ADR-0011 C10: a named runner's card carries the name callers address
+    /// and the text that says what its workers run.
+    #[test]
+    fn a_named_runner_serves_its_own_name_and_description() {
+        let runner = LocalRunner::new("/bin/sh", "/tmp/x.sock", ParticipantRegistry::new())
+            .with_agent_name("local-reviewer")
+            .with_description("Model: gemma. Tool groups disabled: fs-write.");
+        let card = runner.agent_card();
+        assert_eq!(card.name, "local-reviewer");
+        assert_eq!(
+            card.description,
+            "Model: gemma. Tool groups disabled: fs-write."
+        );
+    }
+
+    /// AGE-377's budget test, first half: two runners on different provider
+    /// URLs hold independent permits — a reviewer on another server does
+    /// not queue behind the coder.
+    #[tokio::test]
+    async fn runners_on_different_endpoints_hold_independent_permits() {
+        let registry = ParticipantRegistry::new();
+        let budget = EndpointBudget::new(1);
+        let coder = runner(registry.clone(), "sleep 30")
+            .with_agent_name("local-coder")
+            .with_endpoint_budget("http://localhost:11434", budget.clone());
+        let reviewer = runner(registry.clone(), "sleep 30")
+            .with_agent_name("local-reviewer")
+            .with_endpoint_budget("http://other:8000/v1", budget.clone());
+        let _outbound = [
+            register_when_asked(registry.clone(), "local-coder-0"),
+            register_when_asked(registry.clone(), "local-reviewer-0"),
+        ];
+
+        let first = coder.run_task(DelegatedTask::new("code")).await.unwrap();
+        assert_eq!(budget.in_flight("http://localhost:11434"), 1);
+
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            reviewer.run_task(DelegatedTask::new("review")),
+        )
+        .await
+        .expect("a different endpoint has its own slot, so nothing waits")
+        .unwrap();
+        assert_eq!(budget.in_flight("http://other:8000/v1"), 1);
+        assert_eq!(reviewer.queue_depth(), 0);
+        drop((first, second));
+    }
+
+    /// AGE-377's budget test, second half: two runners on one URL share one
+    /// budget — the limit belongs to the model server, not to the caller.
+    #[tokio::test]
+    async fn runners_on_one_endpoint_share_its_budget() {
+        const ENDPOINT: &str = "http://localhost:11434";
+
+        let registry = ParticipantRegistry::new();
+        let budget = EndpointBudget::new(1);
+        let coder = runner(registry.clone(), "sleep 30")
+            .with_agent_name("local-coder")
+            .with_endpoint_budget(ENDPOINT, budget.clone());
+        let reviewer = Arc::new(
+            runner(registry.clone(), "sleep 30")
+                .with_agent_name("local-reviewer")
+                .with_endpoint_budget(ENDPOINT, budget.clone()),
+        );
+        let _outbound = [
+            register_when_asked(registry.clone(), "local-coder-0"),
+            register_when_asked(registry.clone(), "local-reviewer-0"),
+        ];
+
+        let first = coder.run_task(DelegatedTask::new("code")).await.unwrap();
+        assert_eq!(budget.in_flight(ENDPOINT), 1, "the one slot is spent");
+
+        let second = tokio::spawn({
+            let reviewer = Arc::clone(&reviewer);
+            async move { reviewer.run_task(DelegatedTask::new("review")).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !second.is_finished(),
+            "the reviewer waits for the coder's slot on the same server"
+        );
+        assert_eq!(reviewer.queue_depth(), 1);
+
+        drop(first);
+        let (worker, _updates) = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("the queued reviewer is admitted once the coder is reaped")
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker.name(), "local-reviewer-0");
+        assert_eq!(budget.in_flight(ENDPOINT), 1);
     }
 }

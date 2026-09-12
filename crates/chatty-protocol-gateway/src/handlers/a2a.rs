@@ -44,9 +44,7 @@ pub(crate) async fn module_agent_card(
         return (StatusCode::OK, Json(a2a_participant::card_to_json(&card))).into_response();
     }
 
-    if let Some(runner) = state.runner.as_ref()
-        && runner.agent_name() == module_name
-    {
+    if let Some(runner) = state.runners.get(&module_name) {
         return (
             StatusCode::OK,
             Json(a2a_participant::card_to_json(&runner.agent_card())),
@@ -106,10 +104,10 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
         ));
     }
 
-    // The runner has no process until a task arrives, but it is the agent a
-    // caller addresses to get one, so it belongs on the card. What it spawns
-    // is a child of this machine.
-    if let Some(runner) = state.runner.as_ref() {
+    // A runner has no process until a task arrives, but it is the agent a
+    // caller addresses to get one, so every one of them belongs on the card
+    // (ADR-0011 C10). What it spawns is a child of this machine.
+    for runner in state.runners.values() {
         agents.push(with_origin(
             a2a_participant::card_to_json(&runner.agent_card()),
             AgentOrigin::Local,
@@ -295,9 +293,7 @@ async fn handle_message_send(
         return a2a_participant::message_send(&state.participants, module_name, id, task).await;
     }
 
-    if let Some(runner) = state.runner.as_ref()
-        && runner.agent_name() == module_name
-    {
+    if let Some(runner) = state.runners.get(module_name) {
         tracing::info!(agent = module_name, "A2A: starting a worker");
         let task = DelegatedTask::new(content).with_bearer(bearer);
         return a2a_participant::runner_message_send(runner.as_ref(), id, task).await;
@@ -443,9 +439,7 @@ async fn handle_message_stream(
         return a2a_participant::message_stream(&state.participants, module_name, id, task);
     }
 
-    if let Some(runner) = state.runner.as_ref()
-        && runner.agent_name() == module_name
-    {
+    if let Some(runner) = state.runners.get(module_name) {
         tracing::info!(agent = module_name, "A2A stream: starting a worker");
         let task = DelegatedTask::new(content).with_bearer(bearer);
         return a2a_participant::runner_message_stream(runner.as_ref(), id, task).await;

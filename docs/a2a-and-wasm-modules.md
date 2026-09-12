@@ -448,6 +448,38 @@ serving; any worker still running is reaped by the runner the same way it always
 agent-build context, so `/modules` in the same session still saves exactly what was on
 disk (AGE-382).
 
-**Known limitation.** The worker's model is its own configured default, not the parent
-conversation's: the model would have to ride on the A2A request and A2A has no field
-for it. Carried as an open question on AGE-301.
+**Named virtual agents (ADR-0011 C10, AGE-377).** Every worker used to be the same:
+the roster's default model with the leader's tools. `module_settings.json` can instead
+declare a team, each member a *virtual agent* the broker publishes under its own name
+with its own model and tool set:
+
+```json
+{
+  "virtual_agents": [
+    { "name": "local-coder",    "model": "qwen3:4b" },
+    { "name": "local-reviewer", "model": "gemma4:26b",
+      "disable_tools": ["fs-write", "shell", "git"] }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `name` | The name `invoke_agent` addresses, served at `/a2a/{name}`. |
+| `model` | Optional. Passed as `--model` to each child, resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the child runs the roster's default, as an undeclared worker does. |
+| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. |
+| `extra_args` | Optional. Any further `chatty-tui` flags, appended verbatim. |
+
+An empty or absent list is the single `local-agent` of before. A role is a name plus an
+argv and nothing else: `invoke_agent` takes no `model` or `role` parameter, so the
+leader's tool schema and prompt prefix are identical whatever the team, and each
+agent's card — what `list_agents` shows — says which model it runs and which tool groups
+it lacks, so the leader chooses by reading rather than guessing. Each agent is metered
+on the endpoint of *its* model (`chatty_core::services::worker_endpoint`), so a
+reviewer on another server does not queue behind the coder, while two agents on one
+server share that server's budget. Both frontends build their runners from
+`chatty_core::services::virtual_agents::resolve_virtual_agents`; a `--broker` leader
+started with `--ollama`, `--openai-compat-url` or `--api-key` forwards those flags to
+every child (a Harbor sandbox has no `providers.json` for a child to read), and a
+settings-configured desktop leader forwards nothing. There is no settings page for this
+yet; the JSON is the interface.

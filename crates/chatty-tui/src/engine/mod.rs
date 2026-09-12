@@ -527,6 +527,7 @@ impl ChatEngine {
                 .module_settings
                 .enabled
                 .then_some(self.module_settings.gateway_port)),
+            local_agents: self.module_settings.virtual_agent_names(),
             remote_agents: self.remote_agents.clone(),
         })
     }

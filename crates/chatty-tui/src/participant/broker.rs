@@ -1,38 +1,43 @@
 //! `--broker`: a headless, pipe or interactive leader runs its own protocol
-//! gateway so it can delegate to `local-agent`, the way the desktop's
-//! module-settings controller does for the GPUI app (AGE-376).
+//! gateway so it can delegate to its virtual agents — `local-agent`, or
+//! the named team `module_settings.virtual_agents` declares (ADR-0011 C10)
+//! — the way the desktop's module-settings controller does for the GPUI
+//! app (AGE-376).
 //!
 //! This is the same wiring as chatty-gpui's `broker_runner.rs` — a Unix
-//! socket children register on, and the `local-agent` virtual agent that
-//! spawns one per delegated task — minus the WASM module registry the
-//! desktop's gateway also serves: `--broker` exists to make `local-agent`
-//! reachable, not to load modules, so the registry behind it is empty.
-//! Module agents chatty-tui already knows about (`--enable`/manifest
-//! discovery) are unaffected; they are a separate path from this gateway.
+//! socket children register on, and one virtual agent per resolved
+//! [`VirtualAgentSpec`] that spawns a child per delegated task — minus the
+//! WASM module registry the desktop's gateway also serves: `--broker`
+//! exists to make the workers reachable, not to load modules, so the
+//! registry behind it is empty. Module agents chatty-tui already knows
+//! about (`--enable`/manifest discovery) are unaffected; they are a separate
+//! path from this gateway.
 //!
 //! Unlike the desktop, which binds a fixed configured port and one
 //! well-known socket path, a headless leader is meant to run many at once
 //! (benchmarking a team, CI, a script), so both are ephemeral: the HTTP port
 //! is OS-assigned, and the socket path is suffixed with this process's pid.
+//!
+//! A leader configured by flags (`--ollama`, `--openai-compat-url`,
+//! `--api-key`) has no config dir a child could read, so those flags are
+//! forwarded to every worker (`common_args`); a settings-configured leader
+//! forwards nothing, since the child reads the same files.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chatty_core::services::virtual_agents::{VirtualAgentSpec, resolve_virtual_agents};
 use chatty_core::services::worker_tree;
 use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
-use chatty_core::tools::{LOCAL_AGENT_NAME, worker_executable};
+use chatty_core::tools::worker_executable;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
-    EndpointBudget, LocalRunner, WorkerWorkspace, WorkspaceFactory,
+    EndpointBudget, LocalRunner, ParticipantRegistry, WorkerWorkspace, WorkspaceFactory,
 };
-// Only named by the `participants` field/accessor, which are `#[cfg(test)]`
-// (see `Broker`) — nothing in the production path needs the live registry.
-#[cfg(test)]
-use chatty_protocol_gateway::participant::ParticipantRegistry;
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -54,13 +59,13 @@ impl LlmProvider for NoopProvider {
 }
 
 /// The gateway a `--broker` leader runs: an ephemeral HTTP port, a
-/// pid-suffixed participant socket, and `local-agent` behind it.
+/// pid-suffixed participant socket, and the virtual agents behind it.
 pub struct Broker {
     /// The ephemeral port `invoke_agent`/`list_agents` reach it on.
     pub port: u16,
     socket: PathBuf,
     // Only read by the test-only `participants()` accessor below; the
-    // runner it was built for already holds its own clone.
+    // runners it was built for already hold their own clone.
     #[cfg(test)]
     participants: ParticipantRegistry,
     server: JoinHandle<()>,
@@ -70,40 +75,49 @@ pub struct Broker {
 impl Broker {
     /// `workspace_dir` and `auto_approve` mirror the leader's own execution
     /// settings, exactly as the desktop passes its conversation's workspace
-    /// and approval mode to `broker_runner::local_runner`: a worker gets its
-    /// own `git worktree` under the same root, and inherits the same
-    /// no-human approval policy.
+    /// and approval mode to `broker_runner::local_runners`: a worker gets
+    /// its own `git worktree` under the same root, and inherits the same
+    /// no-human approval policy. `provider_flags` are the leader's own
+    /// `--ollama`/`--openai-compat-url`/`--api-key`, forwarded verbatim
+    /// (see [`provider_flags`]).
     pub async fn start(
         models: &[ModelConfig],
         providers: &[ProviderConfig],
         module_settings: &ModuleSettingsModel,
         workspace_dir: Option<String>,
         auto_approve: bool,
+        provider_flags: &[String],
     ) -> Result<Self> {
+        let mut common_args = Vec::new();
+        if auto_approve {
+            common_args.push("--auto-approve".to_string());
+        }
+        common_args.extend(provider_flags.iter().cloned());
+        let specs = resolve_virtual_agents(models, providers, module_settings, &common_args);
         Self::start_at(
             socket_path(),
-            models,
-            providers,
-            module_settings,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            specs,
             workspace_dir,
-            auto_approve,
         )
         .await
     }
 
-    /// As [`start`](Self::start), but the participant socket path is given
-    /// rather than derived from [`socket_path`]. `start` is the real seam
-    /// (one process, one pid, one path); this is the seam tests use so they
-    /// neither collide with each other — every test in one binary shares a
-    /// pid, so [`socket_path`] alone gives them all the same path — nor
-    /// write into the user's real runtime directory.
+    /// As [`start`](Self::start), but with the participant socket path, the
+    /// worker binary and the already-resolved agents given rather than
+    /// derived. `start` is the real seam (one process, one pid, one path,
+    /// the `chatty-tui` next to this binary); this is the seam tests use so
+    /// they neither collide with each other — every test in one binary
+    /// shares a pid, so [`socket_path`] alone gives them all the same path
+    /// — nor write into the user's real runtime directory, and so they can
+    /// spawn a stand-in binary that records its argv.
     pub(crate) async fn start_at(
         socket: PathBuf,
-        models: &[ModelConfig],
-        providers: &[ProviderConfig],
-        module_settings: &ModuleSettingsModel,
+        executable: PathBuf,
+        default_budget: usize,
+        specs: Vec<VirtualAgentSpec>,
         workspace_dir: Option<String>,
-        auto_approve: bool,
     ) -> Result<Self> {
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let registry = ModuleRegistry::new(provider, ResourceLimits::default())
@@ -119,32 +133,16 @@ impl Broker {
             participants.clone(),
         ));
 
-        let endpoint = chatty_core::services::worker_endpoint::resolve_worker_endpoint(
-            models,
-            providers,
-            module_settings,
-        )
-        .map(|(endpoint, limit)| {
-            let budget = EndpointBudget::new(module_settings.default_endpoint_budget)
-                .with_endpoint(&endpoint, limit);
-            (endpoint, budget)
-        });
-
-        let mut args: Vec<String> = Vec::new();
-        if auto_approve {
-            args.push("--auto-approve".to_string());
+        for runner in local_runners(
+            executable,
+            socket.clone(),
+            participants.clone(),
+            default_budget,
+            specs,
+            workspace_dir,
+        ) {
+            gateway = gateway.with_virtual_agent(Arc::new(runner));
         }
-        let mut runner =
-            LocalRunner::new(worker_executable(), socket.clone(), participants.clone())
-                .with_agent_name(LOCAL_AGENT_NAME)
-                .with_args(args);
-        if let Some(root) = workspace_dir {
-            runner = runner.with_workspace_factory(worktree_factory(root));
-        }
-        if let Some((endpoint, budget)) = endpoint {
-            runner = runner.with_endpoint_budget(endpoint, budget);
-        }
-        gateway = gateway.with_virtual_agent(Arc::new(runner));
 
         // `gateway.start()` binds its own listener from `self.port`, which
         // leaves no way to learn an OS-assigned port before it is needed
@@ -173,8 +171,8 @@ impl Broker {
     }
 
     /// The live participant registry, so a test can register a scripted
-    /// `local-agent` the same way `LocalRunner` would register a real one.
-    /// Nothing in `main.rs` needs this: the runner already holds its own
+    /// worker the same way `LocalRunner` would register a real one.
+    /// Nothing in `main.rs` needs this: the runners already hold their own
     /// clone (ADR-0011 C2), which is why this is test-only rather than
     /// `pub`.
     #[cfg(test)]
@@ -190,6 +188,70 @@ impl Broker {
         self.participant_listener.abort();
         chatty_protocol_gateway::participant::unbind(&self.socket);
     }
+}
+
+/// The leader's own provider flags, to forward to every worker (ADR-0011
+/// C10, Do item 4): a leader started with `--ollama`, `--openai-compat-url`
+/// or `--api-key` was configured by those flags and nothing else, and a
+/// child that does not get them has no provider at all — in a Harbor
+/// sandbox every delegation then fails and looks like "the leader never
+/// delegates". A leader configured by settings has none of these set and
+/// forwards nothing; the child reads the same config dir.
+pub fn provider_flags(
+    ollama: Option<&str>,
+    openai_compat_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if let Some(url) = ollama {
+        flags.push("--ollama".to_string());
+        flags.push(url.to_string());
+    }
+    if let Some(url) = openai_compat_url {
+        flags.push("--openai-compat-url".to_string());
+        flags.push(url.to_string());
+    }
+    if let Some(key) = api_key {
+        flags.push("--api-key".to_string());
+        flags.push(key.to_string());
+    }
+    flags
+}
+
+/// One `LocalRunner` per resolved agent, all metered on one shared budget
+/// so two agents on the same model server queue against each other and two
+/// on different servers do not (ADR-0011 C6/C10). Identical in shape to
+/// chatty-gpui's `broker_runner::local_runners`; the decisions it wraps
+/// are `chatty_core::services::virtual_agents`', made once for both.
+fn local_runners(
+    executable: PathBuf,
+    socket: PathBuf,
+    registry: ParticipantRegistry,
+    default_budget: usize,
+    specs: Vec<VirtualAgentSpec>,
+    workspace_dir: Option<String>,
+) -> Vec<LocalRunner> {
+    let mut budget = EndpointBudget::new(default_budget);
+    for (endpoint, limit) in specs.iter().filter_map(|spec| spec.endpoint.clone()) {
+        budget = budget.with_endpoint(endpoint, limit);
+    }
+
+    specs
+        .into_iter()
+        .map(|spec| {
+            let mut runner = LocalRunner::new(executable.clone(), socket.clone(), registry.clone())
+                .with_agent_name(spec.name)
+                .with_description(spec.description)
+                .with_args(spec.args);
+            if let Some(root) = workspace_dir.clone() {
+                runner = runner.with_workspace_factory(worktree_factory(root));
+            }
+            if let Some((endpoint, _)) = spec.endpoint {
+                runner = runner.with_endpoint_budget(endpoint, budget.clone());
+            }
+            runner
+        })
+        .collect()
 }
 
 /// Where children register: the runtime directory when there is one,
@@ -225,6 +287,7 @@ fn worktree_factory(workspace_root: String) -> WorkspaceFactory {
 mod tests {
     use super::*;
     use chatty_core::settings::models::providers_store::ProviderType;
+    use chatty_core::tools::LOCAL_AGENT_NAME;
 
     /// A socket path in its own temp dir: every test in this binary shares
     /// one pid, so [`socket_path`] alone would give them all the same path
@@ -237,13 +300,29 @@ mod tests {
         (dir, socket)
     }
 
+    /// The agents `start` would resolve for these settings, with the
+    /// default worker binary — what every production `--broker` gets.
+    fn default_specs(
+        models: &[ModelConfig],
+        providers: &[ProviderConfig],
+        module_settings: &ModuleSettingsModel,
+    ) -> Vec<VirtualAgentSpec> {
+        resolve_virtual_agents(models, providers, module_settings, &[])
+    }
+
     #[tokio::test]
     async fn starts_on_an_ephemeral_port_with_no_workspace_or_models() {
         let module_settings = ModuleSettingsModel::default();
         let (_dir, socket) = test_socket();
-        let broker = Broker::start_at(socket, &[], &[], &module_settings, None, false)
-            .await
-            .expect("the broker starts with nothing configured");
+        let broker = Broker::start_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            None,
+        )
+        .await
+        .expect("the broker starts with nothing configured");
         assert_ne!(broker.port, 0, "an ephemeral port was actually assigned");
         broker.shutdown();
     }
@@ -282,12 +361,23 @@ mod tests {
         )];
         let (_dir, socket) = test_socket();
 
+        let specs = default_specs(&models, &[provider], &module_settings);
+        assert_eq!(
+            specs[0].endpoint,
+            Some(("http://localhost:11434".to_string(), 2))
+        );
         // Not asserting on the runner's internals (private to the gateway
         // crate) — this just pins that a configured model does not stop the
         // broker from starting.
-        let broker = Broker::start_at(socket, &models, &[provider], &module_settings, None, false)
-            .await
-            .expect("the broker starts with a resolvable endpoint");
+        let broker = Broker::start_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            specs,
+            None,
+        )
+        .await
+        .expect("the broker starts with a resolvable endpoint");
         broker.shutdown();
     }
 
@@ -295,7 +385,7 @@ mod tests {
     /// *no* worker ever having registered — `local-agent` is virtual, so
     /// nothing is in the participant registry until a task arrives, and the
     /// only thing standing behind `/a2a/local-agent/...` at that point is
-    /// `state.runner` (`handlers/a2a.rs::module_agent_card`). Replacing
+    /// `state.runners` (`handlers/a2a.rs::module_agent_card`). Replacing
     /// `gateway.with_virtual_agent(...)` with `drop(runner)` makes this
     /// fail with a 404, which is how this was confirmed to actually pin
     /// runner registration rather than passing vacuously.
@@ -303,9 +393,15 @@ mod tests {
     async fn the_runner_serves_local_agents_card_with_no_worker_registered() {
         let module_settings = ModuleSettingsModel::default();
         let (_dir, socket) = test_socket();
-        let broker = Broker::start_at(socket, &[], &[], &module_settings, None, false)
-            .await
-            .expect("the broker starts");
+        let broker = Broker::start_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            None,
+        )
+        .await
+        .expect("the broker starts");
 
         let client = chatty_core::services::http_client::default_client(5);
         let url = format!(
@@ -329,5 +425,20 @@ mod tests {
         assert_eq!(card["name"], LOCAL_AGENT_NAME);
 
         broker.shutdown();
+    }
+
+    /// Do item 4: a flag-configured leader forwards exactly its provider
+    /// flags; a settings-configured one forwards nothing.
+    #[test]
+    fn provider_flags_are_forwarded_verbatim_and_only_when_set() {
+        assert!(provider_flags(None, None, None).is_empty());
+        assert_eq!(
+            provider_flags(Some("http://localhost:11434"), None, None),
+            vec!["--ollama", "http://localhost:11434"]
+        );
+        assert_eq!(
+            provider_flags(None, Some("http://x"), Some("k")),
+            vec!["--openai-compat-url", "http://x", "--api-key", "k"]
+        );
     }
 }

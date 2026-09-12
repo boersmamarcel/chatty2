@@ -91,9 +91,10 @@ pub struct InvokeAgentTool {
     client: A2aClient,
     /// Shared slot for sending progress events to the UI stream loop.
     progress_slot: InvokeAgentProgressSlot,
-    /// Name of the broker's local-worker agent, when one is published
-    /// (ADR-0011 C2). Resolved after remote agents and before modules.
-    local_agent: Option<String>,
+    /// Names of the broker's local-worker agents, when any are published
+    /// (ADR-0011 C2; a named team of them under C10). Resolved after remote
+    /// agents and before modules.
+    local_agents: Vec<String>,
     /// Whether to say something before handing a prompt to an agent outside
     /// this user's fleet (ADR-0011 C5).
     warn_outside_fleet: bool,
@@ -120,7 +121,7 @@ impl InvokeAgentTool {
             gateway_base_url,
             client: A2aClient::for_delegation(),
             progress_slot: Arc::new(Mutex::new(None)),
-            local_agent: None,
+            local_agents: Vec::new(),
             warn_outside_fleet: false,
             clarifications: None,
         }
@@ -135,11 +136,16 @@ impl InvokeAgentTool {
         self
     }
 
-    /// Offer the broker's local-worker agent (ADR-0011 C2), which spawns a
-    /// chatty child per task. Only meaningful when the gateway is running,
-    /// since that is what serves it.
-    pub fn with_local_agent(mut self, name: impl Into<String>) -> Self {
-        self.local_agent = Some(name.into());
+    /// Offer the broker's local-worker agents (ADR-0011 C2), each of which
+    /// spawns a chatty child per task — `local-agent`, or the names module
+    /// settings declare (C10). Only meaningful when the gateway is running,
+    /// since that is what serves them.
+    pub fn with_local_agents<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.local_agents = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -266,13 +272,14 @@ impl Tool for InvokeAgentTool {
             return self.call_streaming(config, &prompt).await;
         }
 
-        // 2. The broker's local worker: a chatty child in its own process.
-        //    Ahead of modules, so a module cannot claim its reserved name
-        //    by accident.
+        // 2. The broker's local workers: a chatty child in its own process.
+        //    Ahead of modules, so a module cannot claim a worker's name by
+        //    accident.
         if let Some(local) = self
-            .local_agent
-            .as_deref()
-            .filter(|local| **local == agent_name)
+            .local_agents
+            .iter()
+            .map(String::as_str)
+            .find(|local| *local == agent_name)
         {
             let Some(ref base_url) = self.gateway_base_url else {
                 return Err(InvokeAgentError::InvocationFailed(format!(
@@ -339,7 +346,7 @@ impl Tool for InvokeAgentTool {
             .remote_agents
             .iter()
             .map(|a| a.name.clone())
-            .chain(self.local_agent.clone())
+            .chain(self.local_agents.iter().cloned())
             .chain(self.module_agents.iter().map(|m| m.name.clone()))
             .collect();
 

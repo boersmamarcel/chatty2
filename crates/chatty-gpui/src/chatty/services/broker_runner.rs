@@ -1,23 +1,26 @@
-//! Wiring the broker's local runner into the desktop's protocol gateway
-//! (ADR-0011 C2 / AGE-301).
+//! Wiring the broker's local runners into the desktop's protocol gateway
+//! (ADR-0011 C2 / AGE-301; named virtual agents, C10 / AGE-377).
 //!
 //! The gateway is started by the module-settings controller. This adds the
 //! two things that turn it into a fleet broker: a Unix socket children
-//! register on, and the `local-agent` virtual agent that spawns one per task.
+//! register on, and the virtual agents — `local-agent`, or the named team
+//! `module_settings.virtual_agents` declares — that spawn one child per
+//! task.
 //!
 //! Nothing here decides *what* a worker does — the child is `chatty-tui` in
-//! participant mode, running the same session the desktop does. The only
-//! decisions are where the socket lives, where a worker runs, and how many
-//! of them may run at once against one model server (ADR-0011 C6).
+//! participant mode, running the same session the desktop does, and which
+//! model and tools each named agent's children get is
+//! `chatty_core::services::virtual_agents`' decision, shared with
+//! chatty-tui's `--broker`. The only decisions here are where the socket
+//! lives, where a worker runs, and how the per-endpoint budget (ADR-0011
+//! C6) is wrapped.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chatty_core::services::virtual_agents::VirtualAgentSpec;
 use chatty_core::services::worker_tree;
-use chatty_core::settings::models::ModuleSettingsModel;
-use chatty_core::settings::models::models_store::ModelsModel;
-use chatty_core::settings::models::providers_store::ProviderModel;
-use chatty_core::tools::{LOCAL_AGENT_NAME, worker_executable};
+use chatty_core::tools::worker_executable;
 use chatty_protocol_gateway::participant::{
     EndpointBudget, LocalRunner, ParticipantRegistry, WorkerWorkspace, WorkspaceFactory,
 };
@@ -36,69 +39,49 @@ pub fn socket_path() -> PathBuf {
         .join("participants.sock")
 }
 
-/// The model endpoint every worker will share, and the budget that meters it
-/// (ADR-0011 C6).
-///
-/// A worker resolves its own model exactly as `chatty-tui` does when it is
-/// spawned without `--model`: the first model in the roster. So the endpoint
-/// to meter is that model's provider's, and a desktop with no model
-/// configured has nothing to meter — the delegation would fail in the child
-/// anyway.
-///
-/// The size is the provider's own parallel-request setting where it is
-/// known, an explicit per-endpoint override where there is one, and
-/// otherwise the configured default of one.
-pub fn worker_endpoint(
-    models: &ModelsModel,
-    providers: &ProviderModel,
-    module_settings: &ModuleSettingsModel,
-) -> Option<(String, EndpointBudget)> {
-    let (endpoint, limit) = chatty_core::services::worker_endpoint::resolve_worker_endpoint(
-        models.models(),
-        providers.providers(),
-        module_settings,
-    )?;
-    info!(
-        endpoint = %endpoint,
-        limit,
-        "Metering the broker's workers on their model endpoint"
-    );
-
-    let budget = EndpointBudget::new(module_settings.default_endpoint_budget)
-        .with_endpoint(&endpoint, limit);
-    Some((endpoint, budget))
-}
-
-/// The runner the gateway publishes as `local-agent`.
+/// The runners the gateway publishes, one per resolved virtual agent.
 ///
 /// `workspace_dir` is the conversation's workspace root; each worker gets a
 /// `git worktree` under it (ADR-0012). Without one — or when it is not a git
 /// repository — workers share the desktop's tree, as they did before AGE-314.
-/// `endpoint` is [`worker_endpoint`]'s answer: without one the runner spawns
-/// as many workers at once as it is asked to.
-pub fn local_runner(
+/// Every runner with an endpoint is metered on one shared budget, so two
+/// agents on the same model server queue against each other and two on
+/// different servers do not (ADR-0011 C6/C10); `default_budget` sizes an
+/// endpoint nothing more specific is known about.
+pub fn local_runners(
     registry: ParticipantRegistry,
     socket: PathBuf,
     workspace_dir: Option<String>,
-    auto_approve: bool,
-    endpoint: Option<(String, EndpointBudget)>,
-) -> LocalRunner {
-    let mut args: Vec<String> = Vec::new();
-    if auto_approve {
-        args.push("--auto-approve".to_string());
+    default_budget: usize,
+    specs: Vec<VirtualAgentSpec>,
+) -> Vec<LocalRunner> {
+    let mut budget = EndpointBudget::new(default_budget);
+    for (endpoint, limit) in specs.iter().filter_map(|spec| spec.endpoint.clone()) {
+        info!(
+            endpoint = %endpoint,
+            limit,
+            "Metering the broker's workers on their model endpoint"
+        );
+        budget = budget.with_endpoint(endpoint, limit);
     }
 
-    let mut runner = LocalRunner::new(worker_executable(), socket, registry)
-        .with_agent_name(LOCAL_AGENT_NAME)
-        .with_args(args);
-
-    if let Some(root) = workspace_dir {
-        runner = runner.with_workspace_factory(worktree_factory(root));
-    }
-    if let Some((endpoint, budget)) = endpoint {
-        runner = runner.with_endpoint_budget(endpoint, budget);
-    }
-    runner
+    specs
+        .into_iter()
+        .map(|spec| {
+            let mut runner =
+                LocalRunner::new(worker_executable(), socket.clone(), registry.clone())
+                    .with_agent_name(spec.name)
+                    .with_description(spec.description)
+                    .with_args(spec.args);
+            if let Some(root) = workspace_dir.clone() {
+                runner = runner.with_workspace_factory(worktree_factory(root));
+            }
+            if let Some((endpoint, _)) = spec.endpoint {
+                runner = runner.with_endpoint_budget(endpoint, budget.clone());
+            }
+            runner
+        })
+        .collect()
 }
 
 /// Give each worker its own `git worktree`, and commit what it leaves behind.

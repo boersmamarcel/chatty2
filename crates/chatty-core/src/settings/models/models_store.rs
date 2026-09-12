@@ -252,6 +252,33 @@ impl Default for ModelsModel {
     }
 }
 
+/// The model a `chatty-tui` process runs for `query`, which is what its
+/// `--model` flag carries: an exact id, then a case-insensitive name, then a
+/// substring of the model identifier. Without a query, the model marked
+/// default, else the roster's first. `None` only when the query matches
+/// nothing (or the roster is empty).
+///
+/// One definition, because the broker meters a worker on the endpoint of
+/// the model that worker will actually run (ADR-0011 C6/C10), and that is
+/// decided by the child's own `--model` resolution.
+pub fn resolve_model_query<'a>(
+    models: &'a [ModelConfig],
+    query: Option<&str>,
+) -> Option<&'a ModelConfig> {
+    match query {
+        Some(query) => models
+            .iter()
+            .find(|m| m.id == query)
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.name.to_lowercase() == query.to_lowercase())
+            })
+            .or_else(|| models.iter().find(|m| m.model_identifier.contains(query))),
+        None => models.iter().find(|m| m.is_default).or(models.first()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

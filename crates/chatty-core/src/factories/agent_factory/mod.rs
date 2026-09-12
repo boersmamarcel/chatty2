@@ -223,6 +223,7 @@ impl AgentClient {
             embedding_service,
             module_agents,
             gateway_port,
+            local_agents,
             remote_agents,
             conversation_id,
         } = ctx;
@@ -1079,17 +1080,20 @@ impl AgentClient {
         // times out, so the model must not see the tool at all.
         let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
 
-        // The broker's local worker exists exactly when the gateway that
-        // serves it does (ADR-0011 C2); the gateway publishes it whenever it
-        // starts, so its port is the whole condition.
-        let local_agent = gateway_port.map(|_| crate::tools::LOCAL_AGENT_NAME);
+        // The broker's local workers exist exactly when the gateway that
+        // serves them does (ADR-0011 C2); the gateway publishes them
+        // whenever it starts, so its port is the whole condition. Which
+        // names there are is module settings' decision (C10).
+        let local_agents: Vec<String> = if gateway_port.is_some() {
+            local_agents
+        } else {
+            Vec::new()
+        };
 
         // Create list_agents tool (always available)
         let mut list_agents_tool =
-            ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone());
-        if let Some(name) = local_agent {
-            list_agents_tool = list_agents_tool.with_local_worker(name);
-        }
+            ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone())
+                .with_local_workers(local_agents.iter().cloned());
         // With a gateway there is a live participant table to read, not just
         // the settings snapshot (ADR-0011 C5).
         if let Some(port) = gateway_port {
@@ -1098,10 +1102,8 @@ impl AgentClient {
 
         // Create invoke_agent tool (always available)
         let mut invoke_agent_tool =
-            InvokeAgentTool::new(remote_agents, module_agents, gateway_port);
-        if let Some(name) = local_agent {
-            invoke_agent_tool = invoke_agent_tool.with_local_agent(name);
-        }
+            InvokeAgentTool::new(remote_agents, module_agents, gateway_port)
+                .with_local_agents(local_agents);
         invoke_agent_tool = invoke_agent_tool.with_external_agent_warning(
             exec_settings
                 .as_ref()
