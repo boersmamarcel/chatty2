@@ -207,6 +207,14 @@ pub struct ArtifactView {
     /// instead of just scaling a static-size capture up. `(0, 0)` before
     /// the first screencast frame's bounds are known.
     browser_requested_size: (u32, u32),
+    /// Geometry of the frame currently on screen (AGE-379): the raster's
+    /// pixel size and the CSS viewport it shows, from the frame's own
+    /// metadata. Click mapping goes through this rather than through
+    /// `browser_requested_size`, which is only what the viewport was last
+    /// *asked* to be — during the resize debounce, after a refused retarget,
+    /// or when Chrome downscales the raster, the two disagree and every
+    /// click would land off-target.
+    browser_frame_geometry: Option<FrameGeometry>,
     /// The in-flight debounced CDP retarget, if any (AGE-156). Replacing
     /// this drops (and so cancels, per GPUI's `Task`) whatever retarget
     /// was previously scheduled — see `sync_browser_viewport_size`.
@@ -285,6 +293,7 @@ impl ArtifactView {
             browser_current_url: String::new(),
             browser_address_dirty: false,
             browser_requested_size: (0, 0),
+            browser_frame_geometry: None,
             browser_resize_task: None,
             workspace_root: None,
             load_gen: 0,
@@ -594,16 +603,24 @@ impl ArtifactView {
                     // waiting rather than repainting for no reason.
                     ScreencastUpdate::Starting => continue,
                     ScreencastUpdate::Frame(frame) => {
-                        BrowserPreview::Frame(render_image_from_rgba(&frame))
+                        let geometry = FrameGeometry::from(&frame);
+                        (
+                            BrowserPreview::Frame(render_image_from_rgba(&frame)),
+                            Some(geometry),
+                        )
                     }
-                    ScreencastUpdate::Error(message) => BrowserPreview::Error(message),
+                    ScreencastUpdate::Error(message) => (BrowserPreview::Error(message), None),
                 };
+                let (next, geometry) = next;
                 let superseded = this
                     .update(cx, |this, cx| {
                         if this.load_gen != load_id {
                             return true;
                         }
                         this.browser = next;
+                        if geometry.is_some() {
+                            this.browser_frame_geometry = geometry;
+                        }
                         cx.notify();
                         false
                     })
@@ -631,6 +648,7 @@ impl ArtifactView {
         self.browser_current_url.clear();
         self.browser_address_dirty = true;
         self.browser_requested_size = (0, 0);
+        self.browser_frame_geometry = None;
         self.browser_resize_task = None;
         // Dropping the senders ends the drain loops (AGE-156) — their
         // `.recv()` returns `None` once every sender is gone.
@@ -1411,47 +1429,74 @@ fn render_image_from_rgba(frame: &ScreencastFrame) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
+/// What the frame on screen is: its raster size and the CSS viewport it
+/// shows (AGE-379). The two differ whenever Chrome downscaled the raster to
+/// the screencast's `maxWidth`/`maxHeight`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameGeometry {
+    width: f32,
+    height: f32,
+    css_width: f64,
+    css_height: f64,
+}
+
+impl From<&ScreencastFrame> for FrameGeometry {
+    fn from(frame: &ScreencastFrame) -> Self {
+        Self {
+            width: frame.width as f32,
+            height: frame.height as f32,
+            css_width: frame.css_width,
+            css_height: frame.css_height,
+        }
+    }
+}
+
 /// Map a window-relative position to CDP viewport space (AGE-156), honoring
-/// the same "contain" letterbox math the rendered `img()` uses — the frame
-/// is displayed at `w_full()` with `object_fit(Contain)`, so the actual
-/// image occupies a centered sub-rect of the container whenever the
-/// container's aspect ratio doesn't match the capture's. `None` for a
-/// position that lands in the letterbox padding rather than the image.
+/// the same "contain" letterbox math the frame is painted with — the raster
+/// occupies a centered sub-rect of the container whenever the container's
+/// aspect ratio doesn't match the capture's. `None` for a position that
+/// lands in the letterbox padding rather than the image.
 ///
-/// `viewport` is whatever the CDP screencast is actually sized to right
-/// now — `browser_requested_size`, kept in sync with the panel's real
-/// dimensions by `sync_browser_viewport_size` — not a fixed constant, so
-/// this stays correct as the artifact panel resizes.
+/// `frame` is the frame actually on screen, not the size the viewport was
+/// last asked for (AGE-379): the letterbox follows the raster's aspect,
+/// and the raster maps onto the CSS viewport Chrome reported with it. That
+/// stays exact through a resize debounce, a refused retarget, or a raster
+/// Chrome downscaled — every case where the requested size lies.
 ///
-/// Both `gpui::Pixels` and CDP's `x`/`y` are already device-independent
-/// ("CSS") pixels — the screencast is started with `device_scale_factor:
-/// 1.0` — so nothing here needs to know the display's DPI scale factor.
+/// `gpui::Pixels` are device-independent, as are CDP's CSS `x`/`y`, so the
+/// display's DPI scale factor never enters here.
 fn browser_viewport_position(
     bounds: Bounds<Pixels>,
     position: Point<Pixels>,
-    viewport: (u32, u32),
+    frame: FrameGeometry,
 ) -> Option<(f64, f64)> {
     let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if bw <= 0.0 || bh <= 0.0 {
         return None;
     }
-    let (vw, vh) = (viewport.0 as f32, viewport.1 as f32);
-    if vw <= 0.0 || vh <= 0.0 {
+    let (fw, fh) = (frame.width, frame.height);
+    if fw <= 0.0 || fh <= 0.0 || frame.css_width <= 0.0 || frame.css_height <= 0.0 {
         return None;
     }
-    let scale = (bw / vw).min(bh / vh);
+    let scale = (bw / fw).min(bh / fh);
     if scale <= 0.0 {
         return None;
     }
-    let (dw, dh) = (vw * scale, vh * scale);
+    let (dw, dh) = (fw * scale, fh * scale);
     let (ox, oy) = ((bw - dw) / 2.0, (bh - dh) / 2.0);
     let local_x = f32::from(position.x) - bx - ox;
     let local_y = f32::from(position.y) - by - oy;
     if local_x < 0.0 || local_y < 0.0 || local_x > dw || local_y > dh {
         return None;
     }
-    Some(((local_x / scale) as f64, (local_y / scale) as f64))
+    // Displayed pixels → raster pixels → CSS pixels.
+    let raster_x = f64::from(local_x / scale);
+    let raster_y = f64::from(local_y / scale);
+    Some((
+        raster_x * (frame.css_width / f64::from(fw)),
+        raster_y * (frame.css_height / f64::from(fh)),
+    ))
 }
 
 fn browser_modifiers(modifiers: Modifiers) -> InputModifiers {
@@ -1502,7 +1547,7 @@ fn browser_rendered_body(
     browser: &BrowserPreview,
     control: ControlHolder,
     frame_bounds: Rc<RefCell<Bounds<Pixels>>>,
-    viewport: (u32, u32),
+    geometry: Option<FrameGeometry>,
     focus: FocusHandle,
     address: &Entity<InputState>,
     entity: Entity<ArtifactView>,
@@ -1575,10 +1620,14 @@ fn browser_rendered_body(
                     }
                 })
                 .into_any_element(),
+            // The button is the thing that resumes the task (AGE-379): a
+            // release with no turn running sends the agent a message naming
+            // the page the user left it on, so it re-snapshots and continues.
             ControlHolder::User => Button::new("artifact-browser-release-control")
                 .ghost()
                 .small()
-                .label("Release control")
+                .label("Hand back & continue")
+                .tooltip("Give the browser back to the agent and let it continue from this page")
                 .on_click({
                     let entity = entity.clone();
                     move |_, _, cx| {
@@ -1610,6 +1659,16 @@ fn browser_rendered_body(
             .into_any_element(),
         BrowserPreview::Frame(image) => {
             let bounds_for_prepaint = frame_bounds.clone();
+            let frame_image = image.clone();
+            let corner_radius = cx.theme().radius;
+            // The frame is painted by hand from the canvas that also records
+            // its bounds, so the letterbox the user sees and the letterbox
+            // `browser_viewport_position` maps clicks through come from one
+            // rect (AGE-379). It used to be an `img().object_fit(Contain)`
+            // sibling, which in `ArtifactMode::Full` laid out but painted
+            // nothing — the canvas next to it still painted, and the same
+            // frame painted fine once the panel was docked again; not
+            // root-caused inside gpui — so Full mode was a blank panel.
             let mut container = div()
                 .id("artifact-browser-frame")
                 .relative()
@@ -1622,22 +1681,32 @@ fn browser_rendered_body(
                         move |bounds, _window, _cx| {
                             *bounds_for_prepaint.borrow_mut() = bounds;
                         },
-                        |_, _, _, _| {},
+                        move |bounds, _, window, _| {
+                            let fitted = ObjectFit::Contain.get_bounds(bounds, frame_image.size(0));
+                            let corners =
+                                Corners::all(corner_radius).clamp_radii_for_quad_size(fitted.size);
+                            if let Err(e) =
+                                window.paint_image(fitted, corners, frame_image.clone(), 0, false)
+                            {
+                                tracing::warn!(error = %e, "browser: painting the frame failed");
+                            }
+                        },
                     )
                     .absolute()
                     .size_full(),
-                )
-                .child(
-                    img(image.clone())
-                        .w_full()
-                        .h_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded_md(),
                 );
 
             // Input forwarding (AGE-156) only listens while the user holds
             // control — with the agent driving, the frame behaves like a
             // plain image and never steals the mouse or the keyboard.
+            // A `Frame` always has geometry; the fallback only keeps the
+            // handlers total.
+            let geometry = geometry.unwrap_or(FrameGeometry {
+                width: image.size(0).width.0 as f32,
+                height: image.size(0).height.0 as f32,
+                css_width: f64::from(image.size(0).width.0),
+                css_height: f64::from(image.size(0).height.0),
+            });
             if control == ControlHolder::User {
                 container = container
                     .track_focus(&focus)
@@ -1650,7 +1719,7 @@ fn browser_rendered_body(
                             let Some((x, y)) = browser_viewport_position(
                                 *bounds.borrow(),
                                 event.position,
-                                viewport,
+                                geometry,
                             ) else {
                                 return;
                             };
@@ -1679,7 +1748,7 @@ fn browser_rendered_body(
                             let Some((x, y)) = browser_viewport_position(
                                 *bounds.borrow(),
                                 event.position,
-                                viewport,
+                                geometry,
                             ) else {
                                 return;
                             };
@@ -1708,7 +1777,7 @@ fn browser_rendered_body(
                             let Some((x, y)) = browser_viewport_position(
                                 *bounds.borrow(),
                                 event.position,
-                                viewport,
+                                geometry,
                             ) else {
                                 return;
                             };
@@ -1730,7 +1799,7 @@ fn browser_rendered_body(
                             let Some((x, y)) = browser_viewport_position(
                                 *bounds.borrow(),
                                 event.position,
-                                viewport,
+                                geometry,
                             ) else {
                                 return;
                             };
@@ -2203,7 +2272,7 @@ impl Render for ArtifactView {
         let browser = self.browser.clone();
         let browser_control = self.browser_control;
         let browser_frame_bounds = self.browser_frame_bounds.clone();
-        let browser_viewport = self.browser_requested_size;
+        let browser_geometry = self.browser_frame_geometry;
         let browser_focus = self.browser_focus.clone();
         let browser_address = self.browser_address.clone();
         let has_diff = !old.is_empty() && old != source;
@@ -2256,7 +2325,7 @@ impl Render for ArtifactView {
                     &browser,
                     browser_control,
                     browser_frame_bounds,
-                    browser_viewport,
+                    browser_geometry,
                     browser_focus,
                     &browser_address,
                     entity.clone(),
@@ -2818,5 +2887,128 @@ mod address_bar_tests {
         );
         assert_eq!(normalize_address_bar_url("   "), "");
         assert_eq!(normalize_address_bar_url(""), "");
+    }
+}
+
+#[cfg(test)]
+mod browser_viewport_position_tests {
+    use super::{FrameGeometry, browser_viewport_position};
+    use gpui::{Bounds, Pixels, Point, point, px, size};
+
+    fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(w), px(h)),
+        }
+    }
+
+    fn at(x: f32, y: f32) -> Point<Pixels> {
+        point(px(x), px(y))
+    }
+
+    fn frame(width: f32, height: f32, css_width: f64, css_height: f64) -> FrameGeometry {
+        FrameGeometry {
+            width,
+            height,
+            css_width,
+            css_height,
+        }
+    }
+
+    fn assert_close(actual: Option<(f64, f64)>, expected: (f64, f64)) {
+        let (x, y) = actual.expect("position lands on the frame");
+        assert!(
+            (x - expected.0).abs() < 0.01 && (y - expected.1).abs() < 0.01,
+            "got ({x}, {y}), expected {expected:?}"
+        );
+    }
+
+    /// The frame fills the container: window pixels map one to one.
+    #[test]
+    fn a_frame_that_fills_the_container_maps_one_to_one() {
+        let f = frame(800.0, 600.0, 800.0, 600.0);
+        assert_close(
+            browser_viewport_position(bounds(100.0, 50.0, 800.0, 600.0), at(500.0, 350.0), f),
+            (400.0, 300.0),
+        );
+    }
+
+    /// A 4:3 frame in a wide container is centred with bars left and
+    /// right; a click in a bar is not a click on the page.
+    #[test]
+    fn a_letterboxed_frame_maps_through_its_own_aspect() {
+        let f = frame(800.0, 600.0, 800.0, 600.0);
+        // 1000x600 container: the frame shows at 800x600 with 100px bars.
+        let b = bounds(0.0, 0.0, 1000.0, 600.0);
+        assert_eq!(browser_viewport_position(b, at(50.0, 300.0), f), None);
+        assert_close(browser_viewport_position(b, at(100.0, 0.0), f), (0.0, 0.0));
+        assert_close(
+            browser_viewport_position(b, at(500.0, 300.0), f),
+            (400.0, 300.0),
+        );
+        assert_close(
+            browser_viewport_position(b, at(900.0, 600.0), f),
+            (800.0, 600.0),
+        );
+    }
+
+    /// Chrome downscaled the raster to `maxWidth`: 400x300 pixels showing an
+    /// 800x600 CSS viewport. A click on the raster still lands on the CSS
+    /// point it shows.
+    #[test]
+    fn a_frame_smaller_than_its_viewport_scales_back_to_css_pixels() {
+        let f = frame(400.0, 300.0, 800.0, 600.0);
+        assert_close(
+            browser_viewport_position(bounds(0.0, 0.0, 400.0, 300.0), at(100.0, 75.0), f),
+            (200.0, 150.0),
+        );
+        // Displayed larger than the raster, too.
+        assert_close(
+            browser_viewport_position(bounds(0.0, 0.0, 800.0, 600.0), at(200.0, 150.0), f),
+            (200.0, 150.0),
+        );
+    }
+
+    /// AGE-379: the panel was resized (or Full mode toggled) and the
+    /// requested viewport is already the new 1200x900, but the frame on
+    /// screen is still the old 600x450 capture stretched into the panel.
+    /// Mapping through the frame lands the click where the user sees it;
+    /// mapping through the requested size would halve every coordinate.
+    #[test]
+    fn a_stale_requested_size_does_not_move_the_click() {
+        let stale_frame = frame(600.0, 450.0, 600.0, 450.0);
+        let panel = bounds(0.0, 0.0, 1200.0, 900.0);
+        assert_close(
+            browser_viewport_position(panel, at(600.0, 450.0), stale_frame),
+            (300.0, 225.0),
+        );
+        // Once the retarget lands, the same window point is the same page
+        // point in the new viewport — no discontinuity for the user.
+        let fresh_frame = frame(1200.0, 900.0, 1200.0, 900.0);
+        assert_close(
+            browser_viewport_position(panel, at(600.0, 450.0), fresh_frame),
+            (600.0, 450.0),
+        );
+    }
+
+    #[test]
+    fn degenerate_geometry_maps_nothing() {
+        let b = bounds(0.0, 0.0, 800.0, 600.0);
+        assert_eq!(
+            browser_viewport_position(b, at(10.0, 10.0), frame(0.0, 600.0, 800.0, 600.0)),
+            None
+        );
+        assert_eq!(
+            browser_viewport_position(b, at(10.0, 10.0), frame(800.0, 600.0, 0.0, 600.0)),
+            None
+        );
+        assert_eq!(
+            browser_viewport_position(
+                bounds(0.0, 0.0, 0.0, 0.0),
+                at(0.0, 0.0),
+                frame(800.0, 600.0, 800.0, 600.0)
+            ),
+            None
+        );
     }
 }

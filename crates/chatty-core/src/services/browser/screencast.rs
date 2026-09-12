@@ -35,8 +35,19 @@ const JPEG_QUALITY: i64 = 70;
 /// One decoded screencast frame.
 #[derive(Clone)]
 pub struct ScreencastFrame {
+    /// Raster size of the decoded frame, in frame pixels.
     pub width: u32,
     pub height: u32,
+    /// The page viewport this frame shows, in CSS pixels — Chrome's
+    /// `deviceWidth`/`deviceHeight` frame metadata. Input forwarding
+    /// (AGE-156) maps a click in the displayed raster through *this*, not
+    /// through the size the viewport was last asked for: Chrome may still be
+    /// mid-retarget, may have refused the retarget, or may have scaled the
+    /// raster down to `maxWidth`/`maxHeight`, and in all three cases the
+    /// frame on screen is the only truth about where a click lands
+    /// (AGE-379).
+    pub css_width: f64,
+    pub css_height: f64,
     /// Tightly packed RGBA8, row-major. `Arc` so a `watch` clone is cheap.
     pub rgba: Arc<[u8]>,
 }
@@ -216,9 +227,20 @@ fn decode_frame(event: &EventScreencastFrame) -> Result<ScreencastFrame, Browser
         .map_err(|e| BrowserError::Protocol(format!("cannot decode screencast frame: {e}")))?
         .to_rgba8();
     let (width, height) = image.dimensions();
+    let metadata = &event.metadata;
+    // Chrome reports the CSS viewport alongside every frame. A frame whose
+    // metadata is missing or absurd (0 or negative) falls back to its own
+    // raster size, which is exact whenever the raster was not downscaled.
+    let (css_width, css_height) = if metadata.device_width > 0.0 && metadata.device_height > 0.0 {
+        (metadata.device_width, metadata.device_height)
+    } else {
+        (f64::from(width), f64::from(height))
+    };
     Ok(ScreencastFrame {
         width,
         height,
+        css_width,
+        css_height,
         rgba: Arc::from(image.into_raw()),
     })
 }
@@ -241,13 +263,21 @@ mod tests {
     }
 
     fn frame_event(data: String) -> EventScreencastFrame {
+        frame_event_with_device(data, 4.0, 3.0)
+    }
+
+    fn frame_event_with_device(
+        data: String,
+        device_width: f64,
+        device_height: f64,
+    ) -> EventScreencastFrame {
         EventScreencastFrame {
             data: data.into(),
             metadata: ScreencastFrameMetadata {
                 offset_top: 0.0,
                 page_scale_factor: 1.0,
-                device_width: 4.0,
-                device_height: 3.0,
+                device_width,
+                device_height,
                 scroll_offset_x: 0.0,
                 scroll_offset_y: 0.0,
                 timestamp: None,
@@ -263,6 +293,23 @@ mod tests {
         assert_eq!(frame.width, 4);
         assert_eq!(frame.height, 3);
         assert_eq!(frame.rgba.len(), 4 * 3 * 4);
+    }
+
+    /// AGE-379: the CSS viewport rides along with the raster. A raster
+    /// Chrome scaled down to `maxWidth` still maps back to CSS pixels.
+    #[test]
+    fn carries_the_css_viewport_from_frame_metadata() {
+        let event = frame_event_with_device(sample_jpeg_base64(4, 3), 800.0, 600.0);
+        let frame = decode_frame(&event).expect("decode");
+        assert_eq!((frame.width, frame.height), (4, 3));
+        assert_eq!((frame.css_width, frame.css_height), (800.0, 600.0));
+    }
+
+    #[test]
+    fn falls_back_to_the_raster_size_without_usable_metadata() {
+        let event = frame_event_with_device(sample_jpeg_base64(4, 3), 0.0, 0.0);
+        let frame = decode_frame(&event).expect("decode");
+        assert_eq!((frame.css_width, frame.css_height), (4.0, 3.0));
     }
 
     #[test]
