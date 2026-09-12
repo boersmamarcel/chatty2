@@ -143,7 +143,7 @@ impl RenderOnce for ErrorBlock {
                 .content(
                     div()
                         .text_xs()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_color(cx.theme().muted_foreground)
                         .p_2()
                         .child(detail),

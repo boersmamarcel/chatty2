@@ -111,7 +111,7 @@ impl RenderOnce for ToolRow {
                         .text_xs()
                         .min_w_0()
                         .truncate()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_color(cx.theme().muted_foreground)
                         .child(label.subject.clone()),
                 )

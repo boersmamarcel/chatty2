@@ -363,6 +363,13 @@ fn turn_fingerprint(
 /// items popping into place, without measuring history nobody is looking at.
 const TRANSCRIPT_OVERDRAW: Pixels = px(400.0);
 
+/// The list's own vertical insets. Named so the scroll policy can count them:
+/// gpui clamps the scroll top at content *plus padding* minus viewport but
+/// reports the scroll range without the padding (see
+/// [`scroll::distance_from_bottom`]).
+const TRANSCRIPT_TOP_PADDING: Pixels = px(16.0);
+const TRANSCRIPT_BOTTOM_PADDING: Pixels = px(48.0);
+
 /// Vertical separation between turns.
 ///
 /// Padding, not margin: `List` measures each item with `layout_as_root`, and a
@@ -1713,7 +1720,11 @@ impl ChatView {
         // first frame that drifts (AGE-180).
         let offset = self.transcript_list.scroll_px_offset_for_scrollbar();
         let max_offset = self.transcript_list.max_offset_for_scrollbar();
-        let distance_from_bottom = max_offset.height + offset.y;
+        let distance_from_bottom = scroll::distance_from_bottom(
+            max_offset.height,
+            offset.y,
+            TRANSCRIPT_TOP_PADDING + TRANSCRIPT_BOTTOM_PADDING,
+        );
         let measured = max_offset.height > px(0.0);
 
         let decision = scroll::resolve_scroll_state(
@@ -2062,8 +2073,8 @@ impl ChatView {
                                     entity.update(cx, |view, cx| view.render_turn(ix, window, cx))
                                 }
                             })
-                            .pt_4()
-                            .pb_12()
+                            .pt(TRANSCRIPT_TOP_PADDING)
+                            .pb(TRANSCRIPT_BOTTOM_PADDING)
                             .size_full(),
                         )
                         .when(overlay_open, |this| {

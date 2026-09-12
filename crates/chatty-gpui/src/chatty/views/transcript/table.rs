@@ -103,7 +103,7 @@ fn render_table_grid(
                                 .px_2()
                                 .py_1()
                                 .text_xs()
-                                .font_family("monospace")
+                                .font_family(cx.theme().mono_font_family.clone())
                                 .overflow_hidden()
                                 .child(cell.clone())
                         }))

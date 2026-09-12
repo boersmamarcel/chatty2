@@ -93,7 +93,7 @@ impl RenderOnce for DiffStatRow {
                     .flex_row()
                     .min_w_0()
                     .flex_1()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
                     .when(!dir.is_empty(), |this| {
                         this.child(div().text_color(cx.theme().muted_foreground).child(dir))
@@ -352,7 +352,7 @@ impl RenderOnce for DiffHunkList {
                     div()
                         .px_2()
                         .py_1()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(self.hunk.clone()),
@@ -394,7 +394,7 @@ fn render_diff_line(id: &str, i: usize, row: DiffRow, cx: &App) -> AnyElement {
         .flex_row()
         .w_full()
         .bg(bg)
-        .font_family("monospace")
+        .font_family(cx.theme().mono_font_family.clone())
         .text_xs()
         .px_1()
         .child(

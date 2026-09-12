@@ -168,7 +168,7 @@ impl RenderOnce for ArtifactCard {
                     .max_h(px(240.))
                     .overflow_hidden()
                     .bg(cx.theme().popover)
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(peek.clone())
@@ -218,7 +218,7 @@ impl RenderOnce for ArtifactCard {
                     })
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(file_name),
