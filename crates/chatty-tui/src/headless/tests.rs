@@ -225,6 +225,7 @@ mod runner {
                 provider_config: provider_config.clone(),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
+                broker_port: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,

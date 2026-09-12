@@ -98,11 +98,11 @@ impl HeadlessRunner {
                 search_settings: self.config.search_settings.clone(),
                 embedding_service: self.config.embedding_service.clone(),
                 module_agents: self.config.module_agents.clone(),
-                gateway_port: self
+                gateway_port: self.config.broker_port.or(self
                     .config
                     .module_settings
                     .enabled
-                    .then_some(self.config.module_settings.gateway_port),
+                    .then_some(self.config.module_settings.gateway_port)),
                 remote_agents: self.config.remote_agents.clone(),
             })
         };

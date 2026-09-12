@@ -444,6 +444,9 @@ valid with `--headless`, `--pipe` and the interactive TUI alike. Workspace isola
 the same `git worktree`-per-worker as the desktop when `--workspace` (or the persisted
 workspace) is a git repository. When the turn (or the session) ends the gateway stops
 serving; any worker still running is reaped by the runner the same way it always is.
+`--broker` never writes module settings: its ephemeral port lives only in this run's
+agent-build context, so `/modules` in the same session still saves exactly what was on
+disk (AGE-382).
 
 **Known limitation.** The worker's model is its own configured default, not the parent
 conversation's: the model would have to ride on the A2A request and A2A has no field
