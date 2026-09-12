@@ -431,6 +431,20 @@ a budget that is too tight looks like a queue that never empties.
 > A cloud endpoint gets the same default of 1 unless it is overridden. It is the knob
 > to turn first if delegation feels serialised on OpenRouter.
 
+**Headless leaders need `--broker` (AGE-376).** The wiring above is started by
+chatty-gpui's module-settings controller, so only the desktop had a `local-agent` to
+delegate to — a `chatty-tui --headless` or `--pipe` leader (and the harness-driven
+chatty behind a benchmark, e.g. the Harbor adapter, AGE-285) had none. `chatty-tui
+--broker` runs the same gateway and socket in-process: an ephemeral HTTP port, a
+participant socket suffixed with this leader's pid (so two headless leaders on one
+host never collide), and a `local-agent` `LocalRunner` sized against the same
+per-endpoint budget as the desktop. It carries no WASM module registry of its own —
+`--broker` exists to make `local-agent` reachable, not to load modules — and it is
+valid with `--headless`, `--pipe` and the interactive TUI alike. Workspace isolation is
+the same `git worktree`-per-worker as the desktop when `--workspace` (or the persisted
+workspace) is a git repository. When the turn (or the session) ends the gateway stops
+serving; any worker still running is reaped by the runner the same way it always is.
+
 **Known limitation.** The worker's model is its own configured default, not the parent
 conversation's: the model would have to ride on the A2A request and A2A has no field
 for it. Carried as an open question on AGE-301.

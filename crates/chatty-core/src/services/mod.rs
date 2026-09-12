@@ -61,6 +61,9 @@ pub mod stream_processor;
 pub mod title_generator;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;
+/// Which model endpoint the broker's workers share, and their budget on it
+/// (ADR-0011 C6 / AGE-376).
+pub mod worker_endpoint;
 /// ADR-0012 worker isolation: a `git worktree` per worker (AGE-314 / AGE-301).
 pub mod worker_tree;
 
