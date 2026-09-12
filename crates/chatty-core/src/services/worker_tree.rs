@@ -130,15 +130,18 @@ pub type ExitHook = Box<dyn FnOnce(bool) + Send>;
 
 /// [`create`] plus the commit-on-exit hook every caller wants: the whole
 /// body of a broker's git-worktree `WorkspaceFactory`, minus the wrapping
-/// into that type (AGE-376).
+/// into that type (AGE-376). Also returns [`merge_hint`], since a caller
+/// with a `WorkerTree` has everything needed to hand the leader the note
+/// naming the branch its output landed on (AGE-399).
 pub async fn create_with_commit_hook(
     workspace_root: &str,
     worker: &str,
-) -> Result<Option<(PathBuf, ExitHook)>> {
+) -> Result<Option<(PathBuf, String, ExitHook)>> {
     let Some(tree) = create(workspace_root, worker).await? else {
         return Ok(None);
     };
     let cwd = tree.path.clone();
+    let hint = merge_hint(&tree);
     let on_exit: ExitHook = Box::new(move |_succeeded| {
         // `on_exit` runs from the runner's `Drop`, which cannot await;
         // committing is a `git` subprocess, so it is spawned. The tree is
@@ -149,7 +152,7 @@ pub async fn create_with_commit_hook(
             commit(&tree, "delegated task").await;
         });
     });
-    Ok(Some((cwd, on_exit)))
+    Ok(Some((cwd, hint, on_exit)))
 }
 
 /// The sentence a leader is told so it knows the output is on a branch

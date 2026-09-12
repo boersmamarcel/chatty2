@@ -49,6 +49,11 @@ use super::virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
 pub struct WorkerWorkspace {
     /// The child's working directory, and the root its tools are confined to.
     pub cwd: PathBuf,
+    /// Appended to the worker's reported answer once its task ends — e.g.
+    /// naming the branch an isolated worktree committed to, so the leader
+    /// does not have to guess it (AGE-399). `None` when the workspace has
+    /// nothing to add.
+    pub merge_hint: Option<String>,
     /// Run after the worker exits, with whether its task succeeded. This is
     /// where ADR-0016's turn-commit barrier goes: a worker's output has to be
     /// durable before anything may remove the tree it lives in.
@@ -64,6 +69,7 @@ impl std::fmt::Debug for WorkerWorkspace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkerWorkspace")
             .field("cwd", &self.cwd)
+            .field("merge_hint", &self.merge_hint)
             .finish_non_exhaustive()
     }
 }
@@ -471,6 +477,10 @@ impl WorkerHandle for Worker {
     fn finish(&mut self, succeeded: bool, _metadata: Option<&Value>) {
         Worker::set_succeeded(self, succeeded)
     }
+
+    fn merge_hint(&self) -> Option<&str> {
+        self.workspace.as_ref()?.merge_hint.as_deref()
+    }
 }
 
 impl Drop for Worker {
@@ -637,6 +647,7 @@ mod tests {
                 Box::pin(async move {
                     Ok(Some(WorkerWorkspace {
                         cwd,
+                        merge_hint: None,
                         on_exit: Box::new(move |_| {
                             released.store(true, Ordering::Relaxed);
                         }),
