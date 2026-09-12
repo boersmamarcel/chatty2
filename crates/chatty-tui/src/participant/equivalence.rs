@@ -309,6 +309,166 @@ async fn a_dropped_tool_event_would_be_caught() {
 }
 
 // ---------------------------------------------------------------------------
+// The worker's branch reaches the parent (AGE-399)
+// ---------------------------------------------------------------------------
+
+mod merge_hint {
+    //! AGE-399's verification: `merge_hint` was defined and unit-tested but
+    //! had no caller, so a leader never learned which branch a delegated
+    //! worker's output landed on. Exercising it needs a real `LocalRunner`,
+    //! not the bare registered participant `broker_run` above uses — only a
+    //! runner's `WorkerWorkspace` carries a hint. The worker itself is still
+    //! the scripted stand-in `spawn_scripted_worker` sets up, registered
+    //! under the name the runner deterministically allocates its first
+    //! worker (`local-agent-0`).
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use chatty_core::services::{
+        StreamError, StreamErrorKind, install_progress_channel, scenarios,
+    };
+    use chatty_core::session::{SessionEvent, replay_scenario};
+    use chatty_core::tools::LOCAL_AGENT_NAME;
+    use chatty_core::tools::invoke_agent_tool::{
+        InvokeAgentArgs, InvokeAgentProgress, InvokeAgentTool,
+    };
+    use chatty_module_registry::ModuleRegistry;
+    use chatty_protocol_gateway::ProtocolGateway;
+    use chatty_protocol_gateway::participant::{LocalRunner, ParticipantRegistry, WorkerWorkspace};
+    use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
+    use rig_agent::tool::{Tool, ToolContext};
+    use tokio::sync::RwLock;
+
+    use super::{NoopProvider, assistant_text, policy, spawn_scripted_worker};
+
+    const HINT: &str = "\n\n[Worker output is on branch 'sub-agent/local-agent-0'.]";
+    const FIRST_WORKER: &str = "local-agent-0";
+
+    /// A gateway whose `local-agent` is a real `LocalRunner` with a
+    /// workspace factory that always hands its worker [`HINT`].
+    async fn start_runner_gateway(dir: &std::path::Path) -> (u16, ParticipantRegistry) {
+        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let modules = Arc::new(RwLock::new(
+            ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
+        ));
+        let gateway = ProtocolGateway::new(modules, 0);
+        let registry = gateway.participants();
+
+        let cwd = dir.to_path_buf();
+        let runner = LocalRunner::new(
+            "/bin/sh",
+            "/nonexistent/participants.sock",
+            registry.clone(),
+        )
+        .with_agent_name(LOCAL_AGENT_NAME)
+        .with_args(["-c", "sleep 30"])
+        .with_registration_timeout(Duration::from_secs(5))
+        .with_workspace_factory(Arc::new(move |_worker: String| {
+            let cwd = cwd.clone();
+            Box::pin(async move {
+                Ok(Some(WorkerWorkspace {
+                    cwd,
+                    merge_hint: Some(HINT.to_string()),
+                    on_exit: Box::new(|_| {}),
+                }))
+            })
+        }));
+        let gateway = gateway.with_virtual_agent(Arc::new(runner));
+
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        let router = gateway.build_router();
+        tokio::spawn(async move {
+            axum::serve(tcp, router).await.ok();
+        });
+
+        (port, registry)
+    }
+
+    /// The completed case: the branch reaches the model in the answer it
+    /// actually reads, not merely the transcript.
+    #[tokio::test]
+    async fn a_completed_delegation_reports_the_workers_branch_to_the_model() {
+        let dir = tempfile::tempdir().expect("a workspace dir");
+        let (port, registry) = start_runner_gateway(dir.path()).await;
+
+        let scenario = scenarios()
+            .into_iter()
+            .find(|s| s.name == "tool_call_then_result")
+            .expect("the scenario exists");
+        let events = replay_scenario(scenario, policy()).await;
+        spawn_scripted_worker(&registry, FIRST_WORKER, events.clone());
+
+        let tool =
+            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+        let result = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: LOCAL_AGENT_NAME.to_string(),
+                    prompt: "delegate this".to_string(),
+                },
+            )
+            .await
+            .expect("the delegation succeeds");
+
+        let answer: String = assistant_text(&events).concat();
+        assert_eq!(
+            result.response,
+            format!("{}{HINT}", answer.trim()),
+            "the branch the worker committed to must reach the model, not just the trace"
+        );
+    }
+
+    /// Do item 1's other half: a worker that fails still committed whatever
+    /// it had, so the hint must still reach the parent (here, its progress
+    /// trace — `InvokeAgentTool` does not hand a failed call's text to the
+    /// model at all, which is unrelated to this issue).
+    #[tokio::test]
+    async fn a_failed_delegation_still_reports_the_workers_branch() {
+        let dir = tempfile::tempdir().expect("a workspace dir");
+        let (port, registry) = start_runner_gateway(dir.path()).await;
+
+        let events = vec![SessionEvent::Error(StreamError {
+            kind: StreamErrorKind::Other,
+            message: "the worker crashed".to_string(),
+        })];
+        spawn_scripted_worker(&registry, FIRST_WORKER, events);
+
+        let tool =
+            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+        let mut progress_rx = install_progress_channel(&tool.progress_slot());
+
+        let result = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: LOCAL_AGENT_NAME.to_string(),
+                    prompt: "delegate this".to_string(),
+                },
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "the worker's own failure still fails the delegation"
+        );
+
+        let mut progress_text = String::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            if let InvokeAgentProgress::Text(text) = event {
+                progress_text.push_str(&text);
+            }
+        }
+        assert!(
+            progress_text.contains(HINT),
+            "a failed worker's partial edits are still on its branch, and the \
+             hint must say so: {progress_text:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Named virtual agents (ADR-0011 C10 / AGE-377)
 // ---------------------------------------------------------------------------
 

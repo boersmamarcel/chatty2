@@ -50,6 +50,14 @@ pub trait WorkerHandle: Send {
     /// What that buys depends on the worker: a committed worktree locally, a
     /// billed lease hosted.
     fn finish(&mut self, succeeded: bool, metadata: Option<&Value>);
+
+    /// Text to append to the worker's reported answer, e.g. naming the
+    /// branch a local worktree committed to (AGE-399). `None` when there is
+    /// nothing to add — the default, and every worker whose workspace was
+    /// never isolated.
+    fn merge_hint(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// What [`VirtualAgent::run_task`] returns. Boxed by hand rather than through

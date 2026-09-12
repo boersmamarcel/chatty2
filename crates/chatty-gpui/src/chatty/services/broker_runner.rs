@@ -89,12 +89,16 @@ fn worktree_factory(workspace_root: String) -> WorkspaceFactory {
     Arc::new(move |worker: String| {
         let workspace_root = workspace_root.clone();
         Box::pin(async move {
-            let Some((cwd, on_exit)) =
+            let Some((cwd, merge_hint, on_exit)) =
                 worker_tree::create_with_commit_hook(&workspace_root, &worker).await?
             else {
                 return Ok(None);
             };
-            Ok(Some(WorkerWorkspace { cwd, on_exit }))
+            Ok(Some(WorkerWorkspace {
+                cwd,
+                merge_hint: Some(merge_hint),
+                on_exit,
+            }))
         })
     })
 }

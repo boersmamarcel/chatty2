@@ -254,6 +254,11 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     // un-parks its `ask_user` — the question dies with the task rather than
     // waiting out a timeout nobody is going to beat.
     task.finish(state == TaskState::Completed, metadata.as_ref());
+    // Appended whether the task succeeded or failed: a failed worker's
+    // partial edits are still on that branch (AGE-399).
+    if let Some(hint) = task.worker.as_ref().and_then(|w| w.merge_hint()) {
+        text.push_str(hint);
+    }
 
     let mut result = json!({
         "id": task.task_id,
@@ -318,21 +323,20 @@ fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
         while let Some(update) = task.updates.recv().await {
             match update {
                 TaskUpdate::Artifact { text, last_chunk } => {
-                    yield sse(&json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "id": task_id,
-                            "artifact": {
-                                "parts": [{ "type": "text", "text": text }],
-                                "index": 0,
-                                "lastChunk": last_chunk,
-                            }
-                        }
-                    }));
+                    yield sse(&artifact_event(&id, &task_id, &text, last_chunk));
                 }
                 TaskUpdate::Status { state, message, metadata, input } => {
                     let terminal = state.is_terminal();
+                    // Sent as an artifact chunk, ahead of the terminal status:
+                    // `A2aClient` stops reading the instant it sees a `final`
+                    // status, so anything after that point is never seen
+                    // (AGE-399). Sent whether the task succeeded or failed —
+                    // a failed worker's partial edits are still on that branch.
+                    if terminal
+                        && let Some(hint) = task.worker.as_ref().and_then(|w| w.merge_hint())
+                    {
+                        yield sse(&artifact_event(&id, &task_id, hint, true));
+                    }
                     yield sse(&status_event(
                         &id,
                         &task_id,
@@ -454,6 +458,21 @@ fn failed_stream(id: Option<Value>, task_id: &str, reason: String) -> Response {
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+fn artifact_event(id: &Option<Value>, task_id: &str, text: &str, last_chunk: bool) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "id": task_id,
+            "artifact": {
+                "parts": [{ "type": "text", "text": text }],
+                "index": 0,
+                "lastChunk": last_chunk,
+            }
+        }
+    })
 }
 
 fn status_event(
