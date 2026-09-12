@@ -242,6 +242,10 @@ pub enum ChatViewEvent {
     BrowserControlChanged {
         item: Box<crate::chatty::views::message_types::ToolCallBlock>,
         streaming: bool,
+        /// True for a take, false for a release (AGE-379): a release with no
+        /// turn running is what resumes the agent.
+        taken: bool,
+        url: String,
     },
 }
 

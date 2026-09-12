@@ -74,6 +74,8 @@ impl ChatView {
             cx.emit(ChatViewEvent::BrowserControlChanged {
                 item: Box::new(item),
                 streaming: true,
+                taken,
+                url: url.to_string(),
             });
         } else if let Some(idx) = self.parent_assistant_index() {
             let msg = &mut self.messages[idx];
@@ -95,6 +97,8 @@ impl ChatView {
             cx.emit(ChatViewEvent::BrowserControlChanged {
                 item: Box::new(item),
                 streaming: false,
+                taken,
+                url: url.to_string(),
             });
         } else {
             debug!(

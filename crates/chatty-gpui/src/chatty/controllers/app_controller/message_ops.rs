@@ -1159,9 +1159,11 @@ impl ChattyApp {
     /// the stream's own finalization persists; once the turn has settled it
     /// is appended to the last assistant message and saved right away.
     pub(super) fn handle_browser_control_changed(
-        &self,
+        &mut self,
         item: ToolCallBlock,
         streaming: bool,
+        taken: bool,
+        url: String,
         cx: &mut Context<Self>,
     ) {
         let Some(conv_id) = cx.global::<ConversationsStore>().active_id().cloned() else {
@@ -1180,6 +1182,20 @@ impl ChattyApp {
         });
         if recorded {
             self.persist_conversation(&conv_id, cx);
+        }
+
+        // AGE-379: handing the browser back resumes the task. While the user
+        // drove, every mutating browser tool refused with
+        // `ControlHeldByUser`, so the turn that was running has either ended
+        // or is about to; the trace row above only *records* the handback,
+        // nothing tells the model the page moved. A release with no turn
+        // running becomes an ordinary user message — visible in the
+        // transcript as what resumed the agent, and in the model's history
+        // so it re-snapshots instead of trusting stale element refs. A
+        // release mid-stream is left to the running turn: its next tool call
+        // succeeds now, and the row it just got says why.
+        if !taken && !streaming {
+            self.send_message(browser_handback_message(&url), vec![], cx);
         }
     }
 
@@ -1285,5 +1301,41 @@ impl ChattyApp {
         } else {
             error!("StreamManager not available for regeneration stream");
         }
+    }
+}
+
+/// The user message a browser handback turns into (AGE-379). Written to the
+/// model as much as to the person reading the transcript: it names the page
+/// the user left the browser on and asks for a fresh look at it, because
+/// every element ref the agent held is stale after a takeover.
+fn browser_handback_message(url: &str) -> String {
+    if url.is_empty() {
+        "I've handed the browser back to you. Take a fresh look at the page and continue \
+         from where I left it."
+            .to_string()
+    } else {
+        format!(
+            "I've handed the browser back to you at {url}. Take a fresh look at the page and \
+             continue from where I left it."
+        )
+    }
+}
+
+#[cfg(test)]
+mod browser_handback_tests {
+    use super::browser_handback_message;
+
+    #[test]
+    fn names_the_page_the_user_left_the_browser_on() {
+        let message = browser_handback_message("https://example.com/account");
+        assert!(message.contains("https://example.com/account"));
+        assert!(message.contains("fresh look"));
+    }
+
+    #[test]
+    fn reads_without_a_url() {
+        let message = browser_handback_message("");
+        assert!(!message.contains("at ."));
+        assert!(message.contains("handed the browser back"));
     }
 }
