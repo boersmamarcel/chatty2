@@ -24,6 +24,9 @@ rig-agent.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+# Non-keyed hash for the per-frame transcript cache key (AGE-375); already in
+# the tree via comemo, so this pins the same version rather than adding a crate.
+rustc-hash = "2.1"
 dirs.workspace = true
 uuid.workspace = true
 futures.workspace = true
