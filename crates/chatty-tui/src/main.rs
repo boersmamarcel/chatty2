@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
     let mut providers = providers_result.context("Failed to load providers")?;
     let mut models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
-    let mut module_settings = module_settings_result.unwrap_or_default();
+    let module_settings = module_settings_result.unwrap_or_default();
     let extensions = extensions_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
     let module_agents = discover_module_agents(&module_settings, &extensions);
@@ -408,10 +408,7 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            Ok(broker) => {
-                apply_broker_settings(&mut module_settings, broker.port);
-                Some(broker)
-            }
+            Ok(broker) => Some(broker),
             Err(e) => {
                 warn!(
                     error = %e,
@@ -427,6 +424,14 @@ async fn main() -> Result<()> {
     if cli.broker {
         bail!("--broker needs a Unix socket, which this platform has not got");
     }
+
+    // The broker's ephemeral port, kept out of `module_settings` (AGE-382):
+    // `--broker` only threads it into this run's `AgentBuildContext`, it
+    // never persists it, so `/modules` sees and saves only what was on disk.
+    #[cfg(unix)]
+    let broker_port = broker.as_ref().map(|b| b.port);
+    #[cfg(not(unix))]
+    let broker_port: Option<u16> = None;
 
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -451,6 +456,7 @@ async fn main() -> Result<()> {
                 provider_config,
                 execution_settings,
                 module_settings,
+                broker_port,
                 models,
                 providers,
                 mcp_service,
@@ -502,6 +508,7 @@ async fn main() -> Result<()> {
                 provider_config,
                 execution_settings: execution_settings.clone(),
                 module_settings,
+                broker_port,
                 models,
                 providers: providers.clone(),
                 mcp_service: None,
@@ -781,21 +788,6 @@ fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {
     Ok(all_models[0].clone())
 }
 
-/// What `--broker` changes about the module settings a conversation's agent
-/// is built from: turn the gateway on and point it at wherever
-/// `participant::broker::Broker::start` actually bound its ephemeral port.
-/// `AgentBuildContext.gateway_port` — and with it `local-agent` in
-/// `list_agents`/`invoke_agent` — is `module_settings.enabled.then_some(...
-/// gateway_port)` downstream (`ChatEngine`/`HeadlessRunner`, unchanged by
-/// this issue), so this pair of fields is the entire seam.
-fn apply_broker_settings(
-    module_settings: &mut chatty_core::settings::models::ModuleSettingsModel,
-    port: u16,
-) {
-    module_settings.enabled = true;
-    module_settings.gateway_port = port;
-}
-
 fn apply_tool_overrides(
     settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
     enable: &[String],
@@ -1056,25 +1048,6 @@ fn inject_discovered(
         let mut mc = ModelConfig::new(id, dm.display_name, provider_type.clone(), dm.identifier);
         mc.supports_images = dm.supports_vision;
         models_list.push(mc);
-    }
-}
-
-#[cfg(test)]
-mod broker_settings_tests {
-    use super::apply_broker_settings;
-    use chatty_core::settings::models::ModuleSettingsModel;
-
-    /// Pins the whole of `--broker`'s override: drop either assignment from
-    /// `apply_broker_settings` and this fails.
-    #[test]
-    fn broker_settings_enable_the_gateway_and_point_at_the_brokers_port() {
-        let mut settings = ModuleSettingsModel::default();
-        assert!(!settings.enabled, "starts disabled by default");
-
-        apply_broker_settings(&mut settings, 54321);
-
-        assert!(settings.enabled);
-        assert_eq!(settings.gateway_port, 54321);
     }
 }
 

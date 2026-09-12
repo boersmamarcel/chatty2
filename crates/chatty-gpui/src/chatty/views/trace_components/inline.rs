@@ -80,7 +80,12 @@ where
     } else {
         let full_command = extract_full_command(tool_call);
         if full_command.chars().count() > 80 {
-            content_children.push(render_full_command_box(full_command, panel_bg, text_color));
+            content_children.push(render_full_command_box(
+                full_command,
+                panel_bg,
+                text_color,
+                cx.theme().mono_font_family.clone(),
+            ));
         }
     }
 
@@ -114,7 +119,7 @@ where
             let formatted_output = format_tool_output(output);
             content_children.push(
                 div()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
                     .px_2()
                     .py_1()
@@ -133,7 +138,7 @@ where
             // Show "Running..." for running tools
             content_children.push(
                 div()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
                     .text_color(muted_text)
                     .child("Running...")
@@ -154,7 +159,7 @@ where
                 .gap_1()
                 .child(
                     div()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_xs()
                         .text_color(error_color)
                         .font_weight(FontWeight::BOLD)
@@ -162,7 +167,7 @@ where
                 )
                 .child(
                     div()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_xs()
                         .px_2()
                         .py_1()
@@ -243,9 +248,10 @@ pub(super) fn render_full_command_box(
     full_command: String,
     panel_bg: Hsla,
     text_color: Hsla,
+    mono_font_family: SharedString,
 ) -> gpui::AnyElement {
     div()
-        .font_family("monospace")
+        .font_family(mono_font_family)
         .text_xs()
         .px_2()
         .py_1()

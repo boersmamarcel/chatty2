@@ -147,7 +147,7 @@ fn render_fallback_static(
             .border_color(border_color)
             .rounded(px(3.))
             .text_color(text_color)
-            .font_family("monospace")
+            .font_family(cx.theme().mono_font_family.clone())
             .child(content.to_string())
     } else {
         div()
@@ -170,7 +170,7 @@ fn render_fallback_static(
             .child(
                 div()
                     .text_color(text_color)
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_size(px(14.))
                     .child(content.to_string()),
             )

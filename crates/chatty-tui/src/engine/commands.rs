@@ -982,13 +982,18 @@ impl ChatEngine {
             .iter()
             .filter(|agent| matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
             .count();
+        let broker_line = match self.broker_port {
+            Some(port) => format!("\n- Broker: active on port {port} (not persisted)"),
+            None => String::new(),
+        };
         format!(
-            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n- Local module agents: {}\n- Remote module agents: {}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
+            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n- Local module agents: {}\n- Remote module agents: {}{}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
             self.module_settings.enabled,
             self.module_settings.module_dir,
             self.module_settings.gateway_port,
             local_agents,
-            remote_agents
+            remote_agents,
+            broker_line
         )
     }
 }
@@ -1072,5 +1077,71 @@ mod tests {
     #[test]
     fn parse_update_command() {
         assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
+    }
+
+    /// AGE-382: `--broker` threads its ephemeral port into `broker_port`,
+    /// never into `module_settings`. A `/modules` mutation that only touches
+    /// `module_dir` must leave `enabled`/`gateway_port` exactly as they were
+    /// before the broker started, so the struct `handle_modules_command`
+    /// hands to the repository never carries the broker's port to disk.
+    /// Revert the fix (route `broker_port` back through `module_settings`)
+    /// and this fails.
+    #[tokio::test]
+    async fn broker_port_does_not_leak_into_module_settings_on_a_modules_save() {
+        use crate::engine::ChatEngineConfig;
+        use chatty_core::services::StreamSurface;
+        use chatty_core::settings::models::models_store::ModelConfig;
+        use chatty_core::settings::models::module_settings::ModuleSettingsModel;
+        use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
+
+        let on_disk = ModuleSettingsModel::default();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: on_disk.clone(),
+                broker_port: Some(54321),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                is_sub_agent: false,
+                services_loaded: true,
+                surface: StreamSurface::InteractiveTui,
+            },
+            event_tx,
+        );
+
+        let dir = tempfile::tempdir().expect("a temp dir for module_dir");
+        let changed = engine
+            .handle_modules_command(Some(&format!("dir {}", dir.path().display())))
+            .expect("dir is a valid /modules subcommand");
+
+        assert!(changed, "module_dir changed, so the command reports true");
+        assert_eq!(
+            engine.module_settings.enabled, on_disk.enabled,
+            "the broker must not flip `enabled` on"
+        );
+        assert_eq!(
+            engine.module_settings.gateway_port, on_disk.gateway_port,
+            "the broker's ephemeral port must not overwrite the persisted gateway_port"
+        );
+        assert_eq!(
+            engine.module_settings.module_dir,
+            dir.path().to_string_lossy()
+        );
     }
 }

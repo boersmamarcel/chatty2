@@ -123,7 +123,7 @@ impl RenderOnce for CodeBlockComponent {
                     .rounded_sm()
                     .bg(border_color.opacity(LANGUAGE_BADGE_BG_OPACITY))
                     .text_xs()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_color(header_text_color)
                     .child(lang)
                     .into_any_element(),
@@ -202,7 +202,7 @@ impl RenderOnce for CodeBlockComponent {
             )
             .child(
                 div()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_size(px(13.0))
                     .line_height(relative(1.5))
                     .text_color(theme.foreground)

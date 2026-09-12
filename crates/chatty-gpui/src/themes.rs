@@ -36,6 +36,89 @@ pub(crate) fn get_themes_dir() -> PathBuf {
     PathBuf::from("./themes")
 }
 
+/// Monospace families to try, in order, when the theme's own cannot be
+/// loaded. The theme default is already per platform (Menlo / Consolas /
+/// DejaVu Sans Mono); these cover a Linux box without DejaVu and the odd
+/// macOS install without Menlo. Order is preference, not popularity.
+const MONO_FONT_CANDIDATES: &[&str] = &[
+    "DejaVu Sans Mono",
+    "Menlo",
+    "Consolas",
+    "Ubuntu Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Courier New",
+];
+
+/// Pin the theme's font families to families the platform can actually
+/// load (AGE-378).
+///
+/// gpui caches a family that failed to load as an *error* and clones that
+/// error — formatting its message — on every later lookup; `resolve_font`
+/// then walks the fallback stack, which on Linux is five more failures
+/// before it reaches a font that exists. Every text run of every frame pays
+/// that, and a code-heavy turn is thousands of runs: on the AGE-378 fixture
+/// it was a quarter of the frame while wheel-scrolling. Resolving once here
+/// means every run hits the cached `Ok` instead.
+///
+/// Idempotent: a family that loads is left alone, so this can run from the
+/// theme observer without re-triggering it.
+pub(crate) fn resolve_theme_fonts(cx: &mut App) {
+    let text_system = cx.text_system().clone();
+    // `resolve_font` never fails (it walks the fallbacks and panics past
+    // them); the family it actually landed on tells whether the request
+    // loaded. An alias (".SystemUIFont") may read back under the face's real
+    // name, which just pins the alias to that name — same face, one lookup.
+    let resolved_family = |family: &str| -> Option<SharedString> {
+        text_system
+            .get_font_for_id(text_system.resolve_font(&font(family.to_string())))
+            .map(|resolved| resolved.family)
+    };
+    let loads = |family: &str| resolved_family(family).is_some_and(|resolved| resolved == family);
+
+    let (ui_family, mono_family) = {
+        let theme = cx.theme();
+        (theme.font_family.clone(), theme.mono_font_family.clone())
+    };
+
+    // The UI family: whatever gpui's own fallback walk would have landed on,
+    // recorded so the walk happens once instead of per run.
+    let ui_resolved = (!loads(&ui_family))
+        .then(|| resolved_family(&ui_family))
+        .flatten()
+        .filter(|resolved| *resolved != ui_family);
+
+    // The mono family: gpui's fallbacks are proportional fonts, so code
+    // would lose its alignment — try real monospace families first.
+    let mono_resolved = (!loads(&mono_family))
+        .then(|| {
+            MONO_FONT_CANDIDATES
+                .iter()
+                .find(|candidate| loads(candidate))
+                .map(|candidate| SharedString::from(*candidate))
+                .or_else(|| resolved_family(&mono_family))
+        })
+        .flatten()
+        .filter(|resolved| *resolved != mono_family);
+
+    if ui_resolved.is_none() && mono_resolved.is_none() {
+        return;
+    }
+    if let Some(family) = &ui_resolved {
+        info!(requested = %ui_family, resolved = %family, "UI font family is not installed; pinned to a loadable one");
+    }
+    if let Some(family) = &mono_resolved {
+        info!(requested = %mono_family, resolved = %family, "Mono font family is not installed; pinned to a loadable one");
+    }
+    let theme = Theme::global_mut(cx);
+    if let Some(family) = ui_resolved {
+        theme.font_family = family;
+    }
+    if let Some(family) = mono_resolved {
+        theme.mono_font_family = family;
+    }
+}
+
 pub(crate) fn init_themes(cx: &mut App) {
     let themes_dir = get_themes_dir();
     info!(themes_dir = ?themes_dir, "Loading themes from directory");
@@ -50,6 +133,9 @@ pub(crate) fn init_themes(cx: &mut App) {
     // Observe theme changes and persist base theme name + dark mode to GeneralSettingsModel
     // Only persist after initialization is complete to avoid overwriting saved preferences
     cx.observe_global::<Theme>(|cx| {
+        // A theme pack may name fonts this machine does not have (AGE-378).
+        resolve_theme_fonts(cx);
+
         // Skip saving during initialization - settings haven't been loaded yet
         if !THEME_INIT_COMPLETE.load(Ordering::SeqCst) {
             debug!("Skipping theme save during initialization");
@@ -83,6 +169,9 @@ pub(crate) fn init_themes(cx: &mut App) {
     })
     .detach();
 
+    // The observer only fires on later changes; the baked-in default theme
+    // is already in place, so resolve it now.
+    resolve_theme_fonts(cx);
     cx.refresh_windows();
 }
 

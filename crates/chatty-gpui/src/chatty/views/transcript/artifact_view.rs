@@ -2575,7 +2575,7 @@ impl Render for ArtifactView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),

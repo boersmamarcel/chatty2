@@ -321,7 +321,7 @@ fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
         .py_1()
         .child(
             div()
-                .font_family("monospace")
+                .font_family(cx.theme().mono_font_family.clone())
                 .text_xs()
                 .text_color(muted_text)
                 .child(file_label.unwrap_or("diff").to_string()),
@@ -363,7 +363,7 @@ fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
                     .py_1()
                     .text_xs()
                     .text_color(muted_text)
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("Diff too large to display ({bytes} bytes)")),
             )
             .into_any_element();
@@ -390,7 +390,7 @@ fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
                     .py_1()
                     .text_xs()
                     .text_color(muted_text)
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .child("Diff too large to display inline"),
             )
             .into_any_element();
@@ -444,7 +444,7 @@ fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
                     .flex_row()
                     .w_full()
                     .bg(bg)
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
                     .line_height(relative(1.6))
                     .child(
@@ -477,7 +477,7 @@ fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
                 .text_xs()
                 .text_color(muted_text)
                 .py(px(2.0))
-                .font_family("monospace")
+                .font_family(cx.theme().mono_font_family.clone())
                 .child(format!(
                     "\u{00b7}\u{00b7}\u{00b7} {count} unchanged line{} \u{00b7}\u{00b7}\u{00b7}",
                     if *count == 1 { "" } else { "s" }
@@ -557,7 +557,7 @@ fn render_diff_from_cache(args: DiffFromCacheArgs<'_>, cx: &App) -> AnyElement {
                 .border_color(border_color)
                 .text_xs()
                 .text_color(muted_text)
-                .font_family("monospace")
+                .font_family(cx.theme().mono_font_family.clone())
                 .child(stats_text),
         );
     }

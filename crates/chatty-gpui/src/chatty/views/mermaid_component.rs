@@ -185,7 +185,7 @@ impl RenderOnce for MermaidComponent {
                 .p_3()
                 .child(
                     div()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_size(px(13.0))
                         .line_height(relative(1.5))
                         .text_color(text_color)

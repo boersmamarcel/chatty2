@@ -22,7 +22,13 @@ use crate::chatty::views::diff_view_component::{
 const REVIEW_HEADER_HEIGHT: f32 = 36.0;
 
 /// Directory (muted, may truncate) immediately followed by basename.
-fn review_path_header(dir: &str, base: &str, muted: Hsla, foreground: Hsla) -> impl IntoElement {
+fn review_path_header(
+    dir: &str,
+    base: &str,
+    muted: Hsla,
+    foreground: Hsla,
+    mono_font_family: SharedString,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -30,7 +36,7 @@ fn review_path_header(dir: &str, base: &str, muted: Hsla, foreground: Hsla) -> i
         .min_w_0()
         .flex_1()
         .overflow_hidden()
-        .font_family("monospace")
+        .font_family(mono_font_family)
         .text_xs()
         .when(!dir.is_empty(), |this| {
             this.child(
@@ -250,7 +256,13 @@ impl Render for ReviewFileSection {
                                     .flex_shrink_0()
                                     .child(Icon::new(chevron).size_3().text_color(muted)),
                             )
-                            .child(review_path_header(&dir, &base, muted, foreground)),
+                            .child(review_path_header(
+                                &dir,
+                                &base,
+                                muted,
+                                foreground,
+                                cx.theme().mono_font_family.clone(),
+                            )),
                     )
                     .child(
                         div()

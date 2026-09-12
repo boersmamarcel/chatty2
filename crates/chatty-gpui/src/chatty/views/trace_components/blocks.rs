@@ -263,7 +263,7 @@ impl SystemTraceView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_sm()
                     .child(
                         div()
@@ -296,7 +296,7 @@ impl SystemTraceView {
                     .pl_3()
                     .border_l_2()
                     .border_color(border_color)
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_sm()
                     .text_color(text_color)
                     .child(thinking.content.clone()),
@@ -369,7 +369,12 @@ impl SystemTraceView {
                         .pl_3()
                         .border_l_2()
                         .border_color(border_color)
-                        .child(render_full_command_box(full_command, panel_bg, text_color)),
+                        .child(render_full_command_box(
+                            full_command,
+                            panel_bg,
+                            text_color,
+                            cx.theme().mono_font_family.clone(),
+                        )),
                 );
             }
         }
@@ -392,14 +397,14 @@ impl SystemTraceView {
                     .gap_1()
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .text_color(muted_text)
                             .child("output:"),
                     )
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .px_2()
                             .py_1()
@@ -431,7 +436,7 @@ impl SystemTraceView {
                     .gap_1()
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .text_color(error_color)
                             .font_weight(FontWeight::BOLD)
@@ -439,7 +444,7 @@ impl SystemTraceView {
                     )
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .px_2()
                             .py_1()
@@ -488,7 +493,7 @@ impl SystemTraceView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_sm()
                     .child(
                         div()
@@ -525,14 +530,14 @@ impl SystemTraceView {
                     .gap_1()
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .text_color(muted_text)
                             .child("command:"),
                     )
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_sm()
                             .px_2()
                             .py_1()
