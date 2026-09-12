@@ -25,9 +25,10 @@
 //! ([`apply_plan_ownership`]), so a cached turn converges on the same blocks a
 //! full rebuild would have produced.
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+
+use rustc_hash::FxHasher;
 
 use chatty_core::models::message_types::{SystemTrace, ToolCallState, ToolSource, TraceItem};
 
@@ -154,6 +155,11 @@ impl TurnCache {
 /// never changes a decision; it is here so the key still describes the turn if
 /// that ever stops being true.
 ///
+/// `FxHasher`, not `DefaultHasher`: this runs for every message on every
+/// notify, nothing hashed here is attacker-chosen, and the key is compared,
+/// never used to place anything in a table — SipHash's keyed mixing was 68% of
+/// the cached frame's self-time in AGE-165's profile (AGE-375).
+///
 /// [`adapt_message_with_trace`]: crate::chatty::views::transcript::adapt_message_with_trace
 pub(super) fn adapt_key(
     msg: &DisplayMessage,
@@ -161,7 +167,7 @@ pub(super) fn adapt_key(
     collapsed: bool,
     trace: Option<&SystemTrace>,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     index.hash(&mut hasher);
     role_tag(&msg.role).hash(&mut hasher);
     msg.content.len().hash(&mut hasher);

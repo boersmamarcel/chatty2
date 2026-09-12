@@ -1894,6 +1894,7 @@ dependencies = [
  "rig-core",
  "ropey",
  "rust-embed",
+ "rustc-hash 2.1.2",
  "semver",
  "serde",
  "serde_json",
