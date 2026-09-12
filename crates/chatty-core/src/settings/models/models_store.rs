@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::providers_store::ProviderType;
+use crate::models::token_usage::TokenPricing;
 
 /// Default API version for Azure OpenAI
 pub const AZURE_DEFAULT_API_VERSION: &str = "2025-03-01-preview";
@@ -125,6 +126,26 @@ impl ModelConfig {
     pub fn synced(mut self) -> Self {
         self.source = ModelSource::Sync;
         self
+    }
+
+    /// The per-million prices a turn on this model is costed at, or `None`
+    /// when the model has no input *and* output price — a turn on such a
+    /// model carries no cost rather than a made-up one (AGE-351). The cache
+    /// rates are optional and fall back to the input rate inside
+    /// [`TokenUsage::calculate_cost`](crate::models::token_usage::TokenUsage::calculate_cost).
+    pub fn token_pricing(&self) -> Option<TokenPricing> {
+        match (
+            self.cost_per_million_input_tokens,
+            self.cost_per_million_output_tokens,
+        ) {
+            (Some(input_per_million), Some(output_per_million)) => Some(TokenPricing {
+                input_per_million,
+                output_per_million,
+                cache_read_per_million: self.cost_per_million_cache_read_tokens,
+                cache_write_per_million: self.cost_per_million_cache_write_tokens,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -341,5 +362,52 @@ mod tests {
         assert_eq!(store.toggle_favorite("a"), Some(true));
         assert_eq!(store.toggle_favorite("a"), Some(false));
         assert_eq!(store.toggle_favorite("missing"), None);
+    }
+
+    /// AGE-351: the rule chatty-gpui's `price_usage` applied before pricing
+    /// moved into the session — both an input and an output price, or no
+    /// price at all. Cache rates are passed through as-is.
+    #[test]
+    fn token_pricing_needs_both_input_and_output_prices() {
+        let mut model = model("a", ProviderType::OpenRouter, ModelSource::User);
+        assert_eq!(model.token_pricing(), None, "no prices, no pricing");
+
+        model.cost_per_million_input_tokens = Some(3.0);
+        assert_eq!(
+            model.token_pricing(),
+            None,
+            "an input price alone is not a price"
+        );
+
+        model.cost_per_million_input_tokens = None;
+        model.cost_per_million_output_tokens = Some(15.0);
+        assert_eq!(
+            model.token_pricing(),
+            None,
+            "an output price alone is not a price"
+        );
+
+        model.cost_per_million_input_tokens = Some(3.0);
+        assert_eq!(
+            model.token_pricing(),
+            Some(TokenPricing {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+            })
+        );
+
+        model.cost_per_million_cache_read_tokens = Some(0.3);
+        model.cost_per_million_cache_write_tokens = Some(3.75);
+        assert_eq!(
+            model.token_pricing(),
+            Some(TokenPricing {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                cache_read_per_million: Some(0.3),
+                cache_write_per_million: Some(3.75),
+            })
+        );
     }
 }

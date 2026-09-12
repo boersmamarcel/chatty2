@@ -452,6 +452,8 @@ impl ChattyApp {
                         // A new conversation is local; taking it online is an
                         // explicit action on an existing one (AGE-298).
                         mode: None,
+                        tool_call_count: 0,
+                        context_tokens: 0,
                     };
 
                     repo.save(&conv_id, data)
