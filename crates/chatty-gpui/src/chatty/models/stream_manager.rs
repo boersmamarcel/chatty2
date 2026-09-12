@@ -1,11 +1,16 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui::{EventEmitter, Task};
+use gpui::{App, BorrowAppContext as _, EventEmitter, Task};
 use tracing::{debug, warn};
+
+use chatty_core::models::ConversationsStore;
+use chatty_core::session::SessionEvent;
 
 /// Minimum interval between batched TextChunk events, and the period of the
 /// background flush timer that backstops it (AGE-166).
@@ -30,6 +35,99 @@ pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(20);
 /// implement one flush policy, not two (AGE-166).
 pub(crate) fn should_flush_text(is_first_chunk: bool, since_last_flush: Duration) -> bool {
     is_first_chunk || since_last_flush >= FLUSH_INTERVAL
+}
+
+/// The one buffer of coalesced streaming text for a turn on the desktop.
+///
+/// `DesktopSink` (`message_ops_internals.rs`) fills it — raw
+/// `SessionEvent::Text` chunks arrive far faster than any display repaints,
+/// and coalescing them here is what keeps one `update_global` into the
+/// conversation and one `StreamManager` entity update per `FLUSH_INTERVAL`
+/// instead of per token (AGE-166).
+///
+/// It is *shared* rather than owned by the sink, because the sink lives
+/// inside the turn's future and `stop_stream`, `cancel_pending` and both
+/// `register_*_stream` supersede paths drop that future synchronously: a
+/// buffer only the sink could reach lost up to one `FLUSH_INTERVAL` of the
+/// reply on every Stop, in the UI and in the persisted message (AGE-372).
+/// `StreamState` therefore keeps a handle, and `StreamManager::flush_text`
+/// drains this batch before its own `pending_text` on every one of those
+/// paths and on each `ensure_flush_timer` tick — so the timer backstops the
+/// layer that actually buffers.
+pub(crate) struct TextBatch {
+    /// The conversation whose session buffered text is applied to. Held
+    /// here because `StreamManager` may key the same stream as
+    /// `__pending__`.
+    conv_id: String,
+    pending: String,
+    has_flushed_first: bool,
+    last_flush: Instant,
+}
+
+/// A [`TextBatch`] as the sink and the stream's `StreamState` both hold it.
+/// `Rc`, not `Arc`: the sink holds an `AsyncApp` and `StreamManager` is a
+/// GPUI entity, so neither side ever leaves the main thread.
+pub(crate) type SharedTextBatch = Rc<RefCell<TextBatch>>;
+
+impl TextBatch {
+    fn new(conv_id: String) -> Self {
+        Self {
+            conv_id,
+            pending: String::new(),
+            has_flushed_first: false,
+            last_flush: Instant::now(),
+        }
+    }
+
+    pub(crate) fn shared(conv_id: String) -> SharedTextBatch {
+        Rc::new(RefCell::new(Self::new(conv_id)))
+    }
+
+    /// Buffer `text`, answering whether the batch should go out now: the
+    /// turn's first chunk immediately (time-to-first-token is never delayed
+    /// by batching), then at most once per `FLUSH_INTERVAL`
+    /// (`should_flush_text`). Buffering only — the caller flushes with
+    /// [`TextBatch::drain`].
+    pub(crate) fn push(&mut self, text: &str) -> bool {
+        self.pending.push_str(text);
+        should_flush_text(!self.has_flushed_first, self.last_flush.elapsed())
+    }
+
+    /// Take everything buffered, regardless of the flush policy. `None`
+    /// when nothing is pending, so flushing before a tool call never emits
+    /// a spurious empty `TextChunk`.
+    fn take(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        self.has_flushed_first = true;
+        self.last_flush = Instant::now();
+        Some(std::mem::take(&mut self.pending))
+    }
+
+    /// Take everything buffered and apply it to the conversation's session,
+    /// returning it so the caller can forward it onwards as one
+    /// `SessionEvent::Text`.
+    ///
+    /// This is the single path buffered text takes into
+    /// `Conversation.streaming_message` — which is what
+    /// `finalize_stopped_stream` persists — so a drain driven by
+    /// `StreamManager` and a flush driven by `DesktopSink` cannot disagree.
+    pub(crate) fn drain(&mut self, cx: &mut App) -> Option<String> {
+        let text = self.take()?;
+        if !cx.has_global::<ConversationsStore>() {
+            warn!(conv_id = %self.conv_id, "No ConversationsStore to apply buffered text to");
+            return Some(text);
+        }
+        let conv_id = self.conv_id.clone();
+        let event = SessionEvent::Text(text.clone());
+        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+            store
+                .get_session_mut(&conv_id)
+                .and_then(|session| session.apply(&event));
+        });
+        Some(text)
+    }
 }
 
 use crate::chatty::services::StreamChunk;
@@ -80,6 +178,12 @@ pub struct StreamState {
     pending_text: String,
     /// When the last TextChunk event was emitted (used for flush interval check).
     last_flush: Instant,
+    /// Handle on the `DesktopSink` batch buffering this turn's text one
+    /// layer upstream of `pending_text`, so every path here that drops the
+    /// turn's task can drain it first (AGE-372). `None` for a stream with no
+    /// desktop sink — the characterization harness drives
+    /// `handle_session_event` directly.
+    text_batch: Option<SharedTextBatch>,
 }
 
 /// Events emitted by StreamManager for decoupled UI updates.
@@ -205,7 +309,7 @@ impl StreamManager {
                     .update(cx, |sm, cx| {
                         let conv_ids: Vec<String> = sm.streams.keys().cloned().collect();
                         for conv_id in conv_ids {
-                            sm.flush_pending_text(&conv_id, cx);
+                            sm.flush_text(&conv_id, &conv_id, cx);
                         }
                         if sm.streams.is_empty() {
                             // Nothing left to flush — stop ticking rather than
@@ -260,12 +364,13 @@ impl StreamManager {
     ) {
         self.ensure_flush_timer(cx);
 
+        // Flush every buffered layer — including the superseded turn's own
+        // `DesktopSink` batch — before the task below is dropped (AGE-372).
+        self.flush_text(&conv_id, &conv_id, cx);
+
         // Cancel existing stream if any — emit StreamEnded so subscribers
         // (app_controller) can transition Running tool calls to Cancelled.
         if let Some(mut existing) = self.streams.remove(&conv_id) {
-            // Flush any buffered text
-            Self::flush_pending_text_for(&mut existing, &conv_id, cx);
-
             existing.cancel_flag.store(true, Ordering::Relaxed);
 
             let token_usage = existing.token_usage.take();
@@ -302,6 +407,7 @@ impl StreamManager {
                 has_emitted_first_chunk: false,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
+                text_batch: None,
             },
         );
 
@@ -322,11 +428,13 @@ impl StreamManager {
     ) {
         self.ensure_flush_timer(cx);
 
+        // Same as `register_stream`: drain both buffering layers before the
+        // superseded turn's task is dropped (AGE-372).
+        self.flush_text("__pending__", "__pending__", cx);
+
         // Cancel any existing pending stream — emit StreamEnded so subscribers
         // (app_controller) can transition Running tool calls to Cancelled.
         if let Some(mut existing) = self.streams.remove("__pending__") {
-            Self::flush_pending_text_for(&mut existing, "__pending__", cx);
-
             existing.cancel_flag.store(true, Ordering::Relaxed);
 
             let token_usage = existing.token_usage.take();
@@ -362,6 +470,7 @@ impl StreamManager {
                 has_emitted_first_chunk: false,
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
+                text_batch: None,
             },
         );
 
@@ -413,11 +522,43 @@ impl StreamManager {
         }
     }
 
-    fn flush_pending_text(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
-        if let Some(state) = self.streams.get_mut(conv_id)
-            && !state.pending_text.is_empty()
-        {
-            Self::flush_pending_text_for(state, conv_id, cx);
+    /// Flush every layer of buffered text for the stream keyed `key`,
+    /// oldest first: the `DesktopSink` batch upstream of this manager is
+    /// drained into `pending_text` (it holds text the sink has not forwarded
+    /// yet), then everything buffered goes out as one `TextChunk`.
+    ///
+    /// `emit_id` is the conversation the event is emitted under; it differs
+    /// from `key` only for a `__pending__` stream that has already resolved
+    /// to a conversation.
+    ///
+    /// Draining the sink's batch is what makes this the *only* flush a
+    /// caller needs: `stop_stream`, `cancel_pending` and the two supersede
+    /// paths drop the turn's task right after, taking the sink with it
+    /// (AGE-372), and `ensure_flush_timer` calls this so the timer
+    /// backstops the layer that actually buffers.
+    fn flush_text(&mut self, key: &str, emit_id: &str, cx: &mut gpui::Context<Self>) {
+        let batch = self
+            .streams
+            .get(key)
+            .and_then(|state| state.text_batch.clone());
+        let drained = batch.and_then(|batch| batch.borrow_mut().drain(cx));
+        if let Some(state) = self.streams.get_mut(key) {
+            if let Some(text) = drained {
+                state.pending_text.push_str(&text);
+            }
+            Self::flush_pending_text_for(state, emit_id, cx);
+        }
+    }
+
+    /// Let the turn's `DesktopSink` hand this manager the buffer it fills,
+    /// so `flush_text` can drain it (AGE-372). Called once per turn from
+    /// `run_llm_stream`, after the stream is registered and — for a new
+    /// conversation — after `promote_pending` has moved it under its real
+    /// conversation ID.
+    pub fn attach_text_batch(&mut self, conv_id: &str, batch: SharedTextBatch) {
+        match self.streams.get_mut(conv_id) {
+            Some(state) => state.text_batch = Some(batch),
+            None => warn!(conv_id = %conv_id, "No registered stream to attach the text batch to"),
         }
     }
 
@@ -437,7 +578,7 @@ impl StreamManager {
         cx: &mut gpui::Context<Self>,
     ) {
         if !matches!(chunk, StreamChunk::Text(_)) {
-            self.flush_pending_text(conv_id, cx);
+            self.flush_text(conv_id, conv_id, cx);
         }
         match chunk {
             StreamChunk::Text(text) => {
@@ -683,7 +824,7 @@ impl StreamManager {
     /// Flushes any pending batched text, then drains any pending artifacts queued by AddAttachmentTool.
     pub fn finalize_stream(&mut self, conv_id: &str, cx: &mut gpui::Context<Self>) {
         // Flush any remaining buffered text before emitting StreamEnded
-        self.flush_pending_text(conv_id, cx);
+        self.flush_text(conv_id, conv_id, cx);
 
         let (token_usage, trace_json, artifacts, epoch) =
             if let Some(state) = self.streams.get(conv_id) {
@@ -741,16 +882,14 @@ impl StreamManager {
 
         let Some(key) = key else { return };
 
-        if let Some(mut state) = self.streams.remove(&key) {
-            // Flush any buffered text before the cancellation event
-            if !state.pending_text.is_empty() {
-                let batch = std::mem::take(&mut state.pending_text);
-                cx.emit(StreamManagerEvent::TextChunk {
-                    conversation_id: conv_id.to_string(),
-                    text: batch,
-                });
-            }
+        // Flush every buffered layer before the cancellation event *and*
+        // before the task is dropped below: the turn's `DesktopSink` goes
+        // with that task, so whatever its batch still holds would otherwise
+        // never reach `Conversation.streaming_message` — which is exactly
+        // what `finalize_stopped_stream` persists (AGE-372).
+        self.flush_text(&key, conv_id, cx);
 
+        if let Some(mut state) = self.streams.remove(&key) {
             // Set cancellation flag for graceful shutdown
             state.cancel_flag.store(true, Ordering::Relaxed);
             state.status = StreamStatus::Cancelled;
@@ -782,16 +921,10 @@ impl StreamManager {
 
     /// Cancel any pending stream (used when creating a new conversation).
     pub fn cancel_pending(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some(mut state) = self.streams.remove("__pending__") {
-            // Flush any buffered text before the cancellation event
-            if !state.pending_text.is_empty() {
-                let batch = std::mem::take(&mut state.pending_text);
-                cx.emit(StreamManagerEvent::TextChunk {
-                    conversation_id: "__pending__".to_string(),
-                    text: batch,
-                });
-            }
+        // As in `stop_stream`: both buffering layers, before the task goes.
+        self.flush_text("__pending__", "__pending__", cx);
 
+        if let Some(state) = self.streams.remove("__pending__") {
             state.cancel_flag.store(true, Ordering::Relaxed);
             debug!("Cancelled pending stream");
             cx.emit(StreamManagerEvent::StreamEnded {
@@ -839,16 +972,11 @@ impl StreamManager {
     pub fn stop_all(&mut self, cx: &mut gpui::Context<Self>) {
         let keys: Vec<String> = self.streams.keys().cloned().collect();
         for key in keys {
-            if let Some(mut state) = self.streams.remove(&key) {
-                // Flush any buffered text before the cancellation event
-                if !state.pending_text.is_empty() {
-                    let batch = std::mem::take(&mut state.pending_text);
-                    cx.emit(StreamManagerEvent::TextChunk {
-                        conversation_id: key.clone(),
-                        text: batch,
-                    });
-                }
+            // Both buffering layers, before the task goes — same reason as
+            // `stop_stream` (AGE-372).
+            self.flush_text(&key, &key, cx);
 
+            if let Some(state) = self.streams.remove(&key) {
                 state.cancel_flag.store(true, Ordering::Relaxed);
                 cx.emit(StreamManagerEvent::StreamEnded {
                     conversation_id: key,
@@ -901,6 +1029,7 @@ mod tests {
             has_emitted_first_chunk: false,
             pending_text: String::new(),
             last_flush: Instant::now(),
+            text_batch: None,
         }
     }
 
@@ -1002,6 +1131,7 @@ mod tests {
                 has_emitted_first_chunk: false,
                 pending_text: String::new(),
                 last_flush: Instant::now(),
+                text_batch: None,
             },
         );
         assert!(mgr.is_streaming("conv-123"));
@@ -1050,6 +1180,73 @@ mod tests {
             "FLUSH_INTERVAL={FLUSH_INTERVAL:?} should sit in the ~16-33ms band a 30-60Hz \
              display can actually paint"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // TextBatch (AGE-166 / AGE-372): the one buffer coalescing raw
+    // SessionEvent::Text chunks ahead of `update_global` /
+    // `StreamManager::handle_chunk`. `push`/`take` are the pure half of it;
+    // `drain` (which also applies to the session) is exercised end to end by
+    // the `DesktopSink` tests in `message_ops_internals.rs`.
+    // -------------------------------------------------------------------
+
+    /// The very first chunk of a turn must flush immediately — batching must
+    /// never delay time-to-first-token.
+    #[test]
+    fn text_batch_flushes_the_first_chunk_immediately() {
+        let mut batch = TextBatch::new("conv-1".to_string());
+        assert!(batch.push("Hello"));
+        assert_eq!(batch.take().as_deref(), Some("Hello"));
+    }
+
+    /// A flood of chunks arriving faster than `FLUSH_INTERVAL` apart must
+    /// coalesce into a single pending buffer rather than flushing each one —
+    /// this is the "one update_global + one handle_chunk per flush interval"
+    /// requirement (AGE-166 remediation #2), at the unit level: `push`
+    /// answering `false` means neither call happens for that chunk.
+    #[test]
+    fn text_batch_coalesces_a_flood_after_the_first_chunk() {
+        let mut batch = TextBatch::new("conv-1".to_string());
+        assert!(batch.push("a"), "first chunk flushes immediately");
+        batch.take();
+        for _ in 0..999 {
+            assert!(
+                !batch.push("x"),
+                "chunk arriving well within FLUSH_INTERVAL of the last flush must buffer, not flush"
+            );
+        }
+        // Nothing was lost — it's all still sitting in the pending buffer.
+        assert_eq!(batch.pending.len(), 999);
+    }
+
+    /// Once `FLUSH_INTERVAL` has actually elapsed, the next chunk flushes
+    /// the whole accumulated buffer.
+    #[test]
+    fn text_batch_flushes_once_flush_interval_has_elapsed() {
+        let mut batch = TextBatch::new("conv-1".to_string());
+        assert!(batch.push("first")); // consumes the immediate-first-chunk flush
+        batch.take();
+        batch.pending.push_str("buffered");
+        batch.last_flush = Instant::now() - (FLUSH_INTERVAL * 2);
+
+        assert!(batch.push(" more"));
+        assert_eq!(batch.take().as_deref(), Some("buffered more"));
+    }
+
+    /// `take()` (used before any non-text event, and by every drain path)
+    /// drains whatever is buffered regardless of how much time has passed,
+    /// and is a no-op when there's nothing pending — so flushing before a
+    /// tool call never emits a spurious empty TextChunk.
+    #[test]
+    fn text_batch_take_drains_regardless_of_elapsed_time() {
+        let mut batch = TextBatch::new("conv-1".to_string());
+        assert_eq!(batch.take(), None, "nothing buffered yet");
+
+        batch.push("first");
+        assert_eq!(batch.take().as_deref(), Some("first"));
+        batch.pending.push_str("not yet flushed");
+        assert_eq!(batch.take().as_deref(), Some("not yet flushed"));
+        assert_eq!(batch.take(), None, "draining twice must not re-emit");
     }
 
     #[test]
@@ -1343,7 +1540,7 @@ mod tests {
                         state.pending_text.push_str("some buffered text to flush");
                     }
                     let start = Instant::now();
-                    mgr.flush_pending_text("conv-profile", cx);
+                    mgr.flush_text("conv-profile", "conv-profile", cx);
                     flush_total += start.elapsed();
                 }
             });
@@ -1355,7 +1552,7 @@ mod tests {
              total, {:.1} ns/call avg (a tight, no-clock-advance flood, so all but a \
              handful of calls take the cheap buffer-only path — {notify_count} of these \
              {RAW_CHUNKS} calls actually flushed/emitted a TextChunk)\n\
-             \x20\x20flush_pending_text self-time: {FLUSH_CALLS} calls, {flush_total:?} \
+             \x20\x20flush_text self-time:         {FLUSH_CALLS} calls, {flush_total:?} \
              total, {:.1} ns/call avg (each call has real text to flush, so this is the \
              cx.emit path's own cost, isolated)\n\
              \x20\x20TextChunk notify rate under a sustained flood (separate test, \

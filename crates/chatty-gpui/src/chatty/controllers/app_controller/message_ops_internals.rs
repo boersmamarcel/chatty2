@@ -5,10 +5,8 @@
 //! See `message_ops.rs` for the high-level `ChattyApp` methods that
 //! orchestrate these helpers.
 
-use std::time::Instant;
-
 use super::*;
-use crate::chatty::models::stream_manager::should_flush_text;
+use crate::chatty::models::stream_manager::{SharedTextBatch, TextBatch};
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Parameters for one turn on the desktop.
@@ -134,13 +132,27 @@ pub(super) async fn run_llm_stream(
     }
 
     // 2. Begin the turn on the conversation's session and pump its events.
+    //
+    // The sink's text buffer is shared with `StreamManager`: the sink lives
+    // in this turn's future, which Stop / supersede / cancel all drop
+    // synchronously, so the manager needs its own handle to drain whatever
+    // is still buffered before that happens — and to let its flush timer
+    // reach the layer that actually buffers (AGE-372).
+    let text_batch = TextBatch::shared(conv_id.clone());
+    if let Some(sm) = stream_manager.as_ref() {
+        sm.update(cx, |sm, _cx| {
+            sm.attach_text_batch(&conv_id, text_batch.clone());
+        })
+        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to attach the text batch"))
+        .ok();
+    }
     let mut sink = DesktopSink {
         conv_id: conv_id.clone(),
         cx: cx.clone(),
         chat_view,
         stream_manager,
         weak_ctrl,
-        text_batch: TextBatch::new(),
+        text_batch,
     };
     debug!(conv_id = %conv_id, "Beginning turn on the session");
     let turn = cx
@@ -170,8 +182,8 @@ pub(super) async fn run_llm_stream(
 /// emits the `StreamManagerEvent` the UI subscribes to. Holds its own
 /// [`AsyncApp`], which is why nothing here may be `Send`.
 ///
-/// Raw `SessionEvent::Text` chunks are buffered here (`text_batch`) rather
-/// than applied one at a time: a raw LLM stream can yield far faster than any
+/// Raw `SessionEvent::Text` chunks are buffered in `text_batch` rather than
+/// applied one at a time: a raw LLM stream can yield far faster than any
 /// display repaints, and every chunk previously paid its own `update_global`
 /// into the conversation *and* its own `StreamManager` entity update even
 /// though only the emitted `TextChunk` UI event was ever batched (AGE-166).
@@ -180,66 +192,25 @@ pub(super) async fn run_llm_stream(
 /// first, so the conversation's `text_before` bookkeeping and the UI's paint
 /// order both see buffered text before the tool call / approval / turn-end
 /// that followed it.
+///
+/// That buffer is a [`SharedTextBatch`]: `StreamManager` holds the same
+/// handle, because this sink is dropped with the turn's future the moment
+/// Stop / supersede / cancel drops the task, and its flush timer has to be
+/// able to reach the layer that buffers (AGE-372).
 struct DesktopSink {
     conv_id: String,
     cx: AsyncApp,
     chat_view: Entity<ChatView>,
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     weak_ctrl: gpui::WeakEntity<ChattyApp>,
-    text_batch: TextBatch,
-}
-
-/// Upstream text-batching state for `DesktopSink`, factored out of it (no
-/// GPUI types) so its flush policy is unit-testable without a full
-/// `AsyncApp`/`ChatView` harness (AGE-166). Shares `should_flush_text` with
-/// `StreamManager`'s own UI-facing batching, so the two hot paths this issue
-/// coalesces implement one flush policy, not two.
-struct TextBatch {
-    pending: String,
-    has_flushed_first: bool,
-    last_flush: Instant,
-}
-
-impl TextBatch {
-    fn new() -> Self {
-        Self {
-            pending: String::new(),
-            has_flushed_first: false,
-            last_flush: Instant::now(),
-        }
-    }
-
-    /// Buffer `text`; returns the batch to flush once `should_flush_text`
-    /// says so (the turn's first chunk immediately, then at most once per
-    /// `FLUSH_INTERVAL`), or `None` while still buffering.
-    fn push(&mut self, text: &str) -> Option<String> {
-        self.pending.push_str(text);
-        let is_first = !self.has_flushed_first;
-        if should_flush_text(is_first, self.last_flush.elapsed()) {
-            self.has_flushed_first = true;
-            self.last_flush = Instant::now();
-            Some(std::mem::take(&mut self.pending))
-        } else {
-            None
-        }
-    }
-
-    /// Take whatever is buffered regardless of the flush policy — used
-    /// before any non-text event so nothing is left stranded.
-    fn take(&mut self) -> Option<String> {
-        if self.pending.is_empty() {
-            return None;
-        }
-        self.last_flush = Instant::now();
-        Some(std::mem::take(&mut self.pending))
-    }
+    text_batch: SharedTextBatch,
 }
 
 impl DesktopSink {
     fn handle(&mut self, event: SessionEvent) {
         if let SessionEvent::Text(text) = &event {
-            if let Some(batch) = self.text_batch.push(text) {
-                self.apply_and_forward_text(batch);
+            if self.text_batch.borrow_mut().push(text) {
+                self.flush_text();
             }
             return;
         }
@@ -281,30 +252,28 @@ impl DesktopSink {
         }
     }
 
-    /// Flush whatever text is buffered, if any. A no-op when nothing is
-    /// pending; called unconditionally before every non-text event.
+    /// Apply whatever text is buffered to the session and forward it to
+    /// `StreamManager` as a single `SessionEvent::Text`. A no-op when
+    /// nothing is pending; called when `push` says the flush interval is up,
+    /// and unconditionally before every non-text event.
+    ///
+    /// `TextBatch::drain` does the `update_global` itself, so this and
+    /// `StreamManager::flush_text` share one path into
+    /// `Conversation.streaming_message`.
     fn flush_text(&mut self) {
-        if let Some(batch) = self.text_batch.take() {
-            self.apply_and_forward_text(batch);
-        }
-    }
-
-    /// Apply one coalesced batch of text to the session (`update_global`)
-    /// and forward it to `StreamManager`, as a single `SessionEvent::Text`.
-    fn apply_and_forward_text(&mut self, batch: String) {
+        let batch = self.text_batch.clone();
         let conv_id = self.conv_id.clone();
-        let event = SessionEvent::Text(batch);
-        self.cx
-            .update_global::<ConversationsStore, _>(|store, _cx| {
-                store
-                    .get_session_mut(&conv_id)
-                    .and_then(|session| session.apply(&event));
-            })
+        let flushed = self
+            .cx
+            .update(|cx| batch.borrow_mut().drain(cx))
             .map_err(
                 |e| warn!(error = ?e, conv_id = %conv_id, "Failed to apply buffered text to session"),
             )
-            .ok();
-        self.forward(event);
+            .ok()
+            .flatten();
+        if let Some(text) = flushed {
+            self.forward(SessionEvent::Text(text));
+        }
     }
 
     /// Hand an event to `StreamManager`, which turns it into the
@@ -597,6 +566,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use crate::chatty::models::stream_manager::FLUSH_INTERVAL;
+
     use super::*;
     use chatty_core::models::MessageEntry;
     use rig_core::completion::message::{AssistantContent, Text};
@@ -760,93 +731,23 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // TextBatch (AGE-166): upstream coalescing of raw SessionEvent::Text
-    // chunks, ahead of `update_global`/`StreamManager::handle_chunk`.
+    // DesktopSink end-to-end (AGE-166 / AGE-372).
+    //
+    // The stream_manager.rs tests drive `StreamManager::handle_session_event`
+    // or `handle_chunk` directly — they never construct a `DesktopSink`, so
+    // they see only the manager's own `pending_text` and are blind to the
+    // batch one layer upstream of it. These tests build the real thing: a
+    // real windowed `ChatView`, a real `AgentSession`/`Conversation`
+    // (Ollama, so client construction is network-free), a real
+    // `ConversationsStore` global, and a real `StreamManager` entity.
     // -------------------------------------------------------------------
 
-    /// The very first chunk of a turn must flush immediately — batching must
-    /// never delay time-to-first-token.
-    #[test]
-    fn text_batch_flushes_the_first_chunk_immediately() {
-        let mut batch = TextBatch::new();
-        assert_eq!(batch.push("Hello").as_deref(), Some("Hello"));
-    }
-
-    /// A flood of chunks arriving faster than `FLUSH_INTERVAL` apart must
-    /// coalesce into a single pending buffer rather than flushing each one —
-    /// this is the "one update_global + one handle_chunk per flush interval"
-    /// requirement (AGE-166 remediation #2), at the unit level: `push`
-    /// returning `None` means neither call happens for that chunk.
-    #[test]
-    fn text_batch_coalesces_a_flood_after_the_first_chunk() {
-        let mut batch = TextBatch::new();
-        assert!(batch.push("a").is_some(), "first chunk flushes immediately");
-        for _ in 0..999 {
-            assert_eq!(
-                batch.push("x"),
-                None,
-                "chunk arriving well within FLUSH_INTERVAL of the last flush must buffer, not flush"
-            );
-        }
-        // Nothing was lost — it's all still sitting in the pending buffer.
-        assert_eq!(batch.pending.len(), 999);
-    }
-
-    /// Once `FLUSH_INTERVAL` has actually elapsed, the next chunk flushes
-    /// the whole accumulated buffer.
-    #[test]
-    fn text_batch_flushes_once_flush_interval_has_elapsed() {
-        let mut batch = TextBatch::new();
-        batch.push("first"); // consumes the immediate-first-chunk flush
-        batch.pending.push_str("buffered");
-        batch.last_flush =
-            Instant::now() - (crate::chatty::models::stream_manager::FLUSH_INTERVAL * 2);
-
-        assert_eq!(batch.push(" more").as_deref(), Some("buffered more"));
-    }
-
-    /// `take()` (used before any non-text event) drains whatever is
-    /// buffered regardless of how much time has passed, and is a no-op when
-    /// there's nothing pending — so flushing before a tool call never emits
-    /// a spurious empty TextChunk.
-    #[test]
-    fn text_batch_take_drains_regardless_of_elapsed_time() {
-        let mut batch = TextBatch::new();
-        assert_eq!(batch.take(), None, "nothing buffered yet");
-
-        batch.push("first");
-        batch.pending.push_str("not yet flushed");
-        assert_eq!(batch.take().as_deref(), Some("not yet flushed"));
-        assert_eq!(batch.take(), None, "draining twice must not re-emit");
-    }
-
-    // -------------------------------------------------------------------
-    // DesktopSink::handle (AGE-166): the line this whole issue turns on is
-    // `self.flush_text()` before a non-text event is applied/forwarded.
-    // `tool_start_never_precedes_its_buffered_text` (stream_manager.rs)
-    // proves the UI-facing ordering through `StreamManager`, but that test
-    // drives `StreamManager::handle_session_event` directly — it never
-    // constructs a `DesktopSink`, so it can't see the conversation-model
-    // side of this bug: without the flush, a tool call's `text_before`
-    // (chatty_core::session::mod::note_tool_started, persisted into the
-    // trace and read back for interleaved transcript rendering) would be
-    // truncated by up to one `FLUSH_INTERVAL`, and the conversation's own
-    // `streaming_message` would silently lose the buffered chunk. This test
-    // builds a real `DesktopSink` — a real windowed `ChatView`, a real
-    // `AgentSession`/`Conversation` (Ollama, so client construction is
-    // network-free), and a real `ConversationsStore` global — and fails on
-    // both fronts if `self.flush_text()` is removed from `handle`.
-    // -------------------------------------------------------------------
-
-    #[gpui::test]
-    async fn desktop_sink_flushes_buffered_text_before_tool_call_starts(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        // `ChatView`'s first frame hard-reads six globals (CLAUDE.md
-        // "Desktop boot order") plus gpui-component's own `Theme` global
-        // (`gpui_component::init`, which `main.rs` calls before
-        // `open_window` for the same reason) — a missing one panics on
-        // first paint.
+    /// Everything the desktop sink needs around it: the globals
+    /// `ChatView`'s first frame hard-reads (CLAUDE.md "Desktop boot order")
+    /// plus gpui-component's own `Theme` global, a window, and a loaded
+    /// session owning `conv_id`.
+    async fn sink_harness(cx: &mut gpui::TestAppContext, conv_id: &str) -> Entity<ChatView> {
+        // A missing one of these panics on first paint.
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(crate::settings::models::general_model::GeneralSettingsModel::default());
@@ -865,9 +766,9 @@ mod tests {
         // type-erased `AnyView`.
         let chat_view_slot: Rc<RefCell<Option<Entity<ChatView>>>> = Rc::default();
         let slot_for_window = chat_view_slot.clone();
-        // Bound (not `_`-discarded) so the window stays open for the rest
-        // of the test rather than closing when the handle drops.
-        let _window = cx.add_window(move |window, cx| {
+        // `WindowHandle` is `Copy`, so nothing here closes the window when
+        // this helper returns — the window stays open for the test.
+        cx.add_window(move |window, cx| {
             let view = cx.new(|cx| ChatView::new(window, cx));
             *slot_for_window.borrow_mut() = Some(view.clone());
             gpui_component::Root::new(view, window, cx)
@@ -881,7 +782,6 @@ mod tests {
         // as `desktop_send_path_matches_goldens` and chatty-core's own
         // `session_with_conversation` fixture build one.
         let _ = chatty_core::init_repositories();
-        let conv_id = "conv-order".to_string();
         let mut session = AgentSession::new(AgentSessionConfig {
             execution_settings:
                 chatty_core::settings::models::execution_settings::ExecutionSettingsModel::default(),
@@ -900,7 +800,7 @@ mod tests {
         );
         session
             .create_conversation(
-                conv_id.clone(),
+                conv_id.to_string(),
                 "Test".to_string(),
                 &model_config,
                 &provider_config,
@@ -915,14 +815,94 @@ mod tests {
             });
         });
 
-        let mut sink = DesktopSink {
-            conv_id: conv_id.clone(),
+        chat_view
+    }
+
+    /// A registered `StreamManager` stream for `conv_id`, plus the running
+    /// capture of every event it emits.
+    fn registered_manager(
+        cx: &mut gpui::TestAppContext,
+        conv_id: &str,
+    ) -> (
+        Entity<crate::chatty::models::StreamManager>,
+        Rc<RefCell<Vec<StreamManagerEvent>>>,
+    ) {
+        let manager = cx.update(|cx| cx.new(|_cx| crate::chatty::models::StreamManager::new()));
+        let events: Rc<RefCell<Vec<StreamManagerEvent>>> = Rc::default();
+        let sink = events.clone();
+        let conv_id = conv_id.to_string();
+        cx.update(|cx| {
+            cx.subscribe(&manager, move |_mgr, event: &StreamManagerEvent, _cx| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream(
+                    conv_id.clone(),
+                    task,
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    cx,
+                );
+            });
+        });
+        (manager, events)
+    }
+
+    /// Build the sink the way `run_llm_stream` does, batch attached to the
+    /// manager included.
+    fn desktop_sink(
+        cx: &mut gpui::TestAppContext,
+        conv_id: &str,
+        chat_view: Entity<ChatView>,
+        manager: Option<Entity<crate::chatty::models::StreamManager>>,
+    ) -> DesktopSink {
+        let text_batch = TextBatch::shared(conv_id.to_string());
+        if let Some(manager) = manager.as_ref() {
+            cx.update(|cx| {
+                manager.update(cx, |mgr, _cx| {
+                    mgr.attach_text_batch(conv_id, text_batch.clone());
+                });
+            });
+        }
+        DesktopSink {
+            conv_id: conv_id.to_string(),
             cx: cx.to_async(),
             chat_view,
-            stream_manager: None,
+            stream_manager: manager,
             weak_ctrl: gpui::WeakEntity::new_invalid(),
-            text_batch: TextBatch::new(),
-        };
+            text_batch,
+        }
+    }
+
+    fn emitted_text(events: &Rc<RefCell<Vec<StreamManagerEvent>>>) -> Vec<String> {
+        events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                StreamManagerEvent::TextChunk { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `self.flush_text()` before a non-text event is applied/forwarded.
+    /// `tool_start_never_precedes_its_buffered_text` (stream_manager.rs)
+    /// proves the UI-facing ordering through `StreamManager`, but it can't
+    /// see the conversation-model side of this bug: without the flush, a
+    /// tool call's `text_before`
+    /// (chatty_core::session::mod::note_tool_started, persisted into the
+    /// trace and read back for interleaved transcript rendering) would be
+    /// truncated by up to one `FLUSH_INTERVAL`, and the conversation's own
+    /// `streaming_message` would silently lose the buffered chunk.
+    #[gpui::test]
+    async fn desktop_sink_flushes_buffered_text_before_tool_call_starts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let conv_id = "conv-order".to_string();
+        let chat_view = sink_harness(cx, &conv_id).await;
+        let mut sink = desktop_sink(cx, &conv_id, chat_view, None);
 
         // First chunk flushes immediately (should_flush_text's first-chunk
         // rule); the second arrives well within FLUSH_INTERVAL and stays
@@ -968,5 +948,140 @@ mod tests {
                  removed, this is truncated to just the first chunk"
             );
         });
+    }
+
+    /// AGE-372, done-when #1. Stop drops the turn's task synchronously, and
+    /// the `DesktopSink` goes with it — so whatever the sink still had
+    /// buffered has to reach `Conversation.streaming_message` *before*
+    /// `StreamManager::stop_stream` drops that task, or it is gone from the
+    /// UI and from the message `finalize_stopped_stream` persists.
+    ///
+    /// Fails without the fix: `stop_stream` flushed only its own
+    /// `StreamState.pending_text`, which never saw the sink's tail.
+    #[gpui::test]
+    async fn text_buffered_at_stop_lands_in_the_persisted_stopped_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let conv_id = "conv-stop".to_string();
+        let chat_view = sink_harness(cx, &conv_id).await;
+        let (manager, events) = registered_manager(cx, &conv_id);
+        let mut sink = desktop_sink(cx, &conv_id, chat_view, Some(manager.clone()));
+
+        // First chunk flushes immediately; the second arrives well within
+        // FLUSH_INTERVAL and is still sitting in the sink's batch when the
+        // user hits Stop.
+        sink.handle(SessionEvent::Text("Partial".to_string()));
+        sink.handle(SessionEvent::Text(" answer".to_string()));
+
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                mgr.stop_stream(&conv_id, cx);
+            });
+        });
+        // `stop_stream` drops the turn's task; the sink is part of that
+        // future, so in production it ceases to exist right here.
+        drop(sink);
+
+        let persisted = cx.update(|cx| {
+            cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                let conv = store
+                    .get_session_mut(&conv_id)
+                    .and_then(|session| session.conversation_mut())
+                    .expect("conversation is loaded");
+                // The two lines `AgentSession::finish_turn` runs, which is
+                // what `finalize_stopped_stream` calls on a Cancelled
+                // StreamEnded: the partial reply is read straight out of
+                // `streaming_message`.
+                let response = conv.streaming_message().cloned().unwrap_or_default();
+                conv.finalize_turn(response, Vec::new(), None);
+                last_assistant_text(conv)
+            })
+        });
+
+        assert_eq!(
+            persisted.as_deref(),
+            Some("Partial answer"),
+            "text buffered in DesktopSink at the moment of Stop must reach \
+             Conversation.streaming_message before the task is dropped, or the \
+             persisted stopped message is truncated"
+        );
+
+        assert_eq!(
+            emitted_text(&events),
+            vec!["Partial".to_string(), " answer".to_string()],
+            "the same tail must also be painted, in order, before StreamEnded"
+        );
+    }
+
+    /// AGE-372, done-when #2. A burst followed by a stall must paint within
+    /// one `FLUSH_INTERVAL`. The manager's flush timer is the only thing
+    /// that can do it (no further event arrives), and it has to reach the
+    /// layer that actually buffers — the sink's batch, not just
+    /// `StreamState.pending_text`.
+    ///
+    /// Fails without the fix: the timer drains a `pending_text` the sink
+    /// never wrote to, so the tail stays unpainted indefinitely.
+    #[gpui::test]
+    async fn a_burst_then_a_stall_is_painted_within_one_flush_interval(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let conv_id = "conv-stall".to_string();
+        let chat_view = sink_harness(cx, &conv_id).await;
+        let (manager, events) = registered_manager(cx, &conv_id);
+        let mut sink = desktop_sink(cx, &conv_id, chat_view, Some(manager));
+
+        sink.handle(SessionEvent::Text("Thinking".to_string()));
+        for _ in 0..50 {
+            sink.handle(SessionEvent::Text(" on".to_string()));
+        }
+
+        assert_eq!(
+            emitted_text(&events),
+            vec!["Thinking".to_string()],
+            "only the immediate first-chunk flush should have happened yet — the rest \
+             of the burst is still coalescing (the AGE-166 rate cap)"
+        );
+
+        // The stream stalls: no further event, just time passing.
+        cx.executor().advance_clock(FLUSH_INTERVAL);
+        cx.run_until_parked();
+
+        let tail = " on".repeat(50);
+        assert_eq!(
+            emitted_text(&events),
+            vec!["Thinking".to_string(), tail.clone()],
+            "the stalled tail must be painted by the flush timer within one FLUSH_INTERVAL"
+        );
+
+        cx.update(|cx| {
+            let store = cx.global::<ConversationsStore>();
+            let conv = store
+                .get_conversation(&conv_id)
+                .expect("conversation is loaded");
+            assert_eq!(
+                conv.streaming_message().map(String::as_str),
+                Some(format!("Thinking{tail}").as_str()),
+                "the timer flush must apply the tail to the conversation too, not just \
+                 emit it — Conversation.streaming_message is what gets persisted"
+            );
+        });
+    }
+
+    fn last_assistant_text(conv: &chatty_core::models::Conversation) -> Option<String> {
+        conv.entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.message {
+                rig_core::message::Message::Assistant { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter_map(|c| match c {
+                            AssistantContent::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
     }
 }
