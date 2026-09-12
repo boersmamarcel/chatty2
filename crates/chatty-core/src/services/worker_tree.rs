@@ -117,6 +117,41 @@ pub async fn commit(tree: &WorkerTree, task: &str) {
     }
 }
 
+/// What runs when the worker's process exits, given whether its task
+/// succeeded.
+///
+/// Mirrors the shape `chatty-protocol-gateway`'s `WorkerWorkspace::on_exit`
+/// needs. This crate does not depend on that one — its optional `worker`
+/// feature depends back on `chatty-core`, so the edge stays acyclic — which
+/// is why [`create_with_commit_hook`] returns this instead of a
+/// `WorkerWorkspace` directly; the caller (chatty-gpui's `broker_runner`,
+/// chatty-tui's `--broker` wiring) wraps it in a couple of lines.
+pub type ExitHook = Box<dyn FnOnce(bool) + Send>;
+
+/// [`create`] plus the commit-on-exit hook every caller wants: the whole
+/// body of a broker's git-worktree `WorkspaceFactory`, minus the wrapping
+/// into that type (AGE-376).
+pub async fn create_with_commit_hook(
+    workspace_root: &str,
+    worker: &str,
+) -> Result<Option<(PathBuf, ExitHook)>> {
+    let Some(tree) = create(workspace_root, worker).await? else {
+        return Ok(None);
+    };
+    let cwd = tree.path.clone();
+    let on_exit: ExitHook = Box::new(move |_succeeded| {
+        // `on_exit` runs from the runner's `Drop`, which cannot await;
+        // committing is a `git` subprocess, so it is spawned. The tree is
+        // the worker's alone, so nothing races this.
+        tokio::spawn(async move {
+            // Committed whether the worker succeeded or not: a failed
+            // worker's partial edits are still the only copy that exists.
+            commit(&tree, "delegated task").await;
+        });
+    });
+    Ok(Some((cwd, on_exit)))
+}
+
 /// The sentence a leader is told so it knows the output is on a branch
 /// rather than in its own tree. Nothing is merged automatically.
 pub fn merge_hint(tree: &WorkerTree) -> String {

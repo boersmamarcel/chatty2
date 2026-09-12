@@ -14,6 +14,9 @@
 //! to tell the two apart. All that is left here is the hole the shared loop
 //! leaves for the turn, filled with the headless runner.
 
+pub mod broker;
+#[cfg(test)]
+mod broker_delegation;
 #[cfg(test)]
 mod equivalence;
 #[cfg(test)]

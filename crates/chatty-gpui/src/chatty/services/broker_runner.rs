@@ -53,14 +53,11 @@ pub fn worker_endpoint(
     providers: &ProviderModel,
     module_settings: &ModuleSettingsModel,
 ) -> Option<(String, EndpointBudget)> {
-    let model = models.models().first()?;
-    let provider = providers
-        .providers()
-        .iter()
-        .find(|p| p.provider_type == model.provider_type)?;
-
-    let endpoint = provider.endpoint_key();
-    let limit = module_settings.endpoint_budget(&endpoint, provider.parallel_requests());
+    let (endpoint, limit) = chatty_core::services::worker_endpoint::resolve_worker_endpoint(
+        models.models(),
+        providers.providers(),
+        module_settings,
+    )?;
     info!(
         endpoint = %endpoint,
         limit,
@@ -109,24 +106,12 @@ fn worktree_factory(workspace_root: String) -> WorkspaceFactory {
     Arc::new(move |worker: String| {
         let workspace_root = workspace_root.clone();
         Box::pin(async move {
-            let Some(tree) = worker_tree::create(&workspace_root, &worker).await? else {
+            let Some((cwd, on_exit)) =
+                worker_tree::create_with_commit_hook(&workspace_root, &worker).await?
+            else {
                 return Ok(None);
             };
-            let cwd = tree.path.clone();
-            Ok(Some(WorkerWorkspace {
-                cwd,
-                // `on_exit` runs from the runner's `Drop`, which cannot await;
-                // committing is a `git` subprocess, so it is spawned. The tree
-                // is the worker's alone, so nothing races this.
-                on_exit: Box::new(move |_succeeded| {
-                    tokio::spawn(async move {
-                        // Committed whether the worker succeeded or not: a
-                        // failed worker's partial edits are still the only
-                        // copy that exists.
-                        worker_tree::commit(&tree, "delegated task").await;
-                    });
-                }),
-            }))
+            Ok(Some(WorkerWorkspace { cwd, on_exit }))
         })
     })
 }

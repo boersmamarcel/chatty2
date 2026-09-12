@@ -210,6 +210,19 @@ struct Cli {
     /// spawning this process and is already routing a task to it.
     #[arg(long, value_name = "NAME", requires = "participant_socket")]
     participant_name: Option<String>,
+
+    /// Run this leader's own broker, so it can delegate to `local-agent`.
+    ///
+    /// Starts a protocol gateway on an ephemeral port and a participant
+    /// socket next to it, and offers a `local-agent` virtual worker
+    /// (ADR-0011 C2) that `invoke_agent`/`list_agents` can reach — the same
+    /// wiring the desktop's module settings turn on, minus the WASM module
+    /// runtime. Valid with --headless, --pipe and the interactive TUI.
+    /// A worker is a `chatty-tui` process next to this one; when the
+    /// workspace is a git repository each worker gets its own `git
+    /// worktree`, as on the desktop. Unix only.
+    #[arg(long)]
+    broker: bool,
 }
 
 #[tokio::main]
@@ -262,7 +275,7 @@ async fn main() -> Result<()> {
     let mut providers = providers_result.context("Failed to load providers")?;
     let mut models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
-    let module_settings = module_settings_result.unwrap_or_default();
+    let mut module_settings = module_settings_result.unwrap_or_default();
     let extensions = extensions_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
     let module_agents = discover_module_agents(&module_settings, &extensions);
@@ -372,6 +385,48 @@ async fn main() -> Result<()> {
         provider = ?model_config.provider_type,
         "Using model"
     );
+
+    // --broker (AGE-376): run this leader's own protocol gateway so
+    // `invoke_agent`/`list_agents` can reach a `local-agent` worker, the
+    // same wiring chatty-gpui's module-settings controller turns on for the
+    // desktop. `module_settings.enabled`/`gateway_port` are how
+    // `AgentBuildContext.gateway_port` gets threaded through from here
+    // (`ChatEngine`/`HeadlessRunner` already do that unconditionally), so
+    // overriding them is the whole change. Unix only — the participant
+    // socket underneath it does not exist elsewhere yet.
+    #[cfg(unix)]
+    let broker = if cli.broker {
+        match participant::broker::Broker::start(
+            models.models(),
+            &providers,
+            &module_settings,
+            execution_settings.workspace_dir.clone(),
+            matches!(
+                execution_settings.approval_mode,
+                chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+            ),
+        )
+        .await
+        {
+            Ok(broker) => {
+                apply_broker_settings(&mut module_settings, broker.port);
+                Some(broker)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to start the broker; --broker delegation is unavailable"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    if cli.broker {
+        bail!("--broker needs a Unix socket, which this platform has not got");
+    }
 
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -493,6 +548,14 @@ async fn main() -> Result<()> {
         engine.spawn_init_conversation();
         app::run(engine, event_rx).await
     };
+
+    // Stop serving once the turn (or the interactive session) ends; workers
+    // already spawned are reaped by the runner's own `Drop`, not by this
+    // (Do item 4).
+    #[cfg(unix)]
+    if let Some(broker) = broker {
+        broker.shutdown();
+    }
 
     // The engine (and with it any `SandboxManager`) is gone, but its `Drop`
     // could only spawn a detached cleanup task, which dies with the runtime
@@ -716,6 +779,21 @@ fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {
     }
 
     Ok(all_models[0].clone())
+}
+
+/// What `--broker` changes about the module settings a conversation's agent
+/// is built from: turn the gateway on and point it at wherever
+/// `participant::broker::Broker::start` actually bound its ephemeral port.
+/// `AgentBuildContext.gateway_port` — and with it `local-agent` in
+/// `list_agents`/`invoke_agent` — is `module_settings.enabled.then_some(...
+/// gateway_port)` downstream (`ChatEngine`/`HeadlessRunner`, unchanged by
+/// this issue), so this pair of fields is the entire seam.
+fn apply_broker_settings(
+    module_settings: &mut chatty_core::settings::models::ModuleSettingsModel,
+    port: u16,
+) {
+    module_settings.enabled = true;
+    module_settings.gateway_port = port;
 }
 
 fn apply_tool_overrides(
@@ -982,6 +1060,25 @@ fn inject_discovered(
 }
 
 #[cfg(test)]
+mod broker_settings_tests {
+    use super::apply_broker_settings;
+    use chatty_core::settings::models::ModuleSettingsModel;
+
+    /// Pins the whole of `--broker`'s override: drop either assignment from
+    /// `apply_broker_settings` and this fails.
+    #[test]
+    fn broker_settings_enable_the_gateway_and_point_at_the_brokers_port() {
+        let mut settings = ModuleSettingsModel::default();
+        assert!(!settings.enabled, "starts disabled by default");
+
+        apply_broker_settings(&mut settings, 54321);
+
+        assert!(settings.enabled);
+        assert_eq!(settings.gateway_port, 54321);
+    }
+}
+
+#[cfg(test)]
 mod resolve_model_tests {
     use super::{Cli, resolve_model};
     use chatty_core::settings::models::ModelsModel;
@@ -1052,6 +1149,7 @@ mod resolve_model_tests {
 mod cli_smoke_tests {
     use super::Cli;
     use clap::CommandFactory;
+    use clap::Parser;
 
     /// Replaces the old CI `cargo build -p chatty-tui && ./target/debug/chatty-tui --help`
     /// step. `cargo test` already compiles this crate; a second non-test bin
@@ -1062,5 +1160,15 @@ mod cli_smoke_tests {
         assert!(help.contains("chatty-tui"), "{help}");
         assert!(help.contains("--headless"), "{help}");
         assert!(help.contains("--pipe"), "{help}");
+        assert!(help.contains("--broker"), "{help}");
+    }
+
+    /// AGE-376: `--broker` is valid with `--headless`, `--pipe` and the bare
+    /// interactive TUI — clap must not reject any combination.
+    #[test]
+    fn broker_flag_parses_with_headless_pipe_and_interactive() {
+        assert!(Cli::try_parse_from(["chatty-tui", "--broker"]).is_ok());
+        assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--headless", "-m", "hi"]).is_ok());
+        assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--pipe"]).is_ok());
     }
 }
