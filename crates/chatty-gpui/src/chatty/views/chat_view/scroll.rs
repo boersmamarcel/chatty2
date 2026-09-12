@@ -9,12 +9,18 @@ use gpui::{Bounds, Pixels, px};
 
 /// How close to the bottom still counts as "at the bottom" for sticky scroll.
 ///
-/// Tight on purpose. This was 48px back when the transcript predicted its own
-/// heights and the measurement drifted; the list now measures every turn, so
-/// `distance_from_bottom` is exact and slack here only steals the user's
-/// scrolling. Sticky mode re-asserts the bottom every frame, so a turn growing
-/// below the viewport cannot drift out of this window on its own.
-pub(super) const STICKY_BOTTOM_EPSILON: Pixels = px(8.0);
+/// Float noise only. This was 48px back when the transcript predicted its own
+/// heights and the measurement drifted, then 8px; the list now measures every
+/// turn and [`distance_from_bottom`] accounts for the list's padding, so the
+/// distance is exact: scrolling into the bottom clamps it to zero, and any
+/// positive distance is the user scrolling away. Slack here steals exactly
+/// that much of the user's scrolling — every wheel event re-renders, and a
+/// frame that still reads "at the bottom" re-asserts the bottom and undoes
+/// the event (AGE-378: a trackpad delivers 2–5px per event, an X11 wheel notch
+/// 60px, and the old 8px on top of 64px of unaccounted padding swallowed both).
+/// Sticky mode re-asserts the bottom every frame, so a turn growing below the
+/// viewport cannot drift out of this window on its own.
+pub(super) const STICKY_BOTTOM_EPSILON: Pixels = px(1.0);
 
 /// How far above the bottom the user must be before the pin appears.
 ///
@@ -51,6 +57,26 @@ pub(super) fn plan_is_above_viewport(
     }
 }
 
+/// How far the transcript is scrolled above its bottom, in pixels.
+///
+/// `max_offset` is `ListState::max_offset_for_scrollbar().height` and
+/// `scroll_offset_y` is `scroll_px_offset_for_scrollbar().y` (negative, growing
+/// as the user scrolls down). `padding` is the list's own vertical padding,
+/// top plus bottom.
+///
+/// The padding term is the point: `max_offset_for_scrollbar` is content height
+/// minus viewport height and ignores padding, while the wheel and scrollbar
+/// clamp the scroll top at content *plus padding* minus viewport. Without it the
+/// bottom reads as `-padding`, and a scroll shorter than the padding still
+/// reads as "at the bottom" (AGE-378).
+pub(super) fn distance_from_bottom(
+    max_offset: Pixels,
+    scroll_offset_y: Pixels,
+    padding: Pixels,
+) -> Pixels {
+    max_offset + padding + scroll_offset_y
+}
+
 /// What the transcript should do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ScrollDecision {
@@ -62,7 +88,7 @@ pub(super) struct ScrollDecision {
 
 /// Resolve the scroll policy from the current measurement.
 ///
-/// `distance_from_bottom` is `max_offset.height + offset.y`: zero at the
+/// `distance_from_bottom` comes from [`distance_from_bottom`]: zero at the
 /// bottom, growing as the user scrolls up. `measured` is false before the list
 /// has laid out (max offset still zero), when nothing can be concluded and the
 /// previous state must be preserved rather than guessed at.
@@ -210,6 +236,36 @@ mod tests {
         assert!(!d.show_pin, "…and is too small to be worth the pin");
     }
 
+    /// AGE-378, the first symptom: a trackpad delivers a few pixels per event
+    /// and each event re-renders. With an 8px epsilon the frame after a 3px
+    /// event still read "at the bottom", re-asserted it, and undid the event;
+    /// the transcript only let go once a single event outran the epsilon.
+    #[test]
+    fn a_trackpad_sized_scroll_away_from_the_bottom_stops_following() {
+        for delta in [2.0, 3.0, 5.0] {
+            let d = resolve_scroll_state(px(delta), true, true, false);
+            assert!(!d.stick, "a {delta}px scroll event must not be undone");
+        }
+    }
+
+    /// AGE-378, the geometry behind the symptom: the list has 64px of vertical
+    /// padding that the wheel clamp counts and `max_offset_for_scrollbar` does
+    /// not. Before the padding term, a 60px X11 wheel notch from the bottom
+    /// read as -4px — "at the bottom" — and every notch was undone.
+    #[test]
+    fn distance_accounts_for_the_list_padding() {
+        // Content 2000px, viewport 800px, padding 16 + 48. The clamp puts the
+        // scroll top at 2000 + 64 - 800 = 1264; gpui reports it as -1264.
+        let max_offset = px(2000.0 - 800.0);
+        let padding = px(64.0);
+        let at_bottom = distance_from_bottom(max_offset, px(-1264.0), padding);
+        assert_eq!(at_bottom, px(0.0), "the clamped bottom reads as zero");
+
+        let one_notch = distance_from_bottom(max_offset, px(-1204.0), padding);
+        assert_eq!(one_notch, px(60.0), "a 60px notch reads as 60px, not -4px");
+        assert!(!resolve_scroll_state(one_notch, true, true, false).stick);
+    }
+
     #[test]
     fn scrolling_a_screenful_away_shows_the_pin_and_stops_following() {
         let d = resolve_scroll_state(px(600.0), true, true, false);
@@ -224,7 +280,8 @@ mod tests {
         let away = resolve_scroll_state(px(600.0), true, true, false);
         assert!(away.show_pin);
 
-        let back = resolve_scroll_state(px(2.0), true, away.stick, away.show_pin);
+        // Scrolling into the bottom clamps, so the distance reads exactly zero.
+        let back = resolve_scroll_state(px(0.0), true, away.stick, away.show_pin);
         assert!(!back.show_pin, "the pin must clear when the user returns");
         assert!(back.stick, "following must resume at the bottom");
     }

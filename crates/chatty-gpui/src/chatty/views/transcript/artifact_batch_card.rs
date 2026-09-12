@@ -104,7 +104,7 @@ impl RenderOnce for ArtifactBatchCard {
                                     .min_w_0()
                                     .child(
                                         div()
-                                            .font_family("monospace")
+                                            .font_family(cx.theme().mono_font_family.clone())
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(format!("{count} {noun} produced")),
@@ -175,7 +175,9 @@ impl RenderOnce for ArtifactBatchCard {
                                                 .min_w_0()
                                                 .child(
                                                     div()
-                                                        .font_family("monospace")
+                                                        .font_family(
+                                                            cx.theme().mono_font_family.clone(),
+                                                        )
                                                         .text_xs()
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .child(label),
