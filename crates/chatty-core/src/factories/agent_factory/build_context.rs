@@ -50,6 +50,10 @@ pub struct AgentBuildContext {
     pub embedding_service: Option<EmbeddingService>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
+    /// The broker's virtual agents by name — `local-agent`, or what
+    /// `module_settings.virtual_agents` declares (ADR-0011 C10). Only
+    /// addressable while `gateway_port` is set.
+    pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
     /// Conversation this turn belongs to. Only consulted when the `browser`
     /// feature is on, to register the built `BrowserManager` where the
@@ -75,6 +79,8 @@ pub struct AgentServices {
     pub embedding_service: Option<EmbeddingService>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
+    /// `ModuleSettingsModel::virtual_agent_names()` on the host's settings.
+    pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
 }
 
@@ -117,6 +123,7 @@ impl AgentBuildContext {
             embedding_service,
             module_agents,
             gateway_port,
+            local_agents,
             remote_agents,
         } = services;
         Self {
@@ -141,6 +148,7 @@ impl AgentBuildContext {
             embedding_service,
             module_agents,
             gateway_port,
+            local_agents,
             remote_agents,
             conversation_id: None,
         }
@@ -226,6 +234,7 @@ mod tests {
                 execution_mode: "local".to_string(),
             }],
             gateway_port: Some(4242),
+            local_agents: vec!["local-coder".to_string()],
             remote_agents: vec![A2aAgentConfig {
                 name: "remote".to_string(),
                 url: "http://127.0.0.1:9000".to_string(),
@@ -247,6 +256,7 @@ mod tests {
         assert_eq!(ctx.module_agents.len(), 1);
         assert_eq!(ctx.module_agents[0].name, "echo");
         assert_eq!(ctx.gateway_port, Some(4242));
+        assert_eq!(ctx.local_agents, vec!["local-coder".to_string()]);
         assert_eq!(ctx.remote_agents.len(), 1);
         assert_eq!(ctx.remote_agents[0].name, "remote");
 

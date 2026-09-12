@@ -8,6 +8,8 @@ use crate::settings::models::{
 };
 use anyhow::{Context, Result};
 use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
+#[cfg(unix)]
+use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel,
@@ -744,45 +746,57 @@ pub fn refresh_runtime(cx: &mut App) {
 
                     // ADR-0011 C2: the gateway is also the fleet broker.
                     // Children register on a socket beside its HTTP port, and
-                    // `local-agent` spawns one per delegated task. Unix only —
-                    // the socket and the runner behind it do not exist on
-                    // Windows, so the gateway there is just the gateway.
+                    // each virtual agent — `local-agent`, or the named team
+                    // module settings declare (C10) — spawns one per
+                    // delegated task. Unix only — the socket and the runners
+                    // behind it do not exist on Windows, so the gateway there
+                    // is just the gateway.
                     #[cfg(unix)]
                     {
                         let participants = gateway.participants();
                         let socket = broker_runner::socket_path();
                         if broker_runner::serve_socket(participants.clone(), &socket) {
-                            let (workspace_dir, auto_approve, endpoint) = cx
+                            let (workspace_dir, specs) = cx
                                 .update(|cx| {
                                     let exec = cx.global::<ExecutionSettingsModel>();
                                     // A worker inherits the desktop's approval
-                                    // policy; it has no user to ask.
-                                    let auto_approve =
-                                        matches!(exec.approval_mode, ApprovalMode::AutoApproveAll);
-                                    // The endpoint every worker will share, and
-                                    // how many may hold it at once (ADR-0011 C6).
-                                    let endpoint = match (
-                                        cx.try_global::<ModelsModel>(),
-                                        cx.try_global::<ProviderModel>(),
+                                    // policy; it has no user to ask. A desktop
+                                    // leader forwards no provider flags: the
+                                    // child reads the same config dir.
+                                    let common_args: Vec<String> = if matches!(
+                                        exec.approval_mode,
+                                        ApprovalMode::AutoApproveAll
                                     ) {
-                                        (Some(models), Some(providers)) => {
-                                            broker_runner::worker_endpoint(
-                                                models, providers, &settings,
-                                            )
-                                        }
-                                        _ => None,
+                                        vec!["--auto-approve".to_string()]
+                                    } else {
+                                        Vec::new()
                                     };
-                                    (exec.workspace_dir.clone(), auto_approve, endpoint)
+                                    let models = cx
+                                        .try_global::<ModelsModel>()
+                                        .map(|m| m.models())
+                                        .unwrap_or(&[]);
+                                    let providers = cx
+                                        .try_global::<ProviderModel>()
+                                        .map(|p| p.providers())
+                                        .unwrap_or(&[]);
+                                    let specs = resolve_virtual_agents(
+                                        models,
+                                        providers,
+                                        &settings,
+                                        &common_args,
+                                    );
+                                    (exec.workspace_dir.clone(), specs)
                                 })
-                                .unwrap_or((None, false, None));
-                            gateway =
-                                gateway.with_virtual_agent(Arc::new(broker_runner::local_runner(
-                                    participants,
-                                    socket,
-                                    workspace_dir,
-                                    auto_approve,
-                                    endpoint,
-                                )));
+                                .unwrap_or((None, Vec::new()));
+                            for runner in broker_runner::local_runners(
+                                participants,
+                                socket,
+                                workspace_dir,
+                                settings.default_endpoint_budget,
+                                specs,
+                            ) {
+                                gateway = gateway.with_virtual_agent(Arc::new(runner));
+                            }
                         }
                     }
 

@@ -357,14 +357,15 @@ impl ChattyApp {
                     let module_agents = cx
                         .update(|cx| collect_module_agents(cx))
                         .unwrap_or_default();
-                    let gateway_port = cx
+                    let (gateway_port, local_agents) = cx
                         .update(|cx| {
                             cx.try_global::<crate::settings::models::ModuleSettingsModel>()
-                                .map(|m| m.gateway_port)
+                                .map(|m| (m.gateway_port, m.virtual_agent_names()))
                         })
                         .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                         .ok()
-                        .flatten();
+                        .flatten()
+                        .unzip();
                     let remote_agents = cx
                         .update(|cx| {
                             cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
@@ -397,6 +398,7 @@ impl ChattyApp {
                                     embedding_service,
                                     module_agents,
                                     gateway_port,
+                                    local_agents: local_agents.unwrap_or_default(),
                                     remote_agents,
                                 })
                             },
@@ -505,9 +507,10 @@ impl ChattyApp {
             // Slow path: fetch from SQLite, restore, then display
             let repo = self.conversation_repo.clone();
             let module_agents = collect_module_agents(cx);
-            let gateway_port = cx
+            let (gateway_port, local_agents) = cx
                 .try_global::<crate::settings::models::ModuleSettingsModel>()
-                .map(|m| m.gateway_port);
+                .map(|m| (m.gateway_port, m.virtual_agent_names()))
+                .unzip();
             let remote_agents = cx
                 .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
                 .map(|m| m.a2a_agent_configs())
@@ -555,6 +558,7 @@ impl ChattyApp {
                                     embedding_service,
                                     module_agents,
                                     gateway_port,
+                                    local_agents: local_agents.unwrap_or_default(),
                                     remote_agents,
                                 })
                             },

@@ -61,7 +61,10 @@ pub mod stream_processor;
 pub mod title_generator;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;
-/// Which model endpoint the broker's workers share, and their budget on it
+/// The broker's named virtual agents — each worker's argv and endpoint —
+/// built once for both frontends (ADR-0011 C10 / AGE-377).
+pub mod virtual_agents;
+/// Which model endpoint a broker worker talks to, and its budget on it
 /// (ADR-0011 C6 / AGE-376).
 pub mod worker_endpoint;
 /// ADR-0012 worker isolation: a `git worktree` per worker (AGE-314 / AGE-301).

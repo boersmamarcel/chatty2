@@ -102,7 +102,7 @@ impl Broker {
     /// The `invoke_agent` a level of the chain holds, addressing `agent`
     /// through this broker and re-asking its questions on `store`.
     fn invoke_agent(&self, agent: &str, store: Option<&ClarificationStore>) -> InvokeAgentTool {
-        let tool = InvokeAgentTool::new(vec![], vec![], Some(self.port)).with_local_agent(agent);
+        let tool = InvokeAgentTool::new(vec![], vec![], Some(self.port)).with_local_agents([agent]);
         match store {
             Some(store) => tool.with_clarifications(store.get_pending_clarifications()),
             None => tool,
@@ -204,7 +204,7 @@ async fn child(broker: &Broker) {
         move |task, sink, inputs| async move {
             let store = scripted_session(&sink, inputs);
             let tool = InvokeAgentTool::new(vec![], vec![], Some(port))
-                .with_local_agent(GRANDCHILD)
+                .with_local_agents([GRANDCHILD])
                 .with_clarifications(store.get_pending_clarifications());
             sink(&SessionEvent::TurnStarted);
             tool_started(&sink, "invoke_agent");

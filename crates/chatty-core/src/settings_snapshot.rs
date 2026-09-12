@@ -491,6 +491,7 @@ mod tests {
                     budgets.insert("http://localhost:11434".to_string(), 2);
                     budgets
                 },
+                virtual_agents: Vec::new(),
             },
             providers: vec![
                 ProviderConfig::new("openrouter".to_string(), ProviderType::OpenRouter)

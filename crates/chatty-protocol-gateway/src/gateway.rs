@@ -1,7 +1,7 @@
 //! Core `ProtocolGateway` implementation — builds the axum router and manages
 //! the server lifecycle.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,10 +38,11 @@ pub struct GatewayState {
     /// Processes registered over the participant socket (ADR-0011). Shares
     /// the `/a2a/{name}` namespace with modules and is consulted first.
     pub participants: ParticipantRegistry,
-    /// The agent that has no participant until a task arrives: it starts
-    /// one, routes the task to it, and reaps it (ADR-0011 C2 locally, C8
-    /// hosted).
-    pub runner: Option<Arc<dyn VirtualAgent>>,
+    /// The agents that have no participant until a task arrives: each
+    /// starts one, routes the task to it, and reaps it (ADR-0011 C2
+    /// locally, C8 hosted). Keyed by the name callers address, in name
+    /// order so the aggregated card is stable (ADR-0011 C10).
+    pub runners: Arc<BTreeMap<String, Arc<dyn VirtualAgent>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +94,7 @@ pub struct ProtocolGateway {
     /// it should open one.
     participant_socket: Option<PathBuf>,
     participant_task: Option<tokio::task::JoinHandle<()>>,
-    runner: Option<Arc<dyn VirtualAgent>>,
+    runners: BTreeMap<String, Arc<dyn VirtualAgent>>,
 }
 
 impl ProtocolGateway {
@@ -114,7 +115,7 @@ impl ProtocolGateway {
             participants: ParticipantRegistry::new(),
             participant_socket: None,
             participant_task: None,
-            runner: None,
+            runners: BTreeMap::new(),
         }
     }
 
@@ -169,8 +170,12 @@ impl ProtocolGateway {
     /// ADR-0011 C2); hosted it is a leased microVM (AGE-307). Either way the
     /// agent must be built on this gateway's participant registry, since that
     /// is where its workers register.
+    ///
+    /// Additive: each call publishes one more agent under its own name
+    /// (ADR-0011 C10 — `local-coder`, `local-reviewer`, …). A second agent
+    /// with a name already published replaces the first.
     pub fn with_virtual_agent(mut self, runner: Arc<dyn VirtualAgent>) -> Self {
-        self.runner = Some(runner);
+        self.runners.insert(runner.agent_name().to_string(), runner);
         self
     }
 
@@ -195,7 +200,7 @@ impl ProtocolGateway {
             runner_url: self.runner_url.clone(),
             paid_modules: Arc::new(self.paid_modules.clone()),
             participants: self.participants.clone(),
-            runner: self.runner.clone(),
+            runners: Arc::new(self.runners.clone()),
         };
 
         Router::new()

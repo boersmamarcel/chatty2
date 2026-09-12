@@ -548,6 +548,82 @@ async fn a_participants_card_is_served_and_lists_it_on_the_aggregated_card() {
     );
 }
 
+/// ADR-0011 C10: `with_virtual_agent` is additive. Two named runners are
+/// each served at `/a2a/{name}` with their own card, and both are on the
+/// aggregated card as this machine's — which is what `list_agents` reads.
+#[tokio::test]
+async fn several_virtual_agents_are_each_served_by_name_and_all_listed() {
+    use chatty_protocol_gateway::participant::LocalRunner;
+
+    let dir = tempfile::tempdir().expect("a temp dir for the socket");
+    let socket = dir.path().join("participants.sock");
+    let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+    let modules = Arc::new(RwLock::new(
+        ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
+    ));
+    let mut gateway = ProtocolGateway::new(modules, 0);
+    for (name, description) in [
+        ("local-coder", "Model: qwen. Tools: the full set."),
+        (
+            "local-reviewer",
+            "Model: gemma. Tool groups disabled: fs-write, shell, git.",
+        ),
+    ] {
+        let runner = LocalRunner::new("/bin/sh", &socket, gateway.participants())
+            .with_agent_name(name)
+            .with_description(description);
+        gateway = gateway.with_virtual_agent(Arc::new(runner));
+    }
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral port");
+    let base_url = format!("http://{}", tcp.local_addr().unwrap());
+    let router = gateway.build_router();
+    tokio::spawn(async move {
+        axum::serve(tcp, router).await.ok();
+    });
+
+    let client = A2aClient::new();
+    for (name, description) in [
+        ("local-coder", "Model: qwen. Tools: the full set."),
+        (
+            "local-reviewer",
+            "Model: gemma. Tool groups disabled: fs-write, shell, git.",
+        ),
+    ] {
+        let card = client
+            .fetch_agent_card(&A2aAgentConfig {
+                name: name.to_string(),
+                url: format!("{base_url}/a2a/{name}"),
+                api_key: None,
+                enabled: true,
+                skills: vec![],
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{name}'s card is served: {e:#}"));
+        assert_eq!(card.name, name);
+        assert_eq!(card.description, description);
+    }
+
+    let aggregated: Value = reqwest::get(format!("{base_url}/.well-known/agent.json"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed: Vec<(&str, &str)> = aggregated["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| Some((a["name"].as_str()?, a["origin"].as_str()?)))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![("local-coder", "local"), ("local-reviewer", "local")],
+        "every virtual agent is on the aggregated card, in name order, as this machine's"
+    );
+}
+
 /// The issue's second "Done when": a closed socket deregisters the stub.
 #[tokio::test]
 async fn closing_the_socket_deregisters_the_participant() {

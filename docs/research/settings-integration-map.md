@@ -13,8 +13,16 @@ Parent: [Paper → product pipeline](./paper-to-product-pipeline.md).
 | `ModelConfig` | `temperature`, `cost_per_million_*` | M3 cost accounting | Ships |
 | `ModelConfig` | `supports_images`, `supports_pdf`, … | — | Ships (unrelated) |
 | `TrainingSettingsModel` | `atif_auto_export` | M0 trace export toggle | **Setting** |
+| `ModuleSettingsModel` | `virtual_agents` | Named worker roles for the small-teams experiment (ADR-0011 C10, `dev/design/fleet.md` §2) | Ships (JSON only, no GPUI page) |
 
 Location: `crates/chatty-core/src/settings/models/`.
+
+`virtual_agents` is a list of `{ name, model?, disable_tools?, extra_args? }` in
+`module_settings.json`; empty means the single `local-agent`. The team a leader
+delegates to is a roster plus a skill file, e.g. `local-coder` on `qwen3:4b` and
+`local-reviewer` on `gemma4:26b` with `disable_tools: ["fs-write", "shell", "git"]`.
+Schema and the resolution rules: [A2A and WASM modules](../a2a-and-wasm-modules.md),
+"Named virtual agents".
 
 ## Planned (product integration project)
 

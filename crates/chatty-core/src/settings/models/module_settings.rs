@@ -35,6 +35,39 @@ pub struct ModuleSettingsModel {
     /// provider reports about itself.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub endpoint_budgets: HashMap<String, usize>,
+    /// The broker's virtual agents (ADR-0011 C10): each is a name the leader
+    /// can delegate to, with its own model and tool set. Empty means the one
+    /// default worker, `local-agent`, which runs the roster's default model
+    /// with the leader's tools.
+    ///
+    /// Roles are declared here rather than passed on `invoke_agent`, so the
+    /// leader's tool schema and prompt stay identical whatever the team.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub virtual_agents: Vec<VirtualAgentConfig>,
+}
+
+/// One named virtual agent the broker publishes (ADR-0011 C10).
+///
+/// Each becomes a worker runner whose children get `--model <model>` when
+/// set, `--disable <groups>` when set, then `extra_args`, on top of the
+/// flags every worker gets.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VirtualAgentConfig {
+    /// The name callers address at `/a2a/{name}`, e.g. `local-reviewer`.
+    pub name: String,
+    /// The model the worker runs, as `chatty-tui --model` resolves it (id,
+    /// name, or a substring of the model identifier). `None` leaves the
+    /// child to resolve the roster's default, as an undeclared worker does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Tool groups the worker runs without, as `chatty-tui --disable` names
+    /// them: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`,
+    /// `docker-exec`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable_tools: Vec<String>,
+    /// Any further `chatty-tui` flags, appended verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
 }
 
 impl ModuleSettingsModel {
@@ -52,6 +85,16 @@ impl ModuleSettingsModel {
             .or(reported)
             .unwrap_or(self.default_endpoint_budget)
             .max(1)
+    }
+
+    /// The names the broker publishes as virtual agents: what was declared,
+    /// or the one default worker when nothing was.
+    pub fn virtual_agent_names(&self) -> Vec<String> {
+        if self.virtual_agents.is_empty() {
+            vec![crate::tools::LOCAL_AGENT_NAME.to_string()]
+        } else {
+            self.virtual_agents.iter().map(|a| a.name.clone()).collect()
+        }
     }
 }
 
@@ -105,6 +148,7 @@ impl Default for ModuleSettingsModel {
             gateway_port: default_gateway_port(),
             default_endpoint_budget: default_endpoint_budget(),
             endpoint_budgets: HashMap::new(),
+            virtual_agents: Vec::new(),
         }
     }
 }
@@ -220,6 +264,62 @@ mod tests {
             serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
         assert_eq!(old.default_endpoint_budget, 1);
         assert!(old.endpoint_budgets.is_empty());
+    }
+
+    /// ADR-0011 C10: nothing declared means the one default worker, so a
+    /// settings file written before virtual agents existed publishes exactly
+    /// what it did before.
+    #[test]
+    fn no_declared_virtual_agents_means_the_one_default_worker() {
+        let settings = ModuleSettingsModel::default();
+        assert!(settings.virtual_agents.is_empty());
+        assert_eq!(
+            settings.virtual_agent_names(),
+            vec!["local-agent".to_string()]
+        );
+
+        let old: ModuleSettingsModel =
+            serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
+        assert!(old.virtual_agents.is_empty());
+    }
+
+    #[test]
+    fn declared_virtual_agents_survive_a_roundtrip_and_name_themselves() {
+        let original = ModuleSettingsModel {
+            virtual_agents: vec![
+                VirtualAgentConfig {
+                    name: "local-coder".to_string(),
+                    model: Some("qwen3:4b".to_string()),
+                    ..VirtualAgentConfig::default()
+                },
+                VirtualAgentConfig {
+                    name: "local-reviewer".to_string(),
+                    model: Some("gemma4:26b".to_string()),
+                    disable_tools: vec!["fs-write".into(), "shell".into(), "git".into()],
+                    extra_args: vec!["--enable".into(), "fetch".into()],
+                },
+            ],
+            ..ModuleSettingsModel::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: ModuleSettingsModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.virtual_agents, original.virtual_agents);
+        assert_eq!(
+            restored.virtual_agent_names(),
+            vec!["local-coder".to_string(), "local-reviewer".to_string()],
+            "declared names replace the default worker rather than joining it"
+        );
+
+        // The schema the docs promise: a declaration needs only a name.
+        let minimal: ModuleSettingsModel =
+            serde_json::from_str(r#"{"virtual_agents":[{"name":"local-coder"}]}"#).unwrap();
+        assert_eq!(
+            minimal.virtual_agents,
+            vec![VirtualAgentConfig {
+                name: "local-coder".to_string(),
+                ..VirtualAgentConfig::default()
+            }]
+        );
     }
 
     #[test]

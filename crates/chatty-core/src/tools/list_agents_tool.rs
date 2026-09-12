@@ -52,7 +52,8 @@ pub struct LocalModuleAgentSummary {
     pub execution_mode: String,
 }
 
-/// The broker's local-worker agent, when the gateway publishes one.
+/// One of the broker's local-worker agents, when the gateway publishes
+/// any (ADR-0011 C2; several, by name, under C10).
 #[derive(Debug, Serialize, Clone)]
 pub struct LocalWorkerAgentSummary {
     pub name: String,
@@ -108,8 +109,9 @@ pub struct ListAgentsTool {
     remote_agents: Vec<A2aAgentConfig>,
     /// Locally installed WASM module agents with `agent = true`.
     module_agents: Vec<LocalModuleAgentSummary>,
-    /// The broker's local worker (ADR-0011 C2), if the gateway is running.
-    local_worker: Option<LocalWorkerAgentSummary>,
+    /// The broker's local workers (ADR-0011 C2, named under C10), if the
+    /// gateway is running.
+    local_workers: Vec<LocalWorkerAgentSummary>,
     /// Where to read the broker's live participant table, when the gateway is
     /// running (ADR-0011 C5).
     gateway_base_url: Option<String>,
@@ -121,7 +123,7 @@ impl ListAgentsTool {
         Self {
             remote_agents,
             module_agents: Vec::new(),
-            local_worker: None,
+            local_workers: Vec::new(),
             gateway_base_url: None,
             http: reqwest::Client::new(),
         }
@@ -135,7 +137,7 @@ impl ListAgentsTool {
         Self {
             remote_agents,
             module_agents,
-            local_worker: None,
+            local_workers: Vec::new(),
             gateway_base_url: None,
             http: reqwest::Client::new(),
         }
@@ -148,16 +150,24 @@ impl ListAgentsTool {
         self
     }
 
-    /// Advertise the broker's local worker: a chatty agent in its own
-    /// process (ADR-0011 C2).
-    pub fn with_local_worker(mut self, name: impl Into<String>) -> Self {
-        self.local_worker = Some(LocalWorkerAgentSummary {
-            name: name.into(),
-            description: "A chatty agent in its own process and its own \
-                          workspace, with the same tool set. Delegate a \
-                          self-contained task to it."
-                .to_string(),
-        });
+    /// Advertise the broker's local workers: chatty agents in their own
+    /// process (ADR-0011 C2), one per name (C10). The live card, when the
+    /// gateway answers, supplies each one's real description — its model
+    /// and tool set — so this is the fallback text for when it does not.
+    pub fn with_local_workers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.local_workers = names
+            .into_iter()
+            .map(|name| LocalWorkerAgentSummary {
+                name: name.into(),
+                description: "A chatty agent in its own process and its own \
+                              workspace. Delegate a self-contained task to it."
+                    .to_string(),
+            })
+            .collect();
         self
     }
 }
@@ -237,10 +247,20 @@ impl Tool for ListAgentsTool {
             );
         }
 
-        if let Some(worker) = self.local_worker.as_ref() {
-            listings.insert(
-                worker.name.clone(),
-                AgentListing {
+        // The live half. A remote agent the user configured keeps its own
+        // entry: the broker would report it as whatever it is to the broker,
+        // and what the *user* did is the more informative label.
+        for live in self.live_agents().await {
+            listings.entry(live.name.clone()).or_insert(live);
+        }
+
+        // After the live half: the broker's card says what each worker
+        // actually runs (its model, its tool set — ADR-0011 C10), and this
+        // entry only stands in when the broker did not answer.
+        for worker in &self.local_workers {
+            listings
+                .entry(worker.name.clone())
+                .or_insert_with(|| AgentListing {
                     name: worker.name.clone(),
                     origin: AgentOrigin::Local,
                     kind: "worker",
@@ -249,15 +269,7 @@ impl Tool for ListAgentsTool {
                     enabled: true,
                     skills: Vec::new(),
                     has_api_key: false,
-                },
-            );
-        }
-
-        // The live half. A remote agent the user configured keeps its own
-        // entry: the broker would report it as whatever it is to the broker,
-        // and what the *user* did is the more informative label.
-        for live in self.live_agents().await {
-            listings.entry(live.name.clone()).or_insert(live);
+                });
         }
 
         let agents: Vec<AgentListing> = listings.into_values().collect();
@@ -476,7 +488,7 @@ mod tests {
             vec![make_agent("remote", "https://example.com/a2a", true)],
             vec![make_module_agent("echo")],
         )
-        .with_local_worker("local-agent");
+        .with_local_workers(["local-agent"]);
 
         let output = list(&tool).await;
         assert_eq!(output.total, 3);
@@ -557,6 +569,48 @@ mod tests {
         // A card with no origin is not treated as trusted.
         assert_eq!(find(&output, "mystery").origin, AgentOrigin::Discovered);
         assert!(!find(&output, "mystery").origin.is_own_fleet());
+    }
+
+    /// ADR-0011 C10: the broker's card says what a worker runs, so for a
+    /// local worker the live description beats the static stand-in text.
+    #[tokio::test]
+    async fn a_local_workers_live_card_beats_the_static_stand_in() {
+        let card = serde_json::json!({
+            "agents": [
+                {"name": "local-coder", "origin": "local",
+                 "description": "Model: qwen. Tools: the full set."},
+                {"name": "local-reviewer", "origin": "local",
+                 "description": "Model: gemma. Tool groups disabled: fs-write, shell, git."},
+            ],
+        });
+        let (port, _server) = serve_card(card).await;
+        let tool = ListAgentsTool::new(vec![])
+            .with_local_workers(["local-coder", "local-reviewer"])
+            .with_gateway_port(port);
+
+        let output = list(&tool).await;
+        assert_eq!(output.total, 2);
+        assert_eq!(
+            find(&output, "local-coder").description,
+            "Model: qwen. Tools: the full set."
+        );
+        assert_eq!(
+            find(&output, "local-reviewer").description,
+            "Model: gemma. Tool groups disabled: fs-write, shell, git."
+        );
+        assert_eq!(find(&output, "local-reviewer").kind, "worker");
+    }
+
+    /// Without a gateway answering, the declared names are still listed —
+    /// the stand-in text, so the model knows they exist.
+    #[tokio::test]
+    async fn declared_local_workers_are_listed_even_when_the_broker_is_silent() {
+        let tool =
+            ListAgentsTool::new(vec![]).with_local_workers(["local-coder", "local-reviewer"]);
+        let output = list(&tool).await;
+        assert_eq!(output.total, 2);
+        assert_eq!(find(&output, "local-coder").origin, AgentOrigin::Local);
+        assert_eq!(find(&output, "local-reviewer").origin, AgentOrigin::Local);
     }
 
     /// The user's own label wins over the broker's for an agent that is in

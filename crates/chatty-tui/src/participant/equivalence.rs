@@ -118,14 +118,14 @@ async fn start_gateway() -> (u16, ParticipantRegistry) {
     (port, participants)
 }
 
-/// Register a participant that answers its one task by replaying `events`
-/// through the mapping under test.
-fn spawn_scripted_worker(registry: &ParticipantRegistry, events: Vec<SessionEvent>) {
+/// Register a participant under `name` that answers its one task by
+/// replaying `events` through the mapping under test.
+fn spawn_scripted_worker(registry: &ParticipantRegistry, name: &str, events: Vec<SessionEvent>) {
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
     registry
         .register(
             ParticipantCard {
-                name: LOCAL_AGENT_NAME.to_string(),
+                name: name.to_string(),
                 description: "a scripted worker".to_string(),
                 ..Default::default()
             },
@@ -135,6 +135,7 @@ fn spawn_scripted_worker(registry: &ParticipantRegistry, events: Vec<SessionEven
         .expect("the scripted worker registers");
 
     let registry = registry.clone();
+    let name = name.to_string();
     tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
             let BrokerFrame::Task { task_id, .. } = frame else {
@@ -143,10 +144,10 @@ fn spawn_scripted_worker(registry: &ParticipantRegistry, events: Vec<SessionEven
             let mut mapper = TaskMapper::new(task_id);
             for event in &events {
                 if let Some(frame) = mapper.map(event) {
-                    registry.on_frame(LOCAL_AGENT_NAME, frame);
+                    registry.on_frame(&name, frame);
                 }
             }
-            registry.on_frame(LOCAL_AGENT_NAME, mapper.terminal());
+            registry.on_frame(&name, mapper.terminal());
             return;
         }
     });
@@ -163,9 +164,10 @@ struct BrokerRun {
 /// parent saw.
 async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     let (port, registry) = start_gateway().await;
-    spawn_scripted_worker(&registry, events);
+    spawn_scripted_worker(&registry, LOCAL_AGENT_NAME, events);
 
-    let tool = InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agent(LOCAL_AGENT_NAME);
+    let tool =
+        InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
     let result = tool
@@ -304,4 +306,419 @@ async fn a_dropped_tool_event_would_be_caught() {
         expected, mapped,
         "a mapping that drops tool results must not compare equal"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Named virtual agents (ADR-0011 C10 / AGE-377)
+// ---------------------------------------------------------------------------
+
+mod named_virtual_agents {
+    //! AGE-377's verification: two declared agents, `local-coder` and
+    //! `local-reviewer`, over the exact gateway `--broker` starts. Both
+    //! appear in `list_agents` with their model in the card; a task to each
+    //! spawns a child whose argv carries the expected `--model` and
+    //! `--disable`; and a reviewer child built from those flags has no
+    //! `write_file` tool in its schema.
+    //!
+    //! The child is a stand-in binary that records its argv and waits, and
+    //! a scripted participant registered under the name the runner will
+    //! allocate (`<agent>-0`) answers the task — the same split
+    //! `runner.rs`'s own tests use. Only the argv is what this pins; what
+    //! a real `chatty-tui` does with it is `apply_tool_overrides` and
+    //! `resolve_model`, checked separately below.
+
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
+    use chatty_core::models::clarification_store::ClarificationStore;
+    use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
+    use chatty_core::models::write_approval_store::WriteApprovalStore;
+    use chatty_core::services::virtual_agents::resolve_virtual_agents;
+    use chatty_core::services::{StreamSurface, scenarios};
+    use chatty_core::session::{SessionEvent, TurnPolicy, replay_scenario};
+    use chatty_core::settings::models::models_store::ModelConfig;
+    use chatty_core::settings::models::module_settings::VirtualAgentConfig;
+    use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+    use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
+    use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
+    use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
+    use chatty_protocol_gateway::participant::{
+        AgentOrigin, BrokerFrame, ParticipantCard, ParticipantRegistry,
+    };
+    use chatty_protocol_gateway::worker::TaskMapper;
+    use clap::Parser;
+    use rig_agent::tool::{Tool, ToolContext};
+    use tokio::sync::mpsc;
+
+    use crate::participant::broker::Broker;
+
+    const CODER: &str = "local-coder";
+    const REVIEWER: &str = "local-reviewer";
+    const REVIEWER_DISABLED: [&str; 3] = ["fs-write", "shell", "git"];
+
+    /// The team the issue's manual run uses: a coder on one model, a
+    /// reviewer on another that cannot edit.
+    fn team() -> ModuleSettingsModel {
+        ModuleSettingsModel {
+            // Two slots, so the second delegation does not wait on the
+            // first stand-in child being reaped; queueing is C6's test.
+            default_endpoint_budget: 2,
+            virtual_agents: vec![
+                VirtualAgentConfig {
+                    name: CODER.to_string(),
+                    model: Some("qwen3:4b".to_string()),
+                    ..VirtualAgentConfig::default()
+                },
+                VirtualAgentConfig {
+                    name: REVIEWER.to_string(),
+                    model: Some("gemma4:26b".to_string()),
+                    disable_tools: REVIEWER_DISABLED.iter().map(|s| s.to_string()).collect(),
+                    extra_args: Vec::new(),
+                },
+            ],
+            ..ModuleSettingsModel::default()
+        }
+    }
+
+    fn roster() -> (Vec<ModelConfig>, Vec<ProviderConfig>) {
+        let models = ["qwen3:4b", "gemma4:26b"]
+            .iter()
+            .map(|id| {
+                ModelConfig::new(
+                    id.to_string(),
+                    id.to_string(),
+                    ProviderType::Ollama,
+                    id.to_string(),
+                )
+            })
+            .collect();
+        let mut ollama = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        ollama.base_url = Some("http://localhost:11434".to_string());
+        (models, vec![ollama])
+    }
+
+    /// A "chatty-tui" that appends its argv to `argv.log` beside itself and
+    /// then waits to be reaped, as a real child would wait on its task.
+    fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("chatty-tui");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/argv.log\"\nexec sleep 30\n",
+        )
+        .expect("the stand-in binary is written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in binary is executable");
+        path
+    }
+
+    /// The argv lines the stand-in children recorded so far, once there
+    /// are at least `at_least` of them.
+    async fn recorded_argv(dir: &std::path::Path, at_least: usize) -> Vec<String> {
+        let log = dir.join("argv.log");
+        for _ in 0..200 {
+            let lines: Vec<String> = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            if lines.len() >= at_least {
+                return lines;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "the stand-in child never recorded its argv in {}",
+            log.display()
+        );
+    }
+
+    /// A broker exactly as `--broker` would start it for `team()`, with the
+    /// leader's flags forwarded and the stand-in binary as the worker.
+    async fn start_team_broker(dir: &std::path::Path, provider_flags: &[String]) -> Broker {
+        let (models, providers) = roster();
+        let settings = team();
+        let mut common_args = vec!["--auto-approve".to_string()];
+        common_args.extend(provider_flags.iter().cloned());
+        let specs = resolve_virtual_agents(&models, &providers, &settings, &common_args);
+        Broker::start_at(
+            dir.join("participants.sock"),
+            stand_in_binary(dir),
+            settings.default_endpoint_budget,
+            specs,
+            None,
+        )
+        .await
+        .expect("the broker starts with two declared agents")
+    }
+
+    /// Register a stand-in under `name` that answers its task only once the
+    /// child spawned for it has recorded its argv — the runner reaps the
+    /// child the moment the task ends, and the stand-in answers in
+    /// microseconds, so without this gate `sh` could be killed before its
+    /// first line runs. Otherwise `spawn_scripted_worker`.
+    fn spawn_argv_gated_worker(
+        registry: &ParticipantRegistry,
+        name: &str,
+        argv_log: PathBuf,
+        events: Vec<SessionEvent>,
+    ) {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
+        registry
+            .register(
+                ParticipantCard {
+                    name: name.to_string(),
+                    description: "a scripted worker".to_string(),
+                    ..Default::default()
+                },
+                AgentOrigin::Local,
+                outbound_tx,
+            )
+            .expect("the scripted worker registers");
+
+        let registry = registry.clone();
+        let name = name.to_string();
+        tokio::spawn(async move {
+            while let Some(frame) = outbound_rx.recv().await {
+                let BrokerFrame::Task { task_id, .. } = frame else {
+                    continue;
+                };
+                let marker = format!("--participant-name {name}");
+                for _ in 0..500 {
+                    if std::fs::read_to_string(&argv_log)
+                        .unwrap_or_default()
+                        .contains(&marker)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let mut mapper = TaskMapper::new(task_id);
+                for event in &events {
+                    if let Some(frame) = mapper.map(event) {
+                        registry.on_frame(&name, frame);
+                    }
+                }
+                registry.on_frame(&name, mapper.terminal());
+                return;
+            }
+        });
+    }
+
+    /// Delegate one task to `agent` through the real `invoke_agent`, with a
+    /// scripted stand-in answering under the name the runner allocates.
+    async fn delegate(broker: &Broker, dir: &std::path::Path, agent: &str) {
+        let events = replay_scenario(
+            scenarios()
+                .into_iter()
+                .find(|s| s.name == "tool_call_then_result")
+                .expect("the scenario exists"),
+            TurnPolicy {
+                surface: StreamSurface::Headless,
+                max_agent_turns: 10,
+                loop_guard: false,
+                already_asked_to_retry: false,
+            },
+        )
+        .await;
+        spawn_argv_gated_worker(
+            &broker.participants(),
+            &format!("{agent}-0"),
+            dir.join("argv.log"),
+            events,
+        );
+
+        let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
+            .with_local_agents([CODER, REVIEWER]);
+        tool.call(
+            &mut ToolContext::new(),
+            InvokeAgentArgs {
+                agent: agent.to_string(),
+                prompt: format!("a task for {agent}"),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("delegating to {agent} succeeds: {e:#}"));
+    }
+
+    /// The issue's "Verify": both declared agents are listed with their
+    /// model in the card, and a task to each spawns a child whose argv
+    /// carries its `--model` and `--disable`.
+    #[tokio::test]
+    async fn declared_agents_are_listed_with_their_model_and_spawned_with_their_flags() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let broker = start_team_broker(dir.path(), &[]).await;
+
+        // list_agents, built as agent_factory builds it with the broker's
+        // port and module settings' names.
+        let output = ListAgentsTool::new(vec![])
+            .with_local_workers([CODER, REVIEWER])
+            .with_gateway_port(broker.port)
+            .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+            .await
+            .expect("list_agents succeeds");
+        let find = |name: &str| {
+            output
+                .agents
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap_or_else(|| panic!("{name} is listed, got {:?}", output.agents))
+        };
+        assert!(
+            find(CODER).description.contains("Model: qwen3:4b"),
+            "{}",
+            find(CODER).description
+        );
+        assert!(
+            find(REVIEWER).description.contains("Model: gemma4:26b"),
+            "{}",
+            find(REVIEWER).description
+        );
+        assert!(
+            find(REVIEWER)
+                .description
+                .contains("Tool groups disabled: fs-write, shell, git"),
+            "{}",
+            find(REVIEWER).description
+        );
+
+        delegate(&broker, dir.path(), CODER).await;
+        delegate(&broker, dir.path(), REVIEWER).await;
+
+        let argv = recorded_argv(dir.path(), 2).await;
+        let coder = argv
+            .iter()
+            .find(|line| line.contains("--participant-name local-coder-0"))
+            .unwrap_or_else(|| panic!("no coder child spawned: {argv:?}"));
+        assert!(coder.contains("--model qwen3:4b"), "{coder}");
+        assert!(
+            !coder.contains("--disable"),
+            "the coder keeps every tool: {coder}"
+        );
+        assert!(coder.contains("--auto-approve"), "{coder}");
+
+        let reviewer = argv
+            .iter()
+            .find(|line| line.contains("--participant-name local-reviewer-0"))
+            .unwrap_or_else(|| panic!("no reviewer child spawned: {argv:?}"));
+        assert!(reviewer.contains("--model gemma4:26b"), "{reviewer}");
+        assert!(
+            reviewer.contains("--disable fs-write,shell,git"),
+            "{reviewer}"
+        );
+
+        broker.shutdown();
+    }
+
+    /// The forwarding test (Do item 4): a C9 headless leader started with
+    /// `--openai-compat-url http://x --api-key k` spawns children whose
+    /// argv contains both flags.
+    #[tokio::test]
+    async fn a_flag_configured_leader_forwards_its_provider_flags_to_every_child() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cli = crate::Cli::try_parse_from([
+            "chatty-tui",
+            "--headless",
+            "--broker",
+            "--openai-compat-url",
+            "http://x",
+            "--api-key",
+            "k",
+            "-m",
+            "hi",
+        ])
+        .expect("the leader's flags parse");
+        let flags = crate::participant::broker::provider_flags(
+            cli.ollama.as_deref(),
+            cli.openai_compat_url.as_deref(),
+            cli.api_key.as_deref(),
+        );
+        let broker = start_team_broker(dir.path(), &flags).await;
+
+        delegate(&broker, dir.path(), CODER).await;
+
+        let argv = recorded_argv(dir.path(), 1).await;
+        assert!(
+            argv[0].contains("--openai-compat-url http://x"),
+            "{}",
+            argv[0]
+        );
+        assert!(argv[0].contains("--api-key k"), "{}", argv[0]);
+        assert!(argv[0].contains("--model qwen3:4b"), "{}", argv[0]);
+
+        broker.shutdown();
+    }
+
+    /// The names an agent's tool schema carries, built exactly as a
+    /// `chatty-tui` child would build it after `apply_tool_overrides` has
+    /// applied `--disable <groups>`.
+    async fn tool_names_after(disable: &[&str]) -> Vec<String> {
+        // Resolves repository paths for the always-on `list_mcp` tool; a
+        // no-op after the first call.
+        let _ = chatty_core::init_repositories();
+        let workspace = tempfile::tempdir().expect("a workspace");
+
+        let mut settings = ExecutionSettingsModel {
+            workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+            ..ExecutionSettingsModel::default()
+        };
+        let disable: Vec<String> = disable.iter().map(|s| s.to_string()).collect();
+        crate::apply_tool_overrides(&mut settings, &[], &disable);
+
+        let ctx = AgentBuildContext {
+            pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
+            pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
+            pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),
+            ..AgentBuildContext::from_services(AgentServices {
+                exec_settings: Some(settings),
+                ..AgentServices::default()
+            })
+        };
+        // Ollama: its client is built without network access or credentials.
+        let built = AgentClient::from_model_config_with_tools(
+            &ModelConfig::new(
+                "gemma4:26b".to_string(),
+                "gemma4:26b".to_string(),
+                ProviderType::Ollama,
+                "gemma4:26b".to_string(),
+            ),
+            &ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+            ctx,
+        )
+        .await
+        .expect("the agent builds without network access");
+
+        built
+            .client
+            .agent
+            .tool_definitions(None)
+            .await
+            .expect("tool definitions resolve")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    /// The issue's "Verify", last clause: a reviewer child — `--disable
+    /// fs-write,shell,git` — has no `write_file` in its schema, while a
+    /// coder child, with nothing disabled, does.
+    #[tokio::test]
+    async fn a_reviewer_child_has_no_write_file_tool_in_its_schema() {
+        let coder = tool_names_after(&[]).await;
+        assert!(
+            coder.iter().any(|name| name == "write_file"),
+            "the coder keeps write_file, so the reviewer check is not vacuous: {coder:?}"
+        );
+
+        let reviewer = tool_names_after(&REVIEWER_DISABLED).await;
+        assert!(
+            !reviewer.iter().any(|name| name == "write_file"),
+            "the reviewer must not be able to edit: {reviewer:?}"
+        );
+        assert!(
+            reviewer.iter().any(|name| name == "read_file"),
+            "the reviewer still reads: {reviewer:?}"
+        );
+    }
 }

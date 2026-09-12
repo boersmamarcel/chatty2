@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use chatty_core::services::McpService;
 use chatty_core::settings::models::ModelsModel;
 use chatty_core::settings::models::extensions_store::ExtensionsModel;
-use chatty_core::settings::models::models_store::ModelConfig;
+use chatty_core::settings::models::models_store::{ModelConfig, resolve_model_query};
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use chatty_core::tools::LocalModuleAgentSummary;
 use clap::Parser;
@@ -387,13 +387,13 @@ async fn main() -> Result<()> {
     );
 
     // --broker (AGE-376): run this leader's own protocol gateway so
-    // `invoke_agent`/`list_agents` can reach a `local-agent` worker, the
-    // same wiring chatty-gpui's module-settings controller turns on for the
-    // desktop. `module_settings.enabled`/`gateway_port` are how
-    // `AgentBuildContext.gateway_port` gets threaded through from here
-    // (`ChatEngine`/`HeadlessRunner` already do that unconditionally), so
-    // overriding them is the whole change. Unix only — the participant
-    // socket underneath it does not exist elsewhere yet.
+    // `invoke_agent`/`list_agents` can reach its virtual agents —
+    // `local-agent`, or the named team module settings declare (AGE-377) —
+    // the same wiring chatty-gpui's module-settings controller turns on for
+    // the desktop. The leader's own provider flags ride along to every
+    // worker: a leader configured by `--ollama`/`--openai-compat-url` has
+    // no config dir a child could read. Unix only — the participant socket
+    // underneath it does not exist elsewhere yet.
     #[cfg(unix)]
     let broker = if cli.broker {
         match participant::broker::Broker::start(
@@ -404,6 +404,11 @@ async fn main() -> Result<()> {
             matches!(
                 execution_settings.approval_mode,
                 chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+            ),
+            &participant::broker::provider_flags(
+                cli.ollama.as_deref(),
+                cli.openai_compat_url.as_deref(),
+                cli.api_key.as_deref(),
             ),
         )
         .await
@@ -747,45 +752,26 @@ fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {
         );
     }
 
-    if let Some(ref model_id) = cli.model {
-        // Try exact match on id first, then name
-        if let Some(config) = models.get_model(model_id) {
-            return Ok(config.clone());
-        }
-        // Try case-insensitive name match
-        if let Some(config) = all_models
-            .iter()
-            .find(|m| m.name.to_lowercase() == model_id.to_lowercase())
-        {
-            return Ok(config.clone());
-        }
-        // Try partial match on model identifier
-        if let Some(config) = all_models
-            .iter()
-            .find(|m| m.model_identifier.contains(model_id.as_str()))
-        {
-            return Ok(config.clone());
-        }
-
-        bail!(
-            "Model '{}' not found. Available models:\n{}",
-            model_id,
-            all_models
-                .iter()
-                .map(|m| format!("  - {} ({})", m.name, m.id))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
-
-    // No --model: the model marked default in the desktop settings UI, which
-    // is the only place the marker can be set. Falling straight through to
-    // list order here meant the TUI silently ignored it (#583).
-    if let Some(config) = models.default_model() {
+    // Exact id, then case-insensitive name, then a substring of the model
+    // identifier; without --model, the model marked default in the desktop
+    // settings UI (the only place the marker can be set — falling straight
+    // through to list order here meant the TUI silently ignored it, #583),
+    // else the first. The rule lives in chatty-core because the broker
+    // meters a worker on the endpoint of the model this will pick for it
+    // (ADR-0011 C10).
+    if let Some(config) = resolve_model_query(all_models, cli.model.as_deref()) {
         return Ok(config.clone());
     }
 
-    Ok(all_models[0].clone())
+    bail!(
+        "Model '{}' not found. Available models:\n{}",
+        cli.model.as_deref().unwrap_or_default(),
+        all_models
+            .iter()
+            .map(|m| format!("  - {} ({})", m.name, m.id))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 fn apply_tool_overrides(

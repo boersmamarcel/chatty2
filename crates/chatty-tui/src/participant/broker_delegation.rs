@@ -18,14 +18,15 @@
 //! `invoke_agent` hands back to the model — the "worker's answer" the
 //! issue's acceptance criterion asks for.
 
+use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::services::{StreamSurface, install_progress_channel, scenarios};
 use chatty_core::session::{SessionEvent, TurnPolicy, replay_scenario};
 use chatty_core::settings::models::ModuleSettingsModel;
-use chatty_core::tools::LOCAL_AGENT_NAME;
 use chatty_core::tools::invoke_agent_tool::{
     InvokeAgentArgs, InvokeAgentProgress, InvokeAgentTool,
 };
 use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
+use chatty_core::tools::{LOCAL_AGENT_NAME, worker_executable};
 use chatty_protocol_gateway::participant::{
     AgentOrigin, BrokerFrame, ParticipantCard, ParticipantRegistry,
 };
@@ -92,17 +93,16 @@ async fn list_agents_offers_local_agent_once_the_broker_is_started() {
     let dir = tempfile::tempdir().expect("a temp dir for the socket");
     let broker = Broker::start_at(
         dir.path().join("participants.sock"),
-        &[],
-        &[],
-        &module_settings,
+        worker_executable(),
+        module_settings.default_endpoint_budget,
+        resolve_virtual_agents(&[], &[], &module_settings, &[]),
         None,
-        false,
     )
     .await
     .expect("the broker starts");
 
     let tool = ListAgentsTool::new(vec![])
-        .with_local_worker(LOCAL_AGENT_NAME)
+        .with_local_workers([LOCAL_AGENT_NAME])
         .with_gateway_port(broker.port);
     let output = tool
         .call(&mut ToolContext::new(), ListAgentsToolArgs {})
@@ -127,11 +127,10 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
     let dir = tempfile::tempdir().expect("a temp dir for the socket");
     let broker = Broker::start_at(
         dir.path().join("participants.sock"),
-        &[],
-        &[],
-        &module_settings,
+        worker_executable(),
+        module_settings.default_endpoint_budget,
+        resolve_virtual_agents(&[], &[], &module_settings, &[]),
         None,
-        false,
     )
     .await
     .expect("the broker starts");
@@ -154,8 +153,8 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
 
     // Built exactly as `agent_factory::mod.rs` builds it when `--broker` has
     // set `gateway_port = Some(broker.port)`.
-    let tool =
-        InvokeAgentTool::new(vec![], vec![], Some(broker.port)).with_local_agent(LOCAL_AGENT_NAME);
+    let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
+        .with_local_agents([LOCAL_AGENT_NAME]);
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
     let result = tool

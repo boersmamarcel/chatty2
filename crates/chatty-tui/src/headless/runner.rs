@@ -103,6 +103,7 @@ impl HeadlessRunner {
                     .module_settings
                     .enabled
                     .then_some(self.config.module_settings.gateway_port)),
+                local_agents: self.config.module_settings.virtual_agent_names(),
                 remote_agents: self.config.remote_agents.clone(),
             })
         };
