@@ -774,9 +774,9 @@ impl ChattyApp {
             }
         });
 
-        // 2. Price the turn's usage, hand it to the session, and finish the
-        //    turn there under the one shared empty-turn rule (AGE-243 / D4).
-        let token_usage = token_usage.map(|usage| price_usage(&conv_id, usage, cx));
+        // 2. Hand the turn's usage to the session and finish the turn there
+        //    under the one shared empty-turn rule (AGE-243 / D4). The session
+        //    prices the usage at the barrier (AGE-351).
         let (should_generate_title, assistant_history_index, rolled_back_text) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 let Some(session) = store.get_session_mut(&conv_id) else {
@@ -1075,8 +1075,8 @@ impl ChattyApp {
 
         // Finish the turn on the session under the one shared empty-turn
         // rule (AGE-243 / D4) — an empty assistant message would cause LLM
-        // API errors (400 Bad Request) on the next request.
-        let token_usage = token_usage.map(|usage| price_usage(&conv_id, usage, cx));
+        // API errors (400 Bad Request) on the next request. The session
+        // prices the usage at the barrier (AGE-351).
         let (assistant_history_index, rolled_back_text) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 let Some(session) = store.get_session_mut(&conv_id) else {
@@ -1286,35 +1286,4 @@ impl ChattyApp {
             error!("StreamManager not available for regeneration stream");
         }
     }
-}
-
-/// Attach the model's configured cost to a turn's usage, when pricing is
-/// configured for it.
-fn price_usage(conv_id: &str, mut usage: TokenUsage, cx: &mut App) -> TokenUsage {
-    let model_id = cx
-        .global::<ConversationsStore>()
-        .get_conversation(conv_id)
-        .map(|conv| conv.model_id().to_string());
-    let pricing = model_id.and_then(|model_id| {
-        cx.global::<ModelsModel>()
-            .get_model(&model_id)
-            .and_then(|model| {
-                match (
-                    model.cost_per_million_input_tokens,
-                    model.cost_per_million_output_tokens,
-                ) {
-                    (Some(input_per_million), Some(output_per_million)) => Some(TokenPricing {
-                        input_per_million,
-                        output_per_million,
-                        cache_read_per_million: model.cost_per_million_cache_read_tokens,
-                        cache_write_per_million: model.cost_per_million_cache_write_tokens,
-                    }),
-                    _ => None,
-                }
-            })
-    });
-    if let Some(pricing) = pricing {
-        usage.calculate_cost(&pricing);
-    }
-    usage
 }

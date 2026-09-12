@@ -61,6 +61,11 @@ pub struct ConversationMetadata {
     /// conversation that runs online *without* loading it — the whole point of
     /// this layer is that the list costs no message deserialization.
     pub mode: Option<String>,
+    /// Tool calls made over the conversation's lifetime (AGE-351).
+    pub tool_call_count: u32,
+    /// Prompt size of the last completed API call — the context fill the
+    /// next request starts from (AGE-351).
+    pub context_tokens: u32,
 }
 
 /// Serializable conversation data for persistence
@@ -89,6 +94,15 @@ pub struct ConversationData {
     pub agent_task_snapshot: Option<String>, // JSON-serialized AgentTaskSnapshot
     #[serde(default = "default_none_mode")]
     pub mode: Option<String>, // JSON-serialized ConversationMode; None means Local (AGE-298)
+    /// Tool calls made over the conversation's lifetime, accumulated at the
+    /// turn barrier; a row from before the column reports 0 (AGE-351).
+    #[serde(default)]
+    pub tool_call_count: u32,
+    /// Prompt size of the last completed API call (`input + cache_read +
+    /// cache_write`, output excluded); a row from before the column reports
+    /// 0 (AGE-351).
+    #[serde(default)]
+    pub context_tokens: u32,
 }
 
 impl ConversationData {

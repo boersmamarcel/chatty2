@@ -43,6 +43,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // AGE-298: where the conversation's turns run. NULL means local, so every
     // row that predates the column keeps its meaning without a backfill.
     (4, "ALTER TABLE conversations ADD COLUMN mode TEXT;"),
+    // AGE-351: per-conversation totals the sidebar/rail reads without loading
+    // the row. Both default to 0, so every pre-migration row reports 0 and
+    // nothing is backfilled by walking traces.
+    (
+        5,
+        "ALTER TABLE conversations ADD COLUMN tool_call_count INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE conversations ADD COLUMN context_tokens INTEGER NOT NULL DEFAULT 0;",
+    ),
 ];
 
 /// Creates the database directory, opens the pool and applies any pending
@@ -63,7 +71,7 @@ async fn open_pool(db_path: PathBuf) -> RepositoryResult<SqlitePool> {
         .connect_with(options)
         .await?;
 
-    ConversationSqliteRepository::run_migrations(&pool).await?;
+    ConversationSqliteRepository::run_migrations(&pool, MIGRATIONS).await?;
 
     info!(path = %db_path.display(), "Opened SQLite conversation database");
 
@@ -140,8 +148,10 @@ impl ConversationSqliteRepository {
         }
     }
 
-    /// Create the schema_version table if absent, then apply any pending migrations.
-    async fn run_migrations(pool: &SqlitePool) -> RepositoryResult<()> {
+    /// Create the schema_version table if absent, then apply any pending
+    /// migrations. `migrations` is [`MIGRATIONS`] outside of tests, which
+    /// pass a prefix of it to build a database at an older schema version.
+    async fn run_migrations(pool: &SqlitePool, migrations: &[(i64, &str)]) -> RepositoryResult<()> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER NOT NULL
@@ -159,7 +169,7 @@ impl ConversationSqliteRepository {
             .fetch_one(pool)
             .await?;
 
-        for (version, sql) in MIGRATIONS {
+        for (version, sql) in migrations {
             if *version > current {
                 info!(version, "Applying schema migration");
                 // sqlx doesn't support multiple statements in a single query call,
@@ -208,7 +218,7 @@ impl ConversationRepository for ConversationSqliteRepository {
         Box::pin(async move {
             let pool = pool.get().await?;
             let rows = sqlx::query(
-                "SELECT id, title, total_cost, updated_at, mode
+                "SELECT id, title, total_cost, updated_at, mode, tool_call_count, context_tokens
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -223,6 +233,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                     total_cost: row.get("total_cost"),
                     updated_at: row.get("updated_at"),
                     mode: row.get("mode"),
+                    tool_call_count: row.get("tool_call_count"),
+                    context_tokens: row.get("context_tokens"),
                 })
                 .collect();
 
@@ -239,7 +251,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
                         regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot,
-                        mode
+                        mode, tool_call_count, context_tokens
                  FROM conversations
                  WHERE id = ?",
             )
@@ -263,6 +275,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                 working_dir: r.get("working_dir"),
                 agent_task_snapshot: r.get("agent_task_snapshot"),
                 mode: r.get("mode"),
+                tool_call_count: r.get("tool_call_count"),
+                context_tokens: r.get("context_tokens"),
             }))
         })
     }
@@ -275,7 +289,7 @@ impl ConversationRepository for ConversationSqliteRepository {
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
                         regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot,
-                        mode
+                        mode, tool_call_count, context_tokens
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -300,6 +314,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                     working_dir: r.get("working_dir"),
                     agent_task_snapshot: r.get("agent_task_snapshot"),
                     mode: r.get("mode"),
+                    tool_call_count: r.get("tool_call_count"),
+                    context_tokens: r.get("context_tokens"),
                 })
                 .collect())
         })
@@ -315,8 +331,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                     (id, title, model_id, message_history, system_traces, token_usage,
                      attachment_paths, message_timestamps, message_feedback,
                      regeneration_records, total_cost, created_at, updated_at, working_dir, agent_task_snapshot,
-                     mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                     mode, tool_call_count, context_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                  ON CONFLICT(id) DO UPDATE SET
                     title                = excluded.title,
                     model_id             = excluded.model_id,
@@ -331,7 +347,9 @@ impl ConversationRepository for ConversationSqliteRepository {
                     updated_at           = excluded.updated_at,
                     working_dir          = excluded.working_dir,
                     agent_task_snapshot  = excluded.agent_task_snapshot,
-                    mode                 = excluded.mode",
+                    mode                 = excluded.mode,
+                    tool_call_count      = excluded.tool_call_count,
+                    context_tokens       = excluded.context_tokens",
             )
             .bind(&data.id)
             .bind(&data.title)
@@ -349,6 +367,8 @@ impl ConversationRepository for ConversationSqliteRepository {
             .bind(&data.working_dir)
             .bind(&data.agent_task_snapshot)
             .bind(&data.mode)
+            .bind(data.tool_call_count)
+            .bind(data.context_tokens)
             .execute(&pool)
             .await?;
 
@@ -436,5 +456,74 @@ mod tests {
                 .is_some(),
             "both handles must see the same database"
         );
+    }
+
+    /// AGE-351: a database written before the totals columns existed opens
+    /// without error, and every row that predates them reports 0 for both.
+    #[tokio::test]
+    async fn a_pre_migration_row_opens_and_reports_zero_for_the_totals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("conversations.db");
+
+        // Build the store at schema version 4 and write a row the way the
+        // pre-AGE-351 binary did: no tool_call_count, no context_tokens.
+        {
+            let options = SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("open v4 pool");
+            ConversationSqliteRepository::run_migrations(&pool, &MIGRATIONS[..4])
+                .await
+                .expect("apply migrations 1-4");
+            let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version")
+                .fetch_one(&pool)
+                .await
+                .expect("read version");
+            assert_eq!(version, 4);
+            sqlx::query(
+                "INSERT INTO conversations (id, title, model_id, total_cost, created_at, updated_at)
+                 VALUES ('old-1', 'Before the totals', 'model-1', 0.25, 100, 200)",
+            )
+            .execute(&pool)
+            .await
+            .expect("insert a v4 row");
+            pool.close().await;
+        }
+
+        let repo = ConversationSqliteRepository::deferred_with_path(db_path);
+        let metadata = repo
+            .load_metadata()
+            .await
+            .expect("opening a v4 database applies migration 5 cleanly");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, "old-1");
+        assert_eq!(metadata[0].total_cost, 0.25);
+        assert_eq!(metadata[0].tool_call_count, 0);
+        assert_eq!(metadata[0].context_tokens, 0);
+
+        let loaded = repo
+            .load_one("old-1")
+            .await
+            .expect("load the migrated row")
+            .expect("the row survived the migration");
+        assert_eq!(loaded.title, "Before the totals");
+        assert_eq!(loaded.tool_call_count, 0);
+        assert_eq!(loaded.context_tokens, 0);
+
+        // The migrated store accepts the new columns on the next save.
+        let mut updated = sample_conversation("old-1", "After", 300);
+        updated.tool_call_count = 4;
+        updated.context_tokens = 9_000;
+        repo.save("old-1", updated)
+            .await
+            .expect("save after migration");
+        let metadata = repo.load_metadata().await.expect("reload metadata");
+        assert_eq!(metadata[0].tool_call_count, 4);
+        assert_eq!(metadata[0].context_tokens, 9_000);
     }
 }

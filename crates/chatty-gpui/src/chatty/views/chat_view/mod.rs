@@ -37,6 +37,7 @@
 //!   sub-agent progress row is last.
 //! - [`history`] — `load_history` (conversation switching).
 //! - [`start_screen`] — onboarding / empty-state rendering.
+//! - [`turn_cache`] — the per-message adapt cache the render path reads.
 
 #![allow(clippy::collapsible_if)]
 
@@ -46,6 +47,7 @@ mod history;
 mod parent_stream;
 mod scroll;
 mod start_screen;
+mod turn_cache;
 
 use chatty_core::models::clarification_store::{ClarifyingQuestion, MAX_CLARIFYING_QUESTIONS};
 use chatty_core::services::{AgentTaskSnapshot, AgentTodoStatus};
@@ -74,12 +76,11 @@ use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, ChosenOption,
     ClarificationCard, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip,
     RunPin, RunPinKind, SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole,
-    adapt_messages_with_traces, attach_plan_block, attachment_image_path, block_visible_in_turn,
-    extract_table_preview, file_change_from_tool, file_changes_from_turn, format_worked_for,
-    format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path,
-    merge_file_changes, new_artifact_view, plan_turn_index, produced_path_is_openable,
-    read_artifact_source, render_typed_block, resolve_artifact_path, retain_last_plan_block,
-    tool_file_path, turn_has_work_fold,
+    adapt_message_with_trace, attachment_image_path, block_visible_in_turn, extract_table_preview,
+    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
+    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
+    new_artifact_view, plan_turn_index, produced_path_is_openable, read_artifact_source,
+    render_typed_block, resolve_artifact_path, tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -191,12 +192,16 @@ pub struct ChatView {
     /// Index into `messages` of the last assistant turn that is not streaming.
     /// Resolved once per frame; drives the action bar's always-visible state.
     last_settled_assistant_idx: Option<usize>,
-    /// Turns for the frame being rendered, adapted once in `prepare_render`.
+    /// Turns for the frame being rendered, refreshed once in `prepare_render`.
     ///
     /// The list renders one item at a time, so re-adapting every message per
-    /// item would be quadratic. Shared rather than cloned: `Turn` owns its
-    /// strings and block vectors.
-    turns: Rc<Vec<Turn>>,
+    /// item would be quadratic. Held across frames too: a streaming turn
+    /// notifies every 20ms, and only the turn being written to has changed
+    /// (AGE-165, see [`turn_cache`]).
+    turns: turn_cache::TurnCache,
+    /// Last frame's adapt cost, shown in the `CHATTY_DEBUG_UI` overlay.
+    /// Only measured when that flag is on.
+    adapt_stats: AdaptStats,
     /// Wall clock for the in-flight assistant turn (work-fold timer + duration stamp).
     stream_started_at: Option<Instant>,
     /// Hide the session "N files changed" bar after Keep all.
@@ -207,6 +212,16 @@ pub struct ChatView {
     /// GitHub pull request bar above the composer. Owns its own poller;
     /// `sync_pr_status` only tells it which workspace to watch.
     pr_status: Entity<PrStatusBarView>,
+}
+
+/// What the last transcript refresh cost, for the `CHATTY_DEBUG_UI` overlay.
+#[derive(Clone, Copy, Default)]
+struct AdaptStats {
+    /// Turns re-adapted, of `total`. The point of the cache is that this stays
+    /// near 1 while a turn streams, however long the history is.
+    adapted: usize,
+    total: usize,
+    elapsed: Duration,
 }
 
 /// Events emitted by ChatView for actions that require app-level handling
@@ -231,6 +246,21 @@ pub enum ChatViewEvent {
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
+
+/// The trace `adapt_message_with_trace` will read for this message.
+///
+/// The live trace while the turn streams, the persisted one once it is
+/// finalized — the same choice the adapter makes, made here so the render path
+/// can borrow it rather than clone it per frame.
+fn message_trace<'a>(msg: &'a DisplayMessage, cx: &'a App) -> Option<&'a SystemTrace> {
+    if msg.live_trace.is_some() {
+        return msg.live_trace.as_ref();
+    }
+    msg.system_trace_view
+        .as_ref()
+        .map(|view| view.read(cx).get_trace())
+        .filter(|trace| trace.has_items())
+}
 
 /// Hash of everything about a turn that changes how tall it renders.
 ///
@@ -503,7 +533,8 @@ impl ChatView {
             artifact_split: cx.new(|_| ResizableState::default()),
             activity_expanded: HashMap::new(),
             last_settled_assistant_idx: None,
-            turns: Rc::new(Vec::new()),
+            turns: turn_cache::TurnCache::default(),
+            adapt_stats: AdaptStats::default(),
             stream_started_at: None,
             session_review_dismissed: false,
             session_bar_expanded: false,
@@ -608,20 +639,52 @@ impl ChatView {
             .is_some_and(|snapshot| snapshot.write_todos_called && !snapshot.todos.is_empty())
     }
 
-    fn typed_turns(&self, cx: &App) -> Vec<Turn> {
+    /// Bring `self.turns` up to date with `self.messages` for this frame.
+    ///
+    /// Only the messages whose adapt inputs moved are re-adapted — during a
+    /// stream that is the one turn being written to, whatever the history costs
+    /// (AGE-165). The trace is borrowed rather than cloned for the same reason:
+    /// `history_traces` copies every tool payload in the conversation, which is
+    /// affordable for a one-off lookup and not for a per-frame one.
+    fn refresh_turns(&mut self, cx: &App) {
+        let started = DEBUG_UI_ENABLED.then(Instant::now);
         let collapsed: Vec<bool> = self
             .messages
             .iter()
             .enumerate()
             .map(|(index, msg)| self.should_collapse_turn(index, msg))
             .collect();
-        let traces = self.history_traces(cx);
-        let mut turns = adapt_messages_with_traces(&self.messages, &collapsed, &traces);
-        // A re-plan in a follow-up turn would otherwise paint the same live
-        // snapshot twice; keep only the newest block before filling one in.
-        retain_last_plan_block(&mut turns);
-        attach_plan_block(&mut turns, self.plan_snapshot_active());
-        turns
+        let keys: Vec<u64> = self
+            .messages
+            .iter()
+            .zip(&collapsed)
+            .enumerate()
+            .map(|(index, (msg, collapsed))| {
+                turn_cache::adapt_key(msg, index, *collapsed, message_trace(msg, cx))
+            })
+            .collect();
+        let plan_active = self.plan_snapshot_active();
+
+        let messages = &self.messages;
+        let adapted = self.turns.refresh(&keys, plan_active, |index| {
+            let msg = &messages[index];
+            adapt_message_with_trace(msg, index, collapsed[index], message_trace(msg, cx))
+        });
+
+        if let Some(started) = started {
+            self.adapt_stats = AdaptStats {
+                adapted,
+                total: keys.len(),
+                elapsed: started.elapsed(),
+            };
+            debug!(
+                target: "chatty_gpui::render::adapt",
+                adapted,
+                total = keys.len(),
+                micros = self.adapt_stats.elapsed.as_micros(),
+                "Transcript adapt",
+            );
+        }
     }
 
     fn should_collapse_turn(&self, index: usize, msg: &DisplayMessage) -> bool {
@@ -1490,6 +1553,11 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Per-message traces, cloned — every tool payload in the conversation.
+    ///
+    /// Still what the `last_*` artifact lookups below read. The transcript
+    /// itself no longer does: `refresh_turns` borrows each trace via
+    /// [`message_trace`] instead, since it runs once per streaming notify.
     fn history_traces(&self, cx: &App) -> Vec<Option<SystemTrace>> {
         self.messages
             .iter()
@@ -1612,7 +1680,7 @@ impl ChatView {
         self.reset_clarification_inputs(window, cx);
         self.sync_pr_status(cx);
         self.ensure_scroll_handler(cx);
-        self.turns = Rc::new(self.typed_turns(cx));
+        self.refresh_turns(cx);
         self.last_settled_assistant_idx = self
             .turns
             .iter()
@@ -1806,6 +1874,9 @@ impl ChatView {
     pub(super) fn reset_transcript_list(&mut self) {
         self.transcript_list.reset(0);
         self.transcript_fingerprints.clear();
+        // Cache entries are keyed by message index, and index 3 of the next
+        // conversation is not index 3 of this one.
+        self.turns.clear();
     }
 
     /// Whether the inline plan card has scrolled above the viewport.
@@ -1824,8 +1895,8 @@ impl ChatView {
     /// Render the scrollable message list area including the loading skeleton.
     fn render_message_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_awaiting = self.is_awaiting_response();
-        // Adapted once per frame in `prepare_render`.
-        let turns = self.turns.clone();
+        // Refreshed once per frame in `prepare_render`.
+        let turns = self.turns.shared();
         let show_start_screen = turns.is_empty() && !is_awaiting;
         let thinking_visible = self.is_thinking_indicator_visible(cx);
         if thinking_visible {
@@ -2381,8 +2452,16 @@ impl ChatView {
         let header = format!(
             "ChatView debug\n  msgs: {visible} visible / {total} total   awaiting: {is_awaiting}   skeleton: {is_awaiting}   filtered: {filtered}"
         );
+        // AGE-165: the adapt is the transcript's per-notify cost. `adapted`
+        // staying near 1 on a long history is the cache working.
+        let adapt = format!(
+            "  adapt: {} of {} turns in {}µs",
+            self.adapt_stats.adapted,
+            self.adapt_stats.total,
+            self.adapt_stats.elapsed.as_micros(),
+        );
 
-        let mut lines: Vec<String> = vec![header];
+        let mut lines: Vec<String> = vec![header, adapt];
         for (idx, msg) in self.messages.iter().enumerate() {
             let role = match msg.role {
                 MessageRole::User => "User     ",
