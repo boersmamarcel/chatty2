@@ -6,7 +6,9 @@ pub(super) struct McpTools {
 }
 
 impl McpTools {
-    #[cfg(test)]
+    /// No MCP tools at all: a tool profile that does not name
+    /// `list_mcp_services` (ADR-0011 C11), and every test that wants a bare
+    /// preamble.
     pub fn none() -> Self {
         Self { list: None }
     }

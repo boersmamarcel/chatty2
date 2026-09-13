@@ -62,9 +62,20 @@ pub struct VirtualAgentConfig {
     pub model: Option<String>,
     /// Tool groups the worker runs without, as `chatty-tui --disable` names
     /// them: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`,
-    /// `docker-exec`.
+    /// `docker-exec`. Ignored when `tools` names a profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disable_tools: Vec<String>,
+    /// The role's standing instructions, appended to the worker's system
+    /// prompt (ADR-0011 C11). Without one, a reviewer only knows it is a
+    /// reviewer if the leader says so in the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preamble: Option<String>,
+    /// The named tool profile the worker runs — `coordinator`, `coder` or
+    /// `reviewer` (`chatty_core::factories::tool_profile`). An allowlist of
+    /// tool *names*, where `disable_tools` removes whole groups; it wins
+    /// when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<String>,
     /// Any further `chatty-tui` flags, appended verbatim.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
@@ -296,6 +307,8 @@ mod tests {
                     name: "local-reviewer".to_string(),
                     model: Some("gemma4:26b".to_string()),
                     disable_tools: vec!["fs-write".into(), "shell".into(), "git".into()],
+                    preamble: Some("You review, you do not edit.".to_string()),
+                    tools: Some("reviewer".to_string()),
                     extra_args: vec!["--enable".into(), "fetch".into()],
                 },
             ],
@@ -309,6 +322,20 @@ mod tests {
             vec!["local-coder".to_string(), "local-reviewer".to_string()],
             "declared names replace the default worker rather than joining it"
         );
+
+        // A role survives the file as written (ADR-0011 C11).
+        let reviewer = &restored.virtual_agents[1];
+        assert_eq!(reviewer.tools.as_deref(), Some("reviewer"));
+        assert_eq!(
+            reviewer.preamble.as_deref(),
+            Some("You review, you do not edit.")
+        );
+
+        // Neither is written out when unset, so a pre-C11 file round-trips
+        // byte for byte.
+        let coder = serde_json::to_string(&original.virtual_agents[0]).unwrap();
+        assert!(!coder.contains("preamble"), "{coder}");
+        assert!(!coder.contains("tools"), "{coder}");
 
         // The schema the docs promise: a declaration needs only a name.
         let minimal: ModuleSettingsModel =

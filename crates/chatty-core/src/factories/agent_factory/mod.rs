@@ -10,6 +10,7 @@ mod provider_builder;
 #[cfg(test)]
 mod tool_block_determinism;
 mod tool_collector;
+mod tool_profile;
 mod tool_registry;
 
 use anyhow::Result;
@@ -52,8 +53,9 @@ use preamble_builder::build_preamble;
 use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
-pub use build_context::{AgentBuildContext, AgentServices, gated_exec_settings};
+pub use build_context::{AgentBuildContext, AgentRole, AgentServices, gated_exec_settings};
 pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
+pub use tool_profile::{ToolProfile, tool_profile, tool_profile_names};
 pub use tool_registry::ToolAvailability;
 
 fn doc_retriever_enabled() -> bool {
@@ -228,7 +230,25 @@ impl AgentClient {
             local_agents,
             remote_agents,
             conversation_id,
+            role,
         } = ctx;
+
+        // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
+        // applied on top of the execution settings: it only ever removes
+        // tools. Anything it does not name is dropped, MCP tools included —
+        // a profile is the worker's whole tool set, not a filter over the
+        // native half of it.
+        let tool_profile = role.profile;
+        let mcp_tools = match tool_profile {
+            Some(profile) => {
+                tracing::info!(
+                    profile = profile.name(),
+                    "Tool profile active: MCP tools are not registered on this agent"
+                );
+                None
+            }
+            None => mcp_tools,
+        };
 
         // Only consulted when browser tools are built below; avoids an
         // unused-variable warning on builds without the `browser` feature.
@@ -582,9 +602,14 @@ impl AgentClient {
             "Total MCP tools registered with list_tools"
         );
 
-        // Create MCP listing tool (always available; mutation tools removed)
-        let mcp_mgmt_tools = McpTools {
-            list: Some(ListMcpTool::new(crate::mcp_repository())),
+        // Create MCP listing tool (always available unless a tool profile
+        // leaves it out; mutation tools removed)
+        let mcp_mgmt_tools = if tool_profile.is_none_or(|p| p.allows("list_mcp_services")) {
+            McpTools {
+                list: Some(ListMcpTool::new(crate::mcp_repository())),
+            }
+        } else {
+            McpTools::none()
         };
 
         // Create fetch tool if enabled in settings
@@ -1065,6 +1090,14 @@ impl AgentClient {
             ask_user: false,       // set below alongside publish_module
         };
 
+        // The profile decides what the prompt describes as well as what is
+        // registered: a family with no allowed member is gone from the
+        // summary entirely.
+        let tool_availability = match tool_profile {
+            Some(profile) => profile.narrow(&tool_availability),
+            None => tool_availability,
+        };
+
         let native_tool_names = active_native_tool_names(&tool_availability);
         let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
 
@@ -1142,6 +1175,14 @@ impl AgentClient {
             ..tool_availability
         };
 
+        // Those two are decided after the narrowing above, so the profile has
+        // to reach them too or the preamble describes a tool the collector
+        // will not register. Narrowing is idempotent.
+        let tool_availability = match tool_profile {
+            Some(profile) => profile.narrow(&tool_availability),
+            None => tool_availability,
+        };
+
         // Build the augmented preamble
         let preamble = build_preamble(
             &model_config.preamble,
@@ -1151,10 +1192,12 @@ impl AgentClient {
             &mcp_mgmt_tools,
             &mcp_tool_info,
             &secret_key_names,
+            &role,
         );
 
         // Build native tools once (all providers use the same set)
         let native_tools = native_tools!(
+            tool_profile: tool_profile,
             list_tools: list_tools,
             write_todos_tool: write_todos_tool,
             update_todo_tool: update_todo_tool,

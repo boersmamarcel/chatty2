@@ -15,6 +15,7 @@
 //! lives in `chatty-protocol-gateway`, which this crate does not depend on
 //! (see [`worker_endpoint`](super::worker_endpoint)).
 
+use crate::factories::agent_factory::{tool_profile, tool_profile_names};
 use crate::settings::models::ModuleSettingsModel;
 use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
 use crate::settings::models::module_settings::VirtualAgentConfig;
@@ -72,9 +73,34 @@ pub fn resolve_virtual_agents(
                 args.push("--model".to_string());
                 args.push(model.to_string());
             }
-            if !agent.disable_tools.is_empty() {
-                args.push("--disable".to_string());
-                args.push(agent.disable_tools.join(","));
+            // A profile is an allowlist of tool names and `--disable` a list
+            // of groups; when both are declared the profile wins, so the two
+            // never fight over the same tool (ADR-0011 C11).
+            match agent.tools.as_deref() {
+                Some(profile) => {
+                    if tool_profile(profile).is_none() {
+                        tracing::warn!(
+                            agent = %agent.name,
+                            profile,
+                            valid = ?tool_profile_names(),
+                            "Virtual agent names an unknown tool profile; its workers will fail to start"
+                        );
+                    }
+                    args.push("--tools".to_string());
+                    args.push(profile.to_string());
+                }
+                None => {
+                    if !agent.disable_tools.is_empty() {
+                        args.push("--disable".to_string());
+                        args.push(agent.disable_tools.join(","));
+                    }
+                }
+            }
+            if let Some(preamble) = agent.preamble.as_deref().map(str::trim)
+                && !preamble.is_empty()
+            {
+                args.push("--preamble".to_string());
+                args.push(preamble.to_string());
             }
             args.extend(agent.extra_args.iter().cloned());
             args.extend(common_args.iter().cloned());
@@ -118,15 +144,32 @@ fn describe(agent: &VirtualAgentConfig, models: &[ModelConfig]) -> String {
             None => text.push_str(" Model: the configured default."),
         },
     }
-    if agent.disable_tools.is_empty() {
-        text.push_str(" Tools: the full set.");
-    } else {
-        text.push_str(&format!(
+    match agent.tools.as_deref() {
+        Some(profile) => text.push_str(&format!(" Tool profile: {profile}.")),
+        None if agent.disable_tools.is_empty() => text.push_str(" Tools: the full set."),
+        None => text.push_str(&format!(
             " Tool groups disabled: {}.",
             agent.disable_tools.join(", ")
-        ));
+        )),
+    }
+    if let Some(sentence) = first_sentence(agent.preamble.as_deref()) {
+        text.push_str(&format!(" Role: {sentence}"));
     }
     text
+}
+
+/// The first sentence of a role's preamble, for the card: enough for a leader
+/// to pick the right agent, not the whole standing instruction.
+fn first_sentence(preamble: Option<&str>) -> Option<String> {
+    let preamble = preamble?.trim();
+    if preamble.is_empty() {
+        return None;
+    }
+    let end = preamble
+        .find(['.', '!', '?', '\n'])
+        .map(|i| i + 1)
+        .unwrap_or(preamble.len());
+    Some(preamble[..end].trim().to_string())
 }
 
 #[cfg(test)]
@@ -162,6 +205,7 @@ mod tests {
                     model: Some("gemma".to_string()),
                     disable_tools: vec!["fs-write".into(), "shell".into(), "git".into()],
                     extra_args: vec!["--enable".into(), "fetch".into()],
+                    ..VirtualAgentConfig::default()
                 },
             ],
             ..ModuleSettingsModel::default()
@@ -327,5 +371,115 @@ mod tests {
         let specs = resolve_virtual_agents(&models, &providers, &settings, &[]);
         assert_eq!(specs[0].endpoint, None);
         assert_eq!(specs[0].args, vec!["--model", "no-such-model"]);
+    }
+
+    /// A role travels as argv (ADR-0011 C11): the profile as `--tools`, the
+    /// standing instructions as `--preamble`, both ahead of `extra_args`.
+    #[test]
+    fn a_declared_role_rides_along_as_tools_and_preamble_flags() {
+        let settings = ModuleSettingsModel {
+            virtual_agents: vec![VirtualAgentConfig {
+                name: "local-reviewer".to_string(),
+                model: Some("gemma".to_string()),
+                tools: Some("reviewer".to_string()),
+                preamble: Some("You are the reviewer. Run the tests.".to_string()),
+                ..VirtualAgentConfig::default()
+            }],
+            ..ModuleSettingsModel::default()
+        };
+
+        let specs = resolve_virtual_agents(&[], &[], &settings, &["--auto-approve".to_string()]);
+
+        assert_eq!(
+            specs[0].args,
+            vec![
+                "--model",
+                "gemma",
+                "--tools",
+                "reviewer",
+                "--preamble",
+                "You are the reviewer. Run the tests.",
+                "--auto-approve",
+            ]
+        );
+    }
+
+    /// Do item 1: `tools` wins when both are set, so the two never disagree
+    /// about one tool.
+    #[test]
+    fn a_profile_replaces_the_disabled_groups_rather_than_joining_them() {
+        let settings = ModuleSettingsModel {
+            virtual_agents: vec![VirtualAgentConfig {
+                name: "local-reviewer".to_string(),
+                disable_tools: vec!["fs-write".into()],
+                tools: Some("reviewer".to_string()),
+                ..VirtualAgentConfig::default()
+            }],
+            ..ModuleSettingsModel::default()
+        };
+
+        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
+
+        assert_eq!(specs[0].args, vec!["--tools", "reviewer"]);
+        assert!(
+            specs[0].description.contains("Tool profile: reviewer."),
+            "{}",
+            specs[0].description
+        );
+        assert!(
+            !specs[0].description.contains("Tool groups disabled"),
+            "{}",
+            specs[0].description
+        );
+    }
+
+    /// Do item 3: the card carries the profile name and the preamble's first
+    /// sentence, so the leader picks a reviewer by reading `list_agents`.
+    #[test]
+    fn the_card_carries_the_profile_and_the_preambles_first_sentence() {
+        let settings = ModuleSettingsModel {
+            virtual_agents: vec![VirtualAgentConfig {
+                name: "local-reviewer".to_string(),
+                tools: Some("reviewer".to_string()),
+                preamble: Some(
+                    "You review code you did not write. Never edit the tree; \
+                     run the tests and report."
+                        .to_string(),
+                ),
+                ..VirtualAgentConfig::default()
+            }],
+            ..ModuleSettingsModel::default()
+        };
+
+        let description = resolve_virtual_agents(&[], &[], &settings, &[])
+            .swap_remove(0)
+            .description;
+
+        assert!(
+            description.contains("Tool profile: reviewer."),
+            "{description}"
+        );
+        assert!(
+            description.contains("Role: You review code you did not write."),
+            "{description}"
+        );
+        assert!(
+            !description.contains("run the tests and report"),
+            "only the first sentence, not the whole standing instruction: {description}"
+        );
+    }
+
+    #[test]
+    fn first_sentence_handles_a_preamble_without_one() {
+        assert_eq!(first_sentence(None), None);
+        assert_eq!(first_sentence(Some("   ")), None);
+        assert_eq!(
+            first_sentence(Some("Review only")),
+            Some("Review only".to_string())
+        );
+        assert_eq!(
+            first_sentence(Some("Review only\nNever edit.")),
+            Some("Review only".to_string())
+        );
     }
 }

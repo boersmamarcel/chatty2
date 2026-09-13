@@ -90,6 +90,7 @@ impl HeadlessRunner {
         };
         let ctx = AgentBuildContext {
             mcp_tools,
+            role: self.config.role.clone(),
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.config.user_secrets.clone(),

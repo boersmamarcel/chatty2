@@ -137,6 +137,30 @@ struct Cli {
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
     disable: Vec<String>,
 
+    /// Run with a named tool profile: an allowlist of tool *names*.
+    ///
+    /// Where --enable/--disable work on tool groups, a profile is the whole
+    /// tool set of a role (ADR-0011 C11) — anything it does not name is
+    /// dropped, MCP tools included. It only ever removes tools: a profile
+    /// cannot turn a group back on that the settings switched off.
+    /// Valid profiles: coordinator, coder, reviewer.
+    ///
+    /// Applied after --enable/--disable, and it wins over both.
+    ///
+    /// Example: --tools reviewer
+    #[arg(long, value_name = "PROFILE")]
+    tools: Option<String>,
+
+    /// Standing instructions for this process's role, appended to the system
+    /// prompt after the base preamble (ADR-0011 C11).
+    ///
+    /// Declared as a virtual agent's `preamble` in module settings and
+    /// forwarded here; the broker passes it verbatim.
+    ///
+    /// Example: --preamble "You are the reviewer. Never edit the tree."
+    #[arg(long, value_name = "TEXT")]
+    preamble: Option<String>,
+
     /// Auto-approve all tool executions without prompting.
     ///
     /// Skips the y/n approval prompt for shell commands, file writes,
@@ -343,6 +367,9 @@ async fn main() -> Result<()> {
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
 
+    // --tools / --preamble: the role this process runs as (ADR-0011 C11).
+    let role = resolve_role(cli.tools.as_deref(), cli.preamble.as_deref())?;
+
     // Apply auto-approve if requested
     if cli.auto_approve {
         use chatty_core::settings::models::execution_settings::ApprovalMode;
@@ -471,6 +498,7 @@ async fn main() -> Result<()> {
                 user_secrets,
                 remote_agents,
                 module_agents: module_agents.clone(),
+                role: role.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
                 surface: chatty_core::services::StreamSurface::Headless,
@@ -523,6 +551,7 @@ async fn main() -> Result<()> {
                 user_secrets: vec![],
                 remote_agents,
                 module_agents,
+                role,
                 is_sub_agent: false,
                 services_loaded: false,
                 surface: chatty_core::services::StreamSurface::InteractiveTui,
@@ -580,6 +609,31 @@ async fn main() -> Result<()> {
     }
 
     result
+}
+
+/// The role this process runs as, from `--tools` and `--preamble`
+/// (ADR-0011 C11).
+///
+/// An unknown profile name is fatal rather than silently full-tooled: a typo
+/// in a declared reviewer would otherwise hand it every tool there is, and a
+/// worker that fails to start is a delegation the leader sees fail.
+fn resolve_role(
+    tools: Option<&str>,
+    preamble: Option<&str>,
+) -> Result<chatty_core::factories::AgentRole> {
+    let profile = match tools {
+        Some(name) => Some(chatty_core::factories::tool_profile(name).with_context(|| {
+            format!(
+                "--tools '{name}' is not a tool profile; valid profiles: {}",
+                chatty_core::factories::tool_profile_names().join(", ")
+            )
+        })?),
+        None => None,
+    };
+    Ok(chatty_core::factories::AgentRole {
+        preamble: preamble.map(str::to_string),
+        profile,
+    })
 }
 
 /// Load all deferred services concurrently (MCP, memory, user secrets, search settings).

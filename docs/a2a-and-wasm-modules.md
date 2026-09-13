@@ -463,9 +463,18 @@ with its own model and tool set:
 ```json
 {
   "virtual_agents": [
-    { "name": "local-coder",    "model": "qwen3:4b" },
-    { "name": "local-reviewer", "model": "gemma4:26b",
-      "disable_tools": ["fs-write", "shell", "git"] }
+    {
+      "name": "local-coder",
+      "model": "qwen3:4b",
+      "tools": "coder",
+      "preamble": "You are the coder on this team. Make the smallest change that makes the task's check pass, run it, and report the files you touched."
+    },
+    {
+      "name": "local-reviewer",
+      "model": "gemma4:26b",
+      "tools": "reviewer",
+      "preamble": "You are the reviewer on this team. Read the diff, run the tests, and report what you found; never edit the tree yourself."
+    }
   ]
 }
 ```
@@ -474,14 +483,45 @@ with its own model and tool set:
 |-------|---------|
 | `name` | The name `invoke_agent` addresses, served at `/a2a/{name}`. |
 | `model` | Optional. Passed as `--model` to each child, resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the child runs the roster's default, as an undeclared worker does. |
-| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. |
+| `tools` | Optional. A named tool profile passed as `--tools`: `coordinator`, `coder` or `reviewer`. An allowlist of tool *names* — see below. |
+| `preamble` | Optional. The role's standing instructions, passed as `--preamble` and appended to the worker's system prompt after the base preamble, before the tool summary. |
+| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. Ignored when `tools` is set. |
 | `extra_args` | Optional. Any further `chatty-tui` flags, appended verbatim. |
+
+**Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `disable_tools` removes
+whole tool *groups*, which is the wrong grain for a role — a reviewer wants `git_diff`
+but not `git_commit`, and a coder wants none of the agent tools. `tools` names a profile
+instead: an allowlist of tool *names*, and the worker's whole tool set. Anything the
+profile does not name is dropped, MCP tools included, which is most of the point — a 4B
+coder used to be handed 53 tool schemas (~13k tokens) before it could read a file. A
+profile only ever removes tools: it cannot turn on a group the execution settings
+switched off.
+
+| Profile | What it can call |
+|---------|------------------|
+| `coordinator` | The read set below, plus `list_agents` and `invoke_agent`. It delegates; it does not edit. |
+| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`) and `execute_code`. No agent tools: a coder does not fan out further. |
+| `reviewer` | The read set, plus the shell so it can run the tests. No writes, no commits, no delegation. |
+
+The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
+`search_code`, `git_status`, `git_log`, `git_diff`, `read_skill`, the todo protocol
+(`write_todos`, `update_todo`, `verify_completion`), and `ask_user` — every profile keeps
+that last one, or a worker could no longer park a question on its leader (AGE-306). The
+profiles live in `chatty_core::factories::tool_profile`; `chatty-tui --tools <profile>`
+refuses an unknown name rather than starting a worker with every tool there is.
+
+`preamble` is the other half of a role: without it a reviewer only knows it is a reviewer
+if the leader says so in the task, which is exactly how a reviewer came to approve a
+one-line branch on the coder's word. It lands in the worker's system prompt ahead of the
+tool summary, and its first sentence goes on the agent's card so the leader can pick by
+reading.
 
 An empty or absent list is the single `local-agent` of before. A role is a name plus an
 argv and nothing else: `invoke_agent` takes no `model` or `role` parameter, so the
 leader's tool schema and prompt prefix are identical whatever the team, and each
-agent's card — what `list_agents` shows — says which model it runs and which tool groups
-it lacks, so the leader chooses by reading rather than guessing. Each agent is metered
+agent's card — what `list_agents` shows — says which model it runs, which tool profile or
+tool groups it has, and the first sentence of its preamble, so the leader chooses by
+reading rather than guessing. Each agent is metered
 on the endpoint of *its* model (`chatty_core::services::worker_endpoint`), so a
 reviewer on another server does not queue behind the coder, while two agents on one
 server share that server's budget. Both frontends build their runners from

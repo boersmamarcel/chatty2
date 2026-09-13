@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::{
-    AgentBuildContext, AgentServices, gated_exec_settings,
+    AgentBuildContext, AgentRole, AgentServices, gated_exec_settings,
 };
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
@@ -281,6 +281,9 @@ pub struct ChatEngine {
     /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
     pub remote_agents: Vec<A2aAgentConfig>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
+    /// The role this process runs as (ADR-0011 C11), from `--tools` /
+    /// `--preamble`. Default unless this is a declared worker.
+    pub role: AgentRole,
     /// When `true`, this engine is itself a delegated worker: `/agent` is
     /// refused, so a worker cannot fan out further from the chat box.
     pub is_sub_agent: bool,
@@ -361,6 +364,10 @@ pub struct ChatEngineConfig {
     pub user_secrets: Vec<(String, String)>,
     pub remote_agents: Vec<A2aAgentConfig>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
+    /// The role this process runs as, from `--tools` / `--preamble`
+    /// (ADR-0011 C11). Default for a leader; a declared virtual agent's
+    /// worker carries what its `VirtualAgentConfig` declared.
+    pub role: AgentRole,
     pub is_sub_agent: bool,
     /// Set to `true` when all services were loaded eagerly (headless mode).
     /// Set to `false` when services are deferred to background (interactive mode).
@@ -399,6 +406,7 @@ impl ChatEngine {
             user_secrets: config.user_secrets,
             remote_agents: config.remote_agents,
             module_agents: config.module_agents,
+            role: config.role,
             is_sub_agent: config.is_sub_agent,
             transcript: Transcript::new(),
             is_streaming: false,
@@ -515,21 +523,24 @@ impl ChatEngine {
     /// for the background path, must happen inside the spawned task rather
     /// than while still borrowing `&self` (AGE-224).
     fn build_agent_context(&self) -> AgentBuildContext {
-        AgentBuildContext::from_services(AgentServices {
-            exec_settings: gated_exec_settings(&self.execution_settings),
-            user_secrets: self.user_secrets.clone(),
-            memory_service: self.memory_service.clone(),
-            skill_service: Some(self.skill_service.clone()),
-            search_settings: self.search_settings.clone(),
-            embedding_service: self.embedding_service.clone(),
-            module_agents: self.module_agents.clone(),
-            gateway_port: self.broker_port.or(self
-                .module_settings
-                .enabled
-                .then_some(self.module_settings.gateway_port)),
-            local_agents: self.module_settings.virtual_agent_names(),
-            remote_agents: self.remote_agents.clone(),
-        })
+        AgentBuildContext {
+            role: self.role.clone(),
+            ..AgentBuildContext::from_services(AgentServices {
+                exec_settings: gated_exec_settings(&self.execution_settings),
+                user_secrets: self.user_secrets.clone(),
+                memory_service: self.memory_service.clone(),
+                skill_service: Some(self.skill_service.clone()),
+                search_settings: self.search_settings.clone(),
+                embedding_service: self.embedding_service.clone(),
+                module_agents: self.module_agents.clone(),
+                gateway_port: self.broker_port.or(self
+                    .module_settings
+                    .enabled
+                    .then_some(self.module_settings.gateway_port)),
+                local_agents: self.module_settings.virtual_agent_names(),
+                remote_agents: self.remote_agents.clone(),
+            })
+        }
     }
 
     /// Initialize the conversation (async — creates agent with tools)
@@ -1237,6 +1248,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
+                role: Default::default(),
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,
@@ -1405,6 +1417,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
+                role: Default::default(),
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,
