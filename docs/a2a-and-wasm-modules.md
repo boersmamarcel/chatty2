@@ -411,7 +411,14 @@ it makes the broker stateful for open tasks and every delegation path here
 streams.
 
 Each worker runs in its own `git worktree` under the conversation's workspace
-(ADR-0012), through `chatty_core::services::worker_tree`.
+(ADR-0012), through `chatty_core::services::worker_tree`: `.chatty/worktrees/<name>`
+on branch `sub-agent/<name>`, where `<name>` is the participant name (`local-coder-0`)
+unless that branch or directory already exists in the repository — a sub-leader's
+broker counts its own workers from zero, and a tree left from an earlier run keeps
+its branch — in which case it is the first free `<name>-N` (AGE-402). The merge hint
+appended to the worker's answer names the branch actually created. In a repository, a
+tree that cannot be made fails the delegation; only a workspace that is not a
+repository runs its workers unisolated.
 
 **Per-endpoint concurrency budget (ADR-0011 C6).** Workers all talk to the same model
 server, so the broker holds a semaphore per *endpoint* — the server's base URL, not a

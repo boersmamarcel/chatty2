@@ -317,6 +317,18 @@ impl GitService {
         Ok(format!("Branch '{}' created successfully", name))
     }
 
+    /// Whether a local branch of this name exists. Branches are shared by
+    /// every worktree of a repository, so this is also the check for "may a
+    /// worktree still be created on it" (AGE-402).
+    pub async fn branch_exists(&self, name: &str) -> Result<bool> {
+        Self::validate_branch_name(name)?;
+
+        let listed = self
+            .run_git(&["branch", "--list", "--format=%(refname:short)", name])
+            .await?;
+        Ok(listed.lines().any(|line| line.trim() == name))
+    }
+
     /// Switch to an existing branch.
     pub async fn switch_branch(&self, name: &str) -> Result<String> {
         Self::validate_branch_name(name)?;
@@ -325,6 +337,11 @@ impl GitService {
 
         info!(branch = %name, "Switched to branch");
         Ok(format!("Switched to branch '{}'", name))
+    }
+
+    /// Where [`Self::worktree_add`] puts the worktree called `name`.
+    pub fn worktree_path(&self, name: &str) -> PathBuf {
+        self.workspace_root.join(WORKTREE_DIR).join(name)
     }
 
     /// Create a worktree for one parallel worker, on its own new branch.
@@ -342,7 +359,7 @@ impl GitService {
         self.exclude_worktree_dir_locally().await?;
 
         let rel = format!("{WORKTREE_DIR}/{name}");
-        let path = self.workspace_root.join(&rel);
+        let path = self.worktree_path(name);
         if path.exists() {
             return Err(anyhow!(
                 "Worktree '{}' already exists at {}",
@@ -689,6 +706,30 @@ mod tests {
         assert_eq!(got[1].path, "/repo/.chatty/worktrees/w1");
         assert_eq!(got[1].branch.as_deref(), Some("sub-agent/w1"));
         assert_eq!(got[2].branch, None, "a detached worktree has no branch");
+    }
+
+    #[tokio::test]
+    async fn branch_exists_sees_a_branch_from_any_worktree() {
+        let (tmp, git) = create_test_repo().await;
+        // A worktree on an unborn branch has no ref yet; a real repository
+        // has commits, so give this one one.
+        fs::write(tmp.path().join("README"), "hi").unwrap();
+        git.add(&["README".to_string()]).await.unwrap();
+        git.commit("init").await.unwrap();
+        assert!(!git.branch_exists("sub-agent/w1").await.unwrap());
+
+        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        assert!(git.branch_exists("sub-agent/w1").await.unwrap());
+        assert!(
+            !git.branch_exists("sub-agent/w10").await.unwrap(),
+            "a prefix match is not a match"
+        );
+
+        let nested = GitService::new(&path.to_string_lossy()).await.unwrap();
+        assert!(
+            nested.branch_exists("sub-agent/w1").await.unwrap(),
+            "branches are repository-wide, so a worktree sees them too"
+        );
     }
 
     #[tokio::test]

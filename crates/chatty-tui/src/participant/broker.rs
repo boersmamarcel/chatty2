@@ -431,6 +431,83 @@ mod tests {
         broker.shutdown();
     }
 
+    /// AGE-402: two brokers on one repository — a top leader and a
+    /// sub-leader started with `--broker` inside its own worktree — each
+    /// name their first worker `local-coder-0` from their own counter. Each
+    /// gets a tree and a branch of its own, and each hint names the branch
+    /// that exists. A third broker whose tree cannot be made fails the
+    /// delegation rather than running its worker in the shared tree.
+    #[tokio::test]
+    async fn two_brokers_naming_the_same_worker_get_their_own_branches() {
+        let dir = tempfile::tempdir().expect("a repo dir");
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"], dir.path());
+        git(
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            dir.path(),
+        );
+        let root = dir.path().to_string_lossy().to_string();
+
+        let top = worktree_factory(root.clone());
+        let lead = top("local-lead-0".to_string())
+            .await
+            .expect("the top broker isolates its sub-leader")
+            .expect("the workspace is a repository");
+        let nested = worktree_factory(lead.cwd.to_string_lossy().to_string());
+
+        let nested_coder = nested("local-coder-0".to_string())
+            .await
+            .expect("the sub-leader isolates its coder")
+            .expect("its worktree is a repository too");
+        let top_coder = top("local-coder-0".to_string())
+            .await
+            .expect("the top broker isolates its coder")
+            .expect("the workspace is a repository");
+
+        assert_ne!(nested_coder.cwd, top_coder.cwd);
+        assert!(
+            nested_coder
+                .merge_hint
+                .as_deref()
+                .unwrap()
+                .contains("'sub-agent/local-coder-0'")
+        );
+        assert!(
+            top_coder
+                .merge_hint
+                .as_deref()
+                .unwrap()
+                .contains("'sub-agent/local-coder-0-2'")
+        );
+
+        let refused = top("../escape".to_string()).await;
+        assert!(
+            refused.is_err(),
+            "a tree that cannot be made fails the task; it never falls back to the shared tree"
+        );
+    }
+
     /// Do item 4: a flag-configured leader forwards exactly its provider
     /// flags; a settings-configured one forwards nothing.
     #[test]
