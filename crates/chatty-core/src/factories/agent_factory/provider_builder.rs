@@ -126,6 +126,10 @@ pub(super) async fn build_provider_agent(
                 builder = builder.max_tokens(max_tokens as u64);
             }
 
+            if let Some(think) = ollama_think(model_config) {
+                builder = builder.additional_params(serde_json::json!({ "think": think }));
+            }
+
             let builder = native_tools.apply_to_builder(builder);
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
@@ -318,6 +322,20 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
     endpoint
 }
 
+/// Ollama's per-request `think` switch, from the model's `extra_params.think`
+/// (`"true"` / `"false"`). rig forwards it as the request's top-level `think`
+/// field. A thinking model such as qwen3 sometimes writes its tool call inside
+/// the thinking channel, which Ollama never surfaces as a tool call, so the
+/// turn ends with empty content; `think=false` on a leader or reviewer roster
+/// entry avoids that. Absent or unparsable: the request carries no `think`
+/// key and Ollama's model default applies.
+fn ollama_think(model_config: &ModelConfig) -> Option<bool> {
+    model_config
+        .extra_params
+        .get("think")
+        .and_then(|v| v.trim().parse::<bool>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +363,34 @@ mod tests {
             .await
             .expect("tool_definitions with no prompt does no I/O");
         assert!(defs.is_empty(), "utility agent must be built with no tools");
+    }
+
+    /// AGE-400: `extra_params.think` becomes Ollama's request-level `think`
+    /// switch; anything else leaves the request without one.
+    #[test]
+    fn ollama_think_reads_extra_params() {
+        let mut model = ModelConfig::new(
+            "qwen3".into(),
+            "qwen3:14b".into(),
+            ProviderType::Ollama,
+            "qwen3:14b".into(),
+        );
+        assert_eq!(ollama_think(&model), None);
+
+        model
+            .extra_params
+            .insert("think".to_string(), "false".to_string());
+        assert_eq!(ollama_think(&model), Some(false));
+
+        model
+            .extra_params
+            .insert("think".to_string(), " true ".to_string());
+        assert_eq!(ollama_think(&model), Some(true));
+
+        model
+            .extra_params
+            .insert("think".to_string(), "maybe".to_string());
+        assert_eq!(ollama_think(&model), None);
     }
 
     #[test]
