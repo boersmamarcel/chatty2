@@ -21,6 +21,7 @@ use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, 
 
 use super::AgentClient;
 use super::azure_auth_http::AzureAuthHttpClient;
+use super::empty_turn_retry::EmptyTurnRetry;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::prompt_cache_http::PromptCachingHttpClient;
 use super::tool_collector::NativeTools;
@@ -88,7 +89,7 @@ pub(super) async fn build_provider_agent(
             }
 
             let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-            let builder = native_tools.apply_to_builder(builder);
+            let builder = chat_agent_builder(native_tools, builder);
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
             let utility_model = client
@@ -130,7 +131,7 @@ pub(super) async fn build_provider_agent(
                 builder = builder.additional_params(serde_json::json!({ "think": think }));
             }
 
-            let builder = native_tools.apply_to_builder(builder);
+            let builder = chat_agent_builder(native_tools, builder);
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
             let utility = client
@@ -283,7 +284,7 @@ async fn build_azure_agent(
     }
 
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-    let builder = native_tools.apply_to_builder(builder);
+    let builder = chat_agent_builder(native_tools, builder);
     let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
     Ok(AgentClient {
@@ -320,6 +321,18 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
     }
 
     endpoint
+}
+
+/// Every chat agent's builder: the native tools, plus the turn-steering hook
+/// that retries an empty completion once inside the turn (AGE-401). Utility
+/// agents (titles, summaries) carry neither.
+fn chat_agent_builder(
+    native_tools: NativeTools,
+    builder: AgentBuilder,
+) -> AgentBuilder<rig_agent::agent::WithBuilderTools> {
+    native_tools
+        .apply_to_builder(builder)
+        .add_hook(EmptyTurnRetry)
 }
 
 /// Ollama's per-request `think` switch, from the model's `extra_params.think`

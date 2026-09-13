@@ -2,6 +2,7 @@ mod azure_auth_http;
 mod build_context;
 #[cfg(test)]
 mod cache_breakpoint_probe;
+mod empty_turn_retry;
 mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
@@ -52,6 +53,7 @@ use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
 pub use build_context::{AgentBuildContext, AgentServices, gated_exec_settings};
+pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
 pub use tool_registry::ToolAvailability;
 
 fn doc_retriever_enabled() -> bool {

@@ -39,6 +39,16 @@ pub const MALFORMED_TOOL_CALL_FOLLOW_UP: &str = "Agent protocol follow-up: your 
      fully closed. If the arguments were large, write the content to a file in smaller steps \
      instead.";
 
+/// What ends the turn when the model's final completion is empty even after
+/// [`EmptyTurnRetry`](crate::factories::agent_factory::EmptyTurnRetry)
+/// nudged it once inside the turn (AGE-401). Reported as
+/// [`StreamErrorKind::EmptyCompletion`] so a headless run exits non-zero and
+/// a delegated task ends `failed` instead of passing silence up the chain as
+/// success.
+pub const EMPTY_COMPLETION_ERROR: &str = "The model returned an empty response twice: no text and no tool call. \
+     A thinking model on Ollama may be writing its tool call inside the thinking channel; \
+     set `extra_params.think` to \"false\" on that model.";
+
 /// Injected after a text-only response that ran past the loop guard's
 /// verbosity limit.
 pub const BREVITY_FOLLOW_UP: &str = "You produced a long response without any tool call. \
@@ -90,6 +100,13 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// pivot cancels the turn, so whatever was queued before is moot.
     pending_follow_up: Option<String>,
     text_overflow: bool,
+    /// Whether the provider request in flight has produced anything the
+    /// turn can stand on: text, a tool call, or a question for the user.
+    /// Reset at each request boundary (`ApiCallUsage`).
+    output_in_call: bool,
+    /// The same, for the last request that completed. `true` until one
+    /// has, so a stream that yields nothing at all counts as empty.
+    last_call_empty: bool,
 }
 
 impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
@@ -113,7 +130,17 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             calls: Vec::new(),
             pending_follow_up: None,
             text_overflow: false,
+            output_in_call: false,
+            last_call_empty: true,
         }
+    }
+
+    /// AGE-401: whether the completion that ended the turn carried nothing.
+    /// rig emits each request's `ApiCallUsage` after that request's content,
+    /// so at `Done` the request in flight has either produced output since
+    /// the last boundary or the last completed request is the final one.
+    fn final_completion_is_empty(&self) -> bool {
+        !self.output_in_call && self.last_call_empty
     }
 
     /// Hand the emitter back once the loop is done, so a caller that gave the
@@ -245,6 +272,9 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
 
         match chunk {
             StreamChunk::Text(text) => {
+                if !text.trim().is_empty() {
+                    self.output_in_call = true;
+                }
                 if let Some(guard) = self.loop_guard.as_mut()
                     && !self.text_overflow
                     && guard.on_text_chunk(text.len())
@@ -257,6 +287,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 (self.emit)(SessionEvent::Text(text));
             }
             StreamChunk::ToolCallStarted { id, name } => {
+                self.output_in_call = true;
                 self.pending_tool_names.insert(id.clone(), name.clone());
                 (self.emit)(SessionEvent::ToolCallStarted { id, name });
             }
@@ -287,18 +318,24 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 id,
                 command,
                 is_sandboxed,
-            } => (self.emit)(SessionEvent::ApprovalRequested {
-                id,
-                command,
-                is_sandboxed,
-            }),
+            } => {
+                self.output_in_call = true;
+                (self.emit)(SessionEvent::ApprovalRequested {
+                    id,
+                    command,
+                    is_sandboxed,
+                })
+            }
             StreamChunk::ApprovalResolved { id, approved } => {
                 (self.emit)(SessionEvent::ApprovalResolved { id, approved })
             }
             StreamChunk::ClarificationRequested { id, questions } => {
+                self.output_in_call = true;
                 (self.emit)(SessionEvent::ClarificationRequested { id, questions })
             }
             StreamChunk::ApiCallUsage(call) => {
+                self.last_call_empty = !self.output_in_call;
+                self.output_in_call = false;
                 self.calls.push(call);
                 (self.emit)(SessionEvent::ApiCallUsage(call));
             }
@@ -310,6 +347,15 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 (self.emit)(SessionEvent::TurnMessages(messages));
             }
             StreamChunk::Done => {
+                if self.final_completion_is_empty() {
+                    // The in-turn nudge (`EmptyTurnRetry`) already had its
+                    // one attempt; what reaches here is the second silence.
+                    let error =
+                        StreamError::new(StreamErrorKind::EmptyCompletion, EMPTY_COMPLETION_ERROR);
+                    self.on_stream_error(&error);
+                    (self.emit)(SessionEvent::Error(error));
+                    return Ok(ChunkAction::Break);
+                }
                 if self.text_overflow && self.pending_follow_up.is_none() {
                     self.pending_follow_up = Some(BREVITY_FOLLOW_UP.to_string());
                 }
