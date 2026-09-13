@@ -153,7 +153,9 @@ pub(crate) fn delegation_line(
             format!("[{mode} agent: {agent_name}] {prompt}")
         }
         InvokeAgentProgress::Text(text) => text.clone(),
-        InvokeAgentProgress::Finished { success, result } => result.clone().unwrap_or_else(|| {
+        InvokeAgentProgress::Finished {
+            success, result, ..
+        } => result.clone().unwrap_or_else(|| {
             if *success {
                 "Agent completed.".to_string()
             } else {

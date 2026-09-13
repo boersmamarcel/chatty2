@@ -182,6 +182,9 @@ pub struct AgentSession {
     pending_tool_names: HashMap<String, String>,
     /// Usage of the most recent turn that reported any.
     last_turn_usage: Option<TokenUsage>,
+    /// What this turn's delegated agents spent, one line per delegation
+    /// (AGE-415), recorded on the conversation by `finish_turn`.
+    delegated_usages: Vec<TokenUsage>,
     /// Stream-error recovery attempts per kind across the turns of one task;
     /// reset by a human turn (AGE-273).
     recovery_attempts: HashMap<StreamErrorKind, usize>,
@@ -201,6 +204,7 @@ impl AgentSession {
             cancel_flag: None,
             pending_tool_names: HashMap::new(),
             last_turn_usage: None,
+            delegated_usages: Vec::new(),
             recovery_attempts: HashMap::new(),
         }
     }
@@ -737,8 +741,17 @@ impl AgentSession {
                 );
             }
             InvokeAgentProgress::Text(text) => conversation.append_delegation_progress(text),
-            InvokeAgentProgress::Finished { success, result } => {
+            InvokeAgentProgress::Finished {
+                success,
+                result,
+                usage,
+            } => {
                 conversation.finalize_delegation_progress(*success, result.clone());
+                // The bill follows the bearer (AGE-415): what the worker
+                // spent is this conversation's spend, priced with the turn.
+                if let Some(usage) = usage {
+                    self.delegated_usages.push(usage.clone());
+                }
             }
         }
     }
@@ -779,7 +792,10 @@ impl AgentSession {
     /// nowhere else, so every frontend gets the same `estimated_cost_usd` —
     /// and its tool calls, counted from the trace the session recorded, go
     /// onto the lifetime total. A model without prices leaves the turn's
-    /// cost `None` and the conversation's total unchanged.
+    /// cost `None` and the conversation's total unchanged. What the turn's
+    /// delegated agents spent goes on ahead of the turn's own usage, one
+    /// line per delegation at the same prices (AGE-415), so the totals
+    /// carry the whole tree while `last_usage` stays this agent's own.
     ///
     /// Returns `None` when there is no conversation or no turn to finish: a
     /// second call for the same turn is a no-op, so an owner that finalizes
@@ -825,6 +841,12 @@ impl AgentSession {
         conversation.set_streaming_delegation_trace(None);
 
         conversation.add_tool_calls(tool_calls);
+        for mut usage in std::mem::take(&mut self.delegated_usages) {
+            if let Some(pricing) = conversation.pricing() {
+                usage.calculate_cost(pricing);
+            }
+            conversation.add_delegated_usage(usage);
+        }
         if let Some(mut usage) = self.last_turn_usage.take() {
             if let Some(pricing) = conversation.pricing() {
                 usage.calculate_cost(pricing);

@@ -62,12 +62,16 @@
 //!
 //! Token usage. A2A has no notion of it, and inventing a frame would put
 //! accounting into the task protocol. It rides in the terminal status's
-//! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it.
+//! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it. What
+//! this worker's own delegations spent is folded into that number before
+//! it goes (AGE-415), so a parent sees one number per delegation however
+//! deep the tree below it, and the root's line carries the whole tree.
 
 use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::session::SessionEvent;
+use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -116,6 +120,8 @@ pub struct TaskMapper {
     state: TaskState,
     failure: Option<String>,
     usage: Option<TokenUsage>,
+    /// What this worker's own delegations spent, summed (AGE-415).
+    delegated_usage: Option<TokenUsage>,
 }
 
 impl TaskMapper {
@@ -128,6 +134,7 @@ impl TaskMapper {
             state: TaskState::Completed,
             failure: None,
             usage: None,
+            delegated_usage: None,
         }
     }
 
@@ -175,6 +182,14 @@ impl TaskMapper {
                 self.usage = Some(usage.clone());
                 None
             }
+            // A grandchild's spend rolls up into this task's number.
+            SessionEvent::Delegation(InvokeAgentProgress::Finished {
+                usage: Some(usage), ..
+            }) => {
+                let total = self.delegated_usage.get_or_insert_with(TokenUsage::default);
+                add_tokens(total, usage);
+                None
+            }
 
             SessionEvent::Cancelled => {
                 self.state = TaskState::Canceled;
@@ -203,8 +218,23 @@ impl TaskMapper {
             task_id: self.task_id.clone(),
             state: self.state,
             message: self.failure.clone(),
-            metadata: self.usage.as_ref().map(usage_metadata),
+            metadata: self.reported_usage().as_ref().map(usage_metadata),
             input: None,
+        }
+    }
+
+    /// The task's usage as the parent is told it: this worker's own turn
+    /// plus everything it delegated, or `None` when neither reported any.
+    fn reported_usage(&self) -> Option<TokenUsage> {
+        match (&self.usage, &self.delegated_usage) {
+            (None, None) => None,
+            (Some(own), None) => Some(own.clone()),
+            (None, Some(delegated)) => Some(delegated.clone()),
+            (Some(own), Some(delegated)) => {
+                let mut total = own.clone();
+                add_tokens(&mut total, delegated);
+                Some(total)
+            }
         }
     }
 
@@ -217,6 +247,18 @@ impl TaskMapper {
             input: None,
         }
     }
+}
+
+/// Add `usage`'s four token buckets onto `total`.
+fn add_tokens(total: &mut TokenUsage, usage: &TokenUsage) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(usage.cache_read_tokens);
+    total.cache_write_tokens = total
+        .cache_write_tokens
+        .saturating_add(usage.cache_write_tokens);
 }
 
 /// The turn's usage, for the terminal status's `metadata`.
@@ -390,6 +432,86 @@ mod tests {
         let metadata = metadata.expect("usage is attached to the terminal status");
         assert_eq!(metadata["usage"]["inputTokens"], 120);
         assert_eq!(metadata["usage"]["outputTokens"], 34);
+        // The leader reads it back with core's reader (AGE-415): the two
+        // spellings are pinned to each other here.
+        let read = chatty_core::services::a2a_client::usage_from_status_metadata(Some(&metadata))
+            .expect("the leader can read what the mapper wrote");
+        assert_eq!((read.input_tokens, read.output_tokens), (120, 34));
+    }
+
+    /// AGE-415: a sub-leader's terminal usage already includes what its own
+    /// workers spent, so its parent sees one number for the whole subtree.
+    #[test]
+    fn a_workers_delegations_roll_up_into_its_terminal_usage() {
+        let mut mapper = TaskMapper::new("task-1");
+        let worker = |input: u32, output: u32| TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 10,
+            cache_write_tokens: 1,
+            delegated_to: Some("local-coder".to_string()),
+            ..Default::default()
+        };
+        for usage in [worker(1_000, 100), worker(2_000, 200)] {
+            assert!(
+                mapper
+                    .map(&SessionEvent::Delegation(InvokeAgentProgress::Finished {
+                        success: true,
+                        result: None,
+                        usage: Some(usage),
+                    }))
+                    .is_none(),
+                "a delegation's usage is not a progress line"
+            );
+        }
+        // One delegation reported nothing (a WASM module, say).
+        assert!(
+            mapper
+                .map(&SessionEvent::Delegation(InvokeAgentProgress::Finished {
+                    success: true,
+                    result: None,
+                    usage: None,
+                }))
+                .is_none()
+        );
+        mapper.map(&SessionEvent::TokenUsage(TokenUsage {
+            input_tokens: 120,
+            output_tokens: 34,
+            cache_read_tokens: 5,
+            cache_write_tokens: 2,
+            ..Default::default()
+        }));
+
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        let metadata = metadata.expect("usage is attached to the terminal status");
+        assert_eq!(metadata["usage"]["inputTokens"], 120 + 1_000 + 2_000);
+        assert_eq!(metadata["usage"]["outputTokens"], 34 + 100 + 200);
+        assert_eq!(metadata["usage"]["cacheReadTokens"], 5 + 10 + 10);
+        assert_eq!(metadata["usage"]["cacheWriteTokens"], 2 + 1 + 1);
+        assert!(
+            metadata["usage"].get("delegatedTo").is_none(),
+            "the wire's shape is unchanged: {metadata}"
+        );
+    }
+
+    /// A worker whose own turn reported no usage still passes on what it
+    /// delegated, rather than dropping the subtree's spend.
+    #[test]
+    fn delegated_usage_alone_still_reaches_the_terminal_status() {
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.map(&SessionEvent::Delegation(InvokeAgentProgress::Finished {
+            success: false,
+            result: None,
+            usage: Some(TokenUsage::new(7, 3)),
+        }));
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        let metadata = metadata.expect("the delegated spend is attached");
+        assert_eq!(metadata["usage"]["inputTokens"], 7);
+        assert_eq!(metadata["usage"]["outputTokens"], 3);
     }
 
     #[test]

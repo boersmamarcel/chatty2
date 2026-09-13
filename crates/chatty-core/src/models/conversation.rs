@@ -887,6 +887,14 @@ impl Conversation {
         self.updated_at = SystemTime::now();
     }
 
+    /// Add what a delegated agent spent on this conversation's behalf
+    /// (AGE-415): a line on the usage record and the totals, but not the
+    /// context fill — that is the worker's prompt, not this agent's.
+    pub fn add_delegated_usage(&mut self, usage: TokenUsage) {
+        self.token_usage.add_usage(usage);
+        self.updated_at = SystemTime::now();
+    }
+
     /// Serialize token usage to JSON string
     pub fn serialize_token_usage(&self) -> Result<String> {
         serde_json::to_string(&self.token_usage).context("Failed to serialize token usage")

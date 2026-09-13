@@ -91,6 +91,14 @@ pub struct TokenUsage {
     /// per-call usage was tracked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<ApiCallUsage>,
+
+    /// The agent this usage was spent by on the conversation's behalf, when
+    /// it is a delegated line rather than the turn's own requests (AGE-415):
+    /// what a worker reported on its terminal status, folded into the
+    /// leader's conversation so the bill follows the bearer. `None` for the
+    /// turn's own usage, which is every record written before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_to: Option<String>,
 }
 
 fn default_turn_count() -> u32 {
@@ -107,6 +115,7 @@ impl Default for TokenUsage {
             estimated_cost_usd: None,
             api_turn_count: 1,
             calls: Vec::new(),
+            delegated_to: None,
         }
     }
 }
@@ -393,6 +402,26 @@ mod tests {
 
         conv.recalculate_totals();
         assert_eq!(conv.total_cache_read_tokens, 900);
+    }
+
+    /// AGE-415: a delegated line names its agent and round-trips; the turn's
+    /// own usage — every record written before the field existed — carries
+    /// no such key, so persisted bytes are unchanged.
+    #[test]
+    fn a_delegated_line_names_its_agent_and_an_own_line_does_not() {
+        let own = TokenUsage::from_calls(vec![call(1, 10, 0, 0, 5)]);
+        let json = serde_json::to_string(&own).unwrap();
+        assert!(!json.contains("delegated_to"), "{json}");
+
+        let delegated = TokenUsage {
+            delegated_to: Some("local-coder".to_string()),
+            ..TokenUsage::new(100, 20)
+        };
+        let json = serde_json::to_string(&delegated).unwrap();
+        let back: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.delegated_to.as_deref(), Some("local-coder"));
+        assert_eq!(back.input_tokens, 100);
+        assert_eq!(back.output_tokens, 20);
     }
 
     #[test]

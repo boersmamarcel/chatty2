@@ -21,7 +21,7 @@ use rig_core::completion::Message;
 
 use crate::exporters::types::*;
 use crate::models::conversation::{MessageFeedback, RegenerationRecord};
-use crate::models::token_usage::ConversationTokenUsage;
+use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::settings::models::models_store::ModelConfig;
 
@@ -62,7 +62,14 @@ pub fn conversation_to_atif(
     // PHASE 2: Build agent block
     let agent = build_agent(&conversation.model_id, model_config);
 
-    // PHASE 3: Build steps (track assistant turn index for token_usage lookup)
+    // PHASE 3: Build steps (track assistant turn index for token_usage lookup).
+    // A delegated worker's usage is its own line on the record (AGE-415),
+    // not an assistant turn, so only the turns' own usage is aligned here.
+    let own_usages: Vec<&TokenUsage> = token_usage
+        .message_usages
+        .iter()
+        .filter(|u| u.delegated_to.is_none())
+        .collect();
     let mut steps = Vec::with_capacity(history.len());
     let mut assistant_turn_idx: usize = 0;
 
@@ -78,24 +85,21 @@ pub fn conversation_to_atif(
         let trace_json = traces.get(idx).cloned().flatten();
         let step_id = (idx as u32) + 1;
 
-        let step =
-            match message {
-                Message::User { content } => {
-                    build_user_step(step_id, content, timestamp, &msg_attachments)
-                }
-                Message::Assistant { content, .. } => {
-                    let metrics = token_usage.message_usages.get(assistant_turn_idx).map(|u| {
-                        AtifStepMetrics {
-                            prompt_tokens: Some(u.prompt_tokens()),
-                            completion_tokens: Some(u.output_tokens),
-                            cost_usd: u.estimated_cost_usd,
-                        }
-                    });
-                    assistant_turn_idx += 1;
-                    build_agent_step(step_id, content, timestamp, trace_json, metrics)
-                }
-                Message::System { .. } => continue,
-            };
+        let step = match message {
+            Message::User { content } => {
+                build_user_step(step_id, content, timestamp, &msg_attachments)
+            }
+            Message::Assistant { content, .. } => {
+                let metrics = own_usages.get(assistant_turn_idx).map(|u| AtifStepMetrics {
+                    prompt_tokens: Some(u.prompt_tokens()),
+                    completion_tokens: Some(u.output_tokens),
+                    cost_usd: u.estimated_cost_usd,
+                });
+                assistant_turn_idx += 1;
+                build_agent_step(step_id, content, timestamp, trace_json, metrics)
+            }
+            Message::System { .. } => continue,
+        };
         steps.push(step);
     }
 
