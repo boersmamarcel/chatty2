@@ -13,7 +13,7 @@ A sub-agent is a separate `chatty-tui` process the parent agent hands a task to,
 
 ## Isolated file changes
 
-When the workspace is a git repository, each spawned sub-agent works in its own `git worktree` on a new branch (`sub-agent/<name>`) instead of the shared workspace tree. That means two children editing the same file at the same time no longer silently overwrite each other — each keeps its own copy. When a child finishes, its changes are committed to its branch and the worktree is left on disk; the parent agent merges the branch to take the changes, and the tool result names the branch to merge.
+When the workspace is a git repository, each spawned sub-agent works in its own `git worktree` on a new branch (`sub-agent/<name>`) instead of the shared workspace tree. That means two children editing the same file at the same time no longer silently overwrite each other — each keeps its own copy. The branch name is unique per repository: if `sub-agent/<name>` is already taken (for example, two sub-agent leaders on the same repo naming a worker the same thing), Chatty picks `sub-agent/<name>-2`, `-3`, and so on. When a child finishes, its changes are committed to its branch and the worktree is left on disk; the parent agent merges the branch to take the changes, and the tool result names the actual branch to merge. If a worktree can't be created at all, the delegation fails with the reason rather than silently falling back to a shared tree.
 
 > [!NOTE]
 > If the workspace isn't a git repository, sub-agents fall back to sharing the parent's tree as before, so parallel children editing files can still collide.
