@@ -240,11 +240,17 @@ examples.
 7. **Sub-agent worktrees.** `sub_agent` tool workers each get their own
    `git worktree` under `<workspace>/.chatty/worktrees/<name>` on a
    `sub-agent/<name>` branch (AGE-314), passed to the child via chatty-tui's
-   `--workspace <DIR>` flag. Worktrees are left in place after a worker
-   exits (never auto-removed) and are excluded via `.git/info/exclude`, not
+   `--workspace <DIR>` flag. `<name>` is a wish, not a guarantee: if that
+   branch or directory already exists in the repository (another broker's
+   worker, or a tree left from an earlier run), the first free `<name>-N`
+   (from 2) is used instead, and the merge hint names the branch actually
+   created (AGE-402). Worktrees are left in place after a worker exits
+   (never auto-removed) and are excluded via `.git/info/exclude`, not
    `.gitignore` — they won't show in `git status` but can still accumulate
-   on disk. Falls back to the old shared-tree behavior if the workspace
-   isn't a git repo. See CLAUDE.md.
+   on disk. In a git repository, a worktree that cannot be created now fails
+   the delegation instead of silently sharing the tree; only a workspace
+   that isn't a git repo falls back to the old shared-tree behavior. See
+   CLAUDE.md.
 
 8. **Large module directories.** Several complex areas have been split
    into sub-module directories (`chat_view/`, `chat_input/`,
