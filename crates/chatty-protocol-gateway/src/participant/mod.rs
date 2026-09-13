@@ -38,7 +38,7 @@ pub use protocol::{
 pub use registry::{
     AnswerError, ParticipantRegistry, RegisterError, RegisteredAgent, TaskStream, TaskUpdate,
 };
-pub use virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
+pub use virtual_agent::{EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle};
 
 // The socket itself is Unix-only. Everything above it is not, so the
 // registry and the frames still compile (and are still tested) elsewhere;
@@ -55,4 +55,4 @@ pub use client::{ParticipantConnection, ParticipantReader, ParticipantWriter};
 #[cfg(unix)]
 pub use listener::{bind, serve, serve_connection, unbind};
 #[cfg(unix)]
-pub use runner::{LocalRunner, Worker, WorkerWorkspace, WorkspaceFactory};
+pub use runner::{EvidenceFactory, LocalRunner, Worker, WorkerWorkspace, WorkspaceFactory};

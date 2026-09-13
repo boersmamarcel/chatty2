@@ -44,6 +44,36 @@ pub struct ModuleSettingsModel {
     /// leader's tool schema and prompt stay identical whatever the team.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub virtual_agents: Vec<VirtualAgentConfig>,
+    /// What the whole team shares, as opposed to what one agent does
+    /// (AGE-406). Absent in a settings file written before it existed, and
+    /// then exactly the empty declaration.
+    #[serde(default, skip_serializing_if = "TeamConfig::is_empty")]
+    pub team: TeamConfig,
+}
+
+/// Settings that belong to the declared team rather than to any one of its
+/// members (ADR-0011 C12).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TeamConfig {
+    /// The command the runner runs in a worker's worktree once its task
+    /// ends, whose exit code and last lines go into the evidence envelope
+    /// the leader reads — e.g.
+    /// `"python3 -m unittest discover -s tests -t . -v"`.
+    ///
+    /// Run with the platform shell in the worktree, not through the agent's
+    /// tools, so it is the *runner's* fact and not the worker's account of
+    /// one. `None` leaves the envelope with branch, commits and diff stat
+    /// only. It is never run for a worker whose profile has no shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+}
+
+impl TeamConfig {
+    /// Nothing declared — so a settings file that never had a `team` block
+    /// round-trips without gaining one.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// One named virtual agent the broker publishes (ADR-0011 C10).
@@ -160,6 +190,7 @@ impl Default for ModuleSettingsModel {
             default_endpoint_budget: default_endpoint_budget(),
             endpoint_budgets: HashMap::new(),
             virtual_agents: Vec::new(),
+            team: TeamConfig::default(),
         }
     }
 }
@@ -346,6 +377,31 @@ mod tests {
                 name: "local-coder".to_string(),
                 ..VirtualAgentConfig::default()
             }]
+        );
+    }
+
+    /// AGE-406 Do item 3: `team.verification` is optional, round-trips, and
+    /// a file written before it existed neither gains it nor changes.
+    #[test]
+    fn the_teams_verification_command_is_optional_and_round_trips() {
+        let declared: ModuleSettingsModel = serde_json::from_str(
+            r#"{"team":{"verification":"python3 -m unittest discover -s tests -t . -v"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            declared.team.verification.as_deref(),
+            Some("python3 -m unittest discover -s tests -t . -v")
+        );
+        let round_tripped: ModuleSettingsModel =
+            serde_json::from_str(&serde_json::to_string(&declared).unwrap()).unwrap();
+        assert_eq!(round_tripped.team, declared.team);
+
+        let old: ModuleSettingsModel =
+            serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
+        assert!(old.team.verification.is_none());
+        assert!(
+            !serde_json::to_string(&old).unwrap().contains("team"),
+            "a settings file that never had a team block does not gain one"
         );
     }
 

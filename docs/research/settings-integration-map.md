@@ -14,6 +14,7 @@ Parent: [Paper → product pipeline](./paper-to-product-pipeline.md).
 | `ModelConfig` | `supports_images`, `supports_pdf`, … | — | Ships (unrelated) |
 | `TrainingSettingsModel` | `atif_auto_export` | M0 trace export toggle | **Setting** |
 | `ModuleSettingsModel` | `virtual_agents` | Named worker roles for the small-teams experiment (ADR-0011 C10, `dev/design/fleet.md` §2) | Ships (JSON only, no GPUI page) |
+| `ModuleSettingsModel` | `team.verification` | The command behind the evidence envelope every delegation reply carries (ADR-0011 C12) | Ships (JSON only, no GPUI page) |
 
 Location: `crates/chatty-core/src/settings/models/`.
 
@@ -21,8 +22,11 @@ Location: `crates/chatty-core/src/settings/models/`.
 `module_settings.json`; empty means the single `local-agent`. The team a leader
 delegates to is a roster plus a skill file, e.g. `local-coder` on `qwen3:4b` and
 `local-reviewer` on `gemma4:26b` with `disable_tools: ["fs-write", "shell", "git"]`.
-Schema and the resolution rules: [A2A and WASM modules](../a2a-and-wasm-modules.md),
-"Named virtual agents".
+`team.verification` sits beside it and belongs to the whole roster: the runner runs it
+in each worker's worktree when the worker's task ends and puts its exit code into the
+evidence envelope the leader reads. Schema and the resolution rules:
+[A2A and WASM modules](../a2a-and-wasm-modules.md), "Named virtual agents" and "The
+evidence envelope".
 
 ## Planned (product integration project)
 

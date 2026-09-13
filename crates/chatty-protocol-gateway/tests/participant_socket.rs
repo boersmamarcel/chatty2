@@ -717,3 +717,175 @@ async fn a_duplicate_name_is_rejected_on_the_socket() {
     );
     assert!(harness.participants.is_registered("stub-worker"));
 }
+
+/// The evidence block a stand-in runner hands back (AGE-406).
+const EVIDENCE_BLOCK: &str = "\n\n```evidence\nbranch: sub-agent/local-agent-0\ncommits: 2\n```";
+
+/// A gateway whose `local-agent` is a real `LocalRunner` whose workspace
+/// hands back a fixed evidence envelope, plus its socket and base URL.
+///
+/// A fixed envelope rather than a real worktree: what these tests pin is
+/// that whatever a runner collected reaches the caller in both shapes.
+/// Collecting it from git is `chatty_core::services::worker_tree`'s own
+/// tests, and both ends together are `chatty-tui`'s
+/// `participant::equivalence`.
+async fn start_evidence_runner() -> (tempfile::TempDir, PathBuf, String) {
+    use chatty_protocol_gateway::participant::{LocalRunner, TaskEvidence, WorkerWorkspace};
+
+    let dir = tempfile::tempdir().expect("a temp dir for the socket");
+    let socket = dir.path().join("participants.sock");
+    let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+    let modules = Arc::new(RwLock::new(
+        ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
+    ));
+    let mut gateway = ProtocolGateway::new(modules, 0);
+    let participants = gateway.participants();
+    let listener =
+        chatty_protocol_gateway::participant::bind(&socket).expect("the participant socket binds");
+    tokio::spawn(chatty_protocol_gateway::participant::serve(
+        listener,
+        participants.clone(),
+    ));
+
+    let cwd = dir.path().to_path_buf();
+    let runner = LocalRunner::new("/bin/sh", &socket, participants.clone())
+        .with_args(["-c", "sleep 30"])
+        .with_registration_timeout(Duration::from_secs(5))
+        .with_workspace_factory(Arc::new(move |_worker: String| {
+            let cwd = cwd.clone();
+            Box::pin(async move {
+                Ok(Some(WorkerWorkspace {
+                    cwd,
+                    evidence: Some(Box::new(|| {
+                        Box::pin(async {
+                            Some(TaskEvidence {
+                                text: EVIDENCE_BLOCK.to_string(),
+                                data: json!({
+                                    "branch": "sub-agent/local-agent-0",
+                                    "commits": 2,
+                                    "verification": { "exit_code": 3 },
+                                }),
+                            })
+                        })
+                    })),
+                    on_exit: Box::new(|_| {}),
+                }))
+            })
+        }));
+    gateway = gateway.with_virtual_agent(Arc::new(runner));
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral port");
+    let base_url = format!("http://{}", tcp.local_addr().unwrap());
+    let router = gateway.build_router();
+    tokio::spawn(async move {
+        axum::serve(tcp, router).await.ok();
+    });
+
+    (dir, socket, base_url)
+}
+
+/// ADR-0011 C12 / AGE-406, Do item 4, on `message/send`: the envelope is a
+/// structured field on the task result as well as a fenced block in the
+/// answer, so a trace — or Harbor's ATIF — reads it without parsing prose.
+#[tokio::test]
+async fn message_send_carries_the_evidence_envelope_as_prose_and_as_a_field() {
+    let (_dir, socket, base_url) = start_evidence_runner().await;
+
+    // The runner names its first worker deterministically, so a stub can
+    // claim the name before the task is sent — the same split `runner.rs`'s
+    // own tests use.
+    let mut stub = StubParticipant::register(&socket, "local-agent-0").await;
+    tokio::spawn(async move { stub.answer_one_task("done").await });
+
+    let response: Value = reqwest::Client::new()
+        .post(format!("{base_url}/a2a/local-agent"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": { "message": { "parts": [{ "type": "text", "text": "do it" }] } },
+        }))
+        .send()
+        .await
+        .expect("the gateway answers message/send")
+        .json()
+        .await
+        .expect("the reply is JSON-RPC");
+
+    let result = &response["result"];
+    assert_eq!(result["status"]["state"], "completed");
+    assert_eq!(
+        result["artifacts"][0]["parts"][0]["text"],
+        format!("done{EVIDENCE_BLOCK}"),
+        "the block is appended to the worker's own answer"
+    );
+    assert_evidence(&result["status"]["metadata"]);
+}
+
+/// The same on `message/stream`, which is the method `invoke_agent`
+/// actually uses: the envelope rides the *final* status event's `metadata`,
+/// and the block arrives as the artifact chunk ahead of it.
+#[tokio::test]
+async fn message_stream_carries_the_evidence_envelope_on_its_final_status() {
+    let (_dir, socket, base_url) = start_evidence_runner().await;
+
+    let mut stub = StubParticipant::register(&socket, "local-agent-0").await;
+    tokio::spawn(async move { stub.answer_one_task("done").await });
+
+    let client = A2aClient::new();
+    let mut stream = client
+        .send_message_stream(
+            &A2aAgentConfig {
+                name: "local-agent".to_string(),
+                url: format!("{base_url}/a2a/local-agent"),
+                api_key: None,
+                enabled: true,
+                skills: vec![],
+            },
+            "do it",
+        )
+        .await
+        .expect("the gateway accepts message/stream for a virtual agent");
+
+    let mut artifacts = String::new();
+    let mut final_metadata = None;
+    let mut final_state = None;
+    while let Some(event) = stream.next().await {
+        match event.expect("no stream error") {
+            A2aStreamEvent::ArtifactUpdate { text, .. } => artifacts.push_str(&text),
+            A2aStreamEvent::StatusUpdate {
+                state,
+                is_final,
+                metadata,
+                ..
+            } => {
+                if is_final {
+                    final_state = Some(state);
+                    final_metadata = metadata;
+                    break;
+                }
+            }
+        }
+    }
+
+    assert_eq!(final_state.as_deref(), Some("completed"));
+    assert_eq!(
+        artifacts,
+        format!("done{EVIDENCE_BLOCK}"),
+        "the block reaches a streaming caller too, ahead of the final status"
+    );
+    assert_evidence(&final_metadata.expect("the terminal status carries the evidence envelope"));
+}
+
+/// The structured field, wherever it was read from.
+fn assert_evidence(metadata: &Value) {
+    let evidence = &metadata["evidence"];
+    assert_eq!(evidence["branch"], "sub-agent/local-agent-0");
+    assert_eq!(evidence["commits"], 2);
+    assert_eq!(
+        evidence["verification"]["exit_code"], 3,
+        "the structured field carries what the prose does: {evidence}"
+    );
+}

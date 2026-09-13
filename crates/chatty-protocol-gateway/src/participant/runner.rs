@@ -43,17 +43,21 @@ use tracing::{debug, info};
 use super::budget::{EndpointBudget, EndpointPermit};
 use super::protocol::{DelegatedTask, ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
-use super::virtual_agent::{VirtualAgent, WorkerFuture, WorkerHandle};
+use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
 
 /// A worker's directory, and what to do with it once the worker is gone.
 pub struct WorkerWorkspace {
     /// The child's working directory, and the root its tools are confined to.
     pub cwd: PathBuf,
-    /// Appended to the worker's reported answer once its task ends — e.g.
-    /// naming the branch an isolated worktree committed to, so the leader
-    /// does not have to guess it (AGE-399). `None` when the workspace has
-    /// nothing to add.
-    pub merge_hint: Option<String>,
+    /// Collects the evidence envelope once the worker's task ends: it
+    /// commits the tree and reads back the branch, the diff stat, the
+    /// commit count and the team's verification result (AGE-406). Awaited
+    /// by the handler before the terminal event, since the caller stops
+    /// reading at one.
+    ///
+    /// `None` when the workspace has nothing to report — and the collector
+    /// itself may still answer `None`, which is what an empty branch does.
+    pub evidence: Option<EvidenceFactory>,
     /// Run after the worker exits, with whether its task succeeded. This is
     /// where ADR-0016's turn-commit barrier goes: a worker's output has to be
     /// durable before anything may remove the tree it lives in.
@@ -69,10 +73,14 @@ impl std::fmt::Debug for WorkerWorkspace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkerWorkspace")
             .field("cwd", &self.cwd)
-            .field("merge_hint", &self.merge_hint)
+            .field("evidence", &self.evidence.is_some())
             .finish_non_exhaustive()
     }
 }
+
+/// Makes the evidence envelope for one finished worker. `FnOnce` because
+/// collecting it commits the tree, which must happen exactly once.
+pub type EvidenceFactory = Box<dyn FnOnce() -> EvidenceFuture + Send>;
 
 /// What [`WorkspaceFactory`] returns. Boxed by hand rather than through
 /// `futures`, which this crate does not depend on.
@@ -478,8 +486,13 @@ impl WorkerHandle for Worker {
         Worker::set_succeeded(self, succeeded)
     }
 
-    fn merge_hint(&self) -> Option<&str> {
-        self.workspace.as_ref()?.merge_hint.as_deref()
+    /// Takes the collector out of the workspace and runs it, so a second
+    /// call is `None` rather than a second commit.
+    fn evidence(&mut self) -> EvidenceFuture {
+        match self.workspace.as_mut().and_then(|w| w.evidence.take()) {
+            Some(collect) => collect(),
+            None => Box::pin(std::future::ready(None)),
+        }
     }
 }
 
@@ -647,7 +660,7 @@ mod tests {
                 Box::pin(async move {
                     Ok(Some(WorkerWorkspace {
                         cwd,
-                        merge_hint: None,
+                        evidence: None,
                         on_exit: Box::new(move |_| {
                             released.store(true, Ordering::Relaxed);
                         }),

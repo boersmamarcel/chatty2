@@ -51,14 +51,41 @@ pub trait WorkerHandle: Send {
     /// billed lease hosted.
     fn finish(&mut self, succeeded: bool, metadata: Option<&Value>);
 
-    /// Text to append to the worker's reported answer, e.g. naming the
-    /// branch a local worktree committed to (AGE-399). `None` when there is
-    /// nothing to add — the default, and every worker whose workspace was
-    /// never isolated.
-    fn merge_hint(&self) -> Option<&str> {
-        None
+    /// What the *runner* — not the worker — can say about the finished
+    /// task: the branch, the diff stat, the commit count and the team's
+    /// verification result (ADR-0011 C12, AGE-406).
+    ///
+    /// Awaited once, after [`finish`](Self::finish) and before the caller
+    /// sees a terminal event, because that is the only moment at which the
+    /// workspace is final and something is still listening. Collecting it
+    /// is the implementation's business — locally it commits the worktree
+    /// and reads git back.
+    ///
+    /// `None` when there is nothing to report: the default, every worker
+    /// whose workspace was never isolated, and — deliberately — a branch
+    /// with no commits on it, so a read-only reviewer is never handed
+    /// something to merge.
+    fn evidence(&mut self) -> EvidenceFuture {
+        Box::pin(std::future::ready(None))
     }
 }
+
+/// The runner's account of a finished delegation, in the two shapes its
+/// two readers need (AGE-406).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskEvidence {
+    /// The fenced `evidence` block appended to the worker's answer, so the
+    /// leader's model reads it in the text it already reads.
+    pub text: String,
+    /// The same facts as JSON, carried on the terminal status's metadata so
+    /// a trace — or Harbor's ATIF — needs no prose parsing.
+    pub data: Value,
+}
+
+/// What [`WorkerHandle::evidence`] returns. Boxed by hand rather than
+/// through `futures`, which this crate does not depend on. Owned rather
+/// than borrowing the handle, so a caller can hold both.
+pub type EvidenceFuture = Pin<Box<dyn Future<Output = Option<TaskEvidence>> + Send>>;
 
 /// What [`VirtualAgent::run_task`] returns. Boxed by hand rather than through
 /// `futures`, which this crate does not depend on.

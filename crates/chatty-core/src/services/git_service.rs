@@ -329,6 +329,43 @@ impl GitService {
         Ok(listed.lines().any(|line| line.trim() == name))
     }
 
+    /// The repository's default branch: `main` or `master`, whichever
+    /// exists locally. `None` when neither does.
+    ///
+    /// What a worker's branch is measured against (AGE-406). Deliberately
+    /// not `origin/HEAD`: a worktree in a repository with no remote — a
+    /// scratch clone, every test repository — has no symbolic ref to read,
+    /// and the answer would then be "no evidence" rather than a diff.
+    pub async fn default_branch(&self) -> Option<String> {
+        for candidate in ["main", "master"] {
+            if self.branch_exists(candidate).await.unwrap_or(false) {
+                return Some(candidate.to_string());
+            }
+        }
+        None
+    }
+
+    /// How many commits `branch` carries that `base` does not.
+    pub async fn commits_ahead(&self, base: &str, branch: &str) -> Result<usize> {
+        Self::validate_branch_name(base)?;
+        Self::validate_branch_name(branch)?;
+
+        let range = format!("{base}..{branch}");
+        let counted = self.run_git(&["rev-list", "--count", &range]).await?;
+        Ok(counted.trim().parse().unwrap_or(0))
+    }
+
+    /// `git diff --stat <base>..<branch>`: the summary of what a branch
+    /// changed, as a reviewer reads it.
+    pub async fn diff_stat(&self, base: &str, branch: &str) -> Result<String> {
+        Self::validate_branch_name(base)?;
+        Self::validate_branch_name(branch)?;
+
+        let range = format!("{base}..{branch}");
+        let stat = self.run_git(&["diff", "--stat", &range]).await?;
+        Ok(stat.trim().to_string())
+    }
+
     /// Switch to an existing branch.
     pub async fn switch_branch(&self, name: &str) -> Result<String> {
         Self::validate_branch_name(name)?;

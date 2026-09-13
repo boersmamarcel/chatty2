@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::participant::{
-    DelegatedTask, InputRequest, ParticipantCard, ParticipantRegistry, TaskInput, TaskState,
-    TaskStream, TaskUpdate, VirtualAgent, WorkerHandle,
+    DelegatedTask, InputRequest, ParticipantCard, ParticipantRegistry, TaskEvidence, TaskInput,
+    TaskState, TaskStream, TaskUpdate, VirtualAgent, WorkerHandle,
 };
 
 use super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, json_rpc_error, json_rpc_ok};
@@ -36,6 +36,14 @@ use super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, json_rpc_error, json_rpc_ok
 /// carries the answer. A2A's own `TaskStatus` has no field for either;
 /// `metadata` is the extension point it offers (ADR-0011 C7, AGE-306).
 pub const CLARIFICATION_METADATA_KEY: &str = "clarification";
+
+/// The key under an A2A terminal status's `metadata` that carries the
+/// runner's evidence envelope (ADR-0011 C12, AGE-406): the branch, the
+/// commit count, the diff stat and the team's verification result. The same
+/// facts are appended to the answer as a fenced block, for the leader's
+/// model; this is the copy a trace or Harbor's ATIF reads without parsing
+/// prose.
+pub const EVIDENCE_METADATA_KEY: &str = "evidence";
 
 /// The failure a non-streaming caller gets when its worker asks something.
 ///
@@ -123,12 +131,33 @@ impl RunningTask {
     /// usage. It is passed on rather than only rendered because a hosted
     /// worker's ledger row wants it beside the lease-seconds only the worker
     /// handle knows (AGE-307).
-    fn finish(&mut self, succeeded: bool, metadata: Option<&Value>) {
+    ///
+    /// Returns the runner's evidence envelope, collected after the worker
+    /// was told the task is over and therefore after its worktree is
+    /// committed — the count and the diff stat would be one edit stale
+    /// otherwise (AGE-406).
+    async fn finish(&mut self, succeeded: bool, metadata: Option<&Value>) -> Option<TaskEvidence> {
         self.guard.finished();
-        if let Some(worker) = self.worker.as_mut() {
-            worker.finish(succeeded, metadata);
-        }
+        let worker = self.worker.as_mut()?;
+        worker.finish(succeeded, metadata);
+        worker.evidence().await
     }
+}
+
+/// Fold the evidence envelope into the terminal status's `metadata`, next
+/// to whatever else rides there.
+fn with_evidence(metadata: Option<Value>, evidence: Option<&TaskEvidence>) -> Option<Value> {
+    let Some(evidence) = evidence else {
+        return metadata;
+    };
+    let mut metadata = match metadata {
+        Some(Value::Object(map)) => Value::Object(map),
+        // A non-object metadata cannot be extended. Nothing writes one
+        // today, and the runner's own facts outrank a shape it cannot read.
+        _ => json!({}),
+    };
+    metadata[EVIDENCE_METADATA_KEY] = evidence.data.clone();
+    Some(metadata)
 }
 
 /// Submit `task` to an already-registered participant.
@@ -253,12 +282,15 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     // Dropping the task cancels it, which closes the worker's socket and
     // un-parks its `ask_user` — the question dies with the task rather than
     // waiting out a timeout nobody is going to beat.
-    task.finish(state == TaskState::Completed, metadata.as_ref());
+    let evidence = task
+        .finish(state == TaskState::Completed, metadata.as_ref())
+        .await;
     // Appended whether the task succeeded or failed: a failed worker's
-    // partial edits are still on that branch (AGE-399).
-    if let Some(hint) = task.worker.as_ref().and_then(|w| w.merge_hint()) {
-        text.push_str(hint);
+    // partial edits are still on that branch (AGE-399/AGE-406).
+    if let Some(evidence) = evidence.as_ref() {
+        text.push_str(&evidence.text);
     }
+    let metadata = with_evidence(metadata, evidence.as_ref());
 
     let mut result = json!({
         "id": task.task_id,
@@ -327,26 +359,36 @@ fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
                 }
                 TaskUpdate::Status { state, message, metadata, input } => {
                     let terminal = state.is_terminal();
+                    // The task is finished *before* the terminal event is
+                    // sent, not after, because that is what commits the
+                    // worker's worktree — and the envelope read off a tree
+                    // that has not been committed is one edit stale
+                    // (AGE-406).
+                    let evidence = if terminal {
+                        task.finish(state == TaskState::Completed, metadata.as_ref()).await
+                    } else {
+                        None
+                    };
                     // Sent as an artifact chunk, ahead of the terminal status:
                     // `A2aClient` stops reading the instant it sees a `final`
                     // status, so anything after that point is never seen
                     // (AGE-399). Sent whether the task succeeded or failed —
                     // a failed worker's partial edits are still on that branch.
-                    if terminal
-                        && let Some(hint) = task.worker.as_ref().and_then(|w| w.merge_hint())
-                    {
-                        yield sse(&artifact_event(&id, &task_id, hint, true));
+                    if let Some(evidence) = evidence.as_ref() {
+                        yield sse(&artifact_event(&id, &task_id, &evidence.text, true));
                     }
                     yield sse(&status_event(
                         &id,
                         &task_id,
                         &state.to_string(),
                         message.as_deref(),
-                        with_clarification(metadata.clone(), input),
+                        with_evidence(
+                            with_clarification(metadata.clone(), input),
+                            evidence.as_ref(),
+                        ),
                         terminal,
                     ));
                     if terminal {
-                        task.finish(state == TaskState::Completed, metadata.as_ref());
                         ended = true;
                         break;
                     }
