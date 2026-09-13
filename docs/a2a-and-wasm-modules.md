@@ -483,3 +483,20 @@ started with `--ollama`, `--openai-compat-url` or `--api-key` forwards those fla
 every child (a Harbor sandbox has no `providers.json` for a child to read), and a
 settings-configured desktop leader forwards nothing. There is no settings page for this
 yet; the JSON is the interface.
+
+**Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
+sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls
+only from content, so the call is lost and the model's answer arrives empty. On a leader
+or reviewer that shows up as a delegation chain that stops without a word. The roster
+entry's `extra_params.think` is Ollama's per-request `think` switch (`"true"` or
+`"false"`, sent as the request's top-level `think` field); set it to `"false"` on any
+Ollama model that coordinates or reviews, in `models.json`:
+
+```json
+{ "id": "qwen3-14b", "provider_type": "ollama", "model_identifier": "qwen3:14b",
+  "extra_params": { "think": "false" } }
+```
+
+Absent, Ollama's model default applies. Other providers ignore the key. The desktop's
+model dialog has no field for it and rewrites `extra_params` when a model is saved
+there, so a model edited in the dialog needs the key put back by hand.
