@@ -243,7 +243,7 @@ examples.
    `--workspace <DIR>` flag. `<name>` is a wish, not a guarantee: if that
    branch or directory already exists in the repository (another broker's
    worker, or a tree left from an earlier run), the first free `<name>-N`
-   (from 2) is used instead, and the merge hint names the branch actually
+   (from 2) is used instead, and the evidence envelope names the branch actually
    created (AGE-402). Worktrees are left in place after a worker exits
    (never auto-removed) and are excluded via `.git/info/exclude`, not
    `.gitignore` — they won't show in `git status` but can still accumulate

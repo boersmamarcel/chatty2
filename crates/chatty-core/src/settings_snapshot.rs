@@ -492,6 +492,7 @@ mod tests {
                     budgets
                 },
                 virtual_agents: Vec::new(),
+                team: Default::default(),
             },
             providers: vec![
                 ProviderConfig::new("openrouter".to_string(), ProviderType::OpenRouter)

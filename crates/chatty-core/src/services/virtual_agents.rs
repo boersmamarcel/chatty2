@@ -40,6 +40,10 @@ pub struct VirtualAgentSpec {
     /// The base URL of the model server its children talk to and how many
     /// may hold it at once; `None` leaves the agent unmetered.
     pub endpoint: Option<(String, usize)>,
+    /// The team's verification command, for this agent (AGE-406). The
+    /// team's `verification` when it declared one and this agent's profile
+    /// has a shell; `None` otherwise.
+    pub verification: Option<String>,
 }
 
 /// Resolve every virtual agent the broker should publish.
@@ -124,9 +128,43 @@ pub fn resolve_virtual_agents(
                 description: describe(agent, models),
                 args,
                 endpoint,
+                verification: verification_for(agent, module_settings),
             }
         })
         .collect()
+}
+
+/// The tool group `--disable` names when a worker is to run without a
+/// shell, and the tool a named profile has to allow for the same thing
+/// (AGE-406, "Do not" item 2).
+const SHELL_TOOL_GROUP: &str = "shell";
+const SHELL_TOOL_NAME: &str = "shell_execute";
+
+/// The team's verification command, unless this agent's profile has no
+/// shell.
+///
+/// A worker that cannot run commands did not produce a build, so running
+/// the suite in its tree would report the leader's own state back as the
+/// worker's. Which of the two tool declarations answers that follows
+/// AGE-405's own precedence: a named `tools` profile is an allowlist and
+/// wins when both are set, so a `reviewer` runs the suite even though it
+/// also disables the `shell` group, and a `coordinator` never does.
+fn verification_for(
+    agent: &VirtualAgentConfig,
+    module_settings: &ModuleSettingsModel,
+) -> Option<String> {
+    let has_shell = match agent.tools.as_deref() {
+        // An unknown profile name is warned about above and fails the
+        // child at start-up, so what this answers for it never matters.
+        Some(profile) => tool_profile(profile).is_none_or(|p| p.allows(SHELL_TOOL_NAME)),
+        None => !agent
+            .disable_tools
+            .iter()
+            .any(|group| group == SHELL_TOOL_GROUP),
+    };
+    has_shell
+        .then(|| module_settings.team.verification.clone())
+        .flatten()
 }
 
 /// The card text: what the agent is, which model it runs, and which tool
@@ -175,6 +213,7 @@ fn first_sentence(preamble: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::models::module_settings::TeamConfig;
     use crate::settings::models::providers_store::ProviderType;
 
     fn model(id: &str, provider: ProviderType) -> ModelConfig {
@@ -353,6 +392,74 @@ mod tests {
             specs[2].endpoint, specs[0].endpoint,
             "two agents on one server share its endpoint key"
         );
+    }
+
+    /// AGE-406: the team's verification command reaches every agent that
+    /// could have produced a build, and no agent that could not — read off
+    /// `disable_tools` when that is all the agent declares.
+    #[test]
+    fn the_teams_verification_command_skips_an_agent_that_disables_the_shell_group() {
+        let mut settings = team();
+        settings.team.verification = Some("cargo test".to_string());
+
+        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
+
+        assert_eq!(specs[0].verification.as_deref(), Some("cargo test"));
+        assert_eq!(
+            specs[1].verification, None,
+            "the reviewer disables the `shell` group, so the runner must not run commands for it"
+        );
+    }
+
+    /// AGE-405's precedence, applied to AGE-406: a named `tools` profile is
+    /// an allowlist and wins over `disable_tools`, so what decides is what
+    /// the profile allows — `coordinator` has no `shell_execute` and
+    /// `reviewer` does, even alongside `disable_tools: ["shell"]`.
+    #[test]
+    fn a_named_profile_decides_whether_the_verification_command_runs() {
+        let settings = ModuleSettingsModel {
+            virtual_agents: vec![
+                VirtualAgentConfig {
+                    name: "local-lead".to_string(),
+                    tools: Some("coordinator".to_string()),
+                    ..VirtualAgentConfig::default()
+                },
+                VirtualAgentConfig {
+                    name: "local-reviewer".to_string(),
+                    tools: Some("reviewer".to_string()),
+                    disable_tools: vec!["shell".into()],
+                    ..VirtualAgentConfig::default()
+                },
+                VirtualAgentConfig {
+                    name: "local-coder".to_string(),
+                    tools: Some("coder".to_string()),
+                    ..VirtualAgentConfig::default()
+                },
+            ],
+            team: TeamConfig {
+                verification: Some("cargo test".to_string()),
+            },
+            ..ModuleSettingsModel::default()
+        };
+
+        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
+
+        assert_eq!(
+            specs[0].verification, None,
+            "a coordinator cannot run commands, so its tree was never built"
+        );
+        assert_eq!(
+            specs[1].verification.as_deref(),
+            Some("cargo test"),
+            "the profile is the allowlist and it allows shell_execute; `disable_tools` loses"
+        );
+        assert_eq!(specs[2].verification.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn no_declared_verification_command_means_none_is_run() {
+        let specs = resolve_virtual_agents(&[], &[], &team(), &[]);
+        assert!(specs.iter().all(|spec| spec.verification.is_none()));
     }
 
     #[test]

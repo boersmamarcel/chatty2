@@ -22,7 +22,8 @@ use chatty_core::services::virtual_agents::VirtualAgentSpec;
 use chatty_core::services::worker_tree;
 use chatty_core::tools::worker_executable;
 use chatty_protocol_gateway::participant::{
-    EndpointBudget, LocalRunner, ParticipantRegistry, WorkerWorkspace, WorkspaceFactory,
+    EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
+    WorkspaceFactory,
 };
 use tracing::{info, warn};
 
@@ -74,7 +75,8 @@ pub fn local_runners(
                     .with_description(spec.description)
                     .with_args(spec.args);
             if let Some(root) = workspace_dir.clone() {
-                runner = runner.with_workspace_factory(worktree_factory(root));
+                runner = runner
+                    .with_workspace_factory(worktree_factory(root, spec.verification.clone()));
             }
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());
@@ -84,19 +86,30 @@ pub fn local_runners(
         .collect()
 }
 
-/// Give each worker its own `git worktree`, and commit what it leaves behind.
-fn worktree_factory(workspace_root: String) -> WorkspaceFactory {
+/// Give each worker its own `git worktree`, commit what it leaves behind,
+/// and report what that was (AGE-406). `verification` is the team's command
+/// for *this* agent, already `None` for a profile with no shell.
+fn worktree_factory(workspace_root: String, verification: Option<String>) -> WorkspaceFactory {
     Arc::new(move |worker: String| {
         let workspace_root = workspace_root.clone();
+        let verification = verification.clone();
         Box::pin(async move {
-            let Some((cwd, merge_hint, on_exit)) =
-                worker_tree::create_with_commit_hook(&workspace_root, &worker).await?
+            let Some((cwd, evidence, on_exit)) =
+                worker_tree::create_with_commit_hook(&workspace_root, &worker, verification)
+                    .await?
             else {
                 return Ok(None);
             };
             Ok(Some(WorkerWorkspace {
                 cwd,
-                merge_hint: Some(merge_hint),
+                evidence: Some(Box::new(move || {
+                    Box::pin(async move {
+                        evidence().await.map(|found| TaskEvidence {
+                            text: found.block(),
+                            data: found.json(),
+                        })
+                    })
+                })),
                 on_exit,
             }))
         })

@@ -415,7 +415,7 @@ Each worker runs in its own `git worktree` under the conversation's workspace
 on branch `sub-agent/<name>`, where `<name>` is the participant name (`local-coder-0`)
 unless that branch or directory already exists in the repository — a sub-leader's
 broker counts its own workers from zero, and a tree left from an earlier run keeps
-its branch — in which case it is the first free `<name>-N` (AGE-402). The merge hint
+its branch — in which case it is the first free `<name>-N` (AGE-402). The evidence envelope
 appended to the worker's answer names the branch actually created. In a repository, a
 tree that cannot be made fails the delegation; only a workspace that is not a
 repository runs its workers unisolated.
@@ -530,6 +530,44 @@ started with `--ollama`, `--openai-compat-url` or `--api-key` forwards those fla
 every child (a Harbor sandbox has no `providers.json` for a child to read), and a
 settings-configured desktop leader forwards nothing. There is no settings page for this
 yet; the JSON is the interface.
+
+**The evidence envelope (ADR-0011 C12, AGE-406).** A worker's report is the worker's
+account of what it did; the *runner* can say what it actually left behind, and it does.
+When a delegated task ends the runner commits the worker's worktree and, before the
+caller sees a terminal event, reads the tree back: the branch, how many commits it
+carries over the default branch (`main` or `master`, whichever exists), `git diff --stat
+<default>..<branch>`, and — when the team declares a verification command — that
+command's exit code and last 20 lines, run with the shell in the worktree under a
+five-minute timeout. That envelope is appended to the worker's answer as a fenced
+`evidence` block and carried, structured, on the terminal status's
+`metadata.evidence`, so a trace or Harbor's ATIF reads it without parsing prose. It
+replaces the branch hint of AGE-399. A worker that committed nothing gets **no
+envelope at all** — a read-only reviewer must never be handed something to merge — and
+nothing is ever merged automatically; merge policy belongs to the flow.
+
+The verification command is the team's, not an agent's, and lives next to
+`virtual_agents` in `module_settings.json`:
+
+```json
+{
+  "team": { "verification": "python3 -m unittest discover -s tests -t . -v" }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `team.verification` | Optional. A shell command the runner runs in each worker's worktree once its task ends, whose exit code and output tail go into the evidence envelope. Absent: the envelope carries branch, commits and diff stat only. |
+
+It is skipped for any agent **whose profile has no shell**: a worker that could not run
+commands produced no build, so running the suite in its tree would report the leader's
+own state back as the worker's. Which declaration answers that follows the precedence
+above — a named `tools` profile is an allowlist and wins, so a `reviewer` runs the suite
+(its profile allows `shell_execute`) even alongside `disable_tools: ["shell"]`, while a
+`coordinator` never does; with no profile named, `disable_tools` containing `shell` is
+what skips it. The command is a plain subprocess in a process group of its own, not one
+of the agent's tools — the point of the envelope is that it is the runner's fact and not
+the worker's account of one — and the timeout kills that whole group, so a suite that
+hangs cannot outlive the delegation that started it.
 
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
 sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls

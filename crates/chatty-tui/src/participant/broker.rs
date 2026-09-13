@@ -36,7 +36,8 @@ use chatty_core::tools::worker_executable;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
-    EndpointBudget, LocalRunner, ParticipantRegistry, WorkerWorkspace, WorkspaceFactory,
+    EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
+    WorkspaceFactory,
 };
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use tokio::net::TcpListener;
@@ -244,7 +245,8 @@ fn local_runners(
                 .with_description(spec.description)
                 .with_args(spec.args);
             if let Some(root) = workspace_dir.clone() {
-                runner = runner.with_workspace_factory(worktree_factory(root));
+                runner = runner
+                    .with_workspace_factory(worktree_factory(root, spec.verification.clone()));
             }
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());
@@ -265,22 +267,33 @@ fn socket_path() -> PathBuf {
         .join(format!("participants-{}.sock", std::process::id()))
 }
 
-/// Give each worker its own `git worktree`, and commit what it leaves
-/// behind. Identical to chatty-gpui's `broker_runner::worktree_factory`;
-/// both wrap the same `chatty_core::services::worker_tree` logic, which is
-/// where all of it but the `WorkerWorkspace` glue lives (AGE-376).
-fn worktree_factory(workspace_root: String) -> WorkspaceFactory {
+/// Give each worker its own `git worktree`, commit what it leaves behind,
+/// and report what that was (AGE-406). `verification` is the team's command
+/// for *this* agent, already `None` for a profile with no shell. Identical
+/// to chatty-gpui's `broker_runner::worktree_factory`; both wrap the same
+/// `chatty_core::services::worker_tree` logic, which is where all of it but
+/// the `WorkerWorkspace` glue lives (AGE-376).
+fn worktree_factory(workspace_root: String, verification: Option<String>) -> WorkspaceFactory {
     Arc::new(move |worker: String| {
         let workspace_root = workspace_root.clone();
+        let verification = verification.clone();
         Box::pin(async move {
-            let Some((cwd, merge_hint, on_exit)) =
-                worker_tree::create_with_commit_hook(&workspace_root, &worker).await?
+            let Some((cwd, evidence, on_exit)) =
+                worker_tree::create_with_commit_hook(&workspace_root, &worker, verification)
+                    .await?
             else {
                 return Ok(None);
             };
             Ok(Some(WorkerWorkspace {
                 cwd,
-                merge_hint: Some(merge_hint),
+                evidence: Some(Box::new(move || {
+                    Box::pin(async move {
+                        evidence().await.map(|found| TaskEvidence {
+                            text: found.block(),
+                            data: found.json(),
+                        })
+                    })
+                })),
                 on_exit,
             }))
         })
@@ -434,9 +447,9 @@ mod tests {
     /// AGE-402: two brokers on one repository — a top leader and a
     /// sub-leader started with `--broker` inside its own worktree — each
     /// name their first worker `local-coder-0` from their own counter. Each
-    /// gets a tree and a branch of its own, and each hint names the branch
-    /// that exists. A third broker whose tree cannot be made fails the
-    /// delegation rather than running its worker in the shared tree.
+    /// gets a tree and a branch of its own. A third broker whose tree
+    /// cannot be made fails the delegation rather than running its worker
+    /// in the shared tree.
     #[tokio::test]
     async fn two_brokers_naming_the_same_worker_get_their_own_branches() {
         let dir = tempfile::tempdir().expect("a repo dir");
@@ -469,12 +482,12 @@ mod tests {
         );
         let root = dir.path().to_string_lossy().to_string();
 
-        let top = worktree_factory(root.clone());
+        let top = worktree_factory(root.clone(), None);
         let lead = top("local-lead-0".to_string())
             .await
             .expect("the top broker isolates its sub-leader")
             .expect("the workspace is a repository");
-        let nested = worktree_factory(lead.cwd.to_string_lossy().to_string());
+        let nested = worktree_factory(lead.cwd.to_string_lossy().to_string(), None);
 
         let nested_coder = nested("local-coder-0".to_string())
             .await
@@ -486,19 +499,11 @@ mod tests {
             .expect("the workspace is a repository");
 
         assert_ne!(nested_coder.cwd, top_coder.cwd);
+        assert!(nested_coder.cwd.ends_with("local-coder-0"));
         assert!(
-            nested_coder
-                .merge_hint
-                .as_deref()
-                .unwrap()
-                .contains("'sub-agent/local-coder-0'")
-        );
-        assert!(
-            top_coder
-                .merge_hint
-                .as_deref()
-                .unwrap()
-                .contains("'sub-agent/local-coder-0-2'")
+            top_coder.cwd.ends_with("local-coder-0-2"),
+            "the top broker's coder yields the name the nested one took: {}",
+            top_coder.cwd.display()
         );
 
         let refused = top("../escape".to_string()).await;

@@ -309,22 +309,31 @@ async fn a_dropped_tool_event_would_be_caught() {
 }
 
 // ---------------------------------------------------------------------------
-// The worker's branch reaches the parent (AGE-399)
+// The runner's evidence envelope reaches the parent (AGE-399 / AGE-406)
 // ---------------------------------------------------------------------------
 
-mod merge_hint {
-    //! AGE-399's verification: `merge_hint` was defined and unit-tested but
-    //! had no caller, so a leader never learned which branch a delegated
-    //! worker's output landed on. Exercising it needs a real `LocalRunner`,
+mod evidence {
+    //! ADR-0011 C12's verification: when a worker's task ends, the *runner*
+    //! — not the model — records the branch, the diff stat, the commit
+    //! count and the team's verification result, and appends them to the
+    //! answer as a fenced `evidence` block. A worker that committed nothing
+    //! gets none, so a read-only reviewer is never handed a branch to
+    //! merge.
+    //!
+    //! Exercising it needs a real `LocalRunner` over a real `git worktree`,
     //! not the bare registered participant `broker_run` above uses — only a
-    //! runner's `WorkerWorkspace` carries a hint. The worker itself is still
-    //! the scripted stand-in `spawn_scripted_worker` sets up, registered
-    //! under the name the runner deterministically allocates its first
-    //! worker (`local-agent-0`).
+    //! runner's `WorkerWorkspace` carries an envelope collector. The worker
+    //! itself is still the scripted stand-in `spawn_scripted_worker` sets
+    //! up, registered under the name the runner deterministically allocates
+    //! its first worker (`local-agent-0`); what it *left in its tree* is
+    //! seeded by the workspace factory, since a scripted worker edits
+    //! nothing of its own.
 
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
 
+    use chatty_core::services::worker_tree;
     use chatty_core::services::{
         StreamError, StreamErrorKind, install_progress_channel, scenarios,
     };
@@ -335,19 +344,56 @@ mod merge_hint {
     };
     use chatty_module_registry::ModuleRegistry;
     use chatty_protocol_gateway::ProtocolGateway;
-    use chatty_protocol_gateway::participant::{LocalRunner, ParticipantRegistry, WorkerWorkspace};
+    use chatty_protocol_gateway::participant::{
+        LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
+    };
     use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
     use rig_agent::tool::{Tool, ToolContext};
     use tokio::sync::RwLock;
 
     use super::{NoopProvider, assistant_text, policy, spawn_scripted_worker};
 
-    const HINT: &str = "\n\n[Worker output is on branch 'sub-agent/local-agent-0'.]";
     const FIRST_WORKER: &str = "local-agent-0";
+    const FIRST_BRANCH: &str = "sub-agent/local-agent-0";
+    /// Exit code 3 rather than 0 or 1: it can only have come from actually
+    /// running the command.
+    const VERIFICATION: &str = "echo 'ran the suite'; exit 3";
 
-    /// A gateway whose `local-agent` is a real `LocalRunner` with a
-    /// workspace factory that always hands its worker [`HINT`].
-    async fn start_runner_gateway(dir: &std::path::Path) -> (u16, ParticipantRegistry) {
+    /// A repository with one commit on `main`, so a worker's branch has a
+    /// default branch to be measured against.
+    async fn repo(dir: &Path) {
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(dir.join("README"), "hi").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+    }
+
+    /// A gateway whose `local-agent` is a real `LocalRunner` giving its
+    /// worker a real `git worktree` under `root`, wired exactly as
+    /// `broker.rs`'s `worktree_factory` wires it.
+    ///
+    /// `edits` is written into the worker's tree the moment it is made: the
+    /// scripted stand-in worker writes nothing itself, so this is what
+    /// tells "a coder that commits" from "a reviewer that does not".
+    async fn start_runner_gateway(
+        root: PathBuf,
+        verification: Option<String>,
+        edits: bool,
+    ) -> (u16, ParticipantRegistry) {
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
             ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
@@ -355,7 +401,6 @@ mod merge_hint {
         let gateway = ProtocolGateway::new(modules, 0);
         let registry = gateway.participants();
 
-        let cwd = dir.to_path_buf();
         let runner = LocalRunner::new(
             "/bin/sh",
             "/nonexistent/participants.sock",
@@ -364,13 +409,28 @@ mod merge_hint {
         .with_agent_name(LOCAL_AGENT_NAME)
         .with_args(["-c", "sleep 30"])
         .with_registration_timeout(Duration::from_secs(5))
-        .with_workspace_factory(Arc::new(move |_worker: String| {
-            let cwd = cwd.clone();
+        .with_workspace_factory(Arc::new(move |worker: String| {
+            let root = root.to_string_lossy().to_string();
+            let verification = verification.clone();
             Box::pin(async move {
+                let (cwd, evidence, on_exit) =
+                    worker_tree::create_with_commit_hook(&root, &worker, verification)
+                        .await?
+                        .expect("the workspace is a git repository");
+                if edits {
+                    std::fs::write(cwd.join("added.rs"), "fn added() {}\n").unwrap();
+                }
                 Ok(Some(WorkerWorkspace {
                     cwd,
-                    merge_hint: Some(HINT.to_string()),
-                    on_exit: Box::new(|_| {}),
+                    evidence: Some(Box::new(move || {
+                        Box::pin(async move {
+                            evidence().await.map(|found| TaskEvidence {
+                                text: found.block(),
+                                data: found.json(),
+                            })
+                        })
+                    })),
+                    on_exit,
                 }))
             })
         }));
@@ -386,56 +446,9 @@ mod merge_hint {
         (port, registry)
     }
 
-    /// The completed case: the branch reaches the model in the answer it
-    /// actually reads, not merely the transcript.
-    #[tokio::test]
-    async fn a_completed_delegation_reports_the_workers_branch_to_the_model() {
-        let dir = tempfile::tempdir().expect("a workspace dir");
-        let (port, registry) = start_runner_gateway(dir.path()).await;
-
-        let scenario = scenarios()
-            .into_iter()
-            .find(|s| s.name == "tool_call_then_result")
-            .expect("the scenario exists");
-        let events = replay_scenario(scenario, policy()).await;
-        spawn_scripted_worker(&registry, FIRST_WORKER, events.clone());
-
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                InvokeAgentArgs {
-                    agent: LOCAL_AGENT_NAME.to_string(),
-                    prompt: "delegate this".to_string(),
-                },
-            )
-            .await
-            .expect("the delegation succeeds");
-
-        let answer: String = assistant_text(&events).concat();
-        assert_eq!(
-            result.response,
-            format!("{}{HINT}", answer.trim()),
-            "the branch the worker committed to must reach the model, not just the trace"
-        );
-    }
-
-    /// Do item 1's other half: a worker that fails still committed whatever
-    /// it had, so the hint must still reach the parent (here, its progress
-    /// trace — `InvokeAgentTool` does not hand a failed call's text to the
-    /// model at all, which is unrelated to this issue).
-    #[tokio::test]
-    async fn a_failed_delegation_still_reports_the_workers_branch() {
-        let dir = tempfile::tempdir().expect("a workspace dir");
-        let (port, registry) = start_runner_gateway(dir.path()).await;
-
-        let events = vec![SessionEvent::Error(StreamError {
-            kind: StreamErrorKind::Other,
-            message: "the worker crashed".to_string(),
-        })];
-        spawn_scripted_worker(&registry, FIRST_WORKER, events);
-
+    /// Delegate one task to `local-agent` and return the answer the model
+    /// reads plus every progress line the leader's transcript renders.
+    async fn delegate(port: u16) -> (Result<String, String>, String) {
         let tool =
             InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
@@ -449,21 +462,131 @@ mod merge_hint {
                 },
             )
             .await;
+
+        let mut progress = String::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            if let InvokeAgentProgress::Text(text) = event {
+                progress.push_str(&text);
+            }
+        }
+        (
+            result.map(|r| r.response).map_err(|e| format!("{e:#}")),
+            progress,
+        )
+    }
+
+    async fn completed_turn() -> Vec<SessionEvent> {
+        let scenario = scenarios()
+            .into_iter()
+            .find(|s| s.name == "tool_call_then_result")
+            .expect("the scenario exists");
+        replay_scenario(scenario, policy()).await
+    }
+
+    /// Do items 1 and 2, and the first acceptance criterion: a coder that
+    /// commits gets an envelope naming its branch, its diff stat and the
+    /// verification command's exit code — in the answer the model actually
+    /// reads, not merely in the trace.
+    #[tokio::test]
+    async fn a_coder_that_commits_gets_an_envelope_with_branch_diff_and_verification() {
+        let dir = tempfile::tempdir().expect("a workspace dir");
+        repo(dir.path()).await;
+        let (port, registry) =
+            start_runner_gateway(dir.path().to_path_buf(), Some(VERIFICATION.into()), true).await;
+
+        let events = completed_turn().await;
+        spawn_scripted_worker(&registry, FIRST_WORKER, events.clone());
+
+        let (response, progress) = delegate(port).await;
+        let response = response.expect("the delegation succeeds");
+
+        let answer: String = assistant_text(&events).concat();
+        assert!(
+            response.starts_with(answer.trim()),
+            "the worker's own report still comes first: {response:?}"
+        );
+        assert!(response.contains("```evidence"), "{response}");
+        assert!(
+            response.contains(&format!("branch: {FIRST_BRANCH}")),
+            "{response}"
+        );
+        assert!(response.contains("base: main"), "{response}");
+        assert!(response.contains("commits: 1"), "{response}");
+        assert!(
+            response.contains("added.rs"),
+            "the diff stat names what the worker changed: {response}"
+        );
+        assert!(
+            response.contains("exit code 3") && response.contains("ran the suite"),
+            "the verification result is the runner's, not the worker's: {response}"
+        );
+
+        // Third acceptance criterion: the block the leader's transcript
+        // renders — the delegation's `output` payload (AGE-401) — carries
+        // it exactly once, and so does everything streamed to get there.
+        assert_eq!(
+            response.matches("```evidence").count(),
+            1,
+            "the fenced block appears once in the leader's transcript: {response}"
+        );
+        assert_eq!(progress.matches("```evidence").count(), 1, "{progress}");
+    }
+
+    /// Second acceptance criterion: a reviewer commits nothing, so it gets
+    /// no envelope and no hint. Nothing tells it there is a branch to take.
+    #[tokio::test]
+    async fn a_reviewer_that_commits_nothing_gets_no_envelope_and_no_hint() {
+        let dir = tempfile::tempdir().expect("a workspace dir");
+        repo(dir.path()).await;
+        let (port, registry) =
+            start_runner_gateway(dir.path().to_path_buf(), Some(VERIFICATION.into()), false).await;
+
+        let events = completed_turn().await;
+        spawn_scripted_worker(&registry, FIRST_WORKER, events.clone());
+
+        let (response, progress) = delegate(port).await;
+        let response = response.expect("the delegation succeeds");
+
+        let answer: String = assistant_text(&events).concat();
+        assert_eq!(
+            response,
+            answer.trim(),
+            "a worker that committed nothing adds nothing to its own report"
+        );
+        for text in [&response, &progress] {
+            assert!(!text.contains("evidence"), "{text}");
+            assert!(!text.contains("sub-agent/"), "{text}");
+            assert!(!text.contains("merge"), "{text}");
+        }
+    }
+
+    /// A worker that failed still committed whatever it had, so the
+    /// envelope must still reach the parent (here, its progress trace —
+    /// `InvokeAgentTool` does not hand a failed call's text to the model at
+    /// all, which is unrelated to this issue).
+    #[tokio::test]
+    async fn a_failed_delegation_still_reports_what_is_on_the_branch() {
+        let dir = tempfile::tempdir().expect("a workspace dir");
+        repo(dir.path()).await;
+        let (port, registry) = start_runner_gateway(dir.path().to_path_buf(), None, true).await;
+
+        spawn_scripted_worker(
+            &registry,
+            FIRST_WORKER,
+            vec![SessionEvent::Error(StreamError {
+                kind: StreamErrorKind::Other,
+                message: "the worker crashed".to_string(),
+            })],
+        );
+
+        let (result, progress) = delegate(port).await;
         assert!(
             result.is_err(),
             "the worker's own failure still fails the delegation"
         );
-
-        let mut progress_text = String::new();
-        while let Ok(event) = progress_rx.try_recv() {
-            if let InvokeAgentProgress::Text(text) = event {
-                progress_text.push_str(&text);
-            }
-        }
         assert!(
-            progress_text.contains(HINT),
-            "a failed worker's partial edits are still on its branch, and the \
-             hint must say so: {progress_text:?}"
+            progress.contains("```evidence") && progress.contains(FIRST_BRANCH),
+            "a failed worker's partial edits are still on its branch: {progress:?}"
         );
     }
 }
