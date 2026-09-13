@@ -11,6 +11,7 @@ use crate::models::token_usage::TokenUsage;
 use crate::services::a2a_client::{
     A2aClarificationRequest, A2aClient, A2aStreamEvent, usage_from_status_metadata,
 };
+use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::agent_origin::AgentOrigin;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
@@ -85,6 +86,13 @@ pub enum InvokeAgentError {
     Disabled(String),
     #[error("Invocation failed: {0}")]
     InvocationFailed(String),
+    /// The tenant's monthly cap is spent, so no delegation was started
+    /// (AGE-416). The text is the [`CapExceeded`] display —
+    /// `cap_exceeded: month-to-date $X.XX >= cap $Y.YY; no delegation
+    /// started` — and the payload carries the same three fields hive's
+    /// `402` body does.
+    #[error(transparent)]
+    CapExceeded(CapExceeded),
 }
 
 /// Tool that invokes a named agent (remote A2A or local WASM module) with a prompt.
@@ -117,6 +125,10 @@ pub struct InvokeAgentTool {
     /// leader may instead answer for its worker is an open question on the
     /// ADR; nothing selects such a policy today.
     clarifications: Option<PendingClarifications>,
+    /// The hosted per-user spend cap (AGE-416 / ADR-0010), asked before any
+    /// delegation starts. `None` — the desktop, chatty-tui, any leader
+    /// without a cap — means no check at all.
+    spend_gate: Option<Arc<dyn SpendGate>>,
 }
 
 impl InvokeAgentTool {
@@ -135,6 +147,7 @@ impl InvokeAgentTool {
             local_agents: Vec::new(),
             warn_outside_fleet: false,
             clarifications: None,
+            spend_gate: None,
         }
     }
 
@@ -157,6 +170,16 @@ impl InvokeAgentTool {
         S: Into<String>,
     {
         self.local_agents = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Ask `gate` before every delegation (AGE-416): month-to-date against
+    /// the tenant's cap, nothing more. A refusal fails the call with
+    /// [`InvokeAgentError::CapExceeded`] before any HTTP call is made, so no
+    /// worker is spawned and no participant registers. A delegation that is
+    /// already running is never touched.
+    pub fn with_spend_gate(mut self, gate: Arc<dyn SpendGate>) -> Self {
+        self.spend_gate = Some(gate);
         self
     }
 
@@ -260,6 +283,23 @@ impl Tool for InvokeAgentTool {
             return Err(InvokeAgentError::InvocationFailed(
                 "Prompt cannot be empty".to_string(),
             ));
+        }
+
+        // 0. The tenant's cap (AGE-416), ahead of resolving the agent: a
+        //    leader over its cap starts nothing, so nothing below — the
+        //    `Started` progress event, the `message/stream` call that makes
+        //    the broker spawn a worker — happens. Without a gate this is a
+        //    no-op and the call is exactly what it was.
+        if let Some(gate) = self.spend_gate.as_ref()
+            && let Err(refused) = gate.check().await
+        {
+            warn!(
+                agent = %agent_name,
+                month_to_date_usd = refused.month_to_date_usd,
+                cap_usd = refused.cap_usd,
+                "Refusing to delegate: the spend cap is exceeded"
+            );
+            return Err(InvokeAgentError::CapExceeded(refused));
         }
 
         // 1. Check remote A2A agents first (they take precedence)
@@ -668,6 +708,113 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(warnings(&progress).is_empty());
+    }
+
+    /// AGE-416: a leader over its cap is refused before anything starts —
+    /// no `Started` progress, no HTTP call (the agent's URL has no server,
+    /// so reaching it would have produced a different, network error) —
+    /// with the typed error the model reads and the transcript renders.
+    #[tokio::test]
+    async fn a_spent_cap_refuses_the_delegation_before_it_starts() {
+        use crate::services::spend_gate::FixedSpendGate;
+
+        let tool = InvokeAgentTool::new(
+            vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)],
+            vec![],
+            None,
+        )
+        .with_spend_gate(Arc::new(FixedSpendGate::refusing(12.5, 10.0)));
+        let progress = watch_progress(&tool);
+
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "voucher".to_string(),
+                    prompt: "summarise the contract".to_string(),
+                },
+            )
+            .await
+            .expect_err("the delegation is refused");
+
+        let InvokeAgentError::CapExceeded(ref refused) = err else {
+            panic!("expected CapExceeded, got {err:?}");
+        };
+        assert_eq!(refused.month_to_date_usd, 12.5);
+        assert_eq!(refused.cap_usd, 10.0);
+        assert_eq!(
+            err.to_string(),
+            "cap_exceeded: month-to-date $12.50 \u{2265} cap $10.00; no delegation started"
+        );
+
+        // What the model and the transcript see: the tool's error path, with
+        // the load-bearing `Error:` prefix and the structured source intact.
+        let mapped = tool.map_error(err);
+        assert_eq!(
+            mapped.model_feedback().unwrap_or_default(),
+            "Error: invoke_agent: cap_exceeded: month-to-date $12.50 \u{2265} cap $10.00; \
+             no delegation started"
+        );
+        let source = mapped
+            .downcast_ref::<InvokeAgentError>()
+            .expect("the typed error survives into the tool result");
+        let InvokeAgentError::CapExceeded(refused) = source else {
+            panic!("expected CapExceeded, got {source:?}");
+        };
+        assert_eq!(
+            serde_json::to_value(refused).unwrap(),
+            serde_json::json!({
+                "error": "cap_exceeded",
+                "month_to_date": 12.5,
+                "cap_usd": 10.0,
+            })
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let events: Vec<InvokeAgentProgress> = progress.try_iter().collect();
+        assert!(
+            events.is_empty(),
+            "nothing started, so nothing was reported: {events:?}"
+        );
+    }
+
+    /// A gate that permits changes nothing: the call goes on to the agent
+    /// exactly as it would without a gate (and fails there, since there is
+    /// no server — a network failure, not a refusal).
+    #[tokio::test]
+    async fn a_gate_under_the_cap_lets_the_delegation_through() {
+        use crate::services::spend_gate::FixedSpendGate;
+
+        let tool = InvokeAgentTool::new(
+            vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)],
+            vec![],
+            None,
+        )
+        .with_spend_gate(Arc::new(FixedSpendGate::permitting()));
+        let progress = watch_progress(&tool);
+
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "voucher".to_string(),
+                    prompt: "summarise the contract".to_string(),
+                },
+            )
+            .await
+            .expect_err("there is no server at that URL");
+
+        assert!(
+            matches!(err, InvokeAgentError::InvocationFailed(_)),
+            "the call reached the agent, got {err:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            progress
+                .try_iter()
+                .any(|e| matches!(e, InvokeAgentProgress::Started { .. })),
+            "the delegation was started"
+        );
     }
 
     #[tokio::test]

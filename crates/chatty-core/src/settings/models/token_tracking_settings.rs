@@ -67,6 +67,18 @@ pub struct TokenTrackingSettings {
     /// `None` (default) means: use the active conversation's own agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summarization_model_id: Option<String>,
+
+    /// Monthly spend cap for this user, in USD (AGE-416 / ADR-0010).
+    ///
+    /// Only hive sets it: it stores this family as the user's JSON and its
+    /// `SpendGate` compares month-to-date spend against it before a hosted
+    /// leader starts a turn or delegates. The desktop never sets it and
+    /// nothing local enforces it.
+    ///
+    /// `None` (default) means no cap. Absent from the file unless set, so a
+    /// settings file written before the field existed round-trips unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap_usd: Option<f64>,
 }
 
 // ── Default value functions ───────────────────────────────────────────────────
@@ -98,6 +110,7 @@ impl Default for TokenTrackingSettings {
             critical_threshold: default_critical_threshold(),
             auto_summarize: false,
             summarization_model_id: None,
+            cap_usd: None,
         }
     }
 }
@@ -242,6 +255,7 @@ mod tests {
             critical_threshold: 0.85,
             auto_summarize: true,
             summarization_model_id: Some("some-model-id".to_string()),
+            cap_usd: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: TokenTrackingSettings = serde_json::from_str(&json).unwrap();
@@ -254,6 +268,33 @@ mod tests {
             decoded.summarization_model_id.as_deref(),
             Some("some-model-id")
         );
+    }
+
+    /// AGE-416: hive stores this family as the user's JSON and re-reads it,
+    /// so the cap must survive a load -> save cycle unchanged.
+    #[test]
+    fn cap_usd_roundtrips_through_json() {
+        let original = TokenTrackingSettings {
+            cap_usd: Some(25.0),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains("\"cap_usd\":25.0"), "{json}");
+        let decoded: TokenTrackingSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.cap_usd, Some(25.0));
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+    }
+
+    /// A settings file written before the cap existed deserialises to no
+    /// cap and re-serialises without the key, byte-identical.
+    #[test]
+    fn a_file_without_cap_usd_loads_as_none_and_saves_without_the_key() {
+        let before = serde_json::to_string(&TokenTrackingSettings::default()).unwrap();
+        assert!(!before.contains("cap_usd"), "{before}");
+
+        let decoded: TokenTrackingSettings = serde_json::from_str(&before).unwrap();
+        assert_eq!(decoded.cap_usd, None);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), before);
     }
 
     #[test]

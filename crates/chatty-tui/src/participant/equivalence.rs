@@ -788,7 +788,7 @@ mod named_virtual_agents {
 
     /// A "chatty-tui" that appends its argv to `argv.log` beside itself and
     /// then waits to be reaped, as a real child would wait on its task.
-    fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
+    pub(super) fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("chatty-tui");
         std::fs::write(
@@ -846,7 +846,7 @@ mod named_virtual_agents {
     /// child the moment the task ends, and the stand-in answers in
     /// microseconds, so without this gate `sh` could be killed before its
     /// first line runs. Otherwise `spawn_scripted_worker`.
-    fn spawn_argv_gated_worker(
+    pub(super) fn spawn_argv_gated_worker(
         registry: &ParticipantRegistry,
         name: &str,
         argv_log: PathBuf,
@@ -1357,5 +1357,196 @@ mod declared_roles {
         );
 
         broker.shutdown();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The spend cap at the delegation (AGE-416 / ADR-0010)
+// ---------------------------------------------------------------------------
+
+mod spend_cap {
+    //! AGE-416's verification: a hosted leader built with a `SpendGate`
+    //! that refuses gets the typed `cap_exceeded` error from `invoke_agent`
+    //! and the broker starts nothing — no child is spawned, no participant
+    //! registers. A gate that permits delegates exactly as no gate does; the
+    //! no-gate path is every other test in this file, unchanged.
+    //!
+    //! The refusing case runs against a real `LocalRunner` whose worker is
+    //! the argv-recording stand-in: the control shows that, without a gate,
+    //! the same delegation *does* spawn it, so "nothing spawned" is a real
+    //! finding and not an idle runner.
+
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use chatty_core::services::spend_gate::{FixedSpendGate, SpendGate};
+    use chatty_core::services::{install_progress_channel, scenarios};
+    use chatty_core::session::replay_scenario;
+    use chatty_core::tools::LOCAL_AGENT_NAME;
+    use chatty_core::tools::invoke_agent_tool::{
+        InvokeAgentArgs, InvokeAgentError, InvokeAgentProgress, InvokeAgentTool,
+    };
+    use chatty_module_registry::ModuleRegistry;
+    use chatty_protocol_gateway::ProtocolGateway;
+    use chatty_protocol_gateway::participant::{LocalRunner, ParticipantRegistry};
+    use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
+    use rig_agent::tool::{Tool, ToolContext};
+    use tokio::sync::RwLock;
+
+    use super::named_virtual_agents::{spawn_argv_gated_worker, stand_in_binary};
+    use super::{NoopProvider, assistant_text, policy, spawn_scripted_worker, start_gateway};
+
+    /// A gateway whose `local-agent` is a real `LocalRunner` spawning the
+    /// stand-in binary — the spawn the gate must prevent.
+    async fn start_runner_gateway(dir: &Path) -> (u16, ParticipantRegistry) {
+        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let modules = Arc::new(RwLock::new(
+            ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
+        ));
+        let gateway = ProtocolGateway::new(modules, 0);
+        let registry = gateway.participants();
+
+        let runner = LocalRunner::new(
+            stand_in_binary(dir),
+            dir.join("participants.sock"),
+            registry.clone(),
+        )
+        .with_agent_name(LOCAL_AGENT_NAME)
+        .with_registration_timeout(Duration::from_secs(5));
+        let gateway = gateway.with_virtual_agent(Arc::new(runner));
+
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        let router = gateway.build_router();
+        tokio::spawn(async move {
+            axum::serve(tcp, router).await.ok();
+        });
+
+        (port, registry)
+    }
+
+    /// `invoke_agent` as the factory builds it for a leader with a gate.
+    fn leader_tool(port: u16, gate: Option<Arc<dyn SpendGate>>) -> InvokeAgentTool {
+        let tool =
+            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+        match gate {
+            Some(gate) => tool.with_spend_gate(gate),
+            None => tool,
+        }
+    }
+
+    async fn delegate(tool: &InvokeAgentTool) -> Result<String, InvokeAgentError> {
+        tool.call(
+            &mut ToolContext::new(),
+            InvokeAgentArgs {
+                agent: LOCAL_AGENT_NAME.to_string(),
+                prompt: "do the delegated task".to_string(),
+            },
+        )
+        .await
+        .map(|output| output.response)
+    }
+
+    /// Over the cap: the typed error, and nothing on the broker side —
+    /// no participant in the registry, no child spawned, no progress.
+    #[tokio::test]
+    async fn a_leader_over_its_cap_is_refused_and_nothing_spawns() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (port, registry) = start_runner_gateway(dir.path()).await;
+
+        let tool = leader_tool(port, Some(Arc::new(FixedSpendGate::refusing(12.5, 10.0))));
+        let mut progress_rx = install_progress_channel(&tool.progress_slot());
+
+        let err = delegate(&tool)
+            .await
+            .expect_err("the delegation is refused");
+        assert!(
+            matches!(err, InvokeAgentError::CapExceeded(_)),
+            "expected the typed cap error, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "cap_exceeded: month-to-date $12.50 \u{2265} cap $10.00; no delegation started"
+        );
+
+        // Give a spawn that should not have happened every chance to show.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            registry.names().is_empty(),
+            "no participant registers: {:?}",
+            registry.names()
+        );
+        assert!(
+            !dir.path().join("argv.log").exists(),
+            "the runner never spawned a child"
+        );
+        assert!(
+            progress_rx.try_recv().is_err(),
+            "nothing started, so the transcript has nothing to render"
+        );
+    }
+
+    /// The control for the test above: the same runner, no gate, and the
+    /// same delegation spawns the stand-in child. Without this, an idle
+    /// runner would pass the refusal test for the wrong reason.
+    #[tokio::test]
+    async fn without_a_gate_the_same_delegation_spawns_a_worker() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (port, registry) = start_runner_gateway(dir.path()).await;
+        let events = replay_scenario(
+            scenarios()
+                .into_iter()
+                .find(|s| s.name == "tool_call_then_result")
+                .expect("the scenario exists"),
+            policy(),
+        )
+        .await;
+        spawn_argv_gated_worker(
+            &registry,
+            &format!("{LOCAL_AGENT_NAME}-0"),
+            dir.path().join("argv.log"),
+            events.clone(),
+        );
+
+        let response = delegate(&leader_tool(port, None))
+            .await
+            .expect("the delegation succeeds");
+
+        assert_eq!(response, assistant_text(&events).concat().trim());
+        let argv = std::fs::read_to_string(dir.path().join("argv.log"))
+            .expect("the runner spawned the stand-in child");
+        assert!(
+            argv.contains(&format!("--participant-name {LOCAL_AGENT_NAME}-0")),
+            "{argv}"
+        );
+    }
+
+    /// Under the cap: the gate is asked and says yes, and the delegation is
+    /// the one every other test in this file makes without a gate.
+    #[tokio::test]
+    async fn a_leader_under_its_cap_delegates_as_without_a_gate() {
+        let events = replay_scenario(
+            scenarios()
+                .into_iter()
+                .find(|s| s.name == "tool_call_then_result")
+                .expect("the scenario exists"),
+            policy(),
+        )
+        .await;
+        let (port, registry) = start_gateway().await;
+        spawn_scripted_worker(&registry, LOCAL_AGENT_NAME, events.clone());
+
+        let tool = leader_tool(port, Some(Arc::new(FixedSpendGate::permitting())));
+        let mut progress_rx = install_progress_channel(&tool.progress_slot());
+
+        let response = delegate(&tool).await.expect("the delegation succeeds");
+
+        assert_eq!(response, assistant_text(&events).concat().trim());
+        let mut started = false;
+        while let Ok(event) = progress_rx.try_recv() {
+            started |= matches!(event, InvokeAgentProgress::Started { .. });
+        }
+        assert!(started, "the delegation was started and reported");
     }
 }
