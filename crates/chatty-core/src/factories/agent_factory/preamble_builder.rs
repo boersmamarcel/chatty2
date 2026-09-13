@@ -1,11 +1,17 @@
 use crate::settings::models::providers_store::ProviderType;
 use crate::settings::models::search_settings::SearchSettingsModel;
 
+use super::build_context::AgentRole;
 use super::mcp_helpers::McpTools;
-use super::tool_registry::ToolAvailability;
+use super::tool_registry::{ToolAvailability, active_native_tool_names};
 
-/// Build the augmented preamble with tool summary, formatting guide,
-/// memory instructions, and secret key names.
+/// Build the augmented preamble with the role's standing instructions, tool
+/// summary, formatting guide, memory instructions, and secret key names.
+///
+/// `tools` is what the agent was actually built with — already narrowed by
+/// `role.profile`, so the summary never describes a family of tools the
+/// profile removed wholesale.
+#[allow(clippy::too_many_arguments)] // one argument per prompt section
 pub(super) fn build_preamble(
     base_preamble: &str,
     provider_type: &ProviderType,
@@ -14,7 +20,13 @@ pub(super) fn build_preamble(
     mcp_mgmt_tools: &McpTools,
     mcp_tool_info: &[(String, String, String)],
     secret_key_names: &[String],
+    role: &AgentRole,
 ) -> String {
+    // A tool profile (ADR-0011 C11) removes tools the settings would
+    // otherwise have registered. Most sections below are already gated on
+    // `tools`, which the caller narrowed; these are the always-on ones, which
+    // a profile can take away too.
+    let allows = |name: &str| role.profile.is_none_or(|profile| profile.allows(name));
     let mut tool_sections: Vec<String> = Vec::new();
 
     if tools.fetch || tools.search_web {
@@ -81,7 +93,10 @@ pub(super) fn build_preamble(
         tool_sections.push("- **add_attachment** (display image or PDF inline)".to_string());
     }
     // Chart tool is always available (no filesystem/service dependencies)
-    tool_sections.push("- **create_chart** (bar, line, pie, donut, area, candlestick)".to_string());
+    if allows("create_chart") {
+        tool_sections
+            .push("- **create_chart** (bar, line, pie, donut, area, candlestick)".to_string());
+    }
     if tools.compile_typst {
         tool_sections.push("- **compile_typst** (Typst markup → PDF)".to_string());
     }
@@ -144,8 +159,10 @@ pub(super) fn build_preamble(
         tool_sections.push("- **list_mcp_services**".to_string());
     }
     // list_agents + invoke_agent are always present
-    tool_sections
-        .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
+    if allows("list_agents") || allows("invoke_agent") {
+        tool_sections
+            .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
+    }
     if tools.execute_code {
         tool_sections.push(
             "- **execute_code** (isolated sandbox; Python may use Monty or Docker, other languages use Docker; \
@@ -186,15 +203,22 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         );
     }
     // read_skill is always present
-    tool_sections
-        .push("- **read_skill** (load full skill instructions before executing)".to_string());
-    tool_sections.push(
-        "- **write_todos / update_todo / verify_completion** (required lifecycle for multi-step tasks: plan once, mark one todo in progress before work, mark it done/blocked after, then verify evidence before the final reply)"
-            .to_string(),
-    );
+    if allows("read_skill") {
+        tool_sections
+            .push("- **read_skill** (load full skill instructions before executing)".to_string());
+    }
+    if allows("write_todos") {
+        tool_sections.push(
+            "- **write_todos / update_todo / verify_completion** (required lifecycle for multi-step tasks: plan once, mark one todo in progress before work, mark it done/blocked after, then verify evidence before the final reply)"
+                .to_string(),
+        );
+    }
     // Always present
-    tool_sections
-        .push("- **list_tools** (get full tool list with descriptions at any time)".to_string());
+    if allows("list_tools") {
+        tool_sections.push(
+            "- **list_tools** (get full tool list with descriptions at any time)".to_string(),
+        );
+    }
 
     // Add MCP tools to the tool summary
     if !mcp_tool_info.is_empty() {
@@ -250,7 +274,26 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
             tool_sections.join("\n")
         )
     };
-    let tool_summary = format!("{tool_summary}{browser_guide}");
+    // The exact set, for a role whose profile keeps only part of a family:
+    // the summary above still describes the family (`git_add` alongside
+    // `git_diff`), and only this line is authoritative.
+    let profile_note = match role.profile {
+        Some(profile) => {
+            let mut allowed: Vec<String> = active_native_tool_names(tools)
+                .into_iter()
+                .filter(|name| profile.allows(name))
+                .collect();
+            allowed.sort();
+            format!(
+                "\n\nYou run the `{}` tool profile: the only tools you can call are {}. \
+                 Anything else named above is not available to you.",
+                profile.name(),
+                allowed.join(", ")
+            )
+        }
+        None => String::new(),
+    };
+    let tool_summary = format!("{tool_summary}{browser_guide}{profile_note}");
 
     // Formatting capabilities the app always renders, regardless of tool settings.
     let formatting_guide = "\n\n## Formatting Capabilities\n\
@@ -307,18 +350,40 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         ""
     };
 
-    // Skills instructions — always injected because read_skill is always available.
-    let skills_instructions = "\n\n## Skills\
-         Use `search_memory` to discover relevant skills when a task might benefit from a \
-         saved procedure. The search results will show skill names and short descriptions. \
-         Call `read_skill` with the exact skill name before executing any skill procedure \
-         so you have the complete, up-to-date steps.";
+    // Skills instructions — injected whenever read_skill is available, which
+    // is every agent without a tool profile and every profile that names it.
+    // Discovery is `search_memory`'s, so that half is dropped only when a tool
+    // profile withholds it; without a profile the prompt is what it always was.
+    let skills_instructions = match (allows("read_skill"), allows("search_memory")) {
+        (false, _) => "",
+        (true, true) => {
+            "\n\n## Skills\
+             Use `search_memory` to discover relevant skills when a task might benefit from a \
+             saved procedure. The search results will show skill names and short descriptions. \
+             Call `read_skill` with the exact skill name before executing any skill procedure \
+             so you have the complete, up-to-date steps."
+        }
+        (true, false) => {
+            "\n\n## Skills\
+             Call `read_skill` with the exact skill name before executing any skill procedure \
+             so you have the complete, up-to-date steps."
+        }
+    };
 
     let mut p = if base_preamble.trim().is_empty() {
         default_system_prompt(provider_type)
     } else {
         base_preamble.to_string()
     };
+    // The role's standing instructions come first, ahead of the tool
+    // summary: a reviewer has to know it is a reviewer before it reads what
+    // it can do (ADR-0011 C11).
+    if let Some(preamble) = role.preamble.as_deref().map(str::trim)
+        && !preamble.is_empty()
+    {
+        p.push_str("\n\n## Your Role\n");
+        p.push_str(preamble);
+    }
     p.push_str(&tool_summary);
     p.push_str(formatting_guide);
     p.push_str(memory_instructions);
@@ -448,6 +513,7 @@ in-session, then use available tools for current or uncertain information.\n\
 
 #[cfg(test)]
 mod tests {
+    use super::super::build_context::AgentRole;
     use super::super::mcp_helpers::McpTools;
     use super::super::tool_registry::ToolAvailability;
     use super::*;
@@ -482,6 +548,7 @@ mod tests {
             &mcp,
             &mcp_info,
             &secrets,
+            &AgentRole::default(),
         );
         assert!(result.starts_with("Base prompt."));
         assert!(result.contains("create_chart"));
@@ -504,6 +571,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("shell_execute"));
         assert!(result.contains("shell_cd"));
@@ -527,6 +595,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("doc_retriever"));
         assert!(result.contains("read_file"));
@@ -549,6 +618,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("git_status"));
         assert!(result.contains("git_diff"));
@@ -569,6 +639,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("## Memory"));
         assert!(result.contains("remember"));
@@ -587,6 +658,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(!result.contains("## Memory"));
     }
@@ -603,6 +675,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &secrets,
+            &AgentRole::default(),
         );
         assert!(result.contains("API_KEY"));
         assert!(result.contains("DB_PASSWORD"));
@@ -620,6 +693,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(!result.contains("environment variables with sensitive"));
     }
@@ -640,6 +714,7 @@ mod tests {
             &McpTools::none(),
             &mcp_info,
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("MCP tools"));
         assert!(result.contains("my_tool"));
@@ -660,6 +735,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("read_excel"));
         assert!(!result.contains("write_excel"));
@@ -680,6 +756,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("read_excel"));
         assert!(result.contains("write_excel"));
@@ -701,6 +778,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("pdf_info"));
         assert!(result.contains("pdf_extract_text"));
@@ -721,6 +799,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("read_docx"));
         assert!(result.contains("write_docx"));
@@ -741,6 +820,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("read_pptx"));
         assert!(result.contains("write_pptx"));
@@ -760,6 +840,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("file_structure_detector"));
         assert!(result.contains("query_data"));
@@ -777,9 +858,13 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("## Skills"));
         assert!(result.contains("read_skill"));
+        // An unprofiled agent keeps the discovery sentence whatever its memory
+        // state; only a tool profile that withholds `search_memory` drops it.
+        assert!(result.contains("search_memory"));
     }
 
     #[test]
@@ -797,6 +882,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("search_web"));
         assert!(result.contains("fetch"));
@@ -816,6 +902,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("compile_typst"));
         assert!(result.contains("Typst markup"));
@@ -835,6 +922,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("execute_code"));
         assert!(result.contains("Monty or Docker"));
@@ -854,6 +942,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("browser_use"));
     }
@@ -872,6 +961,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("daytona_run"));
     }
@@ -890,6 +980,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("publish_wasm_module"));
     }
@@ -905,6 +996,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(result.contains("<identity>"));
         assert!(result.contains("Current model provider: OpenRouter."));
@@ -921,6 +1013,7 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         let ollama = build_preamble(
             "",
@@ -930,8 +1023,108 @@ mod tests {
             &McpTools::none(),
             &[],
             &[],
+            &AgentRole::default(),
         );
         assert!(openrouter.contains("concise structured markdown"));
         assert!(ollama.contains("direct and efficient"));
+    }
+
+    /// ADR-0011 C11: the role's standing instructions sit in the system
+    /// prompt, ahead of the tool summary, so a worker knows what it is.
+    #[test]
+    fn the_roles_preamble_is_part_of_the_system_prompt() {
+        let role = AgentRole {
+            preamble: Some("You are the reviewer. Never edit the tree.".to_string()),
+            profile: None,
+        };
+        let result = build_preamble(
+            "Base prompt.",
+            &ProviderType::Ollama,
+            &ToolAvailability::default(),
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+            &role,
+        );
+        assert!(result.contains("## Your Role"));
+        assert!(result.contains("You are the reviewer. Never edit the tree."));
+        let role_at = result
+            .find("## Your Role")
+            .expect("the role section exists");
+        let tools_at = result
+            .find("## Available Tools")
+            .expect("the tool summary exists");
+        assert!(role_at < tools_at, "the role comes before the tool summary");
+    }
+
+    /// An empty or whitespace-only preamble adds nothing: a declared agent
+    /// with no `preamble` must produce the prompt it produced before C11.
+    #[test]
+    fn no_role_leaves_the_prompt_untouched() {
+        let args = || {
+            build_preamble(
+                "Base prompt.",
+                &ProviderType::Ollama,
+                &ToolAvailability::default(),
+                &None,
+                &McpTools::none(),
+                &[],
+                &[],
+                &AgentRole::default(),
+            )
+        };
+        let blank = AgentRole {
+            preamble: Some("   ".to_string()),
+            profile: None,
+        };
+        let with_blank = build_preamble(
+            "Base prompt.",
+            &ProviderType::Ollama,
+            &ToolAvailability::default(),
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+            &blank,
+        );
+        assert!(!args().contains("## Your Role"));
+        assert_eq!(args(), with_blank);
+    }
+
+    /// A profile that keeps only part of a tool family leaves the family's
+    /// prose in place, so the prompt has to say which of them exist.
+    #[test]
+    fn a_profile_spells_out_the_exact_tool_set() {
+        let role = AgentRole {
+            preamble: None,
+            profile: super::super::tool_profile::tool_profile("reviewer"),
+        };
+        let tools = ToolAvailability {
+            git: true,
+            shell: true,
+            fs_read: true,
+            ..Default::default()
+        };
+        let result = build_preamble(
+            "Base prompt.",
+            &ProviderType::Ollama,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+            &role,
+        );
+        assert!(result.contains("You run the `reviewer` tool profile"));
+        assert!(result.contains("git_diff"));
+        let note = result
+            .split("You run the `reviewer` tool profile")
+            .nth(1)
+            .expect("the profile note exists");
+        assert!(note.contains("shell_execute"), "{note}");
+        assert!(!note.contains("git_commit"), "{note}");
+        assert!(!note.contains("write_file"), "{note}");
+        assert!(!note.contains("invoke_agent"), "{note}");
     }
 }

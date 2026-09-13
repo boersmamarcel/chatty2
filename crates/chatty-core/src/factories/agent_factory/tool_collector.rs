@@ -1,4 +1,5 @@
 use rig_agent::agent::{AgentBuilder, WithBuilderTools};
+use rig_agent::tool::Tool;
 
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
@@ -27,6 +28,7 @@ use crate::tools::{ReadDocxTool, WriteDocxTool};
 use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use super::mcp_helpers::McpTools;
+use super::tool_profile::ToolProfile;
 
 /// Filesystem read tool set
 pub(super) type FsReadTools = (
@@ -87,6 +89,11 @@ pub(super) type DataQueryTools = (
 /// there is no public `ToolDyn` erasure. Adding a new optional tool only
 /// requires one new `if let Some` block here.
 pub(super) struct NativeTools {
+    /// The role's tool allowlist, or `None` for every tool collected here
+    /// (ADR-0011 C11). Filtering happens at registration rather than at
+    /// construction: a tool is cheap to build and its schema is what costs
+    /// the worker its context.
+    pub tool_profile: Option<&'static ToolProfile>,
     pub list_tools: ListToolsTool,
     pub write_todos_tool: WriteTodosTool,
     pub update_todo_tool: UpdateTodoTool,
@@ -139,136 +146,169 @@ pub(super) struct NativeTools {
     pub ask_user_tool: Option<AskUserTool>,
 }
 
+/// Register `tool` unless the profile leaves its name out (ADR-0011 C11).
+fn add<T: Tool + 'static>(
+    builder: AgentBuilder<WithBuilderTools>,
+    profile: Option<&'static ToolProfile>,
+    tool: T,
+) -> AgentBuilder<WithBuilderTools> {
+    match profile {
+        Some(profile) if !profile.allows(T::NAME) => builder,
+        _ => builder.tool(tool),
+    }
+}
+
 impl NativeTools {
-    /// Register every collected tool on `builder` via typed `.tool()` calls.
+    /// Register every collected tool on `builder` via typed `.tool()` calls,
+    /// skipping whatever this agent's [`ToolProfile`] does not name.
     pub fn apply_to_builder(self, builder: AgentBuilder) -> AgentBuilder<WithBuilderTools> {
-        let mut b = builder
-            .tool(self.list_tools)
-            .tool(self.write_todos_tool)
-            .tool(self.update_todo_tool)
-            .tool(self.verify_completion_tool)
-            .tool(self.list_agents_tool)
-            .tool(self.invoke_agent_tool);
+        let profile = self.tool_profile;
+        // `dynamic_tools(&[])` is the only public way into the tool-carrying
+        // builder state that registers nothing, and a profile may well drop
+        // whichever tool would otherwise have made that transition.
+        let mut b = builder.dynamic_tools(Vec::new());
+        b = add(b, profile, self.list_tools);
+        b = add(b, profile, self.write_todos_tool);
+        b = add(b, profile, self.update_todo_tool);
+        b = add(b, profile, self.verify_completion_tool);
+        b = add(b, profile, self.list_agents_tool);
+        b = add(b, profile, self.invoke_agent_tool);
 
         if let Some(t) = self.ask_user_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.mcp_mgmt.list {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some((rf, rb, ld, gs)) = self.fs_read {
-            b = b.tool(rf).tool(rb).tool(ld).tool(gs);
+            b = add(b, profile, rf);
+            b = add(b, profile, rb);
+            b = add(b, profile, ld);
+            b = add(b, profile, gs);
         }
         if let Some(dr) = self.doc_retriever {
-            b = b.tool(dr);
+            b = add(b, profile, dr);
         }
         if let Some((wf, fa, cd, df, mf, ad)) = self.fs_write {
-            b = b.tool(wf).tool(fa).tool(cd).tool(df).tool(mf).tool(ad);
+            b = add(b, profile, wf);
+            b = add(b, profile, fa);
+            b = add(b, profile, cd);
+            b = add(b, profile, df);
+            b = add(b, profile, mf);
+            b = add(b, profile, ad);
         }
         if let Some(t) = self.add_attachment {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "pdf")]
         if let Some(t) = self.pdf_to_image {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "pdf")]
         if let Some(t) = self.pdf_info {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "pdf")]
         if let Some(t) = self.pdf_extract_text {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.fetch_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some((exec, set_env, cd, status)) = self.shell_tools {
-            b = b.tool(exec).tool(set_env).tool(cd).tool(status);
+            b = add(b, profile, exec);
+            b = add(b, profile, set_env);
+            b = add(b, profile, cd);
+            b = add(b, profile, status);
         }
-        if let Some((status, diff, log, add, create_branch, switch_branch, commit)) = self.git_tools
+        if let Some((status, diff, log, add_tool, create_branch, switch_branch, commit)) =
+            self.git_tools
         {
-            b = b
-                .tool(status)
-                .tool(diff)
-                .tool(log)
-                .tool(add)
-                .tool(create_branch)
-                .tool(switch_branch)
-                .tool(commit);
+            b = add(b, profile, status);
+            b = add(b, profile, diff);
+            b = add(b, profile, log);
+            b = add(b, profile, add_tool);
+            b = add(b, profile, create_branch);
+            b = add(b, profile, switch_branch);
+            b = add(b, profile, commit);
         }
         if let Some((sc, ff, fd)) = self.search_tools {
-            b = b.tool(sc).tool(ff).tool(fd);
+            b = add(b, profile, sc);
+            b = add(b, profile, ff);
+            b = add(b, profile, fd);
         }
         #[cfg(feature = "excel")]
         if let Some(t) = self.excel_read {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "excel")]
         if let Some((wt, et)) = self.excel_write {
-            b = b.tool(wt).tool(et);
+            b = add(b, profile, wt);
+            b = add(b, profile, et);
         }
         #[cfg(feature = "docx")]
         if let Some(t) = self.docx_read {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "docx")]
         if let Some(t) = self.docx_write {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "pptx")]
         if let Some(t) = self.pptx_read {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "pptx")]
         if let Some(t) = self.pptx_write {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "duckdb")]
         if let Some((qt, dt, pt, fsd)) = self.data_query {
-            b = b.tool(qt).tool(dt).tool(pt).tool(fsd);
+            b = add(b, profile, qt);
+            b = add(b, profile, dt);
+            b = add(b, profile, pt);
+            b = add(b, profile, fsd);
         }
         if let Some(t) = self.chart_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "math-render")]
         if let Some(t) = self.typst_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.execute_code_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.remember_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.save_skill_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.search_memory_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
-        b = b.tool(self.read_skill_tool);
+        b = add(b, profile, self.read_skill_tool);
         if let Some(t) = self.search_web_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         #[cfg(feature = "browser")]
         if let Some((nav, snap, shot, console, net, resize)) = self.browser_tools {
-            b = b
-                .tool(nav)
-                .tool(snap)
-                .tool(shot)
-                .tool(console)
-                .tool(net)
-                .tool(resize);
+            b = add(b, profile, nav);
+            b = add(b, profile, snap);
+            b = add(b, profile, shot);
+            b = add(b, profile, console);
+            b = add(b, profile, net);
+            b = add(b, profile, resize);
         }
         if let Some(t) = self.browser_use_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.daytona_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         if let Some(t) = self.publish_module_tool {
-            b = b.tool(t);
+            b = add(b, profile, t);
         }
         b
     }
@@ -280,6 +320,7 @@ impl NativeTools {
 /// so this macro avoids repeating feature-gated field initialization per provider.
 macro_rules! native_tools {
     (
+        tool_profile: $tool_profile:expr,
         list_tools: $list_tools:expr,
         write_todos_tool: $write_todos_tool:expr,
         update_todo_tool: $update_todo_tool:expr,
@@ -320,6 +361,7 @@ macro_rules! native_tools {
         ask_user_tool: $ask_user_tool:expr $(,)?
     ) => {
         NativeTools {
+            tool_profile: $tool_profile,
             list_tools: $list_tools,
             write_todos_tool: $write_todos_tool,
             update_todo_tool: $update_todo_tool,

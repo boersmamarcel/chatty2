@@ -534,7 +534,7 @@ mod named_virtual_agents {
                     name: REVIEWER.to_string(),
                     model: Some("gemma4:26b".to_string()),
                     disable_tools: REVIEWER_DISABLED.iter().map(|s| s.to_string()).collect(),
-                    extra_args: Vec::new(),
+                    ..VirtualAgentConfig::default()
                 },
             ],
             ..ModuleSettingsModel::default()
@@ -880,5 +880,254 @@ mod named_virtual_agents {
             reviewer.iter().any(|name| name == "read_file"),
             "the reviewer still reads: {reviewer:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Declared roles: a preamble and a tool profile (ADR-0011 C11 / AGE-405)
+// ---------------------------------------------------------------------------
+
+mod declared_roles {
+    //! AGE-405's verification: a `local-reviewer` declared with
+    //! `tools: "reviewer"` and a preamble, taken through the whole chain it
+    //! travels in production — `resolve_virtual_agents` turns the
+    //! declaration into argv, `chatty-tui`'s own parser reads that argv back,
+    //! and the agent it builds from it is the one checked.
+    //!
+    //! What is checked is what the issue asks for: no `write_file` in the
+    //! schema, `shell_execute` in it (a reviewer runs the tests), the
+    //! preamble in the request's first system message, and the profile on the
+    //! card `list_agents` returns.
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
+    use chatty_core::models::clarification_store::ClarificationStore;
+    use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
+    use chatty_core::models::write_approval_store::WriteApprovalStore;
+    use chatty_core::services::virtual_agents::resolve_virtual_agents;
+    use chatty_core::settings::models::models_store::ModelConfig;
+    use chatty_core::settings::models::module_settings::VirtualAgentConfig;
+    use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+    use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
+    use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
+    use clap::Parser;
+    use parking_lot::Mutex;
+    use rig_agent::completion::Prompt;
+    use rig_agent::tool::Tool;
+
+    use crate::participant::broker::Broker;
+
+    const REVIEWER: &str = "local-reviewer";
+    const PREAMBLE: &str = "You are the reviewer on this team. Read the diff, run the tests, \
+                            and report what you found; never edit the tree yourself.";
+
+    /// The team the issue's manual run declares: one reviewer, with a role.
+    fn reviewer_team() -> ModuleSettingsModel {
+        ModuleSettingsModel {
+            virtual_agents: vec![VirtualAgentConfig {
+                name: REVIEWER.to_string(),
+                model: Some("gemma4:26b".to_string()),
+                tools: Some("reviewer".to_string()),
+                preamble: Some(PREAMBLE.to_string()),
+                ..VirtualAgentConfig::default()
+            }],
+            ..ModuleSettingsModel::default()
+        }
+    }
+
+    /// The reviewer's argv, exactly as the broker would spawn its children
+    /// with, read back through `chatty-tui`'s own parser.
+    fn reviewer_role() -> chatty_core::factories::AgentRole {
+        let specs = resolve_virtual_agents(&[], &[], &reviewer_team(), &[]);
+        let argv = ["chatty-tui".to_string()]
+            .into_iter()
+            .chain(specs[0].args.iter().cloned());
+        let cli = crate::Cli::try_parse_from(argv).expect("the worker's argv parses");
+        assert_eq!(cli.tools.as_deref(), Some("reviewer"));
+        crate::resolve_role(cli.tools.as_deref(), cli.preamble.as_deref())
+            .expect("the declared profile exists")
+    }
+
+    /// A daemon that answers `POST /api/chat` with a failure and keeps the
+    /// request body, so the test can read the messages rig actually sent.
+    /// The turn is not what is under test here; the system message is.
+    async fn recording_ollama() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = bodies.clone();
+        let app = axum::Router::new().fallback(move |body: String| {
+            let sink = sink.clone();
+            async move {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    sink.lock().push(json);
+                }
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "no model here",
+                )
+            }
+        });
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(tcp, app).await.ok();
+        });
+        (format!("http://127.0.0.1:{port}"), bodies)
+    }
+
+    /// Build the agent a reviewer child builds: its role, and execution
+    /// settings with the shell on, since a reviewer's job is to run tests.
+    async fn build_reviewer_agent(
+        base_url: String,
+    ) -> chatty_core::factories::agent_factory::BuiltAgent {
+        // Resolves repository paths for the always-on `list_mcp` tool; a
+        // no-op after the first call.
+        let _ = chatty_core::init_repositories();
+        let workspace = tempfile::tempdir().expect("a workspace");
+
+        let settings = ExecutionSettingsModel {
+            enabled: true,
+            workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+            ..ExecutionSettingsModel::default()
+        };
+        let ctx = AgentBuildContext {
+            role: reviewer_role(),
+            pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
+            pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
+            pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),
+            ..AgentBuildContext::from_services(AgentServices {
+                exec_settings: Some(settings),
+                ..AgentServices::default()
+            })
+        };
+        let mut provider = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama);
+        provider.base_url = Some(base_url);
+        AgentClient::from_model_config_with_tools(
+            &ModelConfig::new(
+                "gemma4:26b".to_string(),
+                "gemma4:26b".to_string(),
+                ProviderType::Ollama,
+                "gemma4:26b".to_string(),
+            ),
+            &provider,
+            ctx,
+        )
+        .await
+        .expect("the reviewer agent builds without network access")
+    }
+
+    /// The issue's "Verify", first three clauses: no `write_file`,
+    /// `shell_execute` present, and the preamble in the first system message.
+    #[tokio::test]
+    async fn a_declared_reviewer_has_its_profiles_tools_and_its_preamble() {
+        let (base_url, bodies) = recording_ollama().await;
+        let built = build_reviewer_agent(base_url).await;
+
+        let names: Vec<String> = built
+            .client
+            .agent
+            .tool_definitions(None)
+            .await
+            .expect("tool definitions resolve")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(
+            !names.iter().any(|name| name == "write_file"),
+            "a reviewer must not be able to edit: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "shell_execute"),
+            "a reviewer runs the tests: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "read_file"),
+            "a reviewer still reads: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "ask_user"),
+            "a profiled worker keeps the input-required chain to its leader \
+             (AGE-306): {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "invoke_agent"),
+            "the profile is an allowlist, and it does not name the agent tools: {names:?}"
+        );
+
+        // The profile is also what makes this worth doing: 53 schemas is what
+        // a reviewer used to carry.
+        assert!(
+            names.len() < 20,
+            "a profiled worker carries a small tool set, got {}: {names:?}",
+            names.len()
+        );
+
+        let _ = built.client.agent.prompt("review the diff").await;
+        let recorded = bodies.lock().clone();
+        let body = recorded.first().expect("the agent sent one request");
+        let first = &body["messages"][0];
+        assert_eq!(first["role"], "system", "{body}");
+        let system = first["content"].as_str().unwrap_or_default();
+        assert!(
+            system.contains(PREAMBLE),
+            "the role's standing instructions are missing from the system prompt: {system}"
+        );
+        assert!(
+            system.contains("You run the `reviewer` tool profile"),
+            "the prompt names the exact tool set: {system}"
+        );
+        assert!(
+            !system.contains("write_file"),
+            "the prompt must not advertise tools the profile removed: {system}"
+        );
+    }
+
+    /// The issue's "Verify", last clause: the card lists the profile, so the
+    /// leader chooses by reading `list_agents`.
+    #[tokio::test]
+    async fn the_card_lists_the_profile_and_the_roles_first_sentence() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let specs = resolve_virtual_agents(&[], &[], &reviewer_team(), &[]);
+        let broker = Broker::start_at(
+            dir.path().join("participants.sock"),
+            // No child is spawned by `list_agents`; the runner only needs a
+            // path it could spawn.
+            PathBuf::from("/bin/sh"),
+            1,
+            specs,
+            None,
+        )
+        .await
+        .expect("the broker starts with the declared reviewer");
+
+        let output = ListAgentsTool::new(vec![])
+            .with_local_workers([REVIEWER])
+            .with_gateway_port(broker.port)
+            .call(
+                &mut rig_agent::tool::ToolContext::new(),
+                ListAgentsToolArgs {},
+            )
+            .await
+            .expect("list_agents succeeds");
+        let card = output
+            .agents
+            .iter()
+            .find(|agent| agent.name == REVIEWER)
+            .unwrap_or_else(|| panic!("the reviewer is listed, got {:?}", output.agents));
+
+        assert!(
+            card.description.contains("Tool profile: reviewer."),
+            "{}",
+            card.description
+        );
+        assert!(
+            card.description
+                .contains("Role: You are the reviewer on this team."),
+            "{}",
+            card.description
+        );
+
+        broker.shutdown();
     }
 }

@@ -763,6 +763,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
+                role: Default::default(),
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,

@@ -15,6 +15,7 @@
 //! `from_services` and nowhere else, which is the point: a host cannot
 //! silently drop it.
 
+use super::tool_profile::ToolProfile;
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
@@ -60,6 +61,32 @@ pub struct AgentBuildContext {
     /// artifact viewport (AGE-155) can find it — `None` is fine anywhere
     /// else (e.g. chatty-tui, which doesn't enable that feature).
     pub conversation_id: Option<String>,
+    /// The role this agent runs as (ADR-0011 C11). Empty for an ordinary
+    /// chat agent; a declared virtual agent's worker carries the role its
+    /// `VirtualAgentConfig` names, via `chatty-tui`'s `--preamble` /
+    /// `--tools` flags.
+    ///
+    /// It sits here rather than in [`AgentServices`] because only a worker
+    /// has one: every other host would have to write `AgentRole::default()`
+    /// for a field it never sets.
+    pub role: AgentRole,
+}
+
+/// What makes one worker a reviewer and another a coder (ADR-0011 C11):
+/// standing instructions, and a named set of tools.
+///
+/// Both halves are optional and independent — a role may be only a preamble,
+/// only a profile, or both. `Default` is "no role", which is every agent that
+/// is not a declared virtual agent's worker.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentRole {
+    /// Appended to the system prompt right after the base preamble, before
+    /// the tool summary, so the worker knows what it is before it reads what
+    /// it can do.
+    pub preamble: Option<String>,
+    /// The tool allowlist the agent is built with. `None` leaves it every
+    /// tool the execution settings allow.
+    pub profile: Option<&'static ToolProfile>,
 }
 
 /// The services half of an [`AgentBuildContext`]: what a host gathers from
@@ -151,6 +178,10 @@ impl AgentBuildContext {
             local_agents,
             remote_agents,
             conversation_id: None,
+            // Only a declared virtual agent's worker has a role, and it
+            // arrives on the process's argv rather than from the host's
+            // services (see `AgentBuildContext::role`).
+            role: AgentRole::default(),
         }
     }
 }
@@ -269,5 +300,6 @@ mod tests {
         assert!(ctx.shell_session.is_none());
         assert!(ctx.theme_colors.is_none());
         assert!(ctx.conversation_id.is_none());
+        assert_eq!(ctx.role, AgentRole::default());
     }
 }

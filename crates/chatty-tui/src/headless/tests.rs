@@ -283,6 +283,7 @@ mod runner {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
+                role: Default::default(),
                 is_sub_agent: true,
                 services_loaded: true,
                 surface: chatty_core::services::StreamSurface::Headless,
