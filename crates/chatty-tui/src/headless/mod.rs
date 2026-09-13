@@ -24,7 +24,7 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
-use chatty_core::services::{AgentLoopGuard, RecoveryAction};
+use chatty_core::services::{AgentLoopGuard, RecoveryAction, StreamError};
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -77,6 +77,11 @@ pub async fn run_headless(
     // The session decides whether a stream error is retried and after how
     // long (AGE-273); the delay is held here until the turn has ended.
     let mut recovery_pending_after_error: Option<std::time::Duration> = None;
+    // A stream error the session would not retry ends the run as a failure
+    // (AGE-401): the exit code says so, not an empty stdout.
+    let mut unrecovered_error: Option<StreamError> = None;
+    // The agent the turn is delegating to, for the trace's finish line.
+    let mut delegated_agent: Option<String> = None;
     let mut infer_missing_answer = should_infer_missing_answer(&message);
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.
@@ -377,6 +382,15 @@ pub async fn run_headless(
                 failure_budget_stop_requested = false;
                 continue;
             }
+            AppEvent::Delegation(ref progress) => {
+                // `invoke_agent` is rendered from its progress, not from a
+                // tool row (`Transcript` suppresses those), so its input and
+                // output are logged here to keep the trace auditable.
+                for line in format_delegation_lines(progress, &mut delegated_agent) {
+                    eprintln!("{line}");
+                }
+                engine.handle_event(event);
+            }
             AppEvent::StreamError(error) => {
                 engine.handle_event(AppEvent::StreamError(error.clone()));
                 eprintln!("Error: {}", error);
@@ -408,6 +422,7 @@ pub async fn run_headless(
                     continue;
                 }
 
+                unrecovered_error = Some(error);
                 break;
             }
             AppEvent::StreamCancelled => {
@@ -445,6 +460,16 @@ pub async fn run_headless(
                 candidate, error
             ),
         }
+    }
+
+    if let Some(error) = unrecovered_error {
+        // Whatever was streamed before the failure is still worth having;
+        // the exit code is what tells a script (or a leader) it is not an
+        // answer.
+        if !response.trim().is_empty() {
+            println!("{}", response);
+        }
+        anyhow::bail!("the turn ended with an unrecovered stream error: {error}");
     }
 
     // Print response to stdout

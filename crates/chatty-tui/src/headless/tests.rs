@@ -37,6 +37,54 @@ fn formats_tool_call_with_pretty_json_and_error_output() {
     );
 }
 
+/// AGE-401: a delegation is logged like any other tool, input at the start
+/// and output at the end, so a chain can be audited from the leader's log.
+#[test]
+fn logs_a_delegation_with_its_input_and_output() {
+    use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+
+    let mut agent = None;
+    let started = format_delegation_lines(
+        &InvokeAgentProgress::Started {
+            agent_name: "local-coder".to_string(),
+            prompt: "Fix the overdraft bug.".to_string(),
+            source: ToolSource::Local,
+        },
+        &mut agent,
+    );
+    assert_eq!(
+        started,
+        vec![
+            String::new(),
+            "  [agent: local-coder] [local] ⟳ running".to_string(),
+            "    input".to_string(),
+            "      Fix the overdraft bug.".to_string(),
+        ]
+    );
+    assert!(
+        format_delegation_lines(&InvokeAgentProgress::Text("✓ read_file".into()), &mut agent)
+            .is_empty(),
+        "the worker's own progress is its stderr's, not repeated here"
+    );
+    let finished = format_delegation_lines(
+        &InvokeAgentProgress::Finished {
+            success: false,
+            result: Some("⚠️ Agent 'local-coder' reported failure".to_string()),
+        },
+        &mut agent,
+    );
+    assert_eq!(
+        finished,
+        vec![
+            String::new(),
+            "  [agent: local-coder] ✗ failed".to_string(),
+            "    error".to_string(),
+            "      ⚠️ Agent 'local-coder' reported failure".to_string(),
+        ]
+    );
+    assert!(agent.is_none(), "the finish line consumes the name");
+}
+
 #[test]
 fn keeps_plain_text_payload_lines() {
     assert_eq!(

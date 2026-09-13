@@ -62,6 +62,9 @@ pub enum StreamErrorKind {
     MalformedToolCall,
     /// The stall watchdog ended the turn (`STALL_TIMEOUT`).
     Stalled,
+    /// The model's final completion carried no text and no tool call, even
+    /// after the in-turn nudge (AGE-401). Silence is not an answer.
+    EmptyCompletion,
     /// The turn was cancelled by the user.
     Cancelled,
     /// Anything else (unknown tool call, max turns, memory error, ...).
@@ -171,10 +174,13 @@ pub fn decide_recovery(
             }
         }
         // Stalled: end the turn with the stall message (today). Cancelled:
-        // finalize per D4, handled outside this path. Other: surface as today.
-        StreamErrorKind::Stalled | StreamErrorKind::Cancelled | StreamErrorKind::Other => {
-            RecoveryAction::Stop
-        }
+        // finalize per D4, handled outside this path. EmptyCompletion: the
+        // nudge already happened inside the turn (AGE-401); a second empty
+        // answer is the error. Other: surface as today.
+        StreamErrorKind::Stalled
+        | StreamErrorKind::Cancelled
+        | StreamErrorKind::EmptyCompletion
+        | StreamErrorKind::Other => RecoveryAction::Stop,
     }
 }
 
@@ -708,7 +714,7 @@ mod tests {
     // Recovery policy (AGE-244 / D5): every kind x surface combination.
     // -------------------------------------------------------------------
 
-    const ALL_KINDS: [StreamErrorKind; 7] = [
+    const ALL_KINDS: [StreamErrorKind; 9] = [
         StreamErrorKind::Auth,
         StreamErrorKind::RateLimited,
         StreamErrorKind::ProviderStatus(503),
@@ -716,6 +722,8 @@ mod tests {
         StreamErrorKind::MalformedToolCall,
         StreamErrorKind::Stalled,
         StreamErrorKind::Cancelled,
+        StreamErrorKind::EmptyCompletion,
+        StreamErrorKind::Other,
     ];
     const ALL_SURFACES: [StreamSurface; 3] = [
         StreamSurface::Desktop,
@@ -827,10 +835,11 @@ mod tests {
     }
 
     #[test]
-    fn stalled_cancelled_and_other_always_stop() {
+    fn stalled_cancelled_empty_and_other_always_stop() {
         for kind in [
             StreamErrorKind::Stalled,
             StreamErrorKind::Cancelled,
+            StreamErrorKind::EmptyCompletion,
             StreamErrorKind::Other,
         ] {
             for surface in ALL_SURFACES {
