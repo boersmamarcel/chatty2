@@ -562,6 +562,122 @@ async fn the_retry_turn_itself_does_not_nudge_again() {
     );
 }
 
+/// AGE-401: the three shapes of a silent turn, as a scripted provider. The
+/// in-turn nudge (`EmptyTurnRetry`) has already been spent by the time a
+/// stream reaches `Done`, so what the handler sees is the second silence.
+mod empty_completion {
+    use super::*;
+    use crate::models::token_usage::ApiCallUsage;
+    use crate::services::StreamErrorKind;
+
+    fn call(turn: u32, output_tokens: u32) -> StreamChunk {
+        StreamChunk::ApiCallUsage(ApiCallUsage {
+            turn,
+            input_tokens: 100,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens,
+        })
+    }
+
+    fn empty_error(events: &[SessionEvent]) -> Option<&SessionEvent> {
+        events.iter().find(|e| {
+            matches!(e, SessionEvent::Error(err) if err.kind == StreamErrorKind::EmptyCompletion)
+        })
+    }
+
+    fn scenario(items: Vec<StreamChunk>) -> Scenario {
+        Scenario {
+            name: "empty_completion",
+            progress: Vec::new(),
+            items: items.into_iter().map(ScriptedItem::Chunk).collect(),
+        }
+    }
+
+    /// qwen3 with thinking on: the tool call went into the thinking channel,
+    /// so the one request produced nothing chatty renders.
+    #[tokio::test]
+    async fn a_turn_with_nothing_but_usage_ends_with_the_typed_error() {
+        let events =
+            replay_scenario(scenario(vec![call(1, 90), StreamChunk::Done]), policy()).await;
+        let error = empty_error(&events).expect("an EmptyCompletion error");
+        assert!(
+            matches!(error, SessionEvent::Error(err) if err.message.contains("empty response"))
+        );
+        assert!(matches!(events.last(), Some(SessionEvent::TurnEnded)));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::FollowUp(_))),
+            "the nudge lives inside the turn, not after it"
+        );
+    }
+
+    /// The sub-leader shape: a tool call, then a final request that says
+    /// nothing. The turn did work; its answer is still missing.
+    #[tokio::test]
+    async fn a_tool_call_followed_by_an_empty_final_request_is_still_empty() {
+        let events = replay_scenario(
+            scenario(vec![
+                StreamChunk::ToolCallStarted {
+                    id: "c1".into(),
+                    name: "invoke_agent".into(),
+                },
+                StreamChunk::ToolCallInput {
+                    id: "c1".into(),
+                    arguments: "{}".into(),
+                },
+                StreamChunk::ToolCallResult {
+                    id: "c1".into(),
+                    result: "BLOCKED".into(),
+                },
+                call(1, 40),
+                call(2, 25),
+                StreamChunk::Done,
+            ]),
+            policy(),
+        )
+        .await;
+        assert!(empty_error(&events).is_some());
+    }
+
+    /// A model that says nothing at all — no request record either (the
+    /// scripted scenarios) — is empty too.
+    #[tokio::test]
+    async fn a_bare_done_is_empty() {
+        let events = replay_scenario(scenario(vec![StreamChunk::Done]), policy()).await;
+        assert!(empty_error(&events).is_some());
+    }
+
+    /// Whitespace is not an answer; text or a tool call in the final request
+    /// is.
+    #[tokio::test]
+    async fn text_in_the_final_request_is_an_answer() {
+        let blank = replay_scenario(
+            scenario(vec![
+                StreamChunk::Text("  \n".into()),
+                call(1, 1),
+                StreamChunk::Done,
+            ]),
+            policy(),
+        )
+        .await;
+        assert!(empty_error(&blank).is_some());
+
+        let answered = replay_scenario(
+            scenario(vec![
+                call(1, 40),
+                StreamChunk::Text("The branch is sub-agent/local-coder-0.".into()),
+                call(2, 12),
+                StreamChunk::Done,
+            ]),
+            policy(),
+        )
+        .await;
+        assert!(empty_error(&answered).is_none());
+    }
+}
+
 /// The retry is bounded by spotting this text in history, and hidden from
 /// the transcript by the same prefix. Both depend on the matcher recognising
 /// it — if the text drifts, the retry silently becomes unbounded and visible

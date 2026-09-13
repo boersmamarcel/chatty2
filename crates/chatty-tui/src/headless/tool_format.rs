@@ -6,6 +6,7 @@
 
 use crate::engine::{ToolCallInfo, ToolCallState};
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 pub(super) fn format_tool_call_lines(tc: &ToolCallInfo) -> Vec<String> {
     let mut lines = vec![format_tool_call_header(tc)];
@@ -21,6 +22,47 @@ pub(super) fn format_tool_call_lines(tc: &ToolCallInfo) -> Vec<String> {
     }
 
     lines
+}
+
+/// The trace lines for one `invoke_agent` progress event (AGE-401): the
+/// delegation's input when it starts and its output when it finishes, in
+/// the shape [`format_tool_call_lines`] gives every other tool. The
+/// worker's own progress text is its stderr's business and is not repeated.
+/// `agent` remembers which agent is running between the two events.
+pub(super) fn format_delegation_lines(
+    progress: &InvokeAgentProgress,
+    agent: &mut Option<String>,
+) -> Vec<String> {
+    match progress {
+        InvokeAgentProgress::Started {
+            agent_name,
+            prompt,
+            source,
+        } => {
+            *agent = Some(agent_name.clone());
+            let badge = source_badge_label(source).unwrap_or("local");
+            let mut lines = vec![
+                String::new(),
+                format!("  [agent: {agent_name}] [{badge}] \u{27f3} running"),
+            ];
+            append_tool_payload(&mut lines, "input", prompt);
+            lines
+        }
+        InvokeAgentProgress::Text(_) => Vec::new(),
+        InvokeAgentProgress::Finished { success, result } => {
+            let name = agent.take().unwrap_or_else(|| "agent".to_string());
+            let (icon, status, label) = if *success {
+                ("\u{2713}", "completed", "output")
+            } else {
+                ("\u{2717}", "failed", "error")
+            };
+            let mut lines = vec![String::new(), format!("  [agent: {name}] {icon} {status}")];
+            if let Some(result) = result {
+                append_tool_payload(&mut lines, label, result);
+            }
+            lines
+        }
+    }
 }
 
 pub(super) fn format_tool_call_header(tc: &ToolCallInfo) -> String {
