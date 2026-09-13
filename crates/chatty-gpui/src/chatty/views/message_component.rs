@@ -121,6 +121,11 @@ fn render_cached_markdown_segments(
                 elements.push(mermaid_elem.into_any_element());
                 code_block_index += 1;
             }
+            CachedMarkdownSegment::PlainTail(text) => {
+                // The line still streaming: plain text, no markdown parse
+                // behind it, so a text batch costs one string (AGE-167).
+                elements.push(div().w_full().child(text.clone()).into_any_element());
+            }
         }
     }
 
