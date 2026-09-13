@@ -231,6 +231,7 @@ impl AgentClient {
             remote_agents,
             conversation_id,
             role,
+            spend_gate,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -1148,6 +1149,11 @@ impl AgentClient {
         // `ask_user` surface (ADR-0011 C7), so it needs the same store.
         if let Some(pending) = pending_clarifications {
             invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
+        }
+        // A hosted leader asks the tenant's cap before it delegates
+        // (AGE-416); everyone else has no gate and no check.
+        if let Some(gate) = spend_gate {
+            invoke_agent_tool = invoke_agent_tool.with_spend_gate(gate);
         }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 

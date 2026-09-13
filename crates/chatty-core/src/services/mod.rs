@@ -52,6 +52,9 @@ pub mod pdfium_utils;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
+/// The hosted per-user spend cap `invoke_agent` asks before delegating
+/// (AGE-416 / ADR-0010). chatty2 ships the trait; hive implements it.
+pub mod spend_gate;
 pub mod ssrf_guard;
 /// Scripted stream fixtures for the frontends' characterization tests (AGE-191).
 /// Test-only: enable `chatty-core/test-support` from a dev-dependency.
@@ -94,6 +97,7 @@ pub use message_helpers::{
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
 pub use skill_service::SkillService;
+pub use spend_gate::{CapExceeded, SpendGate};
 #[cfg(any(test, feature = "test-support"))]
 pub use stream_fixtures::{
     Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,

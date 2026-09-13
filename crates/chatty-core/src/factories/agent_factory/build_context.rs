@@ -20,6 +20,7 @@ use crate::services::embedding_service::EmbeddingService;
 use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::services::skill_service::SkillService;
+use crate::services::spend_gate::SpendGate;
 use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::search_settings::SearchSettingsModel;
@@ -70,6 +71,11 @@ pub struct AgentBuildContext {
     /// has one: every other host would have to write `AgentRole::default()`
     /// for a field it never sets.
     pub role: AgentRole,
+    /// The hosted per-user spend cap, asked by `invoke_agent` before it
+    /// starts a delegation (AGE-416 / ADR-0010). Only `chatty-server` in
+    /// the `hive` repo sets it, on top of [`Self::from_services`]; every
+    /// other host leaves it `None`, which means no check at all.
+    pub spend_gate: Option<std::sync::Arc<dyn SpendGate>>,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -182,6 +188,9 @@ impl AgentBuildContext {
             // arrives on the process's argv rather than from the host's
             // services (see `AgentBuildContext::role`).
             role: AgentRole::default(),
+            // Only a hosted leader has a cap to ask about; hive sets it on
+            // top of this base.
+            spend_gate: None,
         }
     }
 }
@@ -301,5 +310,6 @@ mod tests {
         assert!(ctx.theme_colors.is_none());
         assert!(ctx.conversation_id.is_none());
         assert_eq!(ctx.role, AgentRole::default());
+        assert!(ctx.spend_gate.is_none());
     }
 }

@@ -175,14 +175,22 @@ pub struct TokenTrackingSettings {
     pub critical_threshold: f64,                // red at 0.90
     pub auto_summarize: bool,                   // auto-summarize at critical (default: false)
     pub summarization_model_id: Option<String>, // override model for summarization
+    pub cap_usd: Option<f64>,                   // hosted monthly spend cap, USD (default: None)
 }
 ```
 
 > [!NOTE]
-> `TokenTrackingSettings` is **not persisted**. The struct derives `Serialize` /
-> `Deserialize`, but no repository reads or writes it and no settings page edits it;
-> `main.rs` installs `TokenTrackingSettings::default()` at startup and that is the value
-> the app runs with.
+> `TokenTrackingSettings` is **not persisted** by the desktop. The struct derives
+> `Serialize` / `Deserialize`, but no repository here reads or writes it and no settings
+> page edits it; `main.rs` installs `TokenTrackingSettings::default()` at startup and that
+> is the value the app runs with. Hive stores it as the user's JSON, which is why
+> `cap_usd` is omitted from the output when unset: a file written before the field
+> existed round-trips unchanged.
+
+`cap_usd` (AGE-416 / ADR-0010) is only ever set by hive. Nothing in chatty2 reads it: the
+enforcement is a `SpendGate` (`services/spend_gate.rs`) that hive implements and sets on
+`AgentBuildContext.spend_gate`, which `invoke_agent` asks before it starts a delegation.
+With no gate — the desktop, chatty-tui — there is no check.
 
 **Read by:**
 - `gather_snapshot_inputs()` — `response_reserve`
