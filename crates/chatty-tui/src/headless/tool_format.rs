@@ -49,7 +49,9 @@ pub(super) fn format_delegation_lines(
             lines
         }
         InvokeAgentProgress::Text(_) => Vec::new(),
-        InvokeAgentProgress::Finished { success, result } => {
+        InvokeAgentProgress::Finished {
+            success, result, ..
+        } => {
             let name = agent.take().unwrap_or_else(|| "agent".to_string());
             let (icon, status, label) = if *success {
                 ("\u{2713}", "completed", "output")

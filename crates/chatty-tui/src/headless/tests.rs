@@ -70,6 +70,7 @@ fn logs_a_delegation_with_its_input_and_output() {
         &InvokeAgentProgress::Finished {
             success: false,
             result: Some("⚠️ Agent 'local-coder' reported failure".to_string()),
+            usage: None,
         },
         &mut agent,
     );

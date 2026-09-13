@@ -382,7 +382,11 @@ The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
 finishes become `working` status messages, assistant text becomes artifact chunks, and
 the turn's token usage rides in the terminal status's `metadata` (A2A has no usage
-concept; usage belongs to the ledger). The mapper and the one-task loop around it live
+concept; usage belongs to the ledger). That number already includes whatever the child
+itself delegated, and the parent's `invoke_agent` folds it into its own conversation as
+one usage line per delegation, marked `delegated_to` and priced at the parent's rates
+in `finish_turn` — so a leader's `total_cost` carries the whole tree below it, and the
+bill follows the bearer (AGE-415). The mapper and the one-task loop around it live
 beside the broker's own half of the protocol, not in this crate, because a microVM's
 `chatty-server` is a worker too and the parent must not be able to tell the two apart.
 `crates/chatty-tui/src/participant/equivalence.rs` asserts the

@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::models::clarification_store::{
     CLARIFICATION_TIMEOUT, ClarificationAnswer, ClarifyingQuestion,
 };
+use crate::models::token_usage::TokenUsage;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 
 /// The key under a status's `metadata` that carries what an
@@ -44,6 +45,28 @@ impl A2aClarificationRequest {
         let value = metadata?.get(CLARIFICATION_METADATA_KEY)?.clone();
         serde_json::from_value(value).ok()
     }
+}
+
+/// The key under a terminal status's `metadata` that carries the worker's
+/// token usage, as the broker's worker mapper writes it
+/// (`chatty_protocol_gateway::worker::mapper`). A2A has no notion of usage;
+/// this is the one place it rides (ADR-0011).
+pub const USAGE_METADATA_KEY: &str = "usage";
+
+/// The usage a delegated task reports on its terminal status, if any:
+/// `metadata.usage.{inputTokens, outputTokens, cacheReadTokens,
+/// cacheWriteTokens}`. Whatever the worker itself delegated is already folded
+/// in by its mapper, so this is one number for the whole subtree (AGE-415).
+pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Option<TokenUsage> {
+    let usage = metadata?.get(USAGE_METADATA_KEY)?;
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+    Some(TokenUsage {
+        input_tokens: count("inputTokens"),
+        output_tokens: count("outputTokens"),
+        cache_read_tokens: count("cacheReadTokens"),
+        cache_write_tokens: count("cacheWriteTokens"),
+        ..TokenUsage::default()
+    })
 }
 
 /// Discovered capabilities from a remote A2A agent card.
@@ -675,6 +698,27 @@ mod tests {
         assert!(A2aClarificationRequest::from_status_metadata(None).is_none());
         let usage_only = json!({ "usage": { "inputTokens": 1 } });
         assert!(A2aClarificationRequest::from_status_metadata(Some(&usage_only)).is_none());
+    }
+
+    /// AGE-415: the terminal status's `metadata.usage`, spelled as the
+    /// broker's worker mapper writes it, reads back as a `TokenUsage`.
+    #[test]
+    fn a_terminal_status_carries_the_workers_usage() {
+        let block = r#"data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-abc","status":{"state":"completed","metadata":{"usage":{"inputTokens":120,"outputTokens":34,"cacheReadTokens":900,"cacheWriteTokens":50}}},"final":true}}"#;
+        let A2aStreamEvent::StatusUpdate { metadata, .. } = parse_sse_event(block).unwrap() else {
+            panic!("Expected StatusUpdate");
+        };
+        let usage =
+            usage_from_status_metadata(metadata.as_ref()).expect("usage is in the metadata");
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 34);
+        assert_eq!(usage.cache_read_tokens, 900);
+        assert_eq!(usage.cache_write_tokens, 50);
+        assert_eq!(usage.delegated_to, None, "the caller names the agent");
+
+        assert!(usage_from_status_metadata(None).is_none());
+        let clarification_only = json!({ "clarification": { "id": "r", "questions": [] } });
+        assert!(usage_from_status_metadata(Some(&clarification_only)).is_none());
     }
 
     #[test]

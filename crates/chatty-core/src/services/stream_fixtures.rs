@@ -235,6 +235,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 InvokeAgentProgress::Finished {
                     success: true,
                     result: Some("Three releases since 0.3.45.".into()),
+                    usage: None,
                 },
             ],
             items: vec![

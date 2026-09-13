@@ -747,7 +747,9 @@ fn describe(event: &SessionEvent) -> String {
                 format!("Delegation(Started {agent_name:?}, {prompt:?})")
             }
             InvokeAgentProgress::Text(text) => format!("Delegation(Text {text:?})"),
-            InvokeAgentProgress::Finished { success, result } => {
+            InvokeAgentProgress::Finished {
+                success, result, ..
+            } => {
                 format!("Delegation(Finished success={success}, {result:?})")
             }
         },
@@ -984,6 +986,78 @@ mod totals_and_pricing {
             "session cost {turn_cost} must equal what gpui computed ({GPUI_COST_FOR_FIXED_USAGE})"
         );
         assert!((usage.total_estimated_cost_usd - GPUI_COST_FOR_FIXED_USAGE).abs() < 1e-12);
+    }
+
+    /// AGE-415: what a delegated worker reported on its terminal status is
+    /// one line on the leader's conversation, named for the worker and
+    /// priced at the leader's rates, ahead of the turn's own usage — so
+    /// `total_cost` carries the delegation while `last_usage` and the
+    /// context fill stay the leader's own.
+    #[tokio::test]
+    async fn a_delegated_workers_usage_is_a_priced_line_on_the_leaders_conversation() {
+        let mut session = session_with_model(&priced_model()).await;
+        let mut scenario = tool_turn(
+            1,
+            vec![call(1, 1_000, 0, 2_000, 100), call(2, 200, 2_000, 0, 400)],
+        );
+        scenario.progress = vec![
+            InvokeAgentProgress::Started {
+                agent_name: "local-coder".into(),
+                prompt: "fix the bug".into(),
+                source: crate::models::message_types::ToolSource::Local,
+            },
+            InvokeAgentProgress::Finished {
+                success: true,
+                result: Some("fixed".into()),
+                usage: Some(TokenUsage {
+                    delegated_to: Some("local-coder".into()),
+                    ..TokenUsage::new(1_000, 100)
+                }),
+            },
+        ];
+        complete_turn(&mut session, scenario).await;
+
+        let conversation = session.conversation().unwrap();
+        let usage = conversation.token_usage();
+        assert_eq!(
+            usage.message_usages.len(),
+            2,
+            "one delegated line, then the turn's own"
+        );
+        let delegated = &usage.message_usages[0];
+        assert_eq!(delegated.delegated_to.as_deref(), Some("local-coder"));
+        assert_eq!(
+            (delegated.input_tokens, delegated.output_tokens),
+            (1_000, 100)
+        );
+        // 1_000 input × $3/M + 100 output × $15/M, at the leader's prices.
+        let delegated_cost = delegated.estimated_cost_usd.expect("priced");
+        assert!((delegated_cost - (0.003 + 0.0015)).abs() < 1e-12);
+
+        let own = usage.last_usage().unwrap();
+        assert_eq!(
+            own.delegated_to, None,
+            "the last exchange is the leader's own"
+        );
+        assert_eq!(own.input_tokens, 1_200);
+        assert!(
+            (usage.total_estimated_cost_usd - (GPUI_COST_FOR_FIXED_USAGE + delegated_cost)).abs()
+                < 1e-12
+        );
+        assert_eq!(usage.total_input_tokens, 1_200 + 1_000);
+        assert_eq!(usage.total_output_tokens, 500 + 100);
+        assert_eq!(
+            conversation.context_tokens(),
+            200 + 2_000,
+            "the worker's prompt is not this agent's context fill"
+        );
+        assert_eq!(conversation.tool_call_count(), 1);
+
+        // The next turn starts clean: nothing delegated is counted twice.
+        complete_turn(&mut session, tool_turn(0, vec![call(1, 10, 0, 0, 1)])).await;
+        let usage = session.conversation().unwrap().token_usage();
+        assert_eq!(usage.message_usages.len(), 3);
+        assert_eq!(usage.total_input_tokens, 1_200 + 1_000 + 10);
     }
 
     #[tokio::test]

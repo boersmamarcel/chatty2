@@ -679,6 +679,7 @@ mod tests {
             .send(InvokeAgentProgress::Finished {
                 success: true,
                 result: Some("done".into()),
+                usage: None,
             })
             .expect("receiver is alive");
 

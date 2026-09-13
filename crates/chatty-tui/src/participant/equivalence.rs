@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::services::{
     Scenario, StreamSurface, clarification_scenario, install_progress_channel, scenarios,
 };
@@ -158,6 +159,9 @@ struct BrokerRun {
     progress: Vec<String>,
     response: String,
     succeeded: bool,
+    /// What the worker reported spending, as the tool's `Finished` carries
+    /// it to the parent's session (AGE-415).
+    usage: Option<TokenUsage>,
 }
 
 /// Delegate one task through the real `invoke_agent` tool and record what the
@@ -181,9 +185,14 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
         .await;
 
     let mut progress = Vec::new();
+    let mut usage = None;
     while let Ok(event) = progress_rx.try_recv() {
-        if let InvokeAgentProgress::Text(text) = event {
-            progress.push(text);
+        match event {
+            InvokeAgentProgress::Text(text) => progress.push(text),
+            InvokeAgentProgress::Finished {
+                usage: reported, ..
+            } => usage = reported,
+            InvokeAgentProgress::Started { .. } => {}
         }
     }
 
@@ -194,6 +203,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
             .map(|o| o.response.clone())
             .unwrap_or_default(),
         succeeded: result.is_ok(),
+        usage,
     }
 }
 
@@ -306,6 +316,101 @@ async fn a_dropped_tool_event_would_be_caught() {
         expected, mapped,
         "a mapping that drops tool results must not compare equal"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The bill follows the bearer (AGE-415)
+// ---------------------------------------------------------------------------
+
+mod delegated_usage {
+    //! What a worker spent reaches its leader as one usage line named for
+    //! the worker, and a sub-leader's line already carries its own workers,
+    //! so the root of a tree sees one number per delegation. The session
+    //! side — that line priced onto the leader's conversation — is pinned
+    //! in chatty-core's session tests; this is the hop.
+
+    use super::*;
+
+    fn usage(input: u32, output: u32, read: u32, write: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            ..Default::default()
+        }
+    }
+
+    /// A worker's turn: some text, its usage, and the end.
+    fn worker_turn(own: TokenUsage) -> Vec<SessionEvent> {
+        vec![
+            SessionEvent::TurnStarted,
+            SessionEvent::Text("done".into()),
+            SessionEvent::TokenUsage(own),
+            SessionEvent::TurnEnded,
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_workers_usage_reaches_the_leader_named_for_the_worker() {
+        let run = broker_run(worker_turn(usage(1_200, 80, 900, 40))).await;
+
+        assert!(run.succeeded);
+        let reported = run.usage.expect("the worker's usage reaches the leader");
+        assert_eq!(reported.delegated_to.as_deref(), Some(LOCAL_AGENT_NAME));
+        assert_eq!(reported.input_tokens, 1_200);
+        assert_eq!(reported.output_tokens, 80);
+        assert_eq!(reported.cache_read_tokens, 900);
+        assert_eq!(reported.cache_write_tokens, 40);
+    }
+
+    /// A sub-leader's own delegations are already in the number it reports,
+    /// so the root sees the tree's spend as one line, not a flat list.
+    #[tokio::test]
+    async fn a_sub_leaders_line_includes_its_own_workers() {
+        let mut events = vec![SessionEvent::TurnStarted];
+        for (name, spent) in [
+            ("local-coder", usage(5_000, 500, 0, 0)),
+            ("local-reviewer", usage(2_000, 100, 1_000, 0)),
+        ] {
+            events.push(SessionEvent::Delegation(InvokeAgentProgress::Finished {
+                success: true,
+                result: Some("ok".into()),
+                usage: Some(TokenUsage {
+                    delegated_to: Some(name.into()),
+                    ..spent
+                }),
+            }));
+        }
+        events.extend(worker_turn(usage(300, 30, 0, 10)).into_iter().skip(1));
+
+        let run = broker_run(events).await;
+
+        assert!(run.succeeded);
+        let reported = run.usage.expect("the sub-leader's usage reaches the root");
+        assert_eq!(
+            reported.delegated_to.as_deref(),
+            Some(LOCAL_AGENT_NAME),
+            "one line, named for the agent the root delegated to"
+        );
+        assert_eq!(reported.input_tokens, 300 + 5_000 + 2_000);
+        assert_eq!(reported.output_tokens, 30 + 500 + 100);
+        assert_eq!(reported.cache_read_tokens, 1_000);
+        assert_eq!(reported.cache_write_tokens, 10);
+    }
+
+    /// A worker that reports no usage adds no line: nothing is invented.
+    #[tokio::test]
+    async fn a_worker_that_reports_nothing_adds_no_line() {
+        let run = broker_run(vec![
+            SessionEvent::TurnStarted,
+            SessionEvent::Text("done".into()),
+            SessionEvent::TurnEnded,
+        ])
+        .await;
+        assert!(run.succeeded);
+        assert!(run.usage.is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------

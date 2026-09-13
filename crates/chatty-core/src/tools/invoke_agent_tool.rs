@@ -7,7 +7,10 @@ use tracing::{debug, info, warn};
 
 use crate::models::clarification_store::{PendingClarifications, request_clarification};
 use crate::models::message_types::ToolSource;
-use crate::services::a2a_client::{A2aClarificationRequest, A2aClient, A2aStreamEvent};
+use crate::models::token_usage::TokenUsage;
+use crate::services::a2a_client::{
+    A2aClarificationRequest, A2aClient, A2aStreamEvent, usage_from_status_metadata,
+};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::agent_origin::AgentOrigin;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
@@ -36,6 +39,14 @@ pub enum InvokeAgentProgress {
     Finished {
         success: bool,
         result: Option<String>,
+        /// What the agent spent, as reported on its terminal status, with
+        /// `delegated_to` naming the agent (AGE-415). The session folds it
+        /// into the conversation's usage as a delegated line, so the
+        /// leader's totals include what its workers spent. `None` when the
+        /// agent reported nothing — a WASM module, or a task that never
+        /// reached its terminal status.
+        #[serde(default)]
+        usage: Option<TokenUsage>,
     },
 }
 
@@ -380,6 +391,7 @@ impl InvokeAgentTool {
                 self.send_progress(InvokeAgentProgress::Finished {
                     success: false,
                     result: Some(err_text),
+                    usage: None,
                 });
                 InvokeAgentError::InvocationFailed(format!(
                     "Failed to invoke agent '{}': {}",
@@ -390,6 +402,7 @@ impl InvokeAgentTool {
         let mut response = String::new();
         let mut success = true;
         let mut error_msg = None;
+        let mut usage = None;
 
         while let Some(event) = stream.next().await {
             match event {
@@ -400,6 +413,14 @@ impl InvokeAgentTool {
                     metadata,
                     ..
                 }) => {
+                    // The worker's spend rides on its terminal status; a
+                    // failed task spent its tokens too (AGE-415).
+                    if let Some(reported) = usage_from_status_metadata(metadata.as_ref()) {
+                        usage = Some(TokenUsage {
+                            delegated_to: Some(config.name.clone()),
+                            ..reported
+                        });
+                    }
                     if state == "failed" {
                         success = false;
                         error_msg = message.clone();
@@ -448,6 +469,7 @@ impl InvokeAgentTool {
             self.send_progress(InvokeAgentProgress::Finished {
                 success: false,
                 result: Some(err_text),
+                usage,
             });
             return Err(InvokeAgentError::InvocationFailed(format!(
                 "Agent '{}' reported failure{}",
@@ -465,6 +487,7 @@ impl InvokeAgentTool {
             } else {
                 Some(response.clone())
             },
+            usage,
         });
 
         debug!(agent = %config.name, response_len = response.len(), "Agent responded");
