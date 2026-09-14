@@ -574,6 +574,64 @@ of the agent's tools — the point of the envelope is that it is the runner's fa
 the worker's account of one — and the timeout kills that whole group, so a suite that
 hangs cannot outlive the delegation that started it.
 
+### Teams
+
+**The team directory (ADR-0011 C13, AGE-407).** Everything above that makes a working
+team — the roster in `module_settings.json`, its `team.verification`, the leader's
+role, a skill the leader follows and a turn budget in `execution_settings.json` — used
+to live in four files and a shell script. A *team directory* is that in one place a
+Harbor arm can upload and a run can reproduce: `teams/<id>/team.json` with `SKILL.md`
+beside it.
+
+```json
+{
+  "leader": { "model": "qwen3:14b", "profile": "coordinator", "preamble": "You lead a coder-reviewer team and edit nothing yourself. …" },
+  "agents": [
+    { "name": "local-coder", "tools": "coder", "preamble": "You are the coder on this team. …" },
+    { "name": "local-reviewer", "tools": "reviewer", "preamble": "Verify, do not trust, verdict first. …" }
+  ],
+  "verification": "cargo test --all-features -- --test-threads=1",
+  "skill": "coder-reviewer",
+  "max_agent_turns": 50
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `leader.model` | Optional. The leader's model, as `--model` resolves it. `--model` beats it; absent both, the roster's default. |
+| `leader.profile` | Optional. The leader's tool profile (`coordinator`, `coder`, `reviewer`). `--tools` beats it. |
+| `leader.preamble` | Optional. The leader's standing instructions. `--preamble` beats it. |
+| `agents` | The roster, each entry a `VirtualAgentConfig` exactly as `module_settings.virtual_agents` declares one. Replaces that list for the run. |
+| `verification` | Optional. The team's verification command (`team.verification` above) for the run. |
+| `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
+| `max_agent_turns` | Optional. The leader's turn budget for the run; the persisted default of 10 kills a delegating flow. |
+
+`chatty-tui --team <id>` runs as that team's leader. It implies `--broker`, declares the
+roster from the team file (nothing is written back to `module_settings.json`), applies
+the leader's model, profile and preamble unless the corresponding flag was given, sets
+the turn budget, and opens the first turn with the skill instruction. Valid with
+`--headless`, `--pipe` and the interactive TUI. The id is looked up in
+`<workspace>/.chatty/teams/<id>/`, then `<data_dir>/chatty/teams/<id>/` (Linux:
+`~/.local/share/chatty/teams/`), then the presets compiled into the binary; the first
+directory with a `team.json` wins, and a malformed file there is an error rather than a
+fall-through to the preset. The loader is
+`chatty_core::services::team::load_team`; the presets are
+`crates/chatty-core/teams/`.
+
+One preset ships, `coder-reviewer`: a `coordinator` leader, `local-coder` on the `coder`
+profile, `local-reviewer` on the `reviewer` profile with the "verify, do not trust,
+verdict first" preamble, the `coder-reviewer` skill beside it (the reviewer finds the
+default branch with `git_status` and reads `<default>..<branch>` with `git_diff`'s
+`range`; the leader merges with `git_merge` on APPROVE and then has the reviewer run the
+team's verification command on the merged tree, since a coordinator has no shell), and
+a 50-turn budget. It names no models: they come from the roster's default, `--model`, or
+a `team.json` of your own that overrides it.
+
+```bash
+chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
+  -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
+```
+
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
 sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls
 only from content, so the call is lost and the model's answer arrives empty. On a leader

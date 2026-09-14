@@ -233,6 +233,7 @@ impl AgentClient {
             conversation_id,
             role,
             spend_gate,
+            team_skill,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -902,7 +903,8 @@ impl AgentClient {
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_ref())
                 .map(|d| std::path::Path::new(d).join(".claude").join("skills")),
-        );
+        )
+        .with_team_skill(team_skill);
 
         // Chart tool is always available
         let chart_tool: Option<CreateChartTool> = Some(CreateChartTool::new(

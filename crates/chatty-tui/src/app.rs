@@ -764,6 +764,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
                 role: Default::default(),
+                team: None,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,

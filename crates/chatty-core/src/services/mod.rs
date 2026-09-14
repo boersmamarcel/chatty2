@@ -61,6 +61,9 @@ pub mod ssrf_guard;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stream_fixtures;
 pub mod stream_processor;
+/// The team directory: roster, leader role, verification, skill and turn
+/// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
+pub mod team;
 pub mod title_generator;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;

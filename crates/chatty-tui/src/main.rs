@@ -17,6 +17,7 @@ use chatty_core::settings::models::models_store::{ModelConfig, resolve_model_que
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use chatty_core::tools::LocalModuleAgentSummary;
 use clap::Parser;
+use std::path::Path;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -247,6 +248,25 @@ struct Cli {
     /// worktree`, as on the desktop. Unix only.
     #[arg(long)]
     broker: bool,
+
+    /// Run as the leader of a team directory (ADR-0011 C13): `teams/<ID>/`
+    /// holds `team.json` — the roster, the leader's profile and preamble,
+    /// the verification command, the skill and the turn budget — and the
+    /// `SKILL.md` beside it.
+    ///
+    /// Implies --broker. The roster replaces module settings'
+    /// `virtual_agents` for this run (nothing is written back), the
+    /// leader's profile and preamble apply unless --tools / --preamble are
+    /// given, its model applies unless --model is, `max_agent_turns`
+    /// replaces the persisted budget, and the first turn opens with
+    /// "read_skill <skill> and follow it". Searched in
+    /// `<workspace>/.chatty/teams/`, then the platform data directory's
+    /// `chatty/teams/`, then the presets compiled in: `coder-reviewer`.
+    /// Valid with --headless, --pipe and the interactive TUI.
+    ///
+    /// Example: --team coder-reviewer --headless -m "Fix the overdraft bug."
+    #[arg(long, value_name = "ID")]
+    team: Option<String>,
 }
 
 #[tokio::main]
@@ -369,11 +389,46 @@ async fn main() -> Result<()> {
         execution_settings.workspace_dir = Some(cwd.to_string_lossy().to_string());
     }
 
+    // --team (AGE-407): the team directory is declared for this run only —
+    // its roster and verification go to the broker as a copy of the module
+    // settings, so `/modules` still saves exactly what was on disk
+    // (AGE-382), and its turn budget to this run's execution settings.
+    // Resolved after `--workspace`, since the workspace is the first place
+    // a team is looked for.
+    let team = match cli.team.as_deref() {
+        Some(id) => Some(
+            chatty_core::services::team::load_team(
+                id,
+                execution_settings.workspace_dir.as_deref().map(Path::new),
+                dirs::data_dir().as_deref(),
+            )
+            .with_context(|| format!("--team '{id}' could not be loaded"))?,
+        ),
+        None => None,
+    };
+    let broker_module_settings = match team.as_ref() {
+        Some(team) => {
+            team.apply_turn_budget(&mut execution_settings);
+            info!(team = %team.id, source = ?team.source, "Running as a team leader");
+            team.run_module_settings(&module_settings)
+        }
+        None => module_settings.clone(),
+    };
+    let leader = team.as_ref().map(|t| &t.file.leader);
+
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
 
-    // --tools / --preamble: the role this process runs as (ADR-0011 C11).
-    let role = resolve_role(cli.tools.as_deref(), cli.preamble.as_deref())?;
+    // --tools / --preamble: the role this process runs as (ADR-0011 C11);
+    // a team's leader role fills in whichever flag was not given.
+    let role = resolve_role(
+        cli.tools
+            .as_deref()
+            .or(leader.and_then(|l| l.profile.as_deref())),
+        cli.preamble
+            .as_deref()
+            .or(leader.and_then(|l| l.preamble.as_deref())),
+    )?;
 
     // Apply auto-approve if requested
     if cli.auto_approve {
@@ -399,8 +454,14 @@ async fn main() -> Result<()> {
         m
     };
 
-    // Resolve which model to use
-    let model_config = resolve_model(&cli, &models)?;
+    // Resolve which model to use: --model, else the team leader's, else the
+    // roster's default.
+    let model_config = resolve_model(
+        cli.model
+            .as_deref()
+            .or(leader.and_then(|l| l.model.as_deref())),
+        &models,
+    )?;
 
     // Find the provider config for this model
     let provider_config = providers
@@ -426,12 +487,14 @@ async fn main() -> Result<()> {
     // worker: a leader configured by `--ollama`/`--openai-compat-url` has
     // no config dir a child could read. Unix only — the participant socket
     // underneath it does not exist elsewhere yet.
+    // `--team` implies `--broker`: a team is nothing without its workers.
+    let run_broker = cli.broker || cli.team.is_some();
     #[cfg(unix)]
-    let broker = if cli.broker {
+    let broker = if run_broker {
         match participant::broker::Broker::start(
             models.models(),
             &providers,
-            &module_settings,
+            &broker_module_settings,
             execution_settings.workspace_dir.clone(),
             matches!(
                 execution_settings.approval_mode,
@@ -458,7 +521,7 @@ async fn main() -> Result<()> {
         None
     };
     #[cfg(not(unix))]
-    if cli.broker {
+    if run_broker {
         bail!("--broker needs a Unix socket, which this platform has not got");
     }
 
@@ -504,6 +567,7 @@ async fn main() -> Result<()> {
                 remote_agents,
                 module_agents: module_agents.clone(),
                 role: role.clone(),
+                team: team.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
                 surface: chatty_core::services::StreamSurface::Headless,
@@ -557,6 +621,7 @@ async fn main() -> Result<()> {
                 remote_agents,
                 module_agents,
                 role,
+                team,
                 is_sub_agent: false,
                 services_loaded: false,
                 surface: chatty_core::services::StreamSurface::InteractiveTui,
@@ -801,7 +866,7 @@ fn discover_module_agents(
     agents
 }
 
-fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {
+fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfig> {
     let all_models = models.models();
 
     if all_models.is_empty() {
@@ -818,13 +883,13 @@ fn resolve_model(cli: &Cli, models: &ModelsModel) -> Result<ModelConfig> {
     // else the first. The rule lives in chatty-core because the broker
     // meters a worker on the endpoint of the model this will pick for it
     // (ADR-0011 C10).
-    if let Some(config) = resolve_model_query(all_models, cli.model.as_deref()) {
+    if let Some(config) = resolve_model_query(all_models, query) {
         return Ok(config.clone());
     }
 
     bail!(
         "Model '{}' not found. Available models:\n{}",
-        cli.model.as_deref().unwrap_or_default(),
+        query.unwrap_or_default(),
         all_models
             .iter()
             .map(|m| format!("  - {} ({})", m.name, m.id))
@@ -1146,7 +1211,7 @@ mod resolve_model_tests {
         let mut models = store(&["first", "second"]);
         assert!(models.set_default("second"));
 
-        let resolved = resolve_model(&cli(&[]), &models).expect("a model resolves");
+        let resolved = resolve_model(cli(&[]).model.as_deref(), &models).expect("a model resolves");
 
         assert_eq!(resolved.id, "second");
     }
@@ -1155,7 +1220,7 @@ mod resolve_model_tests {
     fn no_model_flag_and_no_marker_still_takes_the_first_model() {
         let models = store(&["first", "second"]);
 
-        let resolved = resolve_model(&cli(&[]), &models).expect("a model resolves");
+        let resolved = resolve_model(cli(&[]).model.as_deref(), &models).expect("a model resolves");
 
         assert_eq!(resolved.id, "first");
     }
@@ -1167,15 +1232,15 @@ mod resolve_model_tests {
         let mut models = store(&["first", "second"]);
         assert!(models.set_default("second"));
 
-        let resolved =
-            resolve_model(&cli(&["--model", "first"]), &models).expect("a model resolves");
+        let resolved = resolve_model(cli(&["--model", "first"]).model.as_deref(), &models)
+            .expect("a model resolves");
 
         assert_eq!(resolved.id, "first");
     }
 
     #[test]
     fn no_models_configured_is_an_error() {
-        assert!(resolve_model(&cli(&[]), &ModelsModel::new()).is_err());
+        assert!(resolve_model(cli(&[]).model.as_deref(), &ModelsModel::new()).is_err());
     }
 }
 
@@ -1204,6 +1269,25 @@ mod cli_smoke_tests {
         assert!(Cli::try_parse_from(["chatty-tui", "--broker"]).is_ok());
         assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--headless", "-m", "hi"]).is_ok());
         assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--pipe"]).is_ok());
+    }
+
+    /// AGE-407: `--team <id>` is valid with `--headless`, `--pipe` and the
+    /// bare interactive TUI, and needs no `--broker` beside it.
+    #[test]
+    fn team_flag_parses_with_headless_pipe_and_interactive() {
+        let team = |args: &[&str]| {
+            let mut argv = vec!["chatty-tui", "--team", "coder-reviewer"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).expect("--team parses")
+        };
+        assert_eq!(team(&[]).team.as_deref(), Some("coder-reviewer"));
+        assert!(
+            !team(&[]).broker,
+            "--broker is implied at run time, not parsed"
+        );
+        assert!(team(&["--headless", "-m", "hi"]).headless);
+        assert!(team(&["--pipe"]).pipe);
+        assert!(Cli::try_parse_from(["chatty-tui", "--team"]).is_err());
     }
 }
 

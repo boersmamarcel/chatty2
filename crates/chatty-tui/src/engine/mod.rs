@@ -13,6 +13,7 @@ use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQu
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::paste::PasteStore;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
+use chatty_core::services::team::Team;
 use chatty_core::services::{McpService, MemoryService, StreamSurface};
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, HostedSession, TurnInput, TurnKind, turn_transport,
@@ -284,6 +285,12 @@ pub struct ChatEngine {
     /// The role this process runs as (ADR-0011 C11), from `--tools` /
     /// `--preamble`. Default unless this is a declared worker.
     pub role: AgentRole,
+    /// The team this process leads under `--team` (AGE-407): its roster is
+    /// the broker's, its skill is served by `read_skill`. `None` otherwise.
+    team: Option<Team>,
+    /// "read_skill <skill> and follow it", prepended to the first human turn
+    /// of a `--team` run and then gone.
+    pending_first_turn: Option<String>,
     /// When `true`, this engine is itself a delegated worker: `/agent` is
     /// refused, so a worker cannot fan out further from the chat box.
     pub is_sub_agent: bool,
@@ -368,6 +375,10 @@ pub struct ChatEngineConfig {
     /// (ADR-0011 C11). Default for a leader; a declared virtual agent's
     /// worker carries what its `VirtualAgentConfig` declared.
     pub role: AgentRole,
+    /// The team directory this process leads under `--team` (ADR-0011 C13,
+    /// AGE-407): its skill is served by `read_skill`, and its first-turn
+    /// instruction opens the first human turn. `None` for everything else.
+    pub team: Option<Team>,
     pub is_sub_agent: bool,
     /// Set to `true` when all services were loaded eagerly (headless mode).
     /// Set to `false` when services are deferred to background (interactive mode).
@@ -407,6 +418,8 @@ impl ChatEngine {
             remote_agents: config.remote_agents,
             module_agents: config.module_agents,
             role: config.role,
+            pending_first_turn: config.team.as_ref().and_then(Team::first_turn_instruction),
+            team: config.team,
             is_sub_agent: config.is_sub_agent,
             transcript: Transcript::new(),
             is_streaming: false,
@@ -517,6 +530,17 @@ impl ChatEngine {
         }
     }
 
+    /// The broker's virtual agents by name: the `--team` roster when this
+    /// process leads a team (held apart from `module_settings`, which
+    /// `/modules` saves to disk; AGE-382/AGE-407), else what module settings
+    /// declare.
+    pub(crate) fn local_agents(&self) -> Vec<String> {
+        match self.team.as_ref() {
+            Some(team) => team.agent_names(),
+            None => self.module_settings.virtual_agent_names(),
+        }
+    }
+
     /// Build the `AgentBuildContext` shared by `init_conversation` and
     /// `spawn_init_conversation`. `mcp_tools` is left `None`; both callers set
     /// it themselves after gathering it, since that gathering is async and,
@@ -525,6 +549,7 @@ impl ChatEngine {
     fn build_agent_context(&self) -> AgentBuildContext {
         AgentBuildContext {
             role: self.role.clone(),
+            team_skill: self.team.as_ref().and_then(Team::skill),
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.user_secrets.clone(),
@@ -537,7 +562,7 @@ impl ChatEngine {
                     .module_settings
                     .enabled
                     .then_some(self.module_settings.gateway_port)),
-                local_agents: self.module_settings.virtual_agent_names(),
+                local_agents: self.local_agents(),
                 remote_agents: self.remote_agents.clone(),
             })
         }
@@ -693,6 +718,18 @@ impl ChatEngine {
             TurnKind::ProtocolFollowUp
         } else {
             TurnKind::Human
+        };
+
+        // A `--team` leader's first human turn opens with the skill to
+        // follow (AGE-407); shown in the transcript too, since it is what
+        // the model was asked. Taken only by a human turn, so a protocol
+        // follow-up arriving first leaves it for the human turn after.
+        let message = match kind {
+            TurnKind::Human => match self.pending_first_turn.take() {
+                Some(instruction) => format!("{instruction}\n\n{message}"),
+                None => message,
+            },
+            _ => message,
         };
 
         // Reset scroll to bottom when sending
@@ -1249,6 +1286,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
                 role: Default::default(),
+                team: None,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,
@@ -1292,6 +1330,44 @@ mod tests {
             .into_iter()
             .find(|s| s.name == name)
             .expect("scenario exists")
+    }
+
+    /// AGE-407: in the interactive TUI too, a `--team` leader's first human
+    /// turn opens with "read_skill <skill> and follow it" — the persisted
+    /// user message carries it — and the second turn does not.
+    #[tokio::test]
+    async fn a_team_leaders_first_turn_opens_with_the_skill_instruction() {
+        let (mut engine, mut event_rx) = test_engine().await;
+        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
+            .expect("the preset loads");
+        engine.pending_first_turn = team.first_turn_instruction();
+
+        send_scripted(&mut engine, &mut event_rx, "hi", scenario("text_only")).await;
+        send_scripted(&mut engine, &mut event_rx, "more", scenario("text_only")).await;
+
+        let user_texts: Vec<String> = engine
+            .session
+            .conversation()
+            .unwrap()
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                rig_core::completion::Message::User { content } => Some(
+                    content
+                        .iter()
+                        .filter_map(|c| match c {
+                            UserContent::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            user_texts,
+            ["read_skill coder-reviewer and follow it.\n\nhi", "more"]
+        );
     }
 
     /// A completed turn is committed to history and the display closes: the
@@ -1418,6 +1494,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
                 role: Default::default(),
+                team: None,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,

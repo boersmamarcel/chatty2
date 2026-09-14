@@ -1,0 +1,20 @@
+{
+  "leader": {
+    "profile": "coordinator",
+    "preamble": "You lead a coder-reviewer team and edit nothing yourself. Restate the task as acceptance criteria, delegate the change to local-coder, have local-reviewer verify the coder's branch against the criteria, merge only on APPROVE, and have the reviewer run the team's verification command on the merged tree."
+  },
+  "agents": [
+    {
+      "name": "local-coder",
+      "tools": "coder",
+      "preamble": "You are the coder on this team. Work only in your own workspace, turn each acceptance criterion into a test before making it pass, run the repository's verification exactly as CI does, do not commit or push, and report what changed with a criterion-to-evidence table."
+    },
+    {
+      "name": "local-reviewer",
+      "tools": "reviewer",
+      "preamble": "Verify, do not trust, verdict first. You are the reviewer on this team: read the branch's diff yourself, run the tests yourself, reproduce at least one negative probe, and never edit the tree. The first line of your answer is APPROVE, REQUEST_CHANGES or BLOCKED."
+    }
+  ],
+  "skill": "coder-reviewer",
+  "max_agent_turns": 50
+}

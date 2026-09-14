@@ -701,7 +701,7 @@ mod evidence {
 // Named virtual agents (ADR-0011 C10 / AGE-377)
 // ---------------------------------------------------------------------------
 
-mod named_virtual_agents {
+pub(super) mod named_virtual_agents {
     //! AGE-377's verification: two declared agents, `local-coder` and
     //! `local-reviewer`, over the exact gateway `--broker` starts. Both
     //! appear in `list_agents` with their model in the card; a task to each
@@ -789,7 +789,7 @@ mod named_virtual_agents {
 
     /// A "chatty-tui" that appends its argv to `argv.log` beside itself and
     /// then waits to be reaped, as a real child would wait on its task.
-    pub(super) fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
+    pub(crate) fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("chatty-tui");
         std::fs::write(
@@ -804,7 +804,7 @@ mod named_virtual_agents {
 
     /// The argv lines the stand-in children recorded so far, once there
     /// are at least `at_least` of them.
-    async fn recorded_argv(dir: &std::path::Path, at_least: usize) -> Vec<String> {
+    pub(crate) async fn recorded_argv(dir: &std::path::Path, at_least: usize) -> Vec<String> {
         let log = dir.join("argv.log");
         for _ in 0..200 {
             let lines: Vec<String> = std::fs::read_to_string(&log)
@@ -847,7 +847,7 @@ mod named_virtual_agents {
     /// child the moment the task ends, and the stand-in answers in
     /// microseconds, so without this gate `sh` could be killed before its
     /// first line runs. Otherwise `spawn_scripted_worker`.
-    pub(super) fn spawn_argv_gated_worker(
+    pub(crate) fn spawn_argv_gated_worker(
         registry: &ParticipantRegistry,
         name: &str,
         argv_log: PathBuf,

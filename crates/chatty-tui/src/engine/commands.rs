@@ -1119,6 +1119,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
                 role: Default::default(),
+                team: None,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,
@@ -1143,6 +1144,82 @@ mod tests {
         assert_eq!(
             engine.module_settings.module_dir,
             dir.path().to_string_lossy()
+        );
+    }
+
+    /// AGE-407, the same rule for a team: `--team` declares its roster and
+    /// verification for the run, so the struct `handle_modules_command`
+    /// hands to the repository on a `/modules` change still carries only
+    /// what was on disk — while the run's agent build still sees the team.
+    #[tokio::test]
+    async fn a_team_does_not_leak_into_module_settings_on_a_modules_save() {
+        use crate::engine::ChatEngineConfig;
+        use chatty_core::services::StreamSurface;
+        use chatty_core::services::team::load_team;
+        use chatty_core::settings::models::models_store::ModelConfig;
+        use chatty_core::settings::models::module_settings::{
+            ModuleSettingsModel, VirtualAgentConfig,
+        };
+        use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
+
+        let on_disk = ModuleSettingsModel {
+            virtual_agents: vec![VirtualAgentConfig {
+                name: "on-disk-agent".to_string(),
+                ..VirtualAgentConfig::default()
+            }],
+            ..ModuleSettingsModel::default()
+        };
+        let mut team = load_team("coder-reviewer", None, None).expect("the preset loads");
+        team.file.verification = Some("make test".to_string());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = ChatEngine::new(
+            ChatEngineConfig {
+                model_config: ModelConfig::new(
+                    "m1".to_string(),
+                    "Test Model".to_string(),
+                    ProviderType::Ollama,
+                    "llama3.2".to_string(),
+                ),
+                provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+                execution_settings: ExecutionSettingsModel::default(),
+                module_settings: on_disk.clone(),
+                broker_port: Some(54321),
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: None,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                role: Default::default(),
+                team: Some(team),
+                is_sub_agent: false,
+                services_loaded: true,
+                surface: StreamSurface::InteractiveTui,
+            },
+            event_tx,
+        );
+
+        let changed = engine
+            .handle_modules_command(Some("port 9000"))
+            .expect("port is a valid /modules subcommand");
+        assert!(changed);
+        assert_eq!(engine.module_settings.gateway_port, 9000);
+        assert_eq!(
+            engine.module_settings.virtual_agents, on_disk.virtual_agents,
+            "the team's roster must not reach the persisted module settings"
+        );
+        assert_eq!(
+            engine.module_settings.team, on_disk.team,
+            "the team's verification must not reach the persisted module settings"
+        );
+        assert_eq!(
+            engine.local_agents(),
+            ["local-coder", "local-reviewer"],
+            "the run's agent build still sees the team's roster"
         );
     }
 }

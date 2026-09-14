@@ -18,6 +18,7 @@ use chatty_core::factories::agent_factory::{
 };
 use chatty_core::models::TurnOutcome;
 use chatty_core::services::StreamSurface;
+use chatty_core::services::team::Team;
 use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
 use chatty_core::settings::models::ExecutionSettingsModel;
 use std::sync::Arc;
@@ -50,6 +51,9 @@ pub struct HeadlessRunner {
     /// An agent-protocol follow-up that arrived while a turn was already
     /// streaming; sent once the turn ends (AGE-242 / D3).
     pending_agent_follow_up: Option<String>,
+    /// "read_skill <skill> and follow it", prepended to the first human turn
+    /// of a `--team` run and then gone (AGE-407).
+    pending_first_turn: Option<String>,
 }
 
 impl HeadlessRunner {
@@ -63,6 +67,7 @@ impl HeadlessRunner {
             // the answer-file deadline the session's does not know about.
             loop_guard: false,
         });
+        let pending_first_turn = config.team.as_ref().and_then(Team::first_turn_instruction);
         Self {
             session,
             execution_settings: config.execution_settings.clone(),
@@ -74,6 +79,7 @@ impl HeadlessRunner {
             event_tx,
             event_observer: None,
             pending_agent_follow_up: None,
+            pending_first_turn,
         }
     }
 
@@ -91,6 +97,7 @@ impl HeadlessRunner {
         let ctx = AgentBuildContext {
             mcp_tools,
             role: self.config.role.clone(),
+            team_skill: self.config.team.as_ref().and_then(Team::skill),
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.config.user_secrets.clone(),
@@ -104,7 +111,10 @@ impl HeadlessRunner {
                     .module_settings
                     .enabled
                     .then_some(self.config.module_settings.gateway_port)),
-                local_agents: self.config.module_settings.virtual_agent_names(),
+                local_agents: match self.config.team.as_ref() {
+                    Some(team) => team.agent_names(),
+                    None => self.config.module_settings.virtual_agent_names(),
+                },
                 remote_agents: self.config.remote_agents.clone(),
             })
         };
@@ -165,6 +175,16 @@ impl HeadlessRunner {
             TurnKind::ProtocolFollowUp
         } else {
             TurnKind::Human
+        };
+        // A `--team` leader's first human turn opens with the skill to
+        // follow (AGE-407). Taken only by a human turn, so a protocol
+        // follow-up arriving first leaves it for the human turn after.
+        let message = match kind {
+            TurnKind::Human => match self.pending_first_turn.take() {
+                Some(instruction) => format!("{instruction}\n\n{message}"),
+                None => message,
+            },
+            _ => message,
         };
         self.transcript.reset_delegation_row();
         if show_in_transcript {
