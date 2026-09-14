@@ -19,6 +19,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use super::math_parser::parse_math_segments;
+use super::message_math_render::resolve_math_segments;
 use super::parsed_cache::{
     CachedCodeBlock, CachedContentSegment, CachedMarkdownSegment, CachedParseResult,
     StreamingParseState,
@@ -256,7 +257,8 @@ pub(super) fn parse_content_segments(content: &str) -> Vec<ContentSegment> {
 /// Phases:
 /// 1. parse_content_segments: extract `<think>` blocks
 /// 2. parse_markdown_segments: extract fenced code blocks from text segments
-/// 3. parse_math_segments: extract math expressions from non-code text
+/// 3. parse_math_segments + resolve_math_segments: extract math expressions
+///    from non-code text and resolve each one's styled SVG path
 /// 4. highlight_code: syntax-highlight each code block
 pub(super) fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseResult {
     let content_segments = parse_content_segments(content);
@@ -292,7 +294,7 @@ pub(super) fn build_cached_parse_result(content: &str, cx: &App) -> CachedParseR
                             })
                         }
                         MarkdownSegment::Text(t) => {
-                            let math_segs = parse_math_segments(&t);
+                            let math_segs = resolve_math_segments(parse_math_segments(&t), cx);
                             CachedMarkdownSegment::TextWithMath(math_segs)
                         }
                         MarkdownSegment::IncompleteCodeBlock { .. } => {
@@ -522,7 +524,7 @@ fn parse_markdown_segment_streaming(
             CachedMarkdownSegment::UnclosedCodeBlock { language, code }
         }
         MarkdownSegment::Text(t) => {
-            let math_segs = parse_math_segments(&t);
+            let math_segs = resolve_math_segments(parse_math_segments(&t), cx);
             CachedMarkdownSegment::TextWithMath(math_segs)
         }
     }

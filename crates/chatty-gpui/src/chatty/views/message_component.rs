@@ -14,7 +14,7 @@ use super::message_parsing::{build_cached_parse_result, build_streaming_parse_re
 use super::message_types::SystemTrace;
 use super::parsed_cache::{
     CachedContentSegment, CachedMarkdownSegment, CachedParseResult, ContentCacheKey,
-    ParsedContentCache, StreamingParseState,
+    ParsedContentCache, StreamingParseState, ThemeKey,
 };
 use super::trace_components::SystemTraceView;
 use super::transcript::{MessageActionBar, OpenTable};
@@ -59,7 +59,7 @@ fn render_from_cached(cached: &CachedParseResult, index: usize, cx: &App) -> Vec
                 vec![render_thinking_block(content, index, seg_idx, cx).into_any_element()]
             }
             CachedContentSegment::Text(md_segments) => {
-                render_cached_markdown_segments(md_segments, index * 100 + seg_idx, cx)
+                render_cached_markdown_segments(md_segments, index * 100 + seg_idx)
             }
         })
         .collect()
@@ -70,7 +70,6 @@ fn render_from_cached(cached: &CachedParseResult, index: usize, cx: &App) -> Vec
 fn render_cached_markdown_segments(
     segments: &[CachedMarkdownSegment],
     base_index: usize,
-    cx: &App,
 ) -> Vec<AnyElement> {
     let mut elements = Vec::new();
     let mut code_block_index = 0;
@@ -88,7 +87,7 @@ fn render_cached_markdown_segments(
                 code_block_index += 1;
             }
             CachedMarkdownSegment::TextWithMath(math_segments) => {
-                let math_elements = render_math_segments(math_segments, base_index, cx);
+                let math_elements = render_math_segments(math_segments, base_index);
                 elements.extend(math_elements);
             }
             CachedMarkdownSegment::IncompleteCodeBlock { language, code } => {
@@ -299,13 +298,13 @@ fn render_text_segment_cached(
     base_index: usize,
     is_markdown: bool,
     is_streaming: bool,
-    is_dark: bool,
+    theme: ThemeKey,
     caches: &mut MessageRenderCaches<'_>,
     cx: &App,
 ) -> Vec<AnyElement> {
     if is_markdown && !is_streaming {
         // Finalized: use cache to avoid re-parsing on every render
-        let cache_key = ContentCacheKey::new(text_segment, is_dark);
+        let cache_key = ContentCacheKey::new(text_segment, theme);
         if caches.parsed.get(&cache_key).is_none() {
             let result = build_cached_parse_result(text_segment, cx);
             caches.parsed.insert(cache_key, result);
@@ -352,7 +351,7 @@ where
 {
     use super::message_types::TraceItem;
 
-    let is_dark = cx.theme().mode.is_dark();
+    let theme = ThemeKey::current(cx);
 
     // Get the trace items from the trace view
     let trace_items = msg
@@ -368,7 +367,7 @@ where
             index,
             msg.is_markdown,
             msg.is_streaming,
-            is_dark,
+            theme,
             caches,
             cx,
         );
@@ -419,7 +418,7 @@ where
                         index * 100 + tool_idx,
                         msg.is_markdown,
                         false, // frozen content — use persistent cache
-                        is_dark,
+                        theme,
                         &mut MessageRenderCaches {
                             parsed: caches.parsed,
                             streaming: &mut None, // don't pollute the streaming cache
@@ -568,7 +567,7 @@ where
                 index * 1000,
                 msg.is_markdown,
                 msg.is_streaming,
-                is_dark,
+                theme,
                 caches,
                 cx,
             );
@@ -627,7 +626,7 @@ where
     G: Fn(usize, Option<MessageFeedback>, &mut App) + 'static + Clone,
     R: Fn(usize, &mut App) + 'static + Clone,
 {
-    let is_dark = cx.theme().mode.is_dark();
+    let theme = ThemeKey::current(cx);
 
     // Full render for messages in viewport.
     //
@@ -674,7 +673,7 @@ where
     if matches!(msg.role, MessageRole::Assistant) && !should_interleave && msg.is_markdown {
         let children = if !msg.is_streaming {
             // Finalized: use cached parse result
-            let cache_key = ContentCacheKey::new(&msg.content, is_dark);
+            let cache_key = ContentCacheKey::new(&msg.content, theme);
             if caches.parsed.get(&cache_key).is_none() {
                 let result = build_cached_parse_result(&msg.content, cx);
                 caches.parsed.insert(cache_key, result);
@@ -781,7 +780,7 @@ where
             index,
             msg.is_markdown,
             msg.is_streaming,
-            is_dark,
+            theme,
             caches,
             cx,
         );
@@ -820,6 +819,8 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
+    use crate::chatty::services::MathRendererService;
+    use crate::chatty::views::parsed_cache::CachedMathSegment;
     use std::time::Duration;
 
     /// Helper to build a ToolCallBlock with the given output.
@@ -878,5 +879,99 @@ mod tests {
     fn extract_attachment_path_empty_json_object() {
         let tc = make_tool_call(Some("{}"));
         assert_eq!(extract_attachment_path(&tc), None);
+    }
+
+    fn finalized_math_message() -> DisplayMessage {
+        let mut content = String::from("# Math\n\nInline $x^2$ and $\\alpha$ here.\n\n");
+        for i in 0..3 {
+            content.push_str(&format!(
+                "$$\n\\frac{{{i}}}{{{i}+1}}\n$$\n\nThen $y_{i}$.\n\n"
+            ));
+        }
+        content.push_str("```rust\nfn f() {}\n```\n\n```mermaid\ngraph TD; A-->B;\n```\n");
+        DisplayMessage {
+            role: MessageRole::Assistant,
+            content,
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: None,
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: Some(1),
+        }
+    }
+
+    fn render_finalized(msg: &DisplayMessage, parsed: &mut ParsedContentCache, cx: &App) {
+        let mut streaming = None;
+        let _ = render_message(
+            msg,
+            1,
+            true,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &mut MessageRenderCaches {
+                parsed,
+                streaming: &mut streaming,
+            },
+            |_, _, _| {},
+            |_, _, _| {},
+            |_, _, _| {},
+            |_, _| {},
+            None,
+            cx,
+        );
+    }
+
+    /// AGE-394: once a finalized message's parse result is cached, re-rendering
+    /// it (every frame while it is on screen) must not touch the math service
+    /// — no `render_*` call, hence no digest, no `stat`, no Typst compile,
+    /// however many equations it has. The stub panics on any such call.
+    #[gpui::test]
+    fn rendering_a_cached_message_never_calls_the_math_service(cx: &mut gpui::TestAppContext) {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let msg = finalized_math_message();
+        let mut parsed = ParsedContentCache::new();
+
+        cx.update(|cx| {
+            cx.set_global(gpui_component::Theme::default());
+            cx.set_global(MathRendererService::with_cache_dir(
+                cache_dir.path().to_path_buf(),
+            ));
+
+            // First render parses and resolves every equation's SVG path.
+            render_finalized(&msg, &mut parsed, cx);
+            let key = ContentCacheKey::new(&msg.content, ThemeKey::current(cx));
+            let cached = parsed.get(&key).expect("first render fills the cache");
+            let mut equations = 0;
+            for seg in &cached.segments {
+                if let CachedContentSegment::Text(mds) = seg {
+                    for md in mds {
+                        if let CachedMarkdownSegment::TextWithMath(maths) = md {
+                            for m in maths {
+                                match m {
+                                    CachedMathSegment::InlineMath { svg_path, .. }
+                                    | CachedMathSegment::BlockMath { svg_path, .. } => {
+                                        equations += 1;
+                                        assert!(
+                                            svg_path.as_ref().is_some_and(|p| p.exists()),
+                                            "every equation's styled SVG is resolved at parse time"
+                                        );
+                                    }
+                                    CachedMathSegment::Text(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(equations, 8, "2 inline + 3 block + 3 inline");
+
+            // Every later frame renders from the cache: the service is never asked.
+            cx.set_global(MathRendererService::panicking_stub());
+            for _ in 0..3 {
+                render_finalized(&msg, &mut parsed, cx);
+            }
+        });
     }
 }
