@@ -49,6 +49,23 @@ pub const EMPTY_COMPLETION_ERROR: &str = "The model returned an empty response t
      A thinking model on Ollama may be writing its tool call inside the thinking channel; \
      set `extra_params.think` to \"false\" on that model.";
 
+/// The same, for a model whose `extra_params.think` is already `"false"`
+/// (AGE-404): the thinking channel cannot be the cause, and the likely one
+/// is a call to a tool the model does not have, which Ollama drops.
+pub const EMPTY_COMPLETION_ERROR_THINK_OFF: &str = "The model produced no text and no known tool call, twice. \
+     Thinking is already off for this model; the likely cause is a call to a tool that \
+     does not exist for this agent (check the tool list in its preamble).";
+
+/// The text an empty final completion ends the turn with, given whether the
+/// model's thinking channel is already switched off.
+pub fn empty_completion_error(think_disabled: bool) -> &'static str {
+    if think_disabled {
+        EMPTY_COMPLETION_ERROR_THINK_OFF
+    } else {
+        EMPTY_COMPLETION_ERROR
+    }
+}
+
 /// Injected after a text-only response that ran past the loop guard's
 /// verbosity limit.
 pub const BREVITY_FOLLOW_UP: &str = "You produced a long response without any tool call. \
@@ -79,6 +96,9 @@ pub struct TurnPolicy {
     /// Whether the last user message in history is already the
     /// malformed-tool-call retry, which bounds that retry to one attempt.
     pub already_asked_to_retry: bool,
+    /// Whether the bound model's `extra_params.think` is `"false"`, which
+    /// picks the empty-completion error text (AGE-404).
+    pub think_disabled: bool,
 }
 
 /// Turn-orchestration logic shared by every frontend. See the module docs.
@@ -89,6 +109,7 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     cancel_flag: Arc<AtomicBool>,
     surface: StreamSurface,
     already_asked_to_retry: bool,
+    think_disabled: bool,
     /// id → name and id → arguments for the tool calls in flight.
     pending_tool_names: HashMap<String, String>,
     pending_tool_args: HashMap<String, String>,
@@ -125,6 +146,7 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             cancel_flag,
             surface: policy.surface,
             already_asked_to_retry: policy.already_asked_to_retry,
+            think_disabled: policy.think_disabled,
             pending_tool_names: HashMap::new(),
             pending_tool_args: HashMap::new(),
             calls: Vec::new(),
@@ -350,8 +372,10 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 if self.final_completion_is_empty() {
                     // The in-turn nudge (`EmptyTurnRetry`) already had its
                     // one attempt; what reaches here is the second silence.
-                    let error =
-                        StreamError::new(StreamErrorKind::EmptyCompletion, EMPTY_COMPLETION_ERROR);
+                    let error = StreamError::new(
+                        StreamErrorKind::EmptyCompletion,
+                        empty_completion_error(self.think_disabled),
+                    );
                     self.on_stream_error(&error);
                     (self.emit)(SessionEvent::Error(error));
                     return Ok(ChunkAction::Break);

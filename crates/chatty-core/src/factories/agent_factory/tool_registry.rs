@@ -97,6 +97,7 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
                 "git_create_branch",
                 "git_switch_branch",
                 "git_commit",
+                "git_merge",
             ]
             .into_iter()
             .map(String::from),
@@ -272,6 +273,7 @@ mod tests {
             "git_create_branch",
             "git_switch_branch",
             "git_commit",
+            "git_merge",
         ] {
             assert!(names.contains(tool), "{tool} missing for git");
         }

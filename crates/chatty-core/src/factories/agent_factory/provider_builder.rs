@@ -342,7 +342,7 @@ fn chat_agent_builder(
 /// turn ends with empty content; `think=false` on a leader or reviewer roster
 /// entry avoids that. Absent or unparsable: the request carries no `think`
 /// key and Ollama's model default applies.
-fn ollama_think(model_config: &ModelConfig) -> Option<bool> {
+pub(crate) fn ollama_think(model_config: &ModelConfig) -> Option<bool> {
     model_config
         .extra_params
         .get("think")
