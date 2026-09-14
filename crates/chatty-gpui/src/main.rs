@@ -211,7 +211,7 @@ fn main() {
         // initialised the EmbeddingService.
         cx.set_global(chatty_core::services::SkillService::new(None));
 
-        // Initialize token tracking settings with defaults
+        // Initialize token tracking settings with defaults - will be populated async
         cx.set_global(settings::models::TokenTrackingSettings::default());
 
         // Initialize the token budget watch channel global used by the context bar
@@ -1031,6 +1031,28 @@ fn main() {
                 }
                 Err(e) => {
                     warn!(error = ?e, "Failed to load training settings, using defaults");
+                }
+            }
+        })
+        .detach();
+
+        // Load token tracking settings asynchronously (non-blocking, no dependencies)
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let repo = chatty_core::token_tracking_repository();
+            match repo.load().await {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        info!(
+                            critical_threshold = settings.critical_threshold,
+                            "Token tracking settings loaded from disk"
+                        );
+                        cx.set_global(settings);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update global token tracking settings"))
+                    .ok();
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to load token tracking settings, using defaults");
                 }
             }
         })

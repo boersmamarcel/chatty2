@@ -26,8 +26,8 @@ pub use in_memory_repository::{
     InMemoryA2aRepository, InMemoryExecutionSettingsRepository, InMemoryExtensionsRepository,
     InMemoryGeneralSettingsRepository, InMemoryHiveSettingsRepository, InMemoryMcpRepository,
     InMemoryModelsRepository, InMemoryModuleSettingsRepository, InMemoryProviderRepository,
-    InMemorySearchSettingsRepository, InMemoryTrainingSettingsRepository,
-    InMemoryUserSecretsRepository,
+    InMemorySearchSettingsRepository, InMemoryTokenTrackingRepository,
+    InMemoryTrainingSettingsRepository, InMemoryUserSecretsRepository,
 };
 
 // ── Macros for generating repository boilerplate ─────────────────────────────
@@ -213,6 +213,13 @@ define_single_json_repository!(
     struct ExtensionsJsonRepository,
     model = crate::settings::models::extensions_store::ExtensionsModel,
     filename = "extensions.json",
+);
+
+define_single_json_repository!(
+    trait TokenTrackingRepository,
+    struct TokenTrackingJsonRepository,
+    model = crate::settings::models::token_tracking_settings::TokenTrackingSettings,
+    filename = "token_tracking.json",
 );
 
 // ── List-based repositories (load_all/save_all) ─────────────────────────────
