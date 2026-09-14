@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::pdfium_utils::create_pdfium;
+use super::pdfium_utils::{PdfiumHandle, create_pdfium};
 
 const THUMBNAIL_SIZE: u32 = 64;
 /// Width used by the artifact-panel page preview (fits a ~380px dock at 2x).
@@ -123,7 +123,7 @@ pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailErro
     Ok(temp_path)
 }
 
-fn bind_pdfium() -> Result<Pdfium, PdfThumbnailError> {
+fn bind_pdfium() -> Result<PdfiumHandle, PdfThumbnailError> {
     create_pdfium().map_err(|e| PdfThumbnailError::Pdfium(format!("Failed to bind pdfium: {}", e)))
 }
 
@@ -220,6 +220,18 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Every test here goes through the process-global `THUMBNAIL_DIR` session
+    /// directory (`super::THUMBNAIL_DIR`), and most end with `cleanup_thumbnails()`,
+    /// which deletes and resets it: run in parallel, one test's cleanup removes the
+    /// PNG another has just rendered (AGE-176). Serialize the module. pdfium itself
+    /// needs no extra care here; `PdfiumHandle` already serializes it.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serialized() -> MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Helper to create a minimal valid PDF file for testing
     fn create_test_pdf(path: &PathBuf) -> std::io::Result<()> {
@@ -291,6 +303,7 @@ startxref
 
     #[test]
     fn test_render_valid_pdf() {
+        let _serial = serialized();
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("test_valid.pdf");
 
@@ -330,6 +343,7 @@ startxref
 
     #[test]
     fn test_render_invalid_pdf() {
+        let _serial = serialized();
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("test_invalid.pdf");
 
@@ -357,6 +371,7 @@ startxref
 
     #[test]
     fn test_render_missing_file() {
+        let _serial = serialized();
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("nonexistent_file.pdf");
 
@@ -383,6 +398,7 @@ startxref
 
     #[test]
     fn test_thumbnail_dir_creation() {
+        let _serial = serialized();
         // Clear any existing thumbnail dir
         // Cleanup omitted to avoid interfering with parallel tests
 
@@ -409,6 +425,7 @@ startxref
 
     #[test]
     fn test_cleanup_thumbnails() {
+        let _serial = serialized();
         // Create a thumbnail to verify cleanup
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("test_cleanup.pdf");
@@ -447,8 +464,8 @@ startxref
     }
 
     #[test]
-    #[ignore] // Run with --ignored or use --test-threads=1 due to shared global state
     fn test_multiple_thumbnails_unique_names() {
+        let _serial = serialized();
         let temp_dir = std::env::temp_dir();
         let pdf_path1 = temp_dir.join("test_unique1.pdf");
         let pdf_path2 = temp_dir.join("test_unique2.pdf");
@@ -479,6 +496,7 @@ startxref
 
     #[test]
     fn test_thumbnail_idempotency() {
+        let _serial = serialized();
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("test_idempotent.pdf");
 
@@ -499,6 +517,7 @@ startxref
 
     #[test]
     fn test_page_count_and_preview_render() {
+        let _serial = serialized();
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("test_preview_page.pdf");
         create_test_pdf(&pdf_path).expect("Failed to create test PDF");

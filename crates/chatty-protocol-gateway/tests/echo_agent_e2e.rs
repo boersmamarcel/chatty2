@@ -11,16 +11,15 @@
 //! `modules/echo-agent/echo_agent.wasm` before running these tests:
 //!
 //! ```sh
-//! cd modules/echo-agent
-//! cargo build --target wasm32-wasip2 --release
-//! cp target/wasm32-wasip2/release/echo_agent.wasm .
+//! make wasm-modules
 //! ```
 //!
-//! Tests that cannot find the WASM file emit a `SKIP:` message and return
-//! immediately without failing — this keeps `cargo test` clean in dev
-//! environments where the WASM target is not installed.
+//! The file is git-ignored, so a fresh checkout does not have it. Every test
+//! here checks for it first and, if it is missing, fails immediately (before
+//! any WASM is loaded) with the absolute path it looked at and the build
+//! command. Set `ECHO_AGENT_WASM` to use a module built elsewhere.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -66,22 +65,27 @@ impl LlmProvider for MockLlmProvider {
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
-/// Return the path to `modules/echo-agent/` if the compiled WASM is present.
+/// Return the path to `modules/echo-agent/`, or an actionable error if the
+/// compiled WASM is not there.
 ///
 /// Checks `ECHO_AGENT_WASM` env var first; falls back to the canonical
 /// workspace-relative path.
-fn find_echo_agent_dir() -> Option<PathBuf> {
+fn find_echo_agent_dir() -> Result<PathBuf, String> {
     // Allow explicit override for CI or unusual layouts.
     if let Ok(wasm) = std::env::var("ECHO_AGENT_WASM") {
         let wasm_path = PathBuf::from(&wasm);
-        if wasm_path.exists() {
-            // Validate that the parent directory contains a module.toml so the
-            // registry can discover and load the module correctly.
-            let parent = wasm_path.parent().map(|p| p.to_path_buf())?;
-            if parent.join("module.toml").exists() {
-                return Some(parent);
-            }
-        }
+        // The parent directory must contain a module.toml so the registry can
+        // discover and load the module correctly.
+        let parent = wasm_path
+            .parent()
+            .filter(|p| p.join("module.toml").exists());
+        return match parent {
+            Some(parent) if wasm_path.exists() => Ok(parent.to_path_buf()),
+            _ => Err(format!(
+                "ECHO_AGENT_WASM={wasm} does not point at a built echo_agent.wasm \
+                 with a module.toml beside it"
+            )),
+        };
     }
 
     // Default: CARGO_MANIFEST_DIR → crates/chatty-protocol-gateway
@@ -90,16 +94,30 @@ fn find_echo_agent_dir() -> Option<PathBuf> {
     let workspace_root = PathBuf::from(manifest_dir)
         .parent() // crates/chatty-protocol-gateway → crates/
         .and_then(|p| p.parent()) // crates/ → workspace root
-        .map(|p| p.to_path_buf())?;
+        .map(|p| p.to_path_buf())
+        .expect("CARGO_MANIFEST_DIR has a workspace root two levels up");
 
     let dir = workspace_root.join("modules").join("echo-agent");
     let wasm = dir.join("echo_agent.wasm");
 
-    if dir.is_dir() && dir.join("module.toml").exists() && wasm.exists() {
-        Some(dir)
+    if dir.join("module.toml").exists() && wasm.exists() {
+        Ok(dir)
     } else {
-        None
+        Err(missing_wasm_message(&wasm, &workspace_root))
     }
+}
+
+/// The error a test fails with when the WASM fixture is missing: the absolute
+/// path that was checked and the exact command that produces it.
+fn missing_wasm_message(wasm: &Path, workspace_root: &Path) -> String {
+    format!(
+        "echo-agent WASM not found at {}\n\
+         It is git-ignored and must be built once per checkout:\n  \
+         cd {} && make wasm-modules\n\
+         (or set ECHO_AGENT_WASM to a built echo_agent.wasm)",
+        wasm.display(),
+        workspace_root.display()
+    )
 }
 
 /// Build a registry with only the echo-agent loaded (no RwLock wrapper).
@@ -151,22 +169,34 @@ async fn post_json(router: axum::Router, path: &str, body: Value) -> (StatusCode
 }
 
 // ---------------------------------------------------------------------------
-// Helper macro: skip a test when the WASM is not yet built.
+// Helper macro: fail fast, before any WASM is loaded, when the fixture is
+// missing. Do not turn this into a skip: a skipped test is reported as `ok`
+// and its message is captured, so a fresh checkout would look green while
+// testing nothing.
 // ---------------------------------------------------------------------------
 
 macro_rules! require_echo_agent {
     ($dir:ident) => {
-        let Some($dir) = find_echo_agent_dir() else {
-            eprintln!(
-                "SKIP: echo-agent WASM not found. \
-                 Build it first:\n  \
-                 cd modules/echo-agent && \
-                 cargo build --target wasm32-wasip2 --release && \
-                 cp target/wasm32-wasip2/release/echo_agent.wasm ."
-            );
-            return;
+        let $dir = match find_echo_agent_dir() {
+            Ok(dir) => dir,
+            Err(msg) => panic!("{msg}"),
         };
     };
+}
+
+#[test]
+fn missing_wasm_message_names_path_and_build_command() {
+    let root = Path::new("/some/checkout");
+    let wasm = root.join("modules/echo-agent/echo_agent.wasm");
+    let msg = missing_wasm_message(&wasm, root);
+    assert!(
+        msg.contains("/some/checkout/modules/echo-agent/echo_agent.wasm"),
+        "message must name the absolute path checked: {msg}"
+    );
+    assert!(
+        msg.contains("cd /some/checkout && make wasm-modules"),
+        "message must give the exact build command: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------

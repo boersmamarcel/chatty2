@@ -90,7 +90,7 @@ Add the provider to the provider-matrix block in `scripts/gen-docs-reference.sh`
 ### 8. Test
 
 ```bash
-cargo test --all-features -- --test-threads=1
+cargo test --all-features
 cargo clippy --all-features -- -D warnings
 ```
 

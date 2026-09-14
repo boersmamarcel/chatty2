@@ -1,7 +1,37 @@
 use pdfium_render::prelude::*;
 use std::ffi::OsStr;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use tracing::{debug, info, warn};
+
+/// The one lock every use of pdfium in this process goes through; see [`PdfiumHandle`].
+static PDFIUM_LOCK: Mutex<()> = Mutex::new(());
+
+/// A bound pdfium together with the process-wide lock that makes using it sound.
+///
+/// pdfium is not thread-safe: it keeps its font mapper, colour spaces, timers and
+/// allocator state in C++ globals, and two threads using it at once corrupt the heap
+/// (SIGSEGV/SIGABRT) or hit a `CHECK` (Chromium's `int3`, delivered as SIGTRAP). That
+/// is the intermittent SIGTRAP that forced the test suite onto `--test-threads=1`
+/// (AGE-176). The handle holds [`PDFIUM_LOCK`] from [`create_pdfium`] until it is
+/// dropped, so callers are serialized for exactly as long as they hold a pdfium; the
+/// documents and pages they open borrow from it and cannot outlive the lock.
+///
+/// Do not call [`create_pdfium`] while already holding a handle on the same thread:
+/// the lock is not re-entrant.
+pub struct PdfiumHandle {
+    pdfium: Pdfium,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl Deref for PdfiumHandle {
+    type Target = Pdfium;
+
+    fn deref(&self) -> &Pdfium {
+        &self.pdfium
+    }
+}
 
 /// Get the path to the pdfium library directory set by build.rs (compile-time path).
 fn compile_time_lib_path() -> Option<PathBuf> {
@@ -309,7 +339,26 @@ fn exe_relative_lib_path() -> Option<PathBuf> {
 /// library (e.g. between tests in the same process), subsequent `bind_to_*` calls return
 /// `PdfiumError::PdfiumLibraryBindingsAlreadyInitialized`; in that case we simply return a
 /// fresh `Pdfium` unit struct that transparently re-uses the existing global bindings.
-pub fn create_pdfium() -> anyhow::Result<Pdfium> {
+///
+/// That check is not atomic with the initialization: `bind_to_*` reads the global *before*
+/// `Pdfium::new` calls `FPDF_InitLibrary` and fills it, so two threads binding at the same
+/// time both pass the check and both initialize the library, and pdfium traps on the second
+/// `FPDF_InitLibrary` (`CFX_Timer::InitializeGlobals` in the backtrace). The returned
+/// [`PdfiumHandle`] holds the process-wide pdfium lock from before the check until the caller
+/// drops it, which covers both that race and pdfium's general lack of thread safety.
+pub fn create_pdfium() -> anyhow::Result<PdfiumHandle> {
+    // A poisoned lock only means a previous holder panicked; pdfium's globals are
+    // still consistent (either initialized or not), so carry on.
+    let guard = PDFIUM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let pdfium = bind()?;
+    Ok(PdfiumHandle {
+        pdfium,
+        _guard: guard,
+    })
+}
+
+/// Bind (or re-use) the pdfium library. Caller must hold [`PDFIUM_LOCK`].
+fn bind() -> anyhow::Result<Pdfium> {
     let lib_name = Pdfium::pdfium_platform_library_name();
 
     let candidate_dirs = [
@@ -393,6 +442,49 @@ mod tests {
 
     fn lib_name() -> std::ffi::OsString {
         Pdfium::pdfium_platform_library_name()
+    }
+
+    /// One empty 612x792 page; enough to bind, load and render.
+    const MINIMAL_PDF: &[u8] = b"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF";
+
+    /// AGE-176: pdfium used from several threads at once used to kill the whole test
+    /// binary (SIGTRAP from a concurrent `FPDF_InitLibrary`, SIGSEGV/SIGABRT from
+    /// concurrent rendering), which is what forced CI onto `--test-threads=1`. With
+    /// `PdfiumHandle` every caller waits for the previous one; this test is the
+    /// in-process reproduction and dies with a signal if that serialization is lost.
+    #[test]
+    fn concurrent_callers_are_serialized() {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..5 {
+                        let pdfium = create_pdfium().expect("bind pdfium");
+                        let doc = pdfium
+                            .load_pdf_from_byte_slice(MINIMAL_PDF, None)
+                            .expect("load pdf");
+                        let page = doc.pages().first().expect("first page");
+                        let config = PdfRenderConfig::new().set_target_width(64);
+                        let bitmap = page.render_with_config(&config).expect("render");
+                        assert_eq!(bitmap.width(), 64);
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().expect("worker panicked");
+        }
     }
 
     #[test]

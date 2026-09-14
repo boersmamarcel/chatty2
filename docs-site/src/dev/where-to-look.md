@@ -31,7 +31,7 @@ flowchart TD
 | [Add a slash command](./guides/add-slash-command.md) | A new `/command` in the desktop and terminal pickers |
 | [Add a desktop GPUI view](./guides/add-gpui-view.md) | A panel, dialog or widget in `chatty-gpui` |
 | [Build a WASM plugin](./guides/build-wasm-module.md) | A sandboxed agent module served by the protocol gateway |
-| [Test](./guides/test.md) | Which tests to run, goldens, mocks, the `--test-threads=1` footgun |
+| [Test](./guides/test.md) | Which tests to run, goldens, mocks, the WASM prebuild |
 | [Debug](./guides/debug.md) | Logs, the render overlay, stalled streams, tool failures, cache hits |
 | [Build & package](./guides/build-package.md) | Local CI and platform packages |
 | [Release process](./architecture/RELEASE_PROCESS.md) | Cutting a version |
