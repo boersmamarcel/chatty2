@@ -51,6 +51,7 @@ fn policy() -> TurnPolicy {
         max_agent_turns: 10,
         loop_guard: false,
         already_asked_to_retry: false,
+        think_disabled: false,
     }
 }
 
@@ -907,6 +908,7 @@ mod named_virtual_agents {
                 max_agent_turns: 10,
                 loop_guard: false,
                 already_asked_to_retry: false,
+                think_disabled: false,
             },
         )
         .await;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::services::git_service::{
-    GitAddOutput, GitCommitOutput, GitLogEntry, GitService, GitStatusOutput,
+    GitAddOutput, GitCommitOutput, GitLogEntry, GitMergeOutput, GitService, GitStatusOutput,
 };
 use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::ToolError;
@@ -77,6 +77,25 @@ pub struct GitDiffArgs {
     /// Optional file path to restrict the diff to.
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional `base..head` range: what `head` changed relative to `base`,
+    /// independent of the working tree (AGE-404). Takes precedence over
+    /// `staged`.
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+/// Split a `base..head` range into its two refs. Two dots exactly: a
+/// three-dot range diffs against the merge base, which is not what a
+/// reviewer reading a branch asked for.
+fn parse_range(range: &str) -> Result<(&str, &str), ToolError> {
+    match range.trim().split_once("..") {
+        Some((base, head)) if !base.is_empty() && !head.is_empty() && !head.starts_with('.') => {
+            Ok((base, head))
+        }
+        _ => Err(ToolError::OperationFailed(format!(
+            "range must be 'base..head' (e.g. 'main..sub-agent/w1'), got '{range}'"
+        ))),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -105,6 +124,8 @@ impl Tool for GitDiffTool {
     fn description(&self) -> String {
         "View changes in the git repository. By default shows unstaged changes. \
                          Set 'staged' to true to see changes that have been staged for commit. \
+                         Set 'range' to 'base..head' (e.g. 'main..sub-agent/w1') to see what a \
+                         branch changed relative to another, independent of the working tree. \
                          Optionally specify a 'path' to limit the diff to a specific file."
             .to_string()
     }
@@ -120,9 +141,13 @@ impl Tool for GitDiffTool {
                 "path": {
                     "type": "string",
                     "description": "Optional file path to restrict the diff to"
+                },
+                "range": {
+                    "type": "string",
+                    "description": "Optional 'base..head' range (e.g. 'main..sub-agent/w1'): diff the two refs instead of the working tree"
                 }
             },
-            "required": ["staged", "path"]
+            "required": ["staged", "path", "range"]
         })
     }
 
@@ -137,8 +162,21 @@ impl Tool for GitDiffTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        tracing::debug!(staged = args.staged, path = ?args.path, "Getting git diff");
-        let diff = self.service.diff(args.staged, args.path.as_deref()).await?;
+        tracing::debug!(staged = args.staged, path = ?args.path, range = ?args.range, "Getting git diff");
+        let diff = match args
+            .range
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            Some(range) => {
+                let (base, head) = parse_range(range)?;
+                self.service
+                    .diff_range(base, head, args.path.as_deref())
+                    .await?
+            }
+            None => self.service.diff(args.staged, args.path.as_deref()).await?,
+        };
         Ok(GitDiffOutput { diff })
     }
 }
@@ -586,5 +624,135 @@ impl Tool for GitCommitTool {
         tracing::debug!(message = %args.message, "Creating git commit");
         let result = self.service.commit(&args.message).await?;
         Ok(result)
+    }
+}
+
+// ── GitMergeTool ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct GitMergeArgs {
+    /// Name of the branch to merge into the current branch.
+    pub branch: String,
+    /// If true, always create a merge commit (--no-ff). Defaults to false.
+    #[serde(default)]
+    pub no_ff: bool,
+    /// Optional merge commit message.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Merge a branch into the current branch (AGE-404): how a coordinator
+/// without a shell takes a worker's `sub-agent/<name>` branch.
+#[derive(Clone)]
+pub struct GitMergeTool {
+    service: Arc<GitService>,
+    approval_mode: ApprovalMode,
+    pending_approvals: PendingApprovals,
+}
+
+impl GitMergeTool {
+    pub fn new(
+        service: Arc<GitService>,
+        approval_mode: ApprovalMode,
+        pending_approvals: PendingApprovals,
+    ) -> Self {
+        Self {
+            service,
+            approval_mode,
+            pending_approvals,
+        }
+    }
+}
+
+impl Tool for GitMergeTool {
+    const NAME: &'static str = "git_merge";
+    type Error = ToolError;
+    type Args = GitMergeArgs;
+    type Output = GitMergeOutput;
+
+    fn description(&self) -> String {
+        "Merge an existing branch into the current branch (git merge). Set \
+                         'no_ff' to true to always record a merge commit, and 'message' to \
+                         name it. On a conflict the error lists the conflicting files and the \
+                         tree is left in the conflicted state: report them, do not resolve \
+                         them by hand."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "branch": {
+                    "type": "string",
+                    "description": "The name of the branch to merge into the current branch"
+                },
+                "no_ff": {
+                    "type": "boolean",
+                    "description": "If true, always create a merge commit (git merge --no-ff). Default: false"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Optional merge commit message"
+                }
+            },
+            "required": ["branch", "no_ff", "message"]
+        })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        let approved = request_execution_approval(
+            &self.pending_approvals,
+            &self.approval_mode,
+            &format!(
+                "[git] merge branch '{}'{}",
+                args.branch,
+                if args.no_ff { " (--no-ff)" } else { "" }
+            ),
+            false,
+        )
+        .await?;
+
+        if !approved {
+            return Err(ToolError::OperationFailed(
+                "Merge denied by user".to_string(),
+            ));
+        }
+
+        tracing::debug!(branch = %args.branch, no_ff = args.no_ff, "Merging git branch");
+        let result = self
+            .service
+            .merge(&args.branch, args.no_ff, args.message.as_deref())
+            .await?;
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AGE-404: a reviewer copies `<default>..<branch>` out of the skill
+    /// text; anything else is rejected before it reaches git.
+    #[test]
+    fn parse_range_takes_base_dot_dot_head_only() {
+        assert_eq!(
+            parse_range("main..sub-agent/w1").unwrap(),
+            ("main", "sub-agent/w1")
+        );
+        assert_eq!(parse_range(" master..feat ").unwrap(), ("master", "feat"));
+        for bad in ["main", "main..", "..feat", "main...feat", ""] {
+            assert!(parse_range(bad).is_err(), "should reject {bad:?}");
+        }
     }
 }

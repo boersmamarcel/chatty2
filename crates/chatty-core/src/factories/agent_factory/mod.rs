@@ -30,7 +30,7 @@ use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, AskUserTool, BrowserUseTool, CreateChartTool,
     CreateDirectoryTool, DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool,
     FinalAnswerTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool,
-    GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
+    GitCreateBranchTool, GitDiffTool, GitLogTool, GitMergeTool, GitStatusTool, GitSwitchBranchTool,
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
@@ -55,6 +55,7 @@ use tool_registry::active_native_tool_names;
 
 pub use build_context::{AgentBuildContext, AgentRole, AgentServices, gated_exec_settings};
 pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
+pub(crate) use provider_builder::ollama_think;
 pub use tool_profile::{ToolProfile, tool_profile, tool_profile_names};
 pub use tool_registry::ToolAvailability;
 
@@ -838,7 +839,8 @@ impl AgentClient {
                         approval_mode.clone(),
                         approvals.clone(),
                     ),
-                    GitCommitTool::new(service, approval_mode, approvals),
+                    GitCommitTool::new(service.clone(), approval_mode.clone(), approvals.clone()),
+                    GitMergeTool::new(service, approval_mode, approvals),
                 ))
             } else {
                 tracing::error!("git_service_ready exists but workspace_dir is None");

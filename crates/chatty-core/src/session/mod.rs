@@ -527,6 +527,7 @@ impl AgentSession {
                 max_agent_turns: self.config.execution_settings.max_agent_turns as usize,
                 loop_guard: self.config.loop_guard,
                 already_asked_to_retry,
+                think_disabled: conversation.think_disabled(),
             },
         })
     }
