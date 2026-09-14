@@ -802,8 +802,10 @@ impl ChatView {
             conversation_id = ?self.conversation_id,
             "append_assistant_text",
         );
+        // No scroll here: `prepare_render` re-asserts the bottom once per
+        // drawn frame while sticky, and text batches arrive faster than
+        // frames are drawn (AGE-167).
         cx.notify();
-        self.scroll_if_sticky();
     }
 
     /// Finalize the current streaming assistant message
@@ -1100,15 +1102,6 @@ impl ChatView {
             item_ix,
             offset_in_item: px(0.0),
         });
-    }
-
-    /// If sticky-scroll is active, re-assert the bottom for this frame.
-    /// Used for incremental streaming updates — respects the user's decision
-    /// to scroll up by not re-enabling sticky mode.
-    fn scroll_if_sticky(&mut self) {
-        if self.stick_to_bottom {
-            self.scroll_transcript_to_bottom();
-        }
     }
 
     /// Index of the parent streaming assistant bubble.
@@ -1721,7 +1714,9 @@ impl ChatView {
 
         // Sticky-scroll and pin visibility are both derived from how far the
         // transcript currently is from its bottom, rather than latched on the
-        // first frame that drifts (AGE-180).
+        // first frame that drifts (AGE-180). This is the only place the bottom
+        // is re-asserted while streaming — once per drawn frame, after the
+        // list has normalised its anchor, never per text batch (AGE-167).
         let offset = self.transcript_list.scroll_px_offset_for_scrollbar();
         let max_offset = self.transcript_list.max_offset_for_scrollbar();
         let distance_from_bottom = scroll::distance_from_bottom(
@@ -2861,5 +2856,48 @@ mod fingerprint_tests {
             "python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
         )]);
         assert_ne!(fp(&short, None), fp(&long, None));
+    }
+}
+
+#[cfg(test)]
+mod sticky_scroll_tests {
+    use core::prelude::rust_2021::test;
+
+    /// The bottom is re-asserted once per drawn frame (`prepare_render`) and
+    /// when sticky mode is (re)activated — never from a stream-event handler,
+    /// which fires per 20ms text batch regardless of whether a frame is drawn
+    /// (AGE-167). Pinned against the source because a `ListState` cannot be
+    /// observed without a window.
+    #[test]
+    fn the_bottom_is_re_asserted_per_frame_not_per_text_chunk() {
+        // Production code only: this module's own needle is not a call site.
+        let this_file = include_str!("mod.rs")
+            .split("mod sticky_scroll_tests")
+            .next()
+            .unwrap();
+        let sources = [
+            this_file,
+            include_str!("handlers.rs"),
+            include_str!("delegation.rs"),
+            include_str!("history.rs"),
+            include_str!("parent_stream.rs"),
+        ];
+        let calls: usize = sources
+            .iter()
+            .map(|src| src.matches("self.scroll_transcript_to_bottom();").count())
+            .sum();
+        assert_eq!(
+            calls, 2,
+            "scroll_transcript_to_bottom must be called from activate_sticky_scroll and prepare_render only"
+        );
+        let append = include_str!("mod.rs")
+            .split("pub fn append_assistant_text")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn finalize_assistant_message").next())
+            .expect("append_assistant_text precedes finalize_assistant_message");
+        assert!(
+            !append.contains("scroll_transcript_to_bottom") && !append.contains("scroll_to("),
+            "append_assistant_text must not scroll; prepare_render does, once per frame"
+        );
     }
 }
