@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use tracing::{debug, info, warn};
 
@@ -41,6 +42,17 @@ const BLOCK_MARGIN_Y: f64 = 10.0;
 // SVG scaling factor for high-DPI displays
 const SVG_SCALE_FACTOR: f64 = 1.5;
 
+/// Typst's embedded fonts, parsed once per process. Every compile used to
+/// re-parse all of them in `MathWorld::new` (AGE-394); a `Font` is an `Arc`
+/// over the parsed face, so handing each world a clone is cheap.
+static FONTS: LazyLock<(Vec<Font>, FontBook)> = LazyLock::new(|| {
+    let fonts = typst_assets::fonts()
+        .map(|data| Font::new(Bytes::new(data), 0).unwrap())
+        .collect::<Vec<_>>();
+    let book = FontBook::from_fonts(fonts.iter());
+    (fonts, book)
+});
+
 /// Minimal World implementation for Typst math rendering
 struct MathWorld {
     library: LazyHash<Library>,
@@ -54,12 +66,9 @@ impl MathWorld {
     fn new(content: &str) -> Self {
         let library = LazyHash::new(Library::builder().build());
 
-        // Use Typst's embedded fonts
-        let fonts = typst_assets::fonts()
-            .map(|data| Font::new(Bytes::new(data), 0).unwrap())
-            .collect::<Vec<_>>();
-
-        let book = LazyHash::new(FontBook::from_fonts(fonts.iter()));
+        let (fonts, book) = &*FONTS;
+        let fonts = fonts.clone();
+        let book = LazyHash::new(book.clone());
 
         // Create virtual file ID for the main file
         let vpath = VirtualPath::new("main.typ").expect("valid virtual path");
@@ -122,6 +131,13 @@ pub struct MathRendererService {
     cache: Arc<Mutex<HashMap<String, String>>>,
     /// Tracks insertion order for LRU eviction of in-memory cache entries.
     insertion_order: Arc<Mutex<VecDeque<String>>>,
+    /// The persistent SVG cache directory, resolved once at construction
+    /// rather than on every lookup. `None` when there is no config directory.
+    cache_dir: Option<PathBuf>,
+    /// Panic on any `render_*` call. Lets a test prove a code path — the
+    /// transcript's render path (AGE-394) — never renders math.
+    #[cfg(any(test, feature = "test-support"))]
+    panic_on_render: bool,
 }
 
 impl Default for MathRendererService {
@@ -150,27 +166,65 @@ impl MathRendererService {
     }
 
     pub fn new() -> Self {
+        Self::with_cache_dir_opt(Self::cache_dir().ok())
+    }
+
+    /// A service whose persistent SVG cache lives in `dir` instead of the
+    /// user's config directory, so a test never writes to `~/.config`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_cache_dir(dir: PathBuf) -> Self {
+        Self::with_cache_dir_opt(Some(dir))
+    }
+
+    /// A service that panics on any `render_*` call (see `panic_on_render`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn panicking_stub() -> Self {
         Self {
-            cache: Arc::new(Mutex::new(HashMap::new())),
-            insertion_order: Arc::new(Mutex::new(VecDeque::new())),
+            panic_on_render: true,
+            ..Self::with_cache_dir_opt(None)
         }
     }
 
+    fn with_cache_dir_opt(cache_dir: Option<PathBuf>) -> Self {
+        Self {
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            insertion_order: Arc::new(Mutex::new(VecDeque::new())),
+            cache_dir,
+            #[cfg(any(test, feature = "test-support"))]
+            panic_on_render: false,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn assert_may_render(&self, latex: &str) {
+        assert!(
+            !self.panic_on_render,
+            "MathRendererService::render_* called on a path that must not render math: {latex}"
+        );
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn assert_may_render(&self, _latex: &str) {}
+
     /// Render LaTeX math expression to SVG
     pub fn render_to_svg(&self, latex: &str, is_inline: bool) -> Result<String> {
-        // Create cache key from content + type
+        self.assert_may_render(latex);
         let cache_key = self.make_cache_key(latex, is_inline);
+        self.render_to_svg_keyed(&cache_key, latex, is_inline)
+    }
 
+    /// `render_to_svg` for a caller that already computed the cache key.
+    fn render_to_svg_keyed(&self, cache_key: &str, latex: &str, is_inline: bool) -> Result<String> {
         // Check cache first
         if let Ok(cache) = self.cache.lock()
-            && let Some(svg) = cache.get(&cache_key)
+            && let Some(svg) = cache.get(cache_key)
         {
             debug!(latex, "Math cache hit");
             let svg = svg.clone();
             // Touch LRU order so this entry stays fresh
             if let Ok(mut order) = self.insertion_order.lock() {
-                order.retain(|k| k != &cache_key);
-                order.push_back(cache_key);
+                order.retain(|k| k != cache_key);
+                order.push_back(cache_key.to_string());
             }
             return Ok(svg);
         }
@@ -251,10 +305,10 @@ $ {typst_code} $")
 
         // Store in cache with LRU eviction
         if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(cache_key.clone(), svg.clone());
+            cache.insert(cache_key.to_string(), svg.clone());
             if let Ok(mut order) = self.insertion_order.lock() {
-                order.retain(|k| k != &cache_key);
-                order.push_back(cache_key);
+                order.retain(|k| k != cache_key);
+                order.push_back(cache_key.to_string());
                 while cache.len() > MAX_MATH_CACHE_ENTRIES {
                     if let Some(oldest) = order.pop_front() {
                         cache.remove(&oldest);
@@ -277,33 +331,39 @@ $ {typst_code} $")
     /// and allows GPUI to load the SVG images as file paths (which GPUI requires).
     ///
     /// Returns the PathBuf to the cached SVG file.
-    pub fn render_to_svg_file(&self, latex: &str, is_inline: bool) -> Result<std::path::PathBuf> {
-        // Get or generate SVG (uses existing in-memory cache)
-        let svg_data = self.render_to_svg(latex, is_inline)?;
-
-        // Create persistent cache directory
-        let cache_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("No config directory"))?
-            .join("chatty")
-            .join("math_cache");
-
-        std::fs::create_dir_all(&cache_dir).context("Failed to create math cache directory")?;
+    ///
+    /// The disk cache is checked *before* the in-memory one: the in-memory
+    /// cache holds at most `MAX_MATH_CACHE_ENTRIES` SVGs, and looking there
+    /// first meant a message with more distinct equations than that
+    /// recompiled the overflow with Typst on every pass even though its SVG
+    /// was already on disk (AGE-394).
+    pub fn render_to_svg_file(&self, latex: &str, is_inline: bool) -> Result<PathBuf> {
+        self.assert_may_render(latex);
+        let cache_dir = self
+            .cache_dir
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
 
         // Use hash as filename for deterministic caching
         let cache_key = self.make_cache_key(latex, is_inline);
         let svg_path = cache_dir.join(format!("{}.svg", cache_key));
 
-        // Only write if file doesn't exist (cache hit)
-        if !svg_path.exists() {
-            // Strip width/height attributes from SVG to allow GPUI to scale it
-            // Typst generates SVGs with small pt dimensions that GPUI respects literally
-            let svg_without_dims = self.strip_svg_dimensions(&svg_data);
-
-            std::fs::write(&svg_path, svg_without_dims).context("Failed to write SVG to cache")?;
-            info!(path = ?svg_path, "Wrote math SVG to persistent cache");
-        } else {
+        if svg_path.exists() {
             debug!(path = ?svg_path, "Math SVG cache hit");
+            return Ok(svg_path);
         }
+
+        // Get or generate SVG (uses existing in-memory cache)
+        let svg_data = self.render_to_svg_keyed(&cache_key, latex, is_inline)?;
+
+        std::fs::create_dir_all(cache_dir).context("Failed to create math cache directory")?;
+
+        // Strip width/height attributes from SVG to allow GPUI to scale it
+        // Typst generates SVGs with small pt dimensions that GPUI respects literally
+        let svg_without_dims = self.strip_svg_dimensions(&svg_data);
+
+        std::fs::write(&svg_path, svg_without_dims).context("Failed to write SVG to cache")?;
+        info!(path = ?svg_path, "Wrote math SVG to persistent cache");
 
         Ok(svg_path)
     }
@@ -316,13 +376,17 @@ $ {typst_code} $")
     /// This allows theme switching without re-rendering or re-injecting colors
     /// during the render phase, significantly improving performance.
     ///
+    /// Called at parse time, when a message's parse result is built and
+    /// cached — never from the transcript's render path, which only builds
+    /// `img(path)` from the stored result (AGE-394).
+    ///
     /// Returns the PathBuf to the styled SVG file.
     pub fn render_to_styled_svg_file(
         &self,
         latex: &str,
         is_inline: bool,
         theme_color: RgbColor,
-    ) -> Result<std::path::PathBuf> {
+    ) -> Result<PathBuf> {
         use sha2::Digest;
 
         // 1. Generate base SVG (uses existing cache)
@@ -507,7 +571,7 @@ $ {typst_code} $")
     }
 
     /// Get the cache directory path
-    fn cache_dir() -> Result<std::path::PathBuf> {
+    fn cache_dir() -> Result<PathBuf> {
         let cache_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("No config directory"))?
             .join("chatty")
@@ -648,6 +712,61 @@ mod tests {
         let service = MathRendererService::new();
         let svg = service.render_to_svg("\\frac{a}{b}", false).unwrap();
         assert!(svg.contains("<svg"), "Output should be SVG");
+    }
+
+    /// AGE-394: the disk cache is consulted before the in-memory one, so an
+    /// equation whose SVG is already on disk is never recompiled — not even
+    /// after the bounded in-memory cache has evicted it.
+    #[test]
+    fn disk_cached_svg_is_served_without_recompiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MathRendererService::with_cache_dir(dir.path().to_path_buf());
+
+        let path = service.render_to_svg_file("x^2", true).unwrap();
+        assert!(path.exists());
+        assert_eq!(service.cache_size(), 1, "the first render compiles");
+
+        // Simulate eviction of the in-memory entry (or a fresh process).
+        service.clear_cache();
+        let again = service.render_to_svg_file("x^2", true).unwrap();
+        assert_eq!(again, path);
+        assert_eq!(
+            service.cache_size(),
+            0,
+            "a disk hit must not compile (a compile would repopulate the in-memory cache)"
+        );
+
+        // The styled variant is likewise a pure path lookup once written.
+        let color = RgbColor {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+        };
+        let styled = service
+            .render_to_styled_svg_file("x^2", true, color)
+            .unwrap();
+        let styled_again = service
+            .render_to_styled_svg_file("x^2", true, color)
+            .unwrap();
+        assert_eq!(styled, styled_again);
+        assert_eq!(service.cache_size(), 0);
+    }
+
+    /// The stub must actually bite, or a test built on it proves nothing.
+    #[test]
+    #[should_panic(expected = "must not render math")]
+    fn panicking_stub_panics_on_render() {
+        MathRendererService::panicking_stub()
+            .render_to_styled_svg_file(
+                "x^2",
+                true,
+                RgbColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                },
+            )
+            .ok();
     }
 
     #[test]

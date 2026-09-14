@@ -1,25 +1,85 @@
 use std::collections::{HashMap, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::math_parser::MathSegment;
-use gpui::HighlightStyle;
+use chatty_core::services::math_renderer_service::RgbColor;
+use gpui::{App, HighlightStyle};
+use gpui_component::ActiveTheme;
+use rustc_hash::FxHasher;
 
 /// Maximum number of entries before oldest are evicted.
 const MAX_ENTRIES: usize = 200;
 
-/// A content hash used as cache key, computed from message content + theme mode
+/// The theme inputs a parse result bakes in: mermaid picks its palette by
+/// mode, and every equation's styled SVG path carries the foreground colour
+/// (AGE-394). A result built under one theme is wrong under another, so both
+/// are part of [`ContentCacheKey`].
+#[derive(Clone, Copy, Debug)]
+pub struct ThemeKey {
+    pub is_dark: bool,
+    pub foreground: RgbColor,
+}
+
+impl ThemeKey {
+    pub fn current(cx: &App) -> Self {
+        let rgb = cx.theme().foreground.to_rgb();
+        Self {
+            is_dark: cx.theme().mode.is_dark(),
+            foreground: RgbColor {
+                r: rgb.r,
+                g: rgb.g,
+                b: rgb.b,
+            },
+        }
+    }
+
+    /// The foreground quantised the way the math service names styled SVGs.
+    fn foreground_bytes(&self) -> [u8; 3] {
+        let c = self.foreground;
+        [
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8,
+        ]
+    }
+}
+
+/// A content hash used as cache key, computed from message content + theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ContentCacheKey(u64);
 
 impl ContentCacheKey {
-    pub fn new(content: &str, is_dark_theme: bool) -> Self {
-        let mut hasher = DefaultHasher::new();
+    /// `FxHasher`, not `DefaultHasher`: this hashes the whole message on every
+    /// frame it is visible, nothing here is attacker-chosen, and SipHash's
+    /// keyed mixing was the bulk of the lookup's cost — the AGE-375 finding
+    /// for the turn cache, again (AGE-394).
+    pub fn new(content: &str, theme: ThemeKey) -> Self {
+        let mut hasher = FxHasher::default();
         content.hash(&mut hasher);
-        is_dark_theme.hash(&mut hasher);
+        theme.is_dark.hash(&mut hasher);
+        theme.foreground_bytes().hash(&mut hasher);
         Self(hasher.finish())
     }
+}
+
+/// [`MathSegment`](super::math_parser::MathSegment) with each equation's
+/// styled SVG resolved at parse time, so the render path only builds
+/// `img(path)` — no service lookup, digest or `stat` per equation per frame
+/// (AGE-394). `svg_path` is `None` when rendering failed (falls back to the
+/// raw LaTeX), mirroring `MermaidDiagram`.
+#[derive(Clone, Debug)]
+pub enum CachedMathSegment {
+    /// Regular text content (may contain markdown)
+    Text(String),
+    InlineMath {
+        latex: String,
+        svg_path: Option<PathBuf>,
+    },
+    BlockMath {
+        latex: String,
+        svg_path: Option<PathBuf>,
+    },
 }
 
 /// Cached segments for a code block with pre-computed syntax highlighting.
@@ -35,8 +95,9 @@ pub struct CachedCodeBlock {
 /// One segment of rendered content — either text (possibly containing math) or a code block
 #[derive(Clone, Debug)]
 pub enum CachedMarkdownSegment {
-    /// Text that may contain math — stores pre-parsed math segments
-    TextWithMath(Vec<MathSegment>),
+    /// Text that may contain math — stores pre-parsed math segments with
+    /// their SVGs already resolved
+    TextWithMath(Vec<CachedMathSegment>),
     /// Code block with pre-computed syntax highlighting
     CodeBlock(CachedCodeBlock),
     /// Incomplete code block (opening ``` without closing ```) during streaming.
@@ -102,13 +163,13 @@ pub struct StreamingParseState {
 /// The settled prefix of the streaming text segment and its math parse.
 ///
 /// Only the tail after the last newline changes from one text batch to the
-/// next, so the prefix's `parse_math_segments` result is kept and handed out
+/// next, so the prefix's resolved math parse is kept and handed out
 /// by pointer until a newline moves the split.
 #[derive(Clone, Debug)]
 pub struct LiveTailCache {
     /// The text up to and including the last newline.
     pub settled_text: String,
-    pub settled: Arc<Vec<MathSegment>>,
+    pub settled: Arc<Vec<CachedMathSegment>>,
 }
 
 /// Bounded cache for parsed message content, keyed by content hash + theme.
@@ -172,6 +233,15 @@ impl ParsedContentCache {
 mod tests {
     use super::*;
 
+    const LIGHT: ThemeKey = ThemeKey {
+        is_dark: false,
+        foreground: RgbColor {
+            r: 0.1,
+            g: 0.1,
+            b: 0.1,
+        },
+    };
+
     fn dummy_result() -> CachedParseResult {
         CachedParseResult {
             segments: vec![CachedContentSegment::Thinking("test".to_string())],
@@ -184,7 +254,7 @@ mod tests {
 
         // Insert MAX_ENTRIES + 10 entries
         for i in 0..(MAX_ENTRIES + 10) {
-            let key = ContentCacheKey::new(&format!("message-{i}"), false);
+            let key = ContentCacheKey::new(&format!("message-{i}"), LIGHT);
             cache.insert(key, dummy_result());
         }
 
@@ -193,13 +263,13 @@ mod tests {
 
         // Oldest 10 entries should be evicted
         for i in 0..10 {
-            let key = ContentCacheKey::new(&format!("message-{i}"), false);
+            let key = ContentCacheKey::new(&format!("message-{i}"), LIGHT);
             assert!(cache.get(&key).is_none(), "entry {i} should be evicted");
         }
 
         // Newest entries should still be present
         for i in 10..(MAX_ENTRIES + 10) {
-            let key = ContentCacheKey::new(&format!("message-{i}"), false);
+            let key = ContentCacheKey::new(&format!("message-{i}"), LIGHT);
             assert!(cache.get(&key).is_some(), "entry {i} should be present");
         }
     }
@@ -207,7 +277,7 @@ mod tests {
     #[test]
     fn test_duplicate_insert_no_double_track() {
         let mut cache = ParsedContentCache::new();
-        let key = ContentCacheKey::new("same content", false);
+        let key = ContentCacheKey::new("same content", LIGHT);
 
         cache.insert(key, dummy_result());
         cache.insert(key, dummy_result());
@@ -216,11 +286,42 @@ mod tests {
         assert_eq!(cache.insertion_order.len(), 1);
     }
 
+    /// AGE-394: the styled SVG paths inside a parse result depend on the
+    /// foreground colour, so two themes of the same mode must not share an
+    /// entry.
+    #[test]
+    fn key_changes_with_foreground_colour_not_just_mode() {
+        let other_fg = ThemeKey {
+            is_dark: false,
+            foreground: RgbColor {
+                r: 0.9,
+                g: 0.1,
+                b: 0.1,
+            },
+        };
+        let dark = ThemeKey {
+            is_dark: true,
+            ..LIGHT
+        };
+        assert_ne!(
+            ContentCacheKey::new("x", LIGHT),
+            ContentCacheKey::new("x", other_fg)
+        );
+        assert_ne!(
+            ContentCacheKey::new("x", LIGHT),
+            ContentCacheKey::new("x", dark)
+        );
+        assert_eq!(
+            ContentCacheKey::new("x", LIGHT),
+            ContentCacheKey::new("x", LIGHT)
+        );
+    }
+
     #[test]
     fn test_clear_resets_both_structures() {
         let mut cache = ParsedContentCache::new();
         for i in 0..5 {
-            let key = ContentCacheKey::new(&format!("msg-{i}"), false);
+            let key = ContentCacheKey::new(&format!("msg-{i}"), LIGHT);
             cache.insert(key, dummy_result());
         }
 
