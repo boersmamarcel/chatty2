@@ -86,7 +86,7 @@ Most logic lives in `chatty-core`, so this is the inner loop while you iterate o
 make ci
 ```
 
-`make ci` is `make wasm-modules`, then `cargo test --all-features -- --test-threads=1`, `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`, and the reserved-symbol and rig-pin checks. The full suite is the one that needs the disk space above. [Make targets & CI workflows](../ci-reference.md) lists every target.
+`make ci` is `make wasm-modules`, then `cargo test --all-features`, `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`, and the reserved-symbol and rig-pin checks. The full suite is the one that needs the disk space above. [Make targets & CI workflows](../ci-reference.md) lists every target.
 
 ## Verify
 
@@ -113,7 +113,7 @@ make ci
 | `BadMatch` when the desktop window opens on Linux | Export `XDG_RUNTIME_DIR` as in step 4 |
 | `No space left on device` during `make ci` | [Build disk usage](../architecture/build-disk-usage.md); share a `CARGO_TARGET_DIR` |
 | `fatal error: 'memory' file not found` or `unable to find library -lstdc++` | `cc`/`c++` resolve to clang; point them at `gcc`/`g++` (`update-alternatives` on Debian/Ubuntu) |
-| Tests pass locally but SIGTRAP in CI | Re-run with `--test-threads=1`; see [Test](../guides/test.md) |
+| A SIGTRAP/SIGSEGV/SIGABRT under `cargo test` | A pdfium call bypassing `create_pdfium()`; see [Test](../guides/test.md) |
 
 ## Next
 

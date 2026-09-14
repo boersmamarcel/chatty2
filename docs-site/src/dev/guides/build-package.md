@@ -21,7 +21,7 @@ make wasm-modules # echo-agent WASM for tests
 make ci           # matches the Rust path of GitHub Actions
 ```
 
-`make ci` runs `cargo test --all-features -- --test-threads=1`, `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`, and the reserved-symbol and rig-pin scripts. GitHub skips that compile path when a PR only changes docs; use `make docs` and `make docs-check` for documentation-only work. Every target is listed in [Make targets & CI workflows](../ci-reference.md); which tests to run for a smaller change is in [Test](./test.md).
+`make ci` runs `cargo test --all-features`, `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`, and the reserved-symbol and rig-pin scripts. GitHub skips that compile path when a PR only changes docs; use `make docs` and `make docs-check` for documentation-only work. Every target is listed in [Make targets & CI workflows](../ci-reference.md); which tests to run for a smaller change is in [Test](./test.md).
 
 ### Platform packages
 

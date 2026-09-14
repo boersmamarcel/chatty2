@@ -12,7 +12,7 @@ The Makefile mirrors `.github/workflows/ci.yml`; the workflow is the ground trut
 | `make setup` | Linux: `scripts/setup-linux.sh` (apt packages for GPUI + `rustup target add wasm32-wasip2`). Other OSes: prints instructions and adds the wasm target |
 | `make build` | `cargo build` |
 | `make build-release` | `cargo build --release` |
-| `make test` | `cargo test --all-features -- --test-threads=1` (matches CI) |
+| `make test` | `cargo test --all-features` (matches CI) |
 | `make test-fast` | `cargo test -p chatty-core --lib` |
 | `make test-tui` | `cargo test -p chatty-tui` |
 | `make test-gpui` | `cargo test -p chatty-gpui` |

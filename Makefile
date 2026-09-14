@@ -22,7 +22,7 @@ help:
 	@echo "  make setup         Install Linux system deps + wasm32-wasip2 target"
 	@echo "  make build         cargo build (debug)"
 	@echo "  make build-release cargo build --release"
-	@echo "  make test          Full test suite (matches CI: --all-features --test-threads=1)"
+	@echo "  make test          Full test suite (matches CI: --all-features)"
 	@echo "  make test-fast     cargo test -p chatty-core --lib (quick inner loop)"
 	@echo "  make test-tui      cargo test -p chatty-tui (TUI changes only)"
 	@echo "  make test-gpui     cargo test -p chatty-gpui (GPUI changes only)"
@@ -63,11 +63,12 @@ build:
 build-release:
 	cargo build --release
 
-# Matches the CI invocation exactly. --test-threads=1 is a workaround for
-# intermittent SIGTRAPs in chatty-core under parallel execution on
-# GitHub-hosted runners; see .github/workflows/ci.yml.
+# Matches the CI invocation exactly. Tests run in parallel: the SIGTRAPs
+# that used to force --test-threads=1 were pdfium being used from several
+# test threads at once, fixed at the source by `PdfiumHandle` in
+# crates/chatty-core/src/services/pdfium_utils.rs (AGE-176).
 test:
-	cargo test --all-features -- --test-threads=1
+	cargo test --all-features
 
 # Fast inner loop: most logic lives in chatty-core. Use this while iterating
 # on tools / services / settings models. Run `make test` before pushing.

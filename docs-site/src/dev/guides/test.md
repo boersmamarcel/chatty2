@@ -44,13 +44,13 @@ make test-gateway   # cargo test -p chatty-protocol-gateway
 ### 3. Everything, the way CI runs it
 
 ```bash
-make test           # cargo test --all-features -- --test-threads=1
+make test           # cargo test --all-features
 ```
 
 `--all-features` matters: the `excel`, `docx`, `pdf`, `pptx`, `math-render`, `mermaid`, `duckdb` and `browser` tool groups only compile with their feature on, so a plain `cargo test` never sees them. `make ci` adds formatting, clippy and the repository check scripts; see [Make targets & CI workflows](../ci-reference.md).
 
-> [!WARNING]
-> **`--test-threads=1` is not optional in CI.** `chatty-core` tests intermittently die with SIGTRAP under parallel execution on GitHub-hosted runners; the root cause is unknown and the serialisation is the documented workaround in `.github/workflows/ci.yml`. If CI shows a SIGTRAP and the same tests pass for you, run `cargo test --all-features -- --test-threads=1` locally to reproduce before assuming flakiness.
+> [!NOTE]
+> **Tests run in parallel.** CI used to pass `--test-threads=1` because `chatty-core` tests intermittently died with SIGTRAP. The cause was pdfium, which is not thread-safe, being used from several test threads at once; `create_pdfium()` now hands out a `PdfiumHandle` that serialises every use (AGE-176). If a SIGTRAP, SIGSEGV or SIGABRT comes back under `cargo test`, look for a new pdfium call that bypasses `create_pdfium()` rather than re-adding the flag.
 
 ### 4. Characterization goldens
 
@@ -99,7 +99,7 @@ Deliberately *not* pinned: the real-time interleaving of progress events with ch
 - [ ] New logic in `chatty-core` has a unit test beside it
 - [ ] A new tool has a `gemini_compat` guard (see [Your first change](../start/first-change.md))
 - [ ] Turn-lifecycle changes re-recorded all three golden directories, not one
-- [ ] `make test` passes with `--test-threads=1`
+- [ ] `make test` passes
 
 ## Common mistakes
 
@@ -108,6 +108,6 @@ Deliberately *not* pinned: the real-time interleaving of progress events with ch
 | Deleting a golden file to make a test pass | `UPDATE_GOLDENS=1` and explain the diff |
 | Updating the TUI goldens but not the desktop ones (or the reverse) | Re-run all three; the point is that they agree |
 | `cargo test` without `--all-features` before pushing | `make test` |
-| Reproducing a CI SIGTRAP with parallel tests | `--test-threads=1` |
+| A signal (SIGTRAP/SIGSEGV/SIGABRT) under `cargo test` | Find the pdfium call that bypasses `create_pdfium()`; do not add `--test-threads=1` |
 | Running `browser_live` in CI | It is `#[ignore]`d on purpose; run it locally |
 | Enabling `test-support` in a normal `[dependencies]` block | Dev-dependency only |

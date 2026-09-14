@@ -24,7 +24,7 @@ optionally the word `release`.
 - The branch is `main`, or the working tree carries changes that belong to another issue.
 - Verification has not been run in this session. Run it now if unsure:
   ```bash
-  cargo test --all-features -- --test-threads=1 && cargo fmt --check && \
+  cargo test --all-features && cargo fmt --check && \
   cargo clippy --all-features --all-targets -- -D warnings && bash scripts/check-reserved.sh
   ```
 - `release` was asked but the diff touches release-guarded paths (`RESERVED.md`,

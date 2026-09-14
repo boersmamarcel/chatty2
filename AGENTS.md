@@ -78,7 +78,7 @@ goes green. Stale CI runs on the same PR are cancelled on the next push.
 ```bash
 make setup            # one-time: install Linux deps + wasm32-wasip2 target
 make build            # cargo build (debug)
-make test             # cargo test --all-features -- --test-threads=1  (matches CI)
+make test             # cargo test --all-features  (matches CI)
 make test-fast        # cargo test -p chatty-core --lib  (quick inner loop)
 make test-tui         # cargo test -p chatty-tui          (TUI changes only)
 make test-gpui        # cargo test -p chatty-gpui         (GPUI changes only)
@@ -104,18 +104,23 @@ Or use cargo directly:
 
 ```bash
 cargo build
-cargo test --all-features -- --test-threads=1
+cargo test --all-features
 cargo fmt --check
 cargo clippy --all-features --all-targets -- -D warnings
 ```
 
-### Test-thread footgun
+### Test-thread footgun (fixed, AGE-176)
 
-CI runs tests with `--test-threads=1` because `chatty-core` tests
-intermittently SIGTRAP under parallel execution on GitHub-hosted runners.
-**If you see a SIGTRAP in CI but tests pass locally, run with
-`--test-threads=1` locally to reproduce.** Root cause is unknown; the
-workaround is documented in `.github/workflows/ci.yml`.
+Tests run in parallel again. CI used to pass `--test-threads=1` because
+`chatty-core` tests intermittently died with SIGTRAP; the cause was pdfium,
+which is not thread-safe, being driven from several test threads at once
+(concurrent `FPDF_InitLibrary` hits a Chromium `CHECK` = `int3` = SIGTRAP;
+concurrent rendering corrupts its heap). `create_pdfium()` now returns a
+`PdfiumHandle` that holds a process-wide lock for as long as the caller uses
+pdfium (`crates/chatty-core/src/services/pdfium_utils.rs`), so never take a
+second handle while holding one on the same thread. If a SIGTRAP, SIGSEGV or
+SIGABRT ever comes back under `cargo test`, look for a new pdfium call that
+bypasses `create_pdfium()` before reaching for `--test-threads=1`.
 
 ### Windows footgun
 
@@ -138,8 +143,10 @@ constrained sandbox or CI runner.
 
 ### WASM module prebuild
 
-Some integration tests load `modules/echo-agent/echo_agent.wasm`. Build
-it (once) before running the full test suite:
+`crates/chatty-protocol-gateway/tests/echo_agent_e2e.rs` loads
+`modules/echo-agent/echo_agent.wasm`, which is git-ignored. Build it (once
+per checkout) before running the full test suite; without it those tests
+fail at once with the absolute path they looked at and this command:
 
 ```bash
 make wasm-modules
@@ -223,10 +230,12 @@ examples.
    `scripts/check-no-core-reexports.sh` (in CI) fails the build if they
    come back.
 
-2. **Test parallelism.** See "Test-thread footgun" above.
+2. **Test parallelism.** See "Test-thread footgun" above; it is fixed, so
+   do not add `--test-threads=1` back.
 
-3. **WASM module prebuild.** Tests fail with a missing-file error if you
-   haven't run `make wasm-modules` first.
+3. **WASM module prebuild.** The `echo_agent_e2e` tests fail immediately,
+   naming the missing path and `make wasm-modules`, if you haven't built
+   the module on this checkout.
 
 4. **Linux system packages.** GPUI needs a long list of `lib*-dev`
    packages. Run `make setup` (or `scripts/setup-linux.sh`) on a fresh

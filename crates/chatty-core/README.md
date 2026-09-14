@@ -41,7 +41,7 @@ From the workspace root:
 ```bash
 cargo test -p chatty-core --lib      # fast inner loop (no integration tests)
 cargo test -p chatty-core            # includes integration tests
-make test                            # full CI-equivalent run (--test-threads=1)
+make test                            # full CI-equivalent run
 ```
 
 See [`AGENTS.md`](../../AGENTS.md) for repo-wide conventions and
