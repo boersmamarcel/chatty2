@@ -197,8 +197,12 @@ examples.
 - **Transcript blocks** — Typed block/turn types in
   `chatty-gpui/src/chatty/views/transcript/` render the transcript;
   persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
-  chatty-core. Don't leak transcript block types into chatty-core. The
-  transcript list uses gpui's `list`/`ListState` (measured heights), not
+  chatty-core. Don't leak transcript block types into chatty-core.
+  chatty-tui has its own parallel `MessageBlock` enum
+  (`chatty-tui/src/engine/mod.rs`) matching the desktop's behaviour
+  (activity folds, inline approvals, plan, error, diff) without sharing
+  widgets or a chatty-gpui dependency — see CLAUDE.md. The gpui transcript
+  list uses gpui's `list`/`ListState` (measured heights), not
   `v_virtual_list` (predicted heights) — see CLAUDE.md.
 - **Tool failure signal is text, not a flag** — `map_tool_error()`'s
   `Error: {tool_name}: {message}` prefix is the only thing that tells
