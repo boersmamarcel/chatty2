@@ -14,7 +14,9 @@ use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::paste::PasteStore;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
 use chatty_core::services::team::Team;
-use chatty_core::services::{McpService, MemoryService, StreamSurface};
+use chatty_core::services::{
+    AgentTaskSnapshot, McpService, MemoryService, StreamSurface, is_agent_todo_tool,
+};
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, HostedSession, TurnInput, TurnKind, turn_transport,
 };
@@ -101,6 +103,35 @@ pub enum MessageRole {
 pub enum MessageBlock {
     Text(String),
     ToolCall(ToolCallInfo),
+    /// A run of consecutive, successfully settled tool calls folded into one
+    /// counted sentence once the turn moved on (AGE-136).
+    Activity(Vec<ToolCallInfo>),
+    /// A command approval, shown inline where it happened in the stream —
+    /// the input slot still takes the y/n.
+    Approval(ApprovalInfo),
+    /// The todo plan as one card, rewritten in place as it advances.
+    Plan(AgentTaskSnapshot),
+    /// A stream-ending error.
+    Error(String),
+    /// An edit's stat row, after the edit that made it: `path +a −r`.
+    Diff(DiffStat),
+}
+
+/// An approval as it appears in the transcript. `decision` is `None` while
+/// the prompt is waiting on the user.
+#[derive(Debug, Clone)]
+pub struct ApprovalInfo {
+    pub id: String,
+    pub command: String,
+    pub is_sandboxed: bool,
+    pub decision: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffStat {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -160,11 +191,65 @@ impl DisplayMessage {
         })
     }
 
+    /// Every tool call, folded ones included, in transcript order.
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCallInfo> {
-        self.blocks.iter().filter_map(|b| match b {
-            MessageBlock::ToolCall(tc) => Some(tc),
+        self.blocks.iter().flat_map(|b| match b {
+            MessageBlock::ToolCall(tc) => std::slice::from_ref(tc),
+            MessageBlock::Activity(tools) => tools.as_slice(),
+            _ => &[],
+        })
+    }
+
+    pub fn approval_mut(&mut self, id: &str) -> Option<&mut ApprovalInfo> {
+        self.blocks.iter_mut().find_map(|b| match b {
+            MessageBlock::Approval(a) if a.id == id => Some(a),
             _ => None,
         })
+    }
+
+    /// Rewrite the plan card in place, or open it where the plan was first
+    /// written.
+    pub fn set_plan(&mut self, snapshot: AgentTaskSnapshot) {
+        if let Some(MessageBlock::Plan(existing)) = self
+            .blocks
+            .iter_mut()
+            .find(|b| matches!(b, MessageBlock::Plan(_)))
+        {
+            *existing = snapshot;
+        } else {
+            self.blocks.push(MessageBlock::Plan(snapshot));
+        }
+    }
+
+    /// Fold every run of two or more consecutive, successfully settled tool
+    /// calls into one `Activity` block. A running or failed call, a todo call
+    /// (that is the plan's) or any other block ends a run.
+    pub fn fold_settled_tools(&mut self) {
+        let mut folded = Vec::with_capacity(self.blocks.len());
+        let mut run: Vec<ToolCallInfo> = Vec::new();
+        let flush = |run: &mut Vec<ToolCallInfo>, folded: &mut Vec<MessageBlock>| {
+            if run.len() >= 2 {
+                folded.push(MessageBlock::Activity(std::mem::take(run)));
+            } else {
+                folded.extend(run.drain(..).map(MessageBlock::ToolCall));
+            }
+        };
+        for block in self.blocks.drain(..) {
+            match block {
+                MessageBlock::ToolCall(tc)
+                    if matches!(tc.state, ToolCallState::Success)
+                        && !is_agent_todo_tool(&tc.name) =>
+                {
+                    run.push(tc);
+                }
+                other => {
+                    flush(&mut run, &mut folded);
+                    folded.push(other);
+                }
+            }
+        }
+        flush(&mut run, &mut folded);
+        self.blocks = folded;
     }
 }
 
@@ -801,6 +886,8 @@ impl ChatEngine {
             } => {
                 self.session
                     .note_approval_requested(&id, &command, is_sandboxed);
+                self.transcript
+                    .approval_requested(id.clone(), command.clone(), is_sandboxed);
                 self.pending_approval = Some(PendingApproval {
                     id,
                     command,
@@ -810,6 +897,7 @@ impl ChatEngine {
             }
             AppEvent::ApprovalResolved { id, approved } => {
                 self.session.note_approval_resolved(&id, approved);
+                self.transcript.approval_resolved(&id, approved);
                 self.pending_approval = None;
                 EngineAction::Redraw
             }
@@ -1453,15 +1541,98 @@ mod tests {
                 )],
             })
         );
-        assert!(
-            engine
-                .transcript
-                .messages
-                .last()
-                .unwrap()
-                .text()
-                .contains("[Error:")
+        assert!(matches!(
+            engine.transcript.messages.last().unwrap().blocks.last(),
+            Some(MessageBlock::Error(_))
+        ));
+    }
+
+    /// AGE-136 acceptance: a turn with tools, an approval and a plan shows
+    /// them as distinct blocks on the assistant row, and the consecutive
+    /// settled tools collapse to one activity block.
+    #[tokio::test]
+    async fn a_turn_with_tools_an_approval_and_a_plan_renders_distinct_blocks() {
+        use chatty_core::services::{Scenario, ScriptedItem, StreamChunk};
+
+        let todo_output = r#"{"message":"ok","snapshot":{"goal":"ship","todos":[{"id":"t1","title":"Read it","description":"","status":"in_progress"}],"write_todos_called":true,"verified":false,"evidence":[]}}"#;
+        let started = |id: &str, name: &str| {
+            ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                id: id.into(),
+                name: name.into(),
+            })
+        };
+        let result = |id: &str, result: &str| {
+            ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                id: id.into(),
+                result: result.into(),
+            })
+        };
+        let scenario = Scenario {
+            name: "age_136_block_parity",
+            progress: Vec::new(),
+            items: vec![
+                started("c1", "write_todos"),
+                result("c1", todo_output),
+                started("c2", "read_file"),
+                result("c2", "contents"),
+                started("c3", "search_code"),
+                result("c3", "hit"),
+                started("c4", "run_shell"),
+                ScriptedItem::Chunk(StreamChunk::ApprovalRequested {
+                    id: "a1".into(),
+                    command: "rm -rf build".into(),
+                    is_sandboxed: false,
+                }),
+                ScriptedItem::Chunk(StreamChunk::ApprovalResolved {
+                    id: "a1".into(),
+                    approved: true,
+                }),
+                result("c4", "removed 'build'"),
+                ScriptedItem::Chunk(StreamChunk::Text("Done.".into())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        };
+
+        let (mut engine, mut event_rx) = test_engine().await;
+        send_scripted(&mut engine, &mut event_rx, "go", scenario).await;
+
+        // The turn's own row; the todo nudge that follows four tool calls
+        // opens a follow-up turn after it.
+        let row = engine
+            .transcript
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, MessageRole::Assistant))
+            .unwrap();
+        let kinds: Vec<&str> = row
+            .blocks
+            .iter()
+            .map(|b| match b {
+                MessageBlock::ToolCall(tc) => {
+                    if is_agent_todo_tool(&tc.name) {
+                        "todo-call"
+                    } else {
+                        "tool"
+                    }
+                }
+                MessageBlock::Activity(_) => "activity",
+                MessageBlock::Approval(a) if a.decision == Some(true) => "approval-allowed",
+                MessageBlock::Approval(_) => "approval",
+                MessageBlock::Plan(_) => "plan",
+                MessageBlock::Text(_) => "text",
+                _ => "other",
+            })
+            .collect();
+        // read_file, search_code and the approved run_shell all settled, so
+        // they fold into one counted activity; the approval sits where the
+        // stream asked for it.
+        assert_eq!(
+            kinds,
+            vec!["todo-call", "plan", "activity", "approval-allowed", "text"]
         );
+        assert!(matches!(&row.blocks[2], MessageBlock::Activity(tools) if tools.len() == 3));
+        assert!(engine.pending_approval.is_none());
+        assert!(!row.is_streaming);
     }
 
     /// A `ChatEngine` with no conversation, for tests that only exercise

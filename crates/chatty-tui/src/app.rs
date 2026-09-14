@@ -951,16 +951,20 @@ mod tests {
         let last = engine.transcript.messages.last().unwrap();
         assert_eq!(
             last.blocks.len(),
-            3,
-            "text/tool/text — never merged across the tool call"
+            5,
+            "text/tool/text/approval/text — never merged across the tool call or the approval"
         );
         assert!(matches!(&last.blocks[0], crate::engine::MessageBlock::Text(t) if t == "a"));
         assert!(
             matches!(&last.blocks[1], crate::engine::MessageBlock::ToolCall(tc) if tc.id == "t1")
         );
-        // "b" and "c" land in the same trailing block: the approval in between
-        // does not open a new text block, so they coalesce together.
-        assert!(matches!(&last.blocks[2], crate::engine::MessageBlock::Text(t) if t == "bc"));
+        // The approval is a block in the stream (AGE-136), so "b" and "c"
+        // stay on either side of it instead of coalescing across it.
+        assert!(matches!(&last.blocks[2], crate::engine::MessageBlock::Text(t) if t == "b"));
+        assert!(
+            matches!(&last.blocks[3], crate::engine::MessageBlock::Approval(a) if a.id == "a1")
+        );
+        assert!(matches!(&last.blocks[4], crate::engine::MessageBlock::Text(t) if t == "c"));
         assert_eq!(
             engine.pending_approval.as_ref().map(|a| a.id.as_str()),
             Some("a1"),

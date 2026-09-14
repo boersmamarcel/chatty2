@@ -7,11 +7,12 @@ use ratatui::widgets::{
 };
 
 use crate::engine::{
-    ChatEngine, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo, ToolCallState,
+    ApprovalInfo, ChatEngine, DiffStat, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo,
+    ToolCallState,
 };
 use crate::ui::theme;
-use crate::ui::{plan, tool_summary};
-use chatty_core::services::{AgentTaskSnapshot, is_agent_todo_tool, snapshot_from_tool_output};
+use crate::ui::{plan, tool_summary, verb};
+use chatty_core::services::{AgentTaskSnapshot, is_agent_todo_tool};
 
 pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
     // Remember the chat area so mouse wheel events can route correctly.
@@ -265,41 +266,9 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, wi
 
     lines.push(Line::from(Span::styled(format!("[{}]", label), style)));
 
-    // The todo plan is a state, not a stream of events: draw the newest
-    // snapshot once, where the plan was first written, and let every later
-    // `update_todo` rewrite it in place instead of adding two more rows
-    // (AGE-342). Verbose mode still shows the raw calls.
-    let plan = if verbose { None } else { latest_plan(msg) };
-    let mut plan_drawn = false;
-
     // Render blocks in the order they arrived so text and tool calls interleave.
     for block in &msg.blocks {
-        match block {
-            MessageBlock::Text(text) => {
-                for line in text.lines() {
-                    lines.push(Line::from(line.to_string()));
-                }
-                // Preserve a trailing empty line when the text ended on a newline.
-                if text.ends_with('\n') {
-                    lines.push(Line::from(""));
-                }
-            }
-            MessageBlock::ToolCall(tc) => {
-                // A failed todo call keeps the normal rendering: it is rare,
-                // it is diagnostic, and errors are never hidden (AGE-340).
-                if let Some(snapshot) = plan.as_ref()
-                    && is_agent_todo_tool(&tc.name)
-                    && !matches!(tc.state, ToolCallState::Error)
-                {
-                    if !plan_drawn {
-                        render_plan(lines, snapshot, width);
-                        plan_drawn = true;
-                    }
-                    continue;
-                }
-                render_tool_call(lines, tc, verbose, width);
-            }
-        }
+        render_block(lines, block, verbose, width, msg.is_streaming);
     }
 
     // Streaming cursor — only when actively streaming text (no trailing tool call).
@@ -309,17 +278,110 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, wi
     }
 }
 
-/// The newest task snapshot in this message, which every todo tool returns
-/// alongside its model-directed `message` field.
-fn latest_plan(msg: &DisplayMessage) -> Option<AgentTaskSnapshot> {
-    msg.blocks
-        .iter()
-        .rev()
-        .filter_map(|block| match block {
-            MessageBlock::ToolCall(tc) if is_agent_todo_tool(&tc.name) => tc.output.as_deref(),
-            _ => None,
-        })
-        .find_map(snapshot_from_tool_output)
+/// One block of a message (AGE-136). The todo plan is a state, not a stream
+/// of events: its `Plan` block is the card, and the successful todo calls
+/// that fed it are skipped — except in verbose mode, which shows the raw
+/// calls and skips the card instead (AGE-342). A failed todo call keeps the
+/// normal rendering: it is diagnostic, and errors are never hidden (AGE-340).
+fn render_block(
+    lines: &mut Vec<Line>,
+    block: &MessageBlock,
+    verbose: bool,
+    width: u16,
+    streaming: bool,
+) {
+    match block {
+        MessageBlock::Text(text) => {
+            for line in text.lines() {
+                lines.push(Line::from(line.to_string()));
+            }
+            // Preserve a trailing empty line when the text ended on a newline.
+            if text.ends_with('\n') {
+                lines.push(Line::from(""));
+            }
+        }
+        MessageBlock::ToolCall(tc) => {
+            if !verbose && is_agent_todo_tool(&tc.name) && !matches!(tc.state, ToolCallState::Error)
+            {
+                return;
+            }
+            render_tool_call(lines, tc, verbose, width);
+        }
+        MessageBlock::Activity(tools) => {
+            if verbose {
+                for tc in tools {
+                    render_tool_call(lines, tc, verbose, width);
+                }
+            } else {
+                render_activity(lines, tools);
+            }
+        }
+        MessageBlock::Approval(approval) => render_approval(lines, approval, streaming),
+        MessageBlock::Plan(snapshot) => {
+            if !verbose {
+                render_plan(lines, snapshot, width);
+            }
+        }
+        MessageBlock::Error(error) => {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("✗ ", theme::error()),
+                Span::styled(format!("Error: {error}"), theme::error()),
+            ]));
+        }
+        MessageBlock::Diff(stat) => lines.push(diff_line(stat)),
+    }
+}
+
+/// A folded run of settled tools as one counted sentence, in the desktop's
+/// tally order: `✓ Edited 2 files, explored 3 files, ran 1 command`.
+fn render_activity(lines: &mut Vec<Line>, tools: &[ToolCallInfo]) {
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("✓", theme::success()),
+        Span::raw(" "),
+        Span::styled(
+            verb::ActivityTally::from_tools(tools).sentence(),
+            theme::tool(),
+        ),
+    ]));
+}
+
+/// The approval where it happened in the stream. While pending, the input
+/// slot below carries the same y/n contract; an undecided approval on a row
+/// that is no longer streaming was cancelled with its turn.
+fn render_approval(lines: &mut Vec<Line>, approval: &ApprovalInfo, streaming: bool) {
+    let (glyph, verdict, style) = match approval.decision {
+        None if streaming => ("?", "waiting for y/n", theme::warning()),
+        None => ("–", "cancelled", theme::muted()),
+        Some(true) => ("✓", "allowed", theme::success()),
+        Some(false) => ("✗", "denied", theme::error()),
+    };
+    let scope = if approval.is_sandboxed {
+        "sandboxed"
+    } else {
+        "host"
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(glyph, style),
+        Span::raw(" "),
+        Span::styled("Approve", theme::tool_bold()),
+        Span::styled(format!(" [{scope}] "), theme::muted()),
+        Span::styled(approval.command.clone(), theme::text()),
+        Span::styled(format!(" — {verdict}"), style),
+    ]));
+}
+
+/// `± path +12 −3`.
+fn diff_line(stat: &DiffStat) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled("± ", theme::accent()),
+        Span::styled(stat.path.clone(), theme::text()),
+        Span::styled(format!(" +{}", stat.added), theme::success()),
+        Span::styled(format!(" −{}", stat.removed), theme::error()),
+    ])
 }
 
 /// The plan card: one header row plus a row per todo, rewritten in place as
@@ -388,7 +450,14 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u
         ToolCallState::Error => " failed".len(),
         ToolCallState::Success => 0,
     };
-    let overhead = 6 + tc.name.chars().count() + status_width;
+    // Known tools read as tense verb + subject (`Read README.md`); the rest
+    // keep their raw `name(args)` header. Either way what follows the verb
+    // or name gets the columns the header has left.
+    let verb = verb::verb_for(&tc.name, &tc.state);
+    let overhead = match &verb {
+        Some(verb) => 5 + verb.chars().count(),
+        None => 6 + tc.name.chars().count() + status_width,
+    };
     let badge_width = badge.as_ref().map_or(0, |b| b.content.chars().count() + 1);
 
     // On a narrow terminal the badge yields before the preview does — it is the
@@ -403,30 +472,40 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u
         usize::from(width).saturating_sub(overhead + badge_width)
     };
 
+    let has_label = verb.is_some();
     let mut header = vec![
         Span::raw("  "),
         Span::styled(icon, tc_style),
         Span::raw(" "),
-        Span::styled(tc.name.clone(), theme::tool()),
-        Span::styled(
+    ];
+    if let Some(verb) = verb {
+        header.push(Span::styled(verb, theme::tool()));
+        let subject = tool_summary::truncate(&verb::subject_for(&tc.input), budget);
+        if !subject.is_empty() {
+            header.push(Span::styled(format!(" {subject}"), theme::text()));
+        }
+    } else {
+        header.push(Span::styled(tc.name.clone(), theme::tool()));
+        header.push(Span::styled(
             format!("({})", tool_summary::summarize_input(&tc.input, budget)),
             theme::text_subtle(),
-        ),
-    ];
+        ));
+    }
     if let Some(badge) = badge {
         header.push(Span::raw(" "));
         header.push(badge);
     }
+    // The verb already carries the tense; only a raw header needs the word.
     match &tc.state {
-        ToolCallState::Running => {
+        ToolCallState::Running if !has_label => {
             header.push(Span::raw(" "));
             header.push(Span::styled("running", tc_style));
         }
-        ToolCallState::Error => {
+        ToolCallState::Error if !has_label => {
             header.push(Span::raw(" "));
             header.push(Span::styled("failed", tc_style));
         }
-        ToolCallState::Success => {}
+        _ => {}
     }
     lines.push(Line::from(header));
 
@@ -660,6 +739,7 @@ fn format_count(count: u32) -> String {
 mod tests {
     use super::*;
     use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+    use chatty_core::services::snapshot_from_tool_output;
 
     #[test]
     fn tool_payload_lines_pretty_print_json() {
@@ -737,7 +817,7 @@ mod tests {
         assert_eq!(
             render(&tc, false),
             vec![
-                "  ✓ shell_execute(ls -la /notes) [shell (local)]".to_string(),
+                "  ✓ Ran ls -la /notes [shell (local)]".to_string(),
                 "    ⎿ DIR entry-1".to_string(),
                 "      DIR entry-2".to_string(),
                 "      DIR entry-3".to_string(),
@@ -757,7 +837,7 @@ mod tests {
         assert_eq!(
             render(&tc, false),
             vec![
-                "  ✗ shell_execute(pwd) [shell (local)] failed".to_string(),
+                "  ✗ Failed Ran pwd [shell (local)]".to_string(),
                 "    ⎿ line 1".to_string(),
                 "      line 2".to_string(),
                 "      line 3".to_string(),
@@ -773,7 +853,94 @@ mod tests {
 
         assert_eq!(
             render(&tc, false),
-            vec!["  ⟳ shell_execute(cargo test) [shell (local)] running".to_string()]
+            vec!["  ⟳ Running cargo test [shell (local)]".to_string()]
+        );
+    }
+
+    /// AGE-136 acceptance: tools, an approval and a plan render as distinct
+    /// rows on one assistant message, and a folded run reads as the counted
+    /// sentence in the desktop's order.
+    #[test]
+    fn a_message_with_tools_an_approval_and_a_plan_renders_distinct_rows() {
+        let mut read = tool_call(
+            r#"{"path":"README.md"}"#,
+            Some("text"),
+            ToolCallState::Success,
+        );
+        read.name = "read_file".into();
+        read.execution_engine = None;
+        let mut search = read.clone();
+        search.name = "search_code".into();
+        let snapshot: AgentTaskSnapshot = serde_json::from_str(
+            r#"{"goal":"ship","todos":[{"id":"t1","title":"Read it","description":"","status":"in_progress"}],"write_todos_called":true,"verified":false,"evidence":[]}"#,
+        )
+        .unwrap();
+        let msg = DisplayMessage {
+            role: MessageRole::Assistant,
+            is_streaming: false,
+            blocks: vec![
+                MessageBlock::Plan(snapshot),
+                MessageBlock::Activity(vec![read, search]),
+                MessageBlock::ToolCall(tool_call(
+                    r#"{"command":"rm -rf build"}"#,
+                    Some("removed 'build'"),
+                    ToolCallState::Success,
+                )),
+                MessageBlock::Approval(ApprovalInfo {
+                    id: "a1".into(),
+                    command: "rm -rf build".into(),
+                    is_sandboxed: false,
+                    decision: Some(true),
+                }),
+                MessageBlock::Diff(DiffStat {
+                    path: "src/lib.rs".into(),
+                    added: 3,
+                    removed: 1,
+                }),
+                MessageBlock::Error("provider went away".into()),
+                MessageBlock::Text("Done.".into()),
+            ],
+        };
+
+        let mut lines = Vec::new();
+        render_message(&mut lines, &msg, false, 80);
+        let rows: Vec<String> = lines.iter().map(line_text).collect();
+
+        assert_eq!(rows[0], "[assistant]");
+        assert!(rows[1].contains("Plan"), "plan card header: {:?}", rows[1]);
+        assert!(
+            rows.contains(&"  ✓ explored 1 file, 1 search".to_string()),
+            "activity fold: {rows:?}"
+        );
+        assert!(rows.contains(&"  ✓ Ran rm -rf build [shell (local)]".to_string()));
+        assert!(rows.contains(&"  ✓ Approve [host] rm -rf build — allowed".to_string()));
+        assert!(rows.contains(&"  ± src/lib.rs +3 −1".to_string()));
+        assert!(rows.contains(&"  ✗ Error: provider went away".to_string()));
+        assert_eq!(rows.last().map(String::as_str), Some("Done."));
+    }
+
+    #[test]
+    fn a_pending_approval_row_points_at_the_y_n_prompt() {
+        let approval = ApprovalInfo {
+            id: "a1".into(),
+            command: "cargo publish".into(),
+            is_sandboxed: true,
+            decision: None,
+        };
+        let mut lines = Vec::new();
+        render_approval(&mut lines, &approval, true);
+        assert_eq!(
+            lines.iter().map(line_text).collect::<Vec<_>>(),
+            vec!["  ? Approve [sandboxed] cargo publish — waiting for y/n".to_string()]
+        );
+
+        // The same approval on a row that stopped streaming (the turn was
+        // cancelled) must not keep pointing at a prompt that is gone.
+        let mut lines = Vec::new();
+        render_approval(&mut lines, &approval, false);
+        assert_eq!(
+            lines.iter().map(line_text).collect::<Vec<_>>(),
+            vec!["  – Approve [sandboxed] cargo publish — cancelled".to_string()]
         );
     }
 
@@ -891,12 +1058,26 @@ mod tests {
         }
     }
 
+    /// Blocks as the transcript would hold them: a successful todo call's
+    /// snapshot becomes the message's one `Plan` block (AGE-136).
     fn assistant_with(blocks: Vec<MessageBlock>) -> DisplayMessage {
-        DisplayMessage {
-            role: MessageRole::Assistant,
-            blocks,
-            is_streaming: false,
+        let mut msg = DisplayMessage::new(MessageRole::Assistant, false);
+        for block in blocks {
+            let plan = match &block {
+                MessageBlock::ToolCall(tc)
+                    if is_agent_todo_tool(&tc.name)
+                        && matches!(tc.state, ToolCallState::Success) =>
+                {
+                    tc.output.as_deref().and_then(snapshot_from_tool_output)
+                }
+                _ => None,
+            };
+            msg.blocks.push(block);
+            if let Some(snapshot) = plan {
+                msg.set_plan(snapshot);
+            }
         }
+        msg
     }
 
     fn render_msg(msg: &DisplayMessage, verbose: bool, width: u16) -> Vec<String> {
@@ -965,10 +1146,7 @@ mod tests {
         assert_eq!(rendered[1], "Planning.");
         assert!(rendered[3].starts_with("  ▣ Plan"), "{rendered:?}");
         assert!(rendered[4].contains("Collect merged PRs"));
-        assert!(
-            rendered[5].contains("shell_execute(gh pr list)"),
-            "{rendered:?}"
-        );
+        assert!(rendered[5].contains("Ran gh pr list"), "{rendered:?}");
     }
 
     /// `blocked_reason` is the user's business; the model's `reflection` and

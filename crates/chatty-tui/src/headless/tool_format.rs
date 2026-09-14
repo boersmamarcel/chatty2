@@ -4,8 +4,10 @@
 //! line-oriented output the CLI prints to stdout. No I/O, no async, no
 //! engine state mutation.
 
-use crate::engine::{ToolCallInfo, ToolCallState};
+use crate::engine::{ApprovalInfo, ToolCallInfo, ToolCallState};
+use crate::ui::plan;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use chatty_core::services::AgentTaskSnapshot;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 pub(super) fn format_tool_call_lines(tc: &ToolCallInfo) -> Vec<String> {
@@ -65,6 +67,41 @@ pub(super) fn format_delegation_lines(
             lines
         }
     }
+}
+
+/// The approval block as the CLI trace shows it (AGE-136): the prompt when
+/// it is raised, its verdict when it resolves.
+pub(super) fn format_approval_requested(approval: &ApprovalInfo) -> String {
+    let scope = if approval.is_sandboxed {
+        "sandboxed"
+    } else {
+        "host"
+    };
+    format!("  ? Approve [{scope}] {}", approval.command)
+}
+
+pub(super) fn format_approval_resolved(approved: bool) -> String {
+    if approved {
+        "  \u{2713} allowed".to_string()
+    } else {
+        "  \u{2717} denied".to_string()
+    }
+}
+
+/// The plan card, one row per line, as the chat view draws it at 80 columns.
+pub(super) fn format_plan_lines(snapshot: &AgentTaskSnapshot) -> Vec<String> {
+    const WIDTH: usize = 80;
+    plan::plan_rows(snapshot, WIDTH, snapshot.verified)
+        .into_iter()
+        .map(|row| {
+            let mut line = format!("{}{} {}", " ".repeat(row.indent), row.glyph, row.text);
+            if !row.trailing.is_empty() {
+                line.push_str(&" ".repeat(row.padding(WIDTH)));
+                line.push_str(&row.trailing);
+            }
+            line
+        })
+        .collect()
 }
 
 pub(super) fn format_tool_call_header(tc: &ToolCallInfo) -> String {

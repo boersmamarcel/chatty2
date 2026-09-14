@@ -262,11 +262,15 @@ impl HeadlessRunner {
                 id,
                 command,
                 is_sandboxed,
-            } => self
-                .session
-                .note_approval_requested(&id, &command, is_sandboxed),
+            } => {
+                self.session
+                    .note_approval_requested(&id, &command, is_sandboxed);
+                self.transcript
+                    .approval_requested(id, command, is_sandboxed);
+            }
             AppEvent::ApprovalResolved { id, approved } => {
-                self.session.note_approval_resolved(&id, approved)
+                self.session.note_approval_resolved(&id, approved);
+                self.transcript.approval_resolved(&id, approved);
             }
             AppEvent::ClarificationRequested { id, questions } => {
                 self.session.note_clarification_requested(&id, &questions);
