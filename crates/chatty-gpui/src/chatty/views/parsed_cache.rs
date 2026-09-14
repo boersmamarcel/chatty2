@@ -163,13 +163,13 @@ pub struct StreamingParseState {
 /// The settled prefix of the streaming text segment and its math parse.
 ///
 /// Only the tail after the last newline changes from one text batch to the
-/// next, so the prefix's `parse_math_segments` result is kept and handed out
+/// next, so the prefix's resolved math parse is kept and handed out
 /// by pointer until a newline moves the split.
 #[derive(Clone, Debug)]
 pub struct LiveTailCache {
     /// The text up to and including the last newline.
     pub settled_text: String,
-    pub settled: Arc<Vec<MathSegment>>,
+    pub settled: Arc<Vec<CachedMathSegment>>,
 }
 
 /// Bounded cache for parsed message content, keyed by content hash + theme.
