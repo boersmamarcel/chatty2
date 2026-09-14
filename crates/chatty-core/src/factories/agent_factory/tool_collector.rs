@@ -9,7 +9,7 @@ use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, AskUserTool, BrowserUseTool, CreateChartTool,
     CreateDirectoryTool, DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool,
     FinalAnswerTool, FindDefinitionTool, FindFilesTool, GitAddTool, GitCommitTool,
-    GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool, GitSwitchBranchTool,
+    GitCreateBranchTool, GitDiffTool, GitLogTool, GitMergeTool, GitStatusTool, GitSwitchBranchTool,
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
@@ -56,7 +56,7 @@ pub(super) type ShellTools = (
     ShellStatusTool,
 );
 
-/// Git integration tool set (seven git tools)
+/// Git integration tool set (eight git tools)
 pub(super) type GitTools = (
     GitStatusTool,
     GitDiffTool,
@@ -65,6 +65,7 @@ pub(super) type GitTools = (
     GitCreateBranchTool,
     GitSwitchBranchTool,
     GitCommitTool,
+    GitMergeTool,
 );
 
 /// Code search tool set (search_code, find_files, find_definition)
@@ -221,7 +222,7 @@ impl NativeTools {
             b = add(b, profile, cd);
             b = add(b, profile, status);
         }
-        if let Some((status, diff, log, add_tool, create_branch, switch_branch, commit)) =
+        if let Some((status, diff, log, add_tool, create_branch, switch_branch, commit, merge)) =
             self.git_tools
         {
             b = add(b, profile, status);
@@ -231,6 +232,7 @@ impl NativeTools {
             b = add(b, profile, create_branch);
             b = add(b, profile, switch_branch);
             b = add(b, profile, commit);
+            b = add(b, profile, merge);
         }
         if let Some((sc, ff, fd)) = self.search_tools {
             b = add(b, profile, sc);

@@ -40,6 +40,7 @@ fn policy() -> TurnPolicy {
         max_agent_turns: 10,
         loop_guard: false,
         already_asked_to_retry: false,
+        think_disabled: false,
     }
 }
 
@@ -610,6 +611,68 @@ mod empty_completion {
                 .iter()
                 .any(|e| matches!(e, SessionEvent::FollowUp(_))),
             "the nudge lives inside the turn, not after it"
+        );
+    }
+
+    /// AGE-404: with `extra_params.think` already `"false"` the thinking
+    /// channel cannot be the cause, so the error must not point at it.
+    #[tokio::test]
+    async fn with_thinking_off_the_error_names_no_known_tool_call_instead() {
+        let events = replay_scenario(
+            scenario(vec![call(1, 90), StreamChunk::Done]),
+            TurnPolicy {
+                think_disabled: true,
+                ..policy()
+            },
+        )
+        .await;
+        let SessionEvent::Error(err) = empty_error(&events).expect("an EmptyCompletion error")
+        else {
+            unreachable!()
+        };
+        assert_eq!(err.kind, StreamErrorKind::EmptyCompletion);
+        assert!(
+            err.message.contains("no text and no known tool call"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("thinking channel"),
+            "must not point at a channel that is off: {}",
+            err.message
+        );
+
+        let default =
+            replay_scenario(scenario(vec![call(1, 90), StreamChunk::Done]), policy()).await;
+        let SessionEvent::Error(err) = empty_error(&default).unwrap() else {
+            unreachable!()
+        };
+        assert!(err.message.contains("thinking channel"), "{}", err.message);
+    }
+
+    /// The bound model decides: `think` = "false" in `extra_params` reaches
+    /// the policy through the conversation, and a model switch re-reads it.
+    #[tokio::test]
+    async fn think_disabled_is_bound_with_the_model() {
+        let mut thinking_off = unpriced_model();
+        thinking_off
+            .extra_params
+            .insert("think".to_string(), "false".to_string());
+        let mut session = session_with_model(&thinking_off).await;
+        assert!(session.conversation().unwrap().think_disabled());
+
+        let ctx = session.build_context(AgentBuildContext::from_services(AgentServices::default()));
+        let built = crate::factories::AgentClient::from_model_config_with_tools(
+            &unpriced_model(),
+            &ollama_provider(),
+            ctx,
+        )
+        .await
+        .expect("the agent builds without network access");
+        assert!(session.install_agent(built, &unpriced_model(), None));
+        assert!(
+            !session.conversation().unwrap().think_disabled(),
+            "a model without the switch gets the default text again"
         );
     }
 
