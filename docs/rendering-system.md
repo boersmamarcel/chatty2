@@ -92,8 +92,11 @@ enum MathSegment {
 
 `build_cached_parse_result()` applies the expensive work once per message: tree-sitter
 syntax highlighting for code blocks (`syntax_highlighter::highlight_code`), math
-parsing for text segments, and `MermaidRendererService::render_to_svg_file()` for
-` ```mermaid ` blocks.
+parsing for text segments followed by `resolve_math_segments()` — which asks
+`MathRendererService::render_to_styled_svg_file()` for every equation's SVG path
+and stores it — and `MermaidRendererService::render_to_svg_file()` for
+` ```mermaid ` blocks. Every path lookup happens here, not in the render pass
+(AGE-394).
 
 ```rust
 struct CachedParseResult {
@@ -106,10 +109,16 @@ enum CachedContentSegment {
 }
 
 enum CachedMarkdownSegment {
-    TextWithMath(Vec<MathSegment>),
+    TextWithMath(Vec<CachedMathSegment>),
     CodeBlock(CachedCodeBlock),           // language + code + pre-computed styles
     IncompleteCodeBlock { language, code },
     MermaidDiagram { source, svg_path: Option<PathBuf> },
+}
+
+enum CachedMathSegment {                  // MathSegment + the resolved SVG path
+    Text(String),
+    InlineMath { latex, svg_path: Option<PathBuf> },
+    BlockMath { latex, svg_path: Option<PathBuf> },
 }
 ```
 
@@ -118,7 +127,9 @@ enum CachedMarkdownSegment {
 `render_from_cached()` dispatches each `CachedMarkdownSegment` to its component:
 `CodeBlock` and `IncompleteCodeBlock` to `CodeBlockComponent` (the latter with no
 highlight styles), `TextWithMath` to `render_math_segments()` (which interleaves
-`MathComponent` images with text), and `MermaidDiagram` to `MermaidComponent`, which
+`MathComponent` images with text, each built from its stored `svg_path` — the render
+pass never touches `MathRendererService`, so no digest, `stat` or Typst compile
+runs per equation per frame), and `MermaidDiagram` to `MermaidComponent`, which
 falls back to the monospace source when no SVG was produced.
 
 Math SVGs come from `MathRendererService` in chatty-core (LaTeX → MiTeX → Typst →
@@ -131,8 +142,13 @@ SVG, theme colour injected, cached on disk; see the Math Cache notes in
 ### Cache key
 
 ```rust
-struct ContentCacheKey(u64);  // hash(content + is_dark_theme)
+struct ContentCacheKey(u64);  // FxHash(content + is_dark_theme + foreground colour)
 ```
+
+The foreground colour is part of the key because the styled math SVG paths
+inside a result are colour-specific (`ThemeKey::current(cx)` gathers both theme
+inputs). The hash is `FxHasher`, not SipHash: it runs over the whole message on
+every frame the message is visible.
 
 The key includes the theme mode because highlight styles are theme-dependent; a
 message that is viewed in both themes gets two entries.

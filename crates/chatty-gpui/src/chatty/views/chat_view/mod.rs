@@ -2054,12 +2054,10 @@ impl ChatView {
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
-                        .on_scroll_wheel({
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |_, cx| cx.notify());
-                            }
-                        })
+                        // No `on_scroll_wheel → notify` here: `ListState::scroll`
+                        // already notifies this view for every wheel tick it
+                        // consumes, and a second notify per tick only bought a
+                        // second full `ChatView::render` (AGE-394).
                         .child(
                             // Horizontal padding and the gap between turns live
                             // on the item, not here: `List` places items at the

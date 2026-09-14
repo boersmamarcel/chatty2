@@ -1,18 +1,28 @@
 //! Math-aware rendering for message content.
 //!
-//! Converts pre-parsed [`MathSegment`] slices into GPUI elements, handling:
+//! [`resolve_math_segments`] runs at parse time and turns the parser's
+//! [`MathSegment`]s into [`CachedMathSegment`]s with every equation's styled
+//! SVG path already looked up. The render functions convert those into GPUI
+//! elements, handling:
 //! - **Block math**: Standalone LaTeX expressions rendered as SVG via [`MathComponent`]
 //! - **Inline math**: Interleaved with text in full-width flex rows
 //! - **Text-only runs**: Passed through as [`MarkdownContent`] with full formatting
+//!
+//! Nothing on the render side touches [`MathRendererService`]: that lookup
+//! (three digests, a `stat`, a clone of the cached SVG) used to run for every
+//! equation on every frame, which is what made a math-heavy answer scroll in
+//! multi-hundred-millisecond stalls (AGE-394).
 
 use crate::chatty::services::MathRendererService;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
+use std::path::PathBuf;
 use tracing::warn;
 
 use super::math_parser::MathSegment;
 use super::math_renderer::MathComponent;
+use super::parsed_cache::CachedMathSegment;
 
 /// Wrapper component for rendering markdown content
 #[derive(IntoElement, Clone)]
@@ -30,51 +40,70 @@ impl RenderOnce for MarkdownContent {
     }
 }
 
-/// Pre-render a math expression to a `MathComponent` with SVG caching.
+/// Resolve every equation's styled SVG path, once, at parse time.
 ///
-/// Uses the theme foreground color for the SVG and falls back to lazy
-/// rendering if the SVG cache misses.
-pub(super) fn make_math_component(
-    math_content: &str,
-    is_inline: bool,
-    element_id: ElementId,
+/// Uses the theme foreground colour for the SVG; an equation whose render
+/// fails keeps `svg_path: None` and falls back to raw LaTeX at render time.
+pub(super) fn resolve_math_segments(
+    segments: Vec<MathSegment>,
     cx: &App,
-) -> MathComponent {
-    if let Some(service) = cx.try_global::<MathRendererService>() {
-        let hsla = cx.theme().foreground;
-        let rgb = hsla.to_rgb();
-        let theme_color = chatty_core::services::math_renderer_service::RgbColor {
-            r: rgb.r,
-            g: rgb.g,
-            b: rgb.b,
+) -> Vec<CachedMathSegment> {
+    let service = cx.try_global::<MathRendererService>();
+    let rgb = cx.theme().foreground.to_rgb();
+    let theme_color = chatty_core::services::math_renderer_service::RgbColor {
+        r: rgb.r,
+        g: rgb.g,
+        b: rgb.b,
+    };
+    let resolve = |latex: &str, is_inline: bool| -> Option<PathBuf> {
+        let Some(service) = service else {
+            warn!(content = %latex, is_inline, "Math renderer service unavailable");
+            return None;
         };
-        match service.render_to_styled_svg_file(math_content, is_inline, theme_color) {
-            Ok(svg_path) => MathComponent::with_svg_path(
-                math_content.to_string(),
-                is_inline,
-                element_id,
-                svg_path,
-            ),
+        match service.render_to_styled_svg_file(latex, is_inline, theme_color) {
+            Ok(svg_path) => Some(svg_path),
             Err(e) => {
-                warn!(
-                    error = ?e,
-                    content = %math_content,
-                    is_inline = is_inline,
-                    "Failed to pre-render math"
-                );
-                MathComponent::new(math_content.to_string(), is_inline, element_id)
+                warn!(error = ?e, content = %latex, is_inline, "Failed to pre-render math");
+                None
             }
         }
-    } else {
-        warn!(content = %math_content, is_inline = is_inline, "Math renderer service unavailable");
-        MathComponent::new(math_content.to_string(), is_inline, element_id)
+    };
+    segments
+        .into_iter()
+        .map(|segment| match segment {
+            MathSegment::Text(text) => CachedMathSegment::Text(text),
+            MathSegment::InlineMath(latex) => {
+                let svg_path = resolve(&latex, true);
+                CachedMathSegment::InlineMath { latex, svg_path }
+            }
+            MathSegment::BlockMath(latex) => {
+                let svg_path = resolve(&latex, false);
+                CachedMathSegment::BlockMath { latex, svg_path }
+            }
+        })
+        .collect()
+}
+
+/// Build a `MathComponent` from a resolved equation. No I/O: the path was
+/// looked up by [`resolve_math_segments`].
+fn make_math_component(
+    latex: &str,
+    is_inline: bool,
+    svg_path: &Option<PathBuf>,
+    element_id: ElementId,
+) -> MathComponent {
+    match svg_path {
+        Some(path) => {
+            MathComponent::with_svg_path(latex.to_string(), is_inline, element_id, path.clone())
+        }
+        None => MathComponent::new(latex.to_string(), is_inline, element_id),
     }
 }
 
 /// Render pre-parsed math segments to GPUI elements.
 ///
-/// Accepts `&[MathSegment]` so it can be used both from the live parsing path
-/// (`render_math_aware_content`) and from the cached path (`render_from_cached`).
+/// Accepts `&[CachedMathSegment]` — the cached path (`render_from_cached`) for
+/// both finalized and streaming messages.
 ///
 /// Segments are processed in **batches** separated by `BlockMath` boundaries.
 /// Within each batch `has_inline_math` is determined locally:
@@ -89,9 +118,8 @@ pub(super) fn make_math_component(
 ///   element, preventing the blank-space issue during streaming that occurred
 ///   when multiple top-level elements (heading + flex rows) were emitted.
 pub(super) fn render_math_segments(
-    math_segments: &[MathSegment],
+    math_segments: &[CachedMathSegment],
     base_index: usize,
-    cx: &App,
 ) -> Vec<AnyElement> {
     let mut elements = Vec::new();
     let n = math_segments.len();
@@ -99,7 +127,8 @@ pub(super) fn render_math_segments(
 
     // Iterate one past the end so the final batch is always flushed.
     for i in 0..=n {
-        let at_block_math = i < n && matches!(math_segments[i], MathSegment::BlockMath(_));
+        let at_block_math =
+            i < n && matches!(math_segments[i], CachedMathSegment::BlockMath { .. });
 
         if at_block_math || i == n {
             // -- Flush the current batch [batch_start..i] ---------------------
@@ -107,16 +136,16 @@ pub(super) fn render_math_segments(
             if !batch.is_empty() {
                 let batch_has_inline = batch
                     .iter()
-                    .any(|s| matches!(s, MathSegment::InlineMath(_)));
+                    .any(|s| matches!(s, CachedMathSegment::InlineMath { .. }));
 
                 if batch_has_inline {
-                    render_inline_math_batch(batch, base_index, batch_start, cx, &mut elements);
+                    render_inline_math_batch(batch, base_index, batch_start, &mut elements);
                 } else {
                     // Text-only batch: push MarkdownContent directly so that
                     // headings, bold, lists, etc. render with full formatting.
                     for (batch_idx, segment) in batch.iter().enumerate() {
                         let element_index = base_index * 1000 + batch_start + batch_idx;
-                        if let MathSegment::Text(text) = segment {
+                        if let CachedMathSegment::Text(text) = segment {
                             elements.push(
                                 MarkdownContent {
                                     content: text.clone(),
@@ -131,12 +160,12 @@ pub(super) fn render_math_segments(
 
             // -- Render the BlockMath element itself --------------------------
             if at_block_math {
-                if let MathSegment::BlockMath(math_content) = &math_segments[i] {
+                if let CachedMathSegment::BlockMath { latex, svg_path } = &math_segments[i] {
                     let element_index = base_index * 1000 + i;
                     let element_id =
                         ElementId::Name(format!("math-block-{}", element_index).into());
                     elements.push(
-                        make_math_component(math_content, false, element_id, cx).into_any_element(),
+                        make_math_component(latex, false, svg_path, element_id).into_any_element(),
                     );
                 }
                 batch_start = i + 1;
@@ -147,13 +176,13 @@ pub(super) fn render_math_segments(
     elements
 }
 
-/// Render an inline-math batch (a slice of [`MathSegment`]s that contains at
-/// least one [`MathSegment::InlineMath`]).
+/// Render an inline-math batch (a slice of [`CachedMathSegment`]s that contains
+/// at least one [`CachedMathSegment::InlineMath`]).
 ///
 /// **Two kinds of content are interleaved:**
 ///
 /// * **Math-containing lines** -- logical lines (delimited by `\n`) that have at
-///   least one [`MathSegment::InlineMath`].  These are emitted as a full-width
+///   least one [`CachedMathSegment::InlineMath`].  These are emitted as a full-width
 ///   `flex_row` with `.min_w_0()` plain-text divs flanking the SVG so that long
 ///   text wraps instead of overflowing.
 ///
@@ -167,10 +196,9 @@ pub(super) fn render_math_segments(
 /// when multiple top-level elements (e.g. a heading `MarkdownContent` followed
 /// by a flex row) were emitted directly into the parent layout.
 fn render_inline_math_batch(
-    batch: &[MathSegment],
+    batch: &[CachedMathSegment],
     base_index: usize,
     batch_start: usize,
-    cx: &App,
     elements: &mut Vec<AnyElement>,
 ) {
     // Local vector: everything goes here first, then gets wrapped in ONE div.
@@ -197,7 +225,7 @@ fn render_inline_math_batch(
     for (batch_idx, segment) in batch.iter().enumerate() {
         let element_index = base_index * 1000 + batch_start + batch_idx;
         match segment {
-            MathSegment::Text(text) => {
+            CachedMathSegment::Text(text) => {
                 let mut remainder = text.as_str();
                 while let Some(nl_pos) = remainder.find('\n') {
                     text_buf.push_str(&remainder[..nl_pos]);
@@ -215,7 +243,7 @@ fn render_inline_math_batch(
                 }
                 text_buf.push_str(remainder);
             }
-            MathSegment::InlineMath(math_content) => {
+            CachedMathSegment::InlineMath { latex, svg_path } => {
                 // Flush any preceding text-only lines as ONE MarkdownContent.
                 let trimmed = full_text_buf.trim_end();
                 if !trimmed.is_empty() {
@@ -241,11 +269,11 @@ fn render_inline_math_batch(
                 }
                 let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
                 math_row.push(
-                    make_math_component(math_content, true, element_id, cx).into_any_element(),
+                    make_math_component(latex, true, svg_path, element_id).into_any_element(),
                 );
                 line_has_math = true;
             }
-            MathSegment::BlockMath(_) => {
+            CachedMathSegment::BlockMath { .. } => {
                 unreachable!(
                     "BlockMath segments are split out as batch boundaries in \
                      render_math_segments and must never appear inside an inline batch"
