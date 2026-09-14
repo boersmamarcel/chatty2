@@ -65,6 +65,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded catalog and community servers (reference) |
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Labels, version bump, changelog, GitHub Release |
 | [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
+| [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` team against Ollama, with the verifier's reward |
 
 ## Research notes (`docs/research/`, synced to the site under Explanation)
 
