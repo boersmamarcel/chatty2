@@ -426,13 +426,14 @@ pub(super) fn split_live_tail(text: &str) -> (&str, &str) {
 fn parse_live_text_tail(
     text: &str,
     cache: &mut Option<LiveTailCache>,
+    cx: &App,
 ) -> Vec<CachedMarkdownSegment> {
     let (settled_text, tail) = split_live_tail(text);
     let entry = match cache.take() {
         Some(prev) if prev.settled_text == settled_text => prev,
         _ => LiveTailCache {
             settled_text: settled_text.to_string(),
-            settled: Arc::new(parse_math_segments(settled_text)),
+            settled: Arc::new(resolve_math_segments(parse_math_segments(settled_text), cx)),
         },
     };
     let mut out = Vec::with_capacity(2);
@@ -457,7 +458,7 @@ fn parse_last_markdown_segment_streaming(
     cx: &App,
 ) -> Vec<CachedMarkdownSegment> {
     match segment {
-        MarkdownSegment::Text(t) => parse_live_text_tail(&t, live_tail),
+        MarkdownSegment::Text(t) => parse_live_text_tail(&t, live_tail, cx),
         other => vec![parse_markdown_segment_streaming(other, prev_mds, cx)],
     }
 }
@@ -800,7 +801,7 @@ mod tests {
 
     // ── live tail (AGE-167) ───────────────────────────────────────────
 
-    use super::super::math_parser::MathSegment;
+    use super::super::parsed_cache::CachedMathSegment;
 
     fn last_mds(state: &StreamingParseState) -> &[CachedMarkdownSegment] {
         match state.result.segments.last() {
@@ -811,9 +812,9 @@ mod tests {
 
     fn has_math(mds: &[CachedMarkdownSegment]) -> bool {
         mds.iter().any(|md| match md {
-            CachedMarkdownSegment::TextWithMath(segs) => {
-                segs.iter().any(|s| !matches!(s, MathSegment::Text(_)))
-            }
+            CachedMarkdownSegment::TextWithMath(segs) => segs
+                .iter()
+                .any(|s| !matches!(s, CachedMathSegment::Text(_))),
             _ => false,
         })
     }
@@ -828,11 +829,12 @@ mod tests {
     #[gpui::test]
     fn the_open_line_is_plain_and_the_settled_prefix_keeps_its_math(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             let s1 = build_streaming_parse_result("Let $x$ be\nthe **bold", None, cx);
             let mds = last_mds(&s1);
             assert_eq!(mds.len(), 2, "{mds:?}");
             assert!(matches!(&mds[0], CachedMarkdownSegment::TextWithMath(segs)
-                    if segs.contains(&MathSegment::InlineMath("x".into()))));
+                    if segs.iter().any(|s| matches!(s, CachedMathSegment::InlineMath { latex, .. } if latex == "x"))));
             assert!(matches!(&mds[1], CachedMarkdownSegment::PlainTail(t) if t == "the **bold"));
 
             // Growing the open line does not re-parse the settled prefix.
@@ -866,6 +868,7 @@ mod tests {
     #[gpui::test]
     fn an_open_math_fence_never_reaches_the_math_parser(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             let mut prev: Option<StreamingParseState> = None;
             let mut text = String::from("Consider\n\n$$\n");
             for piece in ["E = ", "mc^2 + ", "$", "5 \\\\ ", "\\int_0^1 f"] {
@@ -889,6 +892,7 @@ mod tests {
     #[gpui::test]
     fn an_open_code_fence_is_not_highlighted(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             let s1 = build_streaming_parse_result("Code:\n```rust\nfn main() {", None, cx);
             let mds = last_mds(&s1);
             assert!(
@@ -911,6 +915,7 @@ mod tests {
     #[gpui::test]
     fn stream_end_promotes_the_tail(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
+            gpui_component::init(cx);
             let streaming = build_streaming_parse_result("Sum $a+b$ done", None, cx);
             assert!(matches!(
                 last_mds(&streaming).last(),

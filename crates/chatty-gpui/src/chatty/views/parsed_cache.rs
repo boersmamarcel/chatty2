@@ -169,7 +169,7 @@ pub struct StreamingParseState {
 pub struct LiveTailCache {
     /// The text up to and including the last newline.
     pub settled_text: String,
-    pub settled: Arc<Vec<MathSegment>>,
+    pub settled: Arc<Vec<CachedMathSegment>>,
 }
 
 /// Bounded cache for parsed message content, keyed by content hash + theme.
