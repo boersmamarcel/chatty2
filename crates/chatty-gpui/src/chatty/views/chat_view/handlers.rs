@@ -657,7 +657,6 @@ impl ChatView {
         });
 
         cx.notify();
-        self.scroll_if_sticky();
     }
 
     /// Handle thinking block ended event

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chatty_core::services::math_renderer_service::RgbColor;
 use gpui::{App, HighlightStyle};
@@ -117,6 +118,11 @@ pub enum CachedMarkdownSegment {
         source: String,
         svg_path: Option<PathBuf>,
     },
+    /// The line still being streamed: everything after the last newline of
+    /// the growing text segment. Rendered as plain text — no markdown parse,
+    /// no math parse, no Typst — until a newline lands or the stream ends,
+    /// at which point it is promoted like any other text (AGE-167).
+    PlainTail(String),
 }
 
 /// Cached result for a single content segment (after think-block extraction)
@@ -149,6 +155,21 @@ pub struct StreamingParseState {
     pub content_segment_count: usize,
     /// Markdown segment count in the last Text content segment.
     pub last_text_md_count: usize,
+    /// Math parse of the settled part of the growing text segment, reused
+    /// while that prefix is unchanged (AGE-167).
+    pub live_tail: Option<LiveTailCache>,
+}
+
+/// The settled prefix of the streaming text segment and its math parse.
+///
+/// Only the tail after the last newline changes from one text batch to the
+/// next, so the prefix's `parse_math_segments` result is kept and handed out
+/// by pointer until a newline moves the split.
+#[derive(Clone, Debug)]
+pub struct LiveTailCache {
+    /// The text up to and including the last newline.
+    pub settled_text: String,
+    pub settled: Arc<Vec<MathSegment>>,
 }
 
 /// Bounded cache for parsed message content, keyed by content hash + theme.
