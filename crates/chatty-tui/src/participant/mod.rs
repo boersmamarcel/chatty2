@@ -21,6 +21,8 @@ mod broker_delegation;
 mod equivalence;
 #[cfg(test)]
 mod input_required_chain;
+#[cfg(test)]
+mod team_preset;
 
 use anyhow::{Context, Result};
 use chatty_protocol_gateway::worker::{answer_clarifications, serve_one_task, worker_card};

@@ -21,6 +21,7 @@ use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::services::skill_service::SkillService;
 use crate::services::spend_gate::SpendGate;
+use crate::services::team::TeamSkill;
 use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::search_settings::SearchSettingsModel;
@@ -76,6 +77,11 @@ pub struct AgentBuildContext {
     /// the `hive` repo sets it, on top of [`Self::from_services`]; every
     /// other host leaves it `None`, which means no check at all.
     pub spend_gate: Option<std::sync::Arc<dyn SpendGate>>,
+    /// The skill beside the team file a `--team` leader runs under (ADR-0011
+    /// C13, AGE-407), served by `read_skill` ahead of the skill directories.
+    /// Only chatty-tui's `--team` sets it, on top of [`Self::from_services`];
+    /// a worker or an ordinary chat agent has none.
+    pub team_skill: Option<TeamSkill>,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -191,6 +197,8 @@ impl AgentBuildContext {
             // Only a hosted leader has a cap to ask about; hive sets it on
             // top of this base.
             spend_gate: None,
+            // Only a `--team` leader has one (see `AgentBuildContext::team_skill`).
+            team_skill: None,
         }
     }
 }

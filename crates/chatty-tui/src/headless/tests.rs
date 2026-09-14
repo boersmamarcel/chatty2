@@ -259,6 +259,12 @@ mod runner {
     /// agent is built against the session's own store handles, as
     /// `init_conversation` does.
     async fn test_runner() -> (HeadlessRunner, mpsc::UnboundedReceiver<AppEvent>) {
+        test_runner_with_team(None).await
+    }
+
+    async fn test_runner_with_team(
+        team: Option<chatty_core::services::team::Team>,
+    ) -> (HeadlessRunner, mpsc::UnboundedReceiver<AppEvent>) {
         let _ = chatty_core::init_repositories();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let model_config = ModelConfig::new(
@@ -285,6 +291,7 @@ mod runner {
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
                 role: Default::default(),
+                team,
                 is_sub_agent: true,
                 services_loaded: true,
                 surface: chatty_core::services::StreamSurface::Headless,
@@ -364,6 +371,71 @@ mod runner {
                 .any(|e| matches!(e, chatty_core::session::SessionEvent::Text(_))),
             "the observer sees the answer too — the broker maps it to artifact              chunks, which is what lets a parent stream a delegated answer"
         );
+    }
+
+    /// AGE-407: a `--team` leader's first *human* turn opens with
+    /// "read_skill <skill> and follow it"; the next one does not, and a
+    /// protocol follow-up never does — one arriving before the human turn
+    /// neither carries the instruction nor consumes it.
+    #[tokio::test]
+    async fn a_team_leaders_first_human_turn_opens_with_the_skill_instruction() {
+        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
+            .expect("the preset loads");
+        let (mut runner, _event_rx) = test_runner_with_team(Some(team)).await;
+        let text = |input: &chatty_core::session::TurnInput| -> String {
+            input
+                .contents
+                .iter()
+                .filter_map(|c| match c {
+                    rig_core::message::UserContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let follow_up = runner
+            .prepare_send(
+                "Agent protocol follow-up: call verify_completion.".to_string(),
+                false,
+            )
+            .expect("runner is ready and idle");
+        assert_eq!(
+            follow_up.kind,
+            chatty_core::session::TurnKind::ProtocolFollowUp
+        );
+        assert_eq!(
+            text(&follow_up),
+            "Agent protocol follow-up: call verify_completion.",
+            "a follow-up never carries the instruction"
+        );
+
+        runner.is_streaming = false;
+        let first = runner
+            .prepare_send("Fix the overdraft bug.".to_string(), true)
+            .expect("runner is idle again");
+        assert_eq!(first.kind, chatty_core::session::TurnKind::Human);
+        assert_eq!(
+            text(&first),
+            "read_skill coder-reviewer and follow it.\n\nFix the overdraft bug."
+        );
+        let user_row = runner
+            .transcript
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::User))
+            .expect("the user row");
+        assert_eq!(
+            user_row.text(),
+            text(&first),
+            "the transcript shows what the model was asked"
+        );
+
+        runner.is_streaming = false;
+        let second = runner
+            .prepare_send("And the tests?".to_string(), true)
+            .expect("runner is idle again");
+        assert_eq!(text(&second), "And the tests?");
     }
 
     /// T3/AGE-242: `stop_stream()` only sets the cancel flag, so a
