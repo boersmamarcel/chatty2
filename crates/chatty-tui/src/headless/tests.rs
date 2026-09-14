@@ -86,6 +86,38 @@ fn logs_a_delegation_with_its_input_and_output() {
     assert!(agent.is_none(), "the finish line consumes the name");
 }
 
+/// AGE-136: the headless trace shows the approval and the plan as their own
+/// blocks, not only tool headers.
+#[test]
+fn formats_the_approval_block_and_its_verdict() {
+    let approval = crate::engine::ApprovalInfo {
+        id: "a1".to_string(),
+        command: "rm -rf build".to_string(),
+        is_sandboxed: false,
+        decision: None,
+    };
+    assert_eq!(
+        format_approval_requested(&approval),
+        "  ? Approve [host] rm -rf build"
+    );
+    assert_eq!(format_approval_resolved(true), "  ✓ allowed");
+    assert_eq!(format_approval_resolved(false), "  ✗ denied");
+}
+
+#[test]
+fn formats_the_plan_card_after_a_todo_result() {
+    let snapshot: chatty_core::services::AgentTaskSnapshot = serde_json::from_str(
+        r#"{"goal":"ship","todos":[{"id":"t1","title":"Read it","description":"","status":"done"},{"id":"t2","title":"Write it","description":"","status":"in_progress"}],"write_todos_called":true,"verified":false,"evidence":[]}"#,
+    )
+    .unwrap();
+    let lines = format_plan_lines(&snapshot);
+    assert!(lines[0].starts_with("  ▣ Plan"), "{lines:?}");
+    assert!(lines[0].ends_with("1/2"), "{lines:?}");
+    assert!(lines[1].contains("Read it"), "{lines:?}");
+    assert!(lines[2].contains("Write it"), "{lines:?}");
+    assert_eq!(lines.len(), 3);
+}
+
 #[test]
 fn keeps_plain_text_payload_lines() {
     assert_eq!(

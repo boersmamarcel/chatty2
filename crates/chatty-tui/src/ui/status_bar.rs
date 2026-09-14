@@ -7,7 +7,7 @@ use chatty_core::services::github_pr_service::{CheckState, PrState};
 
 use crate::APP_VERSION;
 use crate::engine::ChatEngine;
-use crate::ui::{plan, theme};
+use crate::ui::{plan, theme, verb};
 
 /// Widest the status indicator gets (`● loading services…`), reserved so the
 /// plan segment never pushes it off the bar.
@@ -108,6 +108,19 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
             ));
             spans.push(Span::styled(" │ ", theme::muted()));
         }
+    }
+
+    // The change tray as a footer segment (AGE-136): `4 files +58 −4` across
+    // every edit the conversation made.
+    if let Some(label) = verb::change_tray_label(
+        engine
+            .transcript
+            .messages
+            .iter()
+            .flat_map(|m| m.tool_calls()),
+    ) {
+        spans.push(Span::styled(label, theme::text_subtle()));
+        spans.push(Span::styled(" │ ", theme::muted()));
     }
 
     // Status indicator

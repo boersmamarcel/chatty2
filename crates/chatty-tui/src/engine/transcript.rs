@@ -17,7 +17,10 @@ use chatty_core::models::message_types::{
 };
 use chatty_core::services::{AgentTaskSnapshot, is_agent_todo_tool, snapshot_from_tool_output};
 
-use super::{DisplayMessage, MessageRole, ToolCallInfo, ToolCallState};
+use super::{
+    ApprovalInfo, DiffStat, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo, ToolCallState,
+};
+use crate::ui::verb;
 
 #[derive(Debug, Default)]
 pub struct Transcript {
@@ -118,7 +121,31 @@ impl Transcript {
 
     pub fn push_text(&mut self, text: &str) {
         if let Some(msg) = self.streaming_assistant_or_continuation() {
+            // The turn moved on from a run of tools: fold what settled.
+            if !matches!(msg.blocks.last(), Some(MessageBlock::Text(_))) {
+                msg.fold_settled_tools();
+            }
             msg.push_text(text);
+        }
+    }
+
+    /// The approval prompt, inline where the stream asked for it.
+    pub fn approval_requested(&mut self, id: String, command: String, is_sandboxed: bool) {
+        if let Some(msg) = self.streaming_assistant_or_continuation() {
+            msg.blocks.push(MessageBlock::Approval(ApprovalInfo {
+                id,
+                command,
+                is_sandboxed,
+                decision: None,
+            }));
+        }
+    }
+
+    pub fn approval_resolved(&mut self, id: &str, approved: bool) {
+        if let Some(msg) = self.streaming_assistant_mut()
+            && let Some(approval) = msg.approval_mut(id)
+        {
+            approval.decision = Some(approved);
         }
     }
 
@@ -162,6 +189,7 @@ impl Transcript {
             return;
         }
         let mut plan = None;
+        let mut diff = None;
         if let Some(last) = self.streaming_assistant_mut()
             && let Some(tc) = last.tool_call_mut(id)
         {
@@ -169,11 +197,26 @@ impl Transcript {
             if is_agent_todo_tool(&tc.name) {
                 plan = snapshot_from_tool_output(&result);
             }
+            diff = verb::diff_stats(&tc.name, &tc.input, Some(&result)).map(|(added, removed)| {
+                DiffStat {
+                    path: verb::subject_for(&tc.input),
+                    added,
+                    removed,
+                }
+            });
             tc.output = Some(result);
             tc.state = ToolCallState::Success;
         }
-        if plan.is_some() {
-            self.plan = plan;
+        if let Some(snapshot) = plan {
+            if let Some(last) = self.streaming_assistant_mut() {
+                last.set_plan(snapshot.clone());
+            }
+            self.plan = Some(snapshot);
+        }
+        if let Some(diff) = diff
+            && let Some(last) = self.streaming_assistant_mut()
+        {
+            last.blocks.push(MessageBlock::Diff(diff));
         }
     }
 
@@ -219,21 +262,24 @@ impl Transcript {
     /// Close the streaming row: the turn completed.
     pub fn finish_streaming(&mut self) {
         if let Some(last) = self.streaming_assistant_mut() {
+            last.fold_settled_tools();
             last.is_streaming = false;
         }
     }
 
     pub fn mark_cancelled(&mut self) {
         if let Some(last) = self.streaming_assistant_mut() {
+            last.fold_settled_tools();
             last.push_text("\n\n[Cancelled]");
             last.is_streaming = false;
         }
     }
 
+    /// The error as its own block, after whatever the turn produced.
     pub fn mark_error(&mut self, error: &str) {
         if let Some(last) = self.streaming_assistant_mut() {
-            let prefix = if last.text().is_empty() { "" } else { "\n\n" };
-            last.push_text(&format!("{prefix}[Error: {error}]"));
+            last.fold_settled_tools();
+            last.blocks.push(MessageBlock::Error(error.to_string()));
             last.is_streaming = false;
         }
     }
@@ -310,6 +356,188 @@ mod tests {
         let last = transcript.messages.last().unwrap();
         assert_eq!(last.text(), "done");
         assert!(!last.is_streaming);
+    }
+
+    fn todo_output(current: &str) -> String {
+        format!(
+            r#"{{"message":"ok","snapshot":{{"goal":"ship","todos":[{{"id":"t1","title":"{current}","description":"","status":"in_progress"}}],"write_todos_called":true,"verified":false,"evidence":[]}}}}"#
+        )
+    }
+
+    fn kinds(msg: &DisplayMessage) -> Vec<&'static str> {
+        msg.blocks
+            .iter()
+            .map(|b| match b {
+                MessageBlock::Text(_) => "text",
+                MessageBlock::ToolCall(_) => "tool",
+                MessageBlock::Activity(_) => "activity",
+                MessageBlock::Approval(_) => "approval",
+                MessageBlock::Plan(_) => "plan",
+                MessageBlock::Error(_) => "error",
+                MessageBlock::Diff(_) => "diff",
+            })
+            .collect()
+    }
+
+    /// AGE-136: the approval is a block in the stream, not only an input
+    /// slot, and it records the decision where it was asked.
+    #[test]
+    fn an_approval_is_a_block_in_the_stream_with_its_decision() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.tool_started("c1".into(), "run_shell".into());
+        transcript.approval_requested("a1".into(), "rm -rf build".into(), false);
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["tool", "approval"]);
+        assert!(matches!(
+            &msg.blocks[1],
+            MessageBlock::Approval(a) if a.decision.is_none() && a.command == "rm -rf build"
+        ));
+
+        transcript.approval_resolved("a1", true);
+        let msg = transcript.messages.last().unwrap();
+        assert!(matches!(
+            &msg.blocks[1],
+            MessageBlock::Approval(a) if a.decision == Some(true)
+        ));
+    }
+
+    /// AGE-136: a todo tool's result opens one plan block, and the next todo
+    /// call rewrites it in place instead of adding another.
+    #[test]
+    fn todo_results_become_one_plan_block_rewritten_in_place() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.tool_started("c1".into(), "write_todos".into());
+        transcript.tool_result("c1", todo_output("first"));
+        transcript.tool_started("c2".into(), "update_todo".into());
+        transcript.tool_result("c2", todo_output("second"));
+        transcript.finish_streaming();
+
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["tool", "plan", "tool"]);
+        assert!(matches!(
+            &msg.blocks[1],
+            MessageBlock::Plan(p) if p.todos[0].title == "second"
+        ));
+        assert_eq!(transcript.plan.as_ref().unwrap().todos[0].title, "second");
+    }
+
+    /// AGE-136: consecutive settled tools collapse to one activity block once
+    /// the turn moves on; a failed call stays visible on its own.
+    #[test]
+    fn consecutive_settled_tools_fold_into_an_activity_block() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        for (id, name) in [
+            ("c1", "read_file"),
+            ("c2", "read_file"),
+            ("c3", "shell_execute"),
+        ] {
+            transcript.tool_started(id.into(), name.into());
+            transcript.tool_result(id, "ok".into());
+        }
+        transcript.push_text("Now the failure.");
+        transcript.tool_started("c4".into(), "apply_diff".into());
+        transcript.tool_error("c4", "boom".into());
+        transcript.tool_started("c5".into(), "read_file".into());
+        transcript.tool_result("c5", "ok".into());
+        transcript.finish_streaming();
+
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["activity", "text", "tool", "tool"]);
+        assert!(matches!(&msg.blocks[0], MessageBlock::Activity(tools) if tools.len() == 3));
+        // Folded calls are still reachable by id.
+        assert_eq!(
+            transcript.tool_call("c2").map(|tc| tc.name.as_str()),
+            Some("read_file")
+        );
+    }
+
+    /// AGE-136: an edit's stat row follows the edit as its own block.
+    #[test]
+    fn an_edit_result_adds_a_diff_stat_block() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.tool_started("c1".into(), "apply_diff".into());
+        transcript.tool_input("c1", r#"{"path":"src/lib.rs"}"#);
+        transcript.tool_result("c1", r#"{"insertions":3,"deletions":1}"#.into());
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["tool", "diff"]);
+        assert!(matches!(
+            &msg.blocks[1],
+            MessageBlock::Diff(d) if d.path == "src/lib.rs" && d.added == 3 && d.removed == 1
+        ));
+    }
+
+    /// AGE-136: two approvals in one turn resolve by id, an unknown id
+    /// touches nothing, and settled tools do not fold across the approvals.
+    #[test]
+    fn approvals_resolve_by_id_and_do_not_fold_across() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.tool_started("c1".into(), "shell_execute".into());
+        transcript.approval_requested("a1".into(), "rm -rf build".into(), false);
+        transcript.approval_resolved("a1", false);
+        transcript.tool_error("c1", "denied".into());
+        transcript.tool_started("c2".into(), "shell_execute".into());
+        transcript.approval_requested("a2".into(), "cargo build".into(), true);
+        transcript.approval_resolved("nope", true);
+        transcript.approval_resolved("a2", true);
+        transcript.tool_result("c2", "ok".into());
+        transcript.finish_streaming();
+
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["tool", "approval", "tool", "approval"]);
+        assert!(
+            matches!(&msg.blocks[1], MessageBlock::Approval(a) if a.id == "a1" && a.decision == Some(false))
+        );
+        assert!(
+            matches!(&msg.blocks[3], MessageBlock::Approval(a) if a.id == "a2" && a.decision == Some(true))
+        );
+    }
+
+    /// AGE-136: a cancelled turn folds what settled and leaves the undecided
+    /// approval on a closed row, which the view shows as cancelled.
+    #[test]
+    fn a_cancelled_turn_folds_and_closes_the_row_over_an_open_approval() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.tool_started("c1".into(), "read_file".into());
+        transcript.tool_result("c1", "ok".into());
+        transcript.tool_started("c2".into(), "read_file".into());
+        transcript.tool_result("c2", "ok".into());
+        transcript.tool_started("c3".into(), "shell_execute".into());
+        transcript.approval_requested("a1".into(), "rm -rf build".into(), false);
+        transcript.mark_cancelled();
+
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["activity", "tool", "approval", "text"]);
+        assert!(!msg.is_streaming);
+        assert!(matches!(&msg.blocks[2], MessageBlock::Approval(a) if a.decision.is_none()));
+    }
+
+    #[test]
+    fn a_single_settled_tool_is_not_folded() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.tool_started("c1".into(), "read_file".into());
+        transcript.tool_result("c1", "ok".into());
+        transcript.finish_streaming();
+        assert_eq!(kinds(transcript.messages.last().unwrap()), vec!["tool"]);
+    }
+
+    /// AGE-136: a stream error is its own block, after the partial text.
+    #[test]
+    fn a_stream_error_is_an_error_block() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant();
+        transcript.push_text("partial");
+        transcript.mark_error("provider went away");
+        let msg = transcript.messages.last().unwrap();
+        assert_eq!(kinds(msg), vec!["text", "error"]);
+        assert_eq!(msg.text(), "partial");
+        assert!(!msg.is_streaming);
     }
 
     #[test]

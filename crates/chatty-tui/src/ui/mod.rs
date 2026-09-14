@@ -5,12 +5,13 @@ mod clarification;
 mod hint_bar;
 mod input;
 mod model_picker;
-mod plan;
+pub(crate) mod plan;
 mod slash_menu;
 mod status_bar;
 pub mod theme;
 mod tool_picker;
 mod tool_summary;
+pub(crate) mod verb;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};

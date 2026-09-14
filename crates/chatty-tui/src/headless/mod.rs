@@ -24,7 +24,7 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
-use chatty_core::services::{AgentLoopGuard, RecoveryAction, StreamError};
+use chatty_core::services::{AgentLoopGuard, RecoveryAction, StreamError, is_agent_todo_tool};
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -147,6 +147,15 @@ pub async fn run_headless(
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
+                    }
+                    // The plan card, rewritten after every todo result (AGE-136).
+                    if is_agent_todo_tool(&tc.name)
+                        && let Some(snapshot) = engine.transcript.plan.as_ref()
+                    {
+                        eprintln!();
+                        for line in format_plan_lines(snapshot) {
+                            eprintln!("{line}");
+                        }
                     }
                     let status = if tool_result_looks_failed(tc) {
                         "err"
@@ -436,6 +445,24 @@ pub async fn run_headless(
                     continue;
                 }
                 break;
+            }
+            AppEvent::ApprovalRequested {
+                ref id,
+                ref command,
+                is_sandboxed,
+            } => {
+                let approval = crate::engine::ApprovalInfo {
+                    id: id.clone(),
+                    command: command.clone(),
+                    is_sandboxed,
+                    decision: None,
+                };
+                engine.handle_event(event);
+                eprintln!("\n{}", format_approval_requested(&approval));
+            }
+            AppEvent::ApprovalResolved { approved, .. } => {
+                engine.handle_event(event);
+                eprintln!("{}", format_approval_resolved(approved));
             }
             // Handle other events silently
             _ => {
