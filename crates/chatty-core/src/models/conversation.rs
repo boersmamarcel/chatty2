@@ -10,6 +10,7 @@ use rig_core::completion::message::{AssistantContent, Text, UserContent};
 
 use crate::factories::AgentClient;
 use crate::factories::agent_factory::AgentBuildContext;
+use crate::models::history_compat;
 use crate::models::message_types::{SystemTrace, ToolSource, TraceItem};
 use crate::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
 use crate::repositories::ConversationData;
@@ -516,9 +517,12 @@ impl Conversation {
         serialize_history_of(&self.entries)
     }
 
-    /// Deserialize message history from JSON string
+    /// Deserialize message history from JSON string.
+    ///
+    /// Accepts the legacy untagged assistant content block an older rig wrote
+    /// (AGE-369); see [`history_compat`](crate::models::history_compat).
     pub fn deserialize_history(json: &str) -> Result<Vec<Message>> {
-        serde_json::from_str(json).context("Failed to deserialize message history")
+        history_compat::parse_history(json).context("Failed to deserialize message history")
     }
 
     /// Serialize system traces to JSON string
@@ -1964,6 +1968,17 @@ mod tests {
         let reloaded_entries: Vec<MessageEntry> =
             reloaded.into_iter().map(|m| entry(m, None)).collect();
         assert_pairs_intact(&reloaded_entries);
+    }
+
+    /// The restore path is the compat parser's caller (AGE-369): a row whose
+    /// assistant content was written before the `type` tag existed opens.
+    #[test]
+    fn a_legacy_untagged_row_deserializes_through_the_restore_path() {
+        let legacy = include_str!("snapshots/legacy_untagged_history.json");
+
+        let history = Conversation::deserialize_history(legacy).expect("a legacy row restores");
+
+        assert_eq!(history.len(), 2);
     }
 
     #[test]

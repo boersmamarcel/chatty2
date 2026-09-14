@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod conversations_store;
 pub mod error_store;
 pub mod execution_approval_store;
+pub mod history_compat;
 pub mod message_types;
 pub mod token_usage;
 pub mod write_approval_store;
