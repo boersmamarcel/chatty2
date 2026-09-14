@@ -64,6 +64,19 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 `--broker` works with `--headless`, `--pipe`, and the interactive TUI, and is Unix only.
 
+## Teams
+
+`--team <id>` runs a fixed roster instead of letting the leader spawn ad-hoc sub-agents: a named leader plus co-workers, each with its own model, tool profile and standing instructions, defined once in a `teams/<id>/team.json` directory. It implies `--broker`.
+
+One team ships built in, `coder-reviewer` — a leader that only delegates, a coder, and a reviewer who checks the diff against the default branch before the leader merges it:
+
+```bash
+chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
+  -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
+```
+
+`--model` (and `--tools` / `--preamble`) override the team's own leader settings when given. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/a2a-and-wasm-modules.md#teams).
+
 ## Next
 
 - [Terminal interface](./terminal.md)
