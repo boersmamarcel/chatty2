@@ -228,8 +228,8 @@ pub use filesystem_write_tool::{
     WriteFileTool,
 };
 pub use git_tool::{
-    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitStatusTool,
-    GitSwitchBranchTool,
+    GitAddTool, GitCommitTool, GitCreateBranchTool, GitDiffTool, GitLogTool, GitMergeTool,
+    GitStatusTool, GitSwitchBranchTool,
 };
 pub use invoke_agent_tool::{InvokeAgentTool, LOCAL_AGENT_NAME};
 pub use list_agents_tool::{ListAgentsTool, LocalModuleAgentSummary, LocalWorkerAgentSummary};

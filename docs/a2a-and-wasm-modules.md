@@ -503,12 +503,13 @@ switched off.
 
 | Profile | What it can call |
 |---------|------------------|
-| `coordinator` | The read set below, plus `list_agents` and `invoke_agent`. It delegates; it does not edit. |
-| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`) and `execute_code`. No agent tools: a coder does not fan out further. |
+| `coordinator` | The read set below, plus `list_agents`, `invoke_agent` and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It delegates; it does not edit. |
+| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`) and `execute_code`. No agent tools: a coder does not fan out further. |
 | `reviewer` | The read set, plus the shell so it can run the tests. No writes, no commits, no delegation. |
 
 The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
-`search_code`, `git_status`, `git_log`, `git_diff`, `read_skill`, the todo protocol
+`search_code`, `git_status`, `git_log`, `git_diff` (which takes a `base..head` `range`, so
+a reviewer reads `main..sub-agent/<name>` without a shell), `read_skill`, the todo protocol
 (`write_todos`, `update_todo`, `verify_completion`), and `ask_user` — every profile keeps
 that last one, or a worker could no longer park a question on its leader (AGE-306). The
 profiles live in `chatty_core::factories::tool_profile`; `chatty-tui --tools <profile>`

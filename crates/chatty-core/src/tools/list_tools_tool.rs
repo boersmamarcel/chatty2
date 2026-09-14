@@ -210,6 +210,11 @@ impl ListToolsTool {
                     description: "Commit staged changes with a message (requires user confirmation)".to_string(),
                     source: "native".to_string(),
                 },
+                ToolInfo {
+                    name: "git_merge".to_string(),
+                    description: "Merge a branch into the current branch (requires user confirmation)".to_string(),
+                    source: "native".to_string(),
+                },
             ]);
         }
 
@@ -463,7 +468,7 @@ impl Tool for ListToolsTool {
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
                          - Agent todo tools: write_todos, update_todo, verify_completion for multi-step task tracking\n\
                          - Filesystem tools: read_file, final_answer, write_file, list_directory, optional doc_retriever, etc.\n\
-                         - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit\n\
+                         - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit, git_merge\n\
                          - add_attachment: Display images or PDFs inline in chat responses\n\
                          - PDF tools: pdf_info, pdf_extract_text, pdf_to_image\n\
                          - Data query tools: file_structure_detector, profile_data, query_data, describe_data (workspace/data map and SQL/profile CSV/JSON/Parquet via DuckDB)\n\
@@ -721,6 +726,7 @@ mod tests {
             "git_create_branch",
             "git_switch_branch",
             "git_commit",
+            "git_merge",
             "search_code",
             "find_files",
             "find_definition",

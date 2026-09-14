@@ -568,6 +568,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "git_commit" => "Committing changes".to_string(),
         "git_create_branch" => "Creating branch".to_string(),
         "git_switch_branch" => "Switching branch".to_string(),
+        "git_merge" => "Merging branch".to_string(),
         // Web
         "search_web" => "Searching the web".to_string(),
         "fetch" => "Fetching page".to_string(),
