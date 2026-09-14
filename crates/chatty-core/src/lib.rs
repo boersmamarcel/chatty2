@@ -85,6 +85,7 @@ pub struct RepositoryRegistry {
     pub module_settings: Arc<dyn settings::repositories::ModuleSettingsRepository>,
     pub hive_settings: Arc<dyn settings::repositories::HiveSettingsRepository>,
     pub extensions: Arc<dyn settings::repositories::ExtensionsRepository>,
+    pub token_tracking: Arc<dyn settings::repositories::TokenTrackingRepository>,
 }
 
 static REPOSITORY_REGISTRY: OnceLock<RepositoryRegistry> = OnceLock::new();
@@ -109,6 +110,7 @@ pub fn init_repositories() -> anyhow::Result<()> {
         module_settings: Arc::new(ModuleSettingsJsonRepository::new()?),
         hive_settings: Arc::new(HiveSettingsJsonRepository::new()?),
         extensions: Arc::new(ExtensionsJsonRepository::new()?),
+        token_tracking: Arc::new(TokenTrackingJsonRepository::new()?),
     };
     REPOSITORY_REGISTRY.set(registry).ok();
 
@@ -190,6 +192,11 @@ pub fn hive_settings_repository() -> Arc<dyn settings::repositories::HiveSetting
 /// Returns a cloned Arc to the extensions repository.
 pub fn extensions_repository() -> Arc<dyn settings::repositories::ExtensionsRepository> {
     registry().extensions.clone()
+}
+
+/// Returns a cloned Arc to the token tracking settings repository.
+pub fn token_tracking_repository() -> Arc<dyn settings::repositories::TokenTrackingRepository> {
+    registry().token_tracking.clone()
 }
 
 // ── Pre-warming ──────────────────────────────────────────────────────────────

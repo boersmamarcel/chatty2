@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 /// - `manager::check_pressure()` — for the configurable thresholds
 /// - `TokenContextBarView` — to decide whether to show the bar at all
 ///
-/// Persistence via `json_file_repository` can be added in a follow-up;
-/// for now, the defaults are applied at startup via `cx.set_global(TokenTrackingSettings::default())`.
+/// Persisted as the `token_tracking` settings family (`token_tracking.json`,
+/// `token_tracking_repository()`); the desktop seeds the global with defaults
+/// and overwrites it once the repository has loaded (AGE-381).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TokenTrackingSettings {
     /// Show the token context bar in the status footer.

@@ -186,6 +186,7 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 | `user_secrets.json` | object | `UserSecretsModel` | `UserSecretsJsonRepository` |
 | `hive_settings.json` | object | `HiveSettingsModel` | `HiveSettingsJsonRepository` |
 | `extensions.json` | object | `ExtensionsModel` | `ExtensionsJsonRepository` |
+| `token_tracking.json` | object | `TokenTrackingSettings` | `TokenTrackingJsonRepository` |
 | `module_settings.json` | object | `ModuleSettingsModel` | `ModuleSettingsJsonRepository` |
 | `providers.json` | array | `ProviderConfig` | `JsonFileRepository` |
 | `models.json` | array | `ModelConfig` | `JsonModelsRepository` |
@@ -339,6 +340,25 @@ WASM, and A2A.
 | `source` | `ExtensionSource` | required | Internally tagged `type`: `hive` (`module_name`, `version`) or `custom` |
 | `pricing_model` | `Option<String>` | `null` | Hive marketplace classification |
 | `enabled` | `bool` | `true` | |
+
+---
+
+## `token_tracking.json` — `TokenTrackingSettings`
+
+Source: `settings/models/token_tracking_settings.rs`. The compaction share —
+ADR-0007's utilisation key. Ratio fields (`high_threshold`,
+`critical_threshold`) are fractions of the model's context window, never a
+character count.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `enabled` | `bool` | `true` | Show the token context bar |
+| `response_reserve` | `usize` | `4096` | Tokens reserved for model output |
+| `high_threshold` | `f64` | `0.70` | Ratio `0.0`–`1.0`; bar turns amber |
+| `critical_threshold` | `f64` | `0.90` | Ratio `0.0`–`1.0`; bar turns red |
+| `auto_summarize` | `bool` | `false` | Auto-summarize on crossing `critical_threshold` |
+| `summarization_model_id` | `Option<String>` | `null` | `null` = use the conversation's own model |
+| `cap_usd` | `Option<f64>` | `null` | Monthly spend cap (USD); hive-only (AGE-416 / ADR-0010) |
 
 ---
 
@@ -716,6 +736,7 @@ Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This pag
 | `module_settings_repository()` | modules | WASM module settings |
 | `hive_settings_repository()` | hive | Hive registry / billing |
 | `extensions_repository()` | extensions | Browser extension config |
+| `token_tracking_repository()` | token tracking | Compaction share / context-window thresholds (ADR-0007) |
 
 All repositories initialize via `init_repositories()` once at startup. Use accessor functions — never read `REPOSITORY_REGISTRY` directly.
 

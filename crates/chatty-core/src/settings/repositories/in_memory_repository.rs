@@ -148,6 +148,12 @@ define_single_in_memory_repository!(
     model = crate::settings::models::module_settings::ModuleSettingsModel,
 );
 
+define_single_in_memory_repository!(
+    trait super::TokenTrackingRepository,
+    struct InMemoryTokenTrackingRepository,
+    model = crate::settings::models::token_tracking_settings::TokenTrackingSettings,
+);
+
 // ── List-based families ────────────────────────────────────────────────────
 
 define_list_in_memory_repository!(

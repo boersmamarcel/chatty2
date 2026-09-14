@@ -21,13 +21,14 @@ use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::settings::models::search_settings::SearchSettingsModel;
+use crate::settings::models::token_tracking_settings::TokenTrackingSettings;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::user_secrets_store::UserSecretsModel;
 use crate::settings::repositories::{
     A2aRepository, ExecutionSettingsRepository, ExtensionsRepository, GeneralSettingsRepository,
     HiveSettingsRepository, McpRepository, ModelsRepository, ModuleSettingsRepository,
     OAuthCredentialRepository, ProviderRepository, SearchSettingsRepository,
-    TrainingSettingsRepository, UserSecretsRepository,
+    TokenTrackingRepository, TrainingSettingsRepository, UserSecretsRepository,
 };
 
 use super::conversation_repository::{ConversationData, ConversationRepository};
@@ -130,6 +131,11 @@ single_settings_conformance!(
     conformance_module_settings,
     ModuleSettingsRepository,
     ModuleSettingsModel
+);
+single_settings_conformance!(
+    conformance_token_tracking,
+    TokenTrackingRepository,
+    TokenTrackingSettings
 );
 
 // ── List-based settings conformance (load_all / save_all) ────────────────────
@@ -487,8 +493,8 @@ mod tests {
         A2aJsonRepository, ExecutionSettingsJsonRepository, ExtensionsJsonRepository,
         GeneralSettingsJsonRepository, HiveSettingsJsonRepository, JsonFileRepository,
         JsonMcpRepository, JsonModelsRepository, JsonOAuthCredentialRepository,
-        ModuleSettingsJsonRepository, SearchSettingsJsonRepository, TrainingSettingsJsonRepository,
-        UserSecretsJsonRepository,
+        ModuleSettingsJsonRepository, SearchSettingsJsonRepository, TokenTrackingJsonRepository,
+        TrainingSettingsJsonRepository, UserSecretsJsonRepository,
     };
 
     /// A fresh temp file path for one test. The `TempDir` guard must be kept
@@ -636,6 +642,24 @@ mod tests {
                 module_dir: "/opt/chatty-test-modules".to_string(),
                 gateway_port: 9000,
                 ..ModuleSettingsModel::default()
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn token_tracking_json_backend() {
+        let (_dir, path) = temp_path("token_tracking.json");
+        conformance_token_tracking(
+            || TokenTrackingJsonRepository::with_path(path.clone()),
+            TokenTrackingSettings {
+                enabled: false,
+                response_reserve: 8_192,
+                high_threshold: 0.65,
+                critical_threshold: 0.85,
+                auto_summarize: true,
+                summarization_model_id: Some("summarizer-model".to_string()),
+                cap_usd: Some(25.0),
             },
         )
         .await;

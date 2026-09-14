@@ -44,14 +44,15 @@ use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::settings::models::search_settings::SearchSettingsModel;
+use crate::settings::models::token_tracking_settings::TokenTrackingSettings;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::user_secrets_store::UserSecretsModel;
 use crate::settings::repositories::{
     InMemoryA2aRepository, InMemoryExecutionSettingsRepository, InMemoryExtensionsRepository,
     InMemoryGeneralSettingsRepository, InMemoryHiveSettingsRepository, InMemoryMcpRepository,
     InMemoryModelsRepository, InMemoryModuleSettingsRepository, InMemoryProviderRepository,
-    InMemorySearchSettingsRepository, InMemoryTrainingSettingsRepository,
-    InMemoryUserSecretsRepository, RepositoryResult,
+    InMemorySearchSettingsRepository, InMemoryTokenTrackingRepository,
+    InMemoryTrainingSettingsRepository, InMemoryUserSecretsRepository, RepositoryResult,
 };
 
 /// Recursively re-sort every JSON object's entries by key, in place. Arrays
@@ -83,6 +84,7 @@ pub struct SettingsSnapshot {
     pub module_settings: ModuleSettingsModel,
     pub providers: Vec<ProviderConfig>,
     pub search_settings: SearchSettingsModel,
+    pub token_tracking: TokenTrackingSettings,
     pub training_settings: TrainingSettingsModel,
     pub user_secrets: UserSecretsModel,
 }
@@ -113,6 +115,7 @@ pub struct SettingsDelta {
     pub module_settings: Option<ModuleSettingsModel>,
     pub providers: Option<Vec<ProviderConfig>>,
     pub search_settings: Option<SearchSettingsModel>,
+    pub token_tracking: Option<TokenTrackingSettings>,
     pub training_settings: Option<TrainingSettingsModel>,
     pub user_secrets: Option<UserSecretsModel>,
 }
@@ -131,6 +134,7 @@ impl SettingsDelta {
             module_settings,
             providers,
             search_settings,
+            token_tracking,
             training_settings,
             user_secrets,
         } = self;
@@ -144,6 +148,7 @@ impl SettingsDelta {
             && module_settings.is_none()
             && providers.is_none()
             && search_settings.is_none()
+            && token_tracking.is_none()
             && training_settings.is_none()
             && user_secrets.is_none()
     }
@@ -176,6 +181,7 @@ impl RepositoryRegistry {
             module_settings,
             providers,
             search_settings,
+            token_tracking,
             training_settings,
             user_secrets,
         ) = tokio::try_join!(
@@ -189,6 +195,7 @@ impl RepositoryRegistry {
             self.module_settings.load(),
             self.providers.load_all(),
             self.search_settings.load(),
+            self.token_tracking.load(),
             self.training_settings.load(),
             self.user_secrets.load(),
         )?;
@@ -204,6 +211,7 @@ impl RepositoryRegistry {
             module_settings,
             providers,
             search_settings,
+            token_tracking,
             training_settings,
             user_secrets,
         })
@@ -236,6 +244,9 @@ impl RepositoryRegistry {
             )),
             hive_settings: Arc::new(InMemoryHiveSettingsRepository::new(snapshot.hive_settings)),
             extensions: Arc::new(InMemoryExtensionsRepository::new(snapshot.extensions)),
+            token_tracking: Arc::new(InMemoryTokenTrackingRepository::new(
+                snapshot.token_tracking,
+            )),
         }
     }
 
@@ -259,6 +270,7 @@ impl RepositoryRegistry {
             module_settings: changed(&current.module_settings, &snapshot.module_settings),
             providers: changed(&current.providers, &snapshot.providers),
             search_settings: changed(&current.search_settings, &snapshot.search_settings),
+            token_tracking: changed(&current.token_tracking, &snapshot.token_tracking),
             training_settings: changed(&current.training_settings, &snapshot.training_settings),
             user_secrets: changed(&current.user_secrets, &snapshot.user_secrets),
         })
@@ -301,6 +313,9 @@ impl RepositoryRegistry {
         if let Some(value) = delta.search_settings {
             self.search_settings.save(value).await?;
         }
+        if let Some(value) = delta.token_tracking {
+            self.token_tracking.save(value).await?;
+        }
         if let Some(value) = delta.training_settings {
             self.training_settings.save(value).await?;
         }
@@ -320,7 +335,8 @@ mod tests {
         A2aJsonRepository, ExecutionSettingsJsonRepository, ExtensionsJsonRepository,
         GeneralSettingsJsonRepository, HiveSettingsJsonRepository, JsonFileRepository,
         JsonMcpRepository, JsonModelsRepository, ModuleSettingsJsonRepository,
-        SearchSettingsJsonRepository, TrainingSettingsJsonRepository, UserSecretsJsonRepository,
+        SearchSettingsJsonRepository, TokenTrackingJsonRepository, TrainingSettingsJsonRepository,
+        UserSecretsJsonRepository,
     };
 
     /// A `RepositoryRegistry` backed by JSON files under a fresh temp dir.
@@ -355,6 +371,9 @@ mod tests {
                 "hive_settings.json",
             ))),
             extensions: Arc::new(ExtensionsJsonRepository::with_path(path("extensions.json"))),
+            token_tracking: Arc::new(TokenTrackingJsonRepository::with_path(path(
+                "token_tracking.json",
+            ))),
         };
         (dir, registry)
     }
@@ -509,6 +528,15 @@ mod tests {
                 daytona_enabled: false,
                 daytona_api_key: Some("dt-key".to_string()),
             },
+            token_tracking: TokenTrackingSettings {
+                enabled: false,
+                response_reserve: 8_192,
+                high_threshold: 0.65,
+                critical_threshold: 0.85,
+                auto_summarize: true,
+                summarization_model_id: Some("summarizer-model".to_string()),
+                cap_usd: Some(25.0),
+            },
             training_settings: TrainingSettingsModel {
                 atif_auto_export: true,
                 jsonl_auto_export: true,
@@ -580,6 +608,7 @@ mod tests {
     family_round_trip_test!(module_settings_round_trip, module_settings);
     family_round_trip_test!(providers_round_trip, providers);
     family_round_trip_test!(search_settings_round_trip, search_settings);
+    family_round_trip_test!(token_tracking_round_trip, token_tracking);
     family_round_trip_test!(training_settings_round_trip, training_settings);
     family_round_trip_test!(user_secrets_round_trip, user_secrets);
 }
