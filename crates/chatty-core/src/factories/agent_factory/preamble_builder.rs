@@ -85,7 +85,7 @@ pub(super) fn build_preamble(
     if tools.git {
         tool_sections.push(
             "- **git_status / git_diff / git_log / git_add / git_commit / \
-             git_create_branch / git_switch_branch**"
+             git_create_branch / git_switch_branch / git_merge**"
                 .to_string(),
         );
     }

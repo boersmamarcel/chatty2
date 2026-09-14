@@ -15,10 +15,9 @@
 use super::tool_registry::ToolAvailability;
 
 /// The read-only set every profile starts from: look at the tree, read files,
-/// search, read the git history, run the todo protocol, and ask the leader.
-///
-/// `git_merge` belongs here too once AGE-404 adds it to the git tool; the tool
-/// does not exist yet, so naming it now would only be a dead string.
+/// search, read the git history (`git_diff` takes a `base..head` range, so a
+/// reviewer reads a worker's branch without a shell; AGE-404), run the todo
+/// protocol, and ask the leader.
 const READ_SET: &[&str] = &[
     "read_file",
     "list_directory",
@@ -58,7 +57,12 @@ const GIT_WRITE: &[&str] = &[
     "git_create_branch",
     "git_switch_branch",
     "git_commit",
+    "git_merge",
 ];
+
+/// Taking a worker's branch: the one write a leader without a shell needs
+/// (AGE-404). Not in the read set on purpose — a reviewer merges nothing.
+const GIT_MERGE: &[&str] = &["git_merge"];
 
 /// Running code in the sandbox.
 const CODE_EXEC: &[&str] = &["execute_code"];
@@ -124,6 +128,7 @@ fn narrow_availability(tools: &ToolAvailability, allow: impl Fn(&str) -> bool) -
                 "git_create_branch",
                 "git_switch_branch",
                 "git_commit",
+                "git_merge",
             ],
         ),
         search: keep(
@@ -171,10 +176,11 @@ fn narrow_availability(tools: &ToolAvailability, allow: impl Fn(&str) -> bool) -
     }
 }
 
-/// A leader: read the repository, plan, and delegate. It edits nothing itself.
+/// A leader: read the repository, plan, delegate, and merge what a worker
+/// hands back. It edits nothing itself.
 pub static COORDINATOR: ToolProfile = ToolProfile {
     name: "coordinator",
-    groups: &[READ_SET, AGENT_TOOLS],
+    groups: &[READ_SET, AGENT_TOOLS, GIT_MERGE],
 };
 
 /// A worker that writes code: the read set plus everything needed to change
@@ -271,10 +277,15 @@ mod tests {
         assert!(!COORDINATOR.allows("write_file"));
         assert!(!COORDINATOR.allows("shell_execute"));
         assert!(!COORDINATOR.allows("git_commit"));
+        assert!(
+            COORDINATOR.allows("git_merge"),
+            "a leader without a shell takes a worker's branch with it (AGE-404)"
+        );
 
         assert!(CODER.allows("write_file"));
         assert!(CODER.allows("shell_execute"));
         assert!(CODER.allows("git_commit"));
+        assert!(CODER.allows("git_merge"));
         assert!(CODER.allows("execute_code"));
         assert!(!CODER.allows("invoke_agent"), "a coder does not delegate");
         assert!(!CODER.allows("list_agents"));
@@ -285,6 +296,7 @@ mod tests {
         assert!(!REVIEWER.allows("apply_diff"));
         assert!(!REVIEWER.allows("git_add"));
         assert!(!REVIEWER.allows("git_commit"));
+        assert!(!REVIEWER.allows("git_merge"), "a reviewer merges nothing");
         assert!(!REVIEWER.allows("invoke_agent"));
     }
 

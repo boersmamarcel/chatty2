@@ -49,6 +49,18 @@ pub struct GitCommitOutput {
     pub summary: String,
 }
 
+/// Output from `git merge`
+#[derive(Debug, Serialize)]
+pub struct GitMergeOutput {
+    /// The branch that was merged
+    pub branch: String,
+    /// HEAD after the merge: the branch tip on a fast-forward, the new
+    /// merge commit otherwise
+    pub hash: String,
+    /// What git printed (e.g. "Fast-forward" or "Merge made by the 'ort' strategy.")
+    pub summary: String,
+}
+
 /// A single entry from `git worktree list`
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct GitWorktree {
@@ -205,18 +217,7 @@ impl GitService {
     /// If `path` is provided, it is validated to be within the workspace
     /// boundary before being passed to git.
     pub async fn diff(&self, staged: bool, path: Option<&str>) -> Result<String> {
-        // Validate path is within workspace if provided
-        let validated_path: Option<String> = match path {
-            Some(p) => {
-                // Use validate_parent which handles both existing and non-existing paths
-                // (a file may be deleted but still show in diff)
-                let _ = self.validator.validate_parent(p).await.map_err(|e| {
-                    anyhow!("Path '{}' is outside the workspace or invalid: {}", p, e)
-                })?;
-                Some(p.to_string())
-            }
-            None => None,
-        };
+        let validated_path = self.validate_diff_path(path).await?;
 
         let mut args = vec!["diff"];
         if staged {
@@ -364,6 +365,116 @@ impl GitService {
         let range = format!("{base}..{branch}");
         let stat = self.run_git(&["diff", "--stat", &range]).await?;
         Ok(stat.trim().to_string())
+    }
+
+    /// `git diff <base>..<head>`: what `head` changed relative to `base`,
+    /// independent of the working tree — how a reviewer without a shell
+    /// reads a worker's branch (AGE-404). `path` restricts it like
+    /// [`Self::diff`] does.
+    pub async fn diff_range(&self, base: &str, head: &str, path: Option<&str>) -> Result<String> {
+        Self::validate_branch_name(base)?;
+        Self::validate_branch_name(head)?;
+        let validated_path = self.validate_diff_path(path).await?;
+
+        let range = format!("{base}..{head}");
+        let mut args = vec!["diff", &range];
+        if let Some(ref p) = validated_path {
+            args.push("--");
+            args.push(p);
+        }
+
+        let output = self.run_git(&args).await?;
+        if output.trim().is_empty() {
+            Ok("No changes found.".to_string())
+        } else {
+            Ok(output)
+        }
+    }
+
+    /// A `path` argument to a diff, checked to be inside the workspace.
+    /// `validate_parent` rather than `validate`: a deleted file still has a
+    /// diff.
+    async fn validate_diff_path(&self, path: Option<&str>) -> Result<Option<String>> {
+        match path {
+            Some(p) => {
+                let _ = self.validator.validate_parent(p).await.map_err(|e| {
+                    anyhow!("Path '{}' is outside the workspace or invalid: {}", p, e)
+                })?;
+                Ok(Some(p.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Merge `branch` into the current branch (AGE-404).
+    ///
+    /// `no_ff` forces a merge commit even when a fast-forward would do; the
+    /// commit takes `message` when one is given and git's default otherwise.
+    /// On a conflict the error names the conflicting files and the tree is
+    /// left in the conflicted state, `MERGE_HEAD` and markers included: the
+    /// `coder-reviewer` skill has the leader report the files and stop, not
+    /// resolve them.
+    pub async fn merge(
+        &self,
+        branch: &str,
+        no_ff: bool,
+        message: Option<&str>,
+    ) -> Result<GitMergeOutput> {
+        Self::validate_branch_name(branch)?;
+
+        let mut args = vec!["merge", "--no-edit"];
+        if no_ff {
+            args.push("--no-ff");
+        }
+        if let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) {
+            args.push("-m");
+            args.push(m);
+        }
+        args.push(branch);
+
+        let output = tokio::process::Command::new("git")
+            .args(&args)
+            .current_dir(&self.workspace_root)
+            .output()
+            .await
+            .map_err(|e| anyhow!("Failed to execute git command: {}", e))?;
+
+        if !output.status.success() {
+            let conflicts = self
+                .run_git(&["diff", "--name-only", "--diff-filter=U"])
+                .await
+                .unwrap_or_default();
+            let conflicts: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+            if !conflicts.is_empty() {
+                return Err(anyhow!(
+                    "Merge of '{}' has conflicts in: {}. The tree is left in the conflicted \
+                     state (MERGE_HEAD set, markers in the files); nothing was committed.",
+                    branch,
+                    conflicts.join(", ")
+                ));
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(anyhow!(
+                "git {} failed: {}",
+                args.join(" "),
+                format!("{}\n{}", stdout.trim(), stderr.trim()).trim()
+            ));
+        }
+
+        let hash = self
+            .run_git(&["rev-parse", "HEAD"])
+            .await?
+            .trim()
+            .to_string();
+
+        info!(branch = %branch, hash = %hash, no_ff, "Branch merged");
+
+        Ok(GitMergeOutput {
+            branch: branch.to_string(),
+            hash,
+            summary: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        })
     }
 
     /// Switch to an existing branch.
@@ -919,6 +1030,143 @@ mod tests {
 
         let service = GitService::new(path).await.unwrap();
         (tmp, service)
+    }
+
+    // ── Merging a worker's branch (AGE-404) ──────────────────────────────
+
+    /// One commit on the default branch, a worker branch one commit ahead
+    /// of it, and the default branch checked out again — where a leader
+    /// stands when the reviewer says APPROVE.
+    async fn repo_with_worker_branch() -> (tempfile::TempDir, GitService, String) {
+        let (tmp, git) = create_test_repo().await;
+        fs::write(tmp.path().join("base.txt"), "base\n").unwrap();
+        git.add(&["base.txt".to_string()]).await.unwrap();
+        git.commit("init").await.unwrap();
+        let default = git
+            .run_git(&["branch", "--show-current"])
+            .await
+            .unwrap()
+            .trim()
+            .to_string();
+
+        git.run_git(&["switch", "-c", "sub-agent/w1"])
+            .await
+            .unwrap();
+        fs::write(tmp.path().join("work.txt"), "work\n").unwrap();
+        git.add(&["work.txt".to_string()]).await.unwrap();
+        git.commit("worker change").await.unwrap();
+        git.switch_branch(&default).await.unwrap();
+        (tmp, git, default)
+    }
+
+    #[tokio::test]
+    async fn merge_fast_forwards_when_it_can() {
+        let (tmp, git, _) = repo_with_worker_branch().await;
+        let tip = git
+            .run_git(&["rev-parse", "sub-agent/w1"])
+            .await
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let out = git.merge("sub-agent/w1", false, None).await.unwrap();
+
+        assert_eq!(out.hash, tip, "a fast-forward moves HEAD to the branch tip");
+        assert_eq!(out.branch, "sub-agent/w1");
+        assert!(tmp.path().join("work.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn merge_no_ff_creates_a_merge_commit_with_the_given_message() {
+        let (_tmp, git, _) = repo_with_worker_branch().await;
+
+        let out = git
+            .merge("sub-agent/w1", true, Some("Merge worker w1"))
+            .await
+            .unwrap();
+
+        let head = git.run_git(&["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(out.hash, head.trim());
+        let parents = git.run_git(&["log", "-1", "--format=%P"]).await.unwrap();
+        assert_eq!(
+            parents.split_whitespace().count(),
+            2,
+            "a --no-ff merge commit has two parents"
+        );
+        let subject = git.run_git(&["log", "-1", "--format=%s"]).await.unwrap();
+        assert_eq!(subject.trim(), "Merge worker w1");
+    }
+
+    #[tokio::test]
+    async fn merge_conflict_names_the_files_and_leaves_the_tree_conflicted() {
+        let (tmp, git, default) = repo_with_worker_branch().await;
+        // Both sides edit base.txt differently.
+        git.run_git(&["switch", "sub-agent/w1"]).await.unwrap();
+        fs::write(tmp.path().join("base.txt"), "worker\n").unwrap();
+        git.add(&["base.txt".to_string()]).await.unwrap();
+        git.commit("worker edits base").await.unwrap();
+        git.switch_branch(&default).await.unwrap();
+        fs::write(tmp.path().join("base.txt"), "leader\n").unwrap();
+        git.add(&["base.txt".to_string()]).await.unwrap();
+        git.commit("leader edits base").await.unwrap();
+
+        let err = git
+            .merge("sub-agent/w1", true, None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("base.txt"),
+            "names the conflicting file: {err}"
+        );
+        assert!(
+            !err.contains("work.txt"),
+            "a cleanly merged file is not a conflict: {err}"
+        );
+        assert!(
+            git.run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                .await
+                .is_ok(),
+            "the merge is left in progress for the leader to report"
+        );
+        assert!(
+            fs::read_to_string(tmp.path().join("base.txt"))
+                .unwrap()
+                .contains("<<<<<<<"),
+            "conflict markers stay in the tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_rejects_an_invalid_branch_name() {
+        let (_tmp, git, _) = repo_with_worker_branch().await;
+        assert!(git.merge("-rf", false, None).await.is_err());
+        assert!(git.merge("a..b", false, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn diff_range_shows_the_branch_and_not_the_working_tree() {
+        let (tmp, git, default) = repo_with_worker_branch().await;
+        // An unstaged edit must not leak into a range diff.
+        fs::write(tmp.path().join("base.txt"), "dirty\n").unwrap();
+
+        let diff = git
+            .diff_range(&default, "sub-agent/w1", None)
+            .await
+            .unwrap();
+        assert!(diff.contains("work.txt"), "{diff}");
+        assert!(diff.contains("+work"), "{diff}");
+        assert!(!diff.contains("dirty"), "{diff}");
+
+        let restricted = git
+            .diff_range(&default, "sub-agent/w1", Some("base.txt"))
+            .await
+            .unwrap();
+        assert_eq!(restricted, "No changes found.");
+
+        assert!(git.diff_range("-rf", "sub-agent/w1", None).await.is_err());
+        assert!(git.diff_range(&default, "..", None).await.is_err());
     }
 
     #[tokio::test]

@@ -319,7 +319,12 @@ async fn main() -> Result<()> {
         );
     }
     if let Some(ref compat_url) = cli.openai_compat_url {
-        let discovered = discover_openai_compat(compat_url, cli.api_key.as_deref()).await?;
+        // AGE-403: accept either `http://host:port` or `http://host:port/v1`
+        // and discover/store the same canonical `.../v1` base either way —
+        // the OpenRouter-shaped client this injects posts `/chat/completions`
+        // under the stored base_url, so it must already end in `/v1`.
+        let compat_base_url = normalize_openai_compat_base_url(compat_url);
+        let discovered = discover_openai_compat(&compat_base_url, cli.api_key.as_deref()).await?;
         // OpenAI-compatible servers may not require auth, but rig's OpenAI
         // client always needs an API key string. Use a placeholder when none
         // is provided — most local servers (vllm, llama.cpp) ignore it.
@@ -338,7 +343,7 @@ async fn main() -> Result<()> {
             discovered,
             ProviderType::OpenRouter,
             "OpenAI-compat (CLI)",
-            Some(compat_url.clone()),
+            Some(compat_base_url),
             Some(api_key),
         );
     }
@@ -988,12 +993,28 @@ struct OpenAIModelEntry {
     id: String,
 }
 
-/// Query an OpenAI-compatible server at `base_url` via `GET /v1/models`.
+/// Normalize an `--openai-compat-url` value to the canonical form the
+/// OpenRouter-shaped client this injects expects as a provider `base_url`:
+/// always ending in `/v1`, with no trailing slash.
+///
+/// Accepts either `http://host:port` (the flag's documented form) or
+/// `http://host:port/v1` (how vllm/llama.cpp document their own base URL) so
+/// both discover at the same `/v1/models` endpoint and store the same
+/// `base_url` for chat completions (AGE-403).
+fn normalize_openai_compat_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let base = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+    format!("{base}/v1")
+}
+
+/// Query an OpenAI-compatible server via `GET {base_url}/models`, where
+/// `base_url` is already normalized to end in `/v1`
+/// (see [`normalize_openai_compat_base_url`]).
 async fn discover_openai_compat(
     base_url: &str,
     api_key: Option<&str>,
 ) -> Result<Vec<DiscoveredModel>> {
-    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let url = format!("{base_url}/models");
     let client = chatty_core::services::http_client::default_client(15);
 
     let mut req = client.get(&url);
@@ -1183,5 +1204,55 @@ mod cli_smoke_tests {
         assert!(Cli::try_parse_from(["chatty-tui", "--broker"]).is_ok());
         assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--headless", "-m", "hi"]).is_ok());
         assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--pipe"]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod openai_compat_url_tests {
+    use super::normalize_openai_compat_base_url;
+
+    /// AGE-403: discovery used to append `/v1/models` to whatever the flag
+    /// was given, while the stored provider `base_url` (used for
+    /// `/chat/completions`) kept the flag's value unchanged. `--openai-compat-url
+    /// http://host:port` (the documented form) and `--openai-compat-url
+    /// http://host:port/v1` (how vllm/llama.cpp document their own base URL)
+    /// must normalize to the same `.../v1` base — used both as the stored
+    /// provider `base_url` and to build the `/v1/models` discovery URL —
+    /// or exactly one of the two shapes 404s.
+    #[test]
+    fn bare_host_and_trailing_v1_normalize_to_the_same_base_url() {
+        let bare = normalize_openai_compat_base_url("http://172.17.0.1:11434");
+        let with_v1 = normalize_openai_compat_base_url("http://172.17.0.1:11434/v1");
+
+        assert_eq!(bare, with_v1);
+        assert_eq!(bare, "http://172.17.0.1:11434/v1");
+    }
+
+    /// The same normalized base is what `discover_openai_compat` appends
+    /// `/models` to, so the discovery URL must match too.
+    #[test]
+    fn bare_host_and_trailing_v1_produce_the_same_discovery_url() {
+        let bare = normalize_openai_compat_base_url("http://localhost:8000");
+        let with_v1 = normalize_openai_compat_base_url("http://localhost:8000/v1");
+
+        let discovery_url_bare = format!("{bare}/models");
+        let discovery_url_with_v1 = format!("{with_v1}/models");
+
+        assert_eq!(discovery_url_bare, discovery_url_with_v1);
+        assert_eq!(discovery_url_bare, "http://localhost:8000/v1/models");
+    }
+
+    /// A trailing slash on either shape must not produce a double slash or
+    /// an extra `/v1`.
+    #[test]
+    fn trailing_slashes_are_tolerated() {
+        assert_eq!(
+            normalize_openai_compat_base_url("http://localhost:8000/"),
+            "http://localhost:8000/v1"
+        );
+        assert_eq!(
+            normalize_openai_compat_base_url("http://localhost:8000/v1/"),
+            "http://localhost:8000/v1"
+        );
     }
 }

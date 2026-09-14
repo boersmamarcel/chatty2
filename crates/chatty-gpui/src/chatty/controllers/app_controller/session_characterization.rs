@@ -153,6 +153,7 @@ async fn record(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String
             max_agent_turns: 10,
             loop_guard: true,
             already_asked_to_retry: false,
+            think_disabled: false,
         },
     )
     .await;
