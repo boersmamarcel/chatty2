@@ -20,10 +20,11 @@ use std::sync::LazyLock;
 
 use super::math_parser::parse_math_segments;
 use super::parsed_cache::{
-    CachedCodeBlock, CachedContentSegment, CachedMarkdownSegment, CachedParseResult,
+    CachedCodeBlock, CachedContentSegment, CachedMarkdownSegment, CachedParseResult, LiveTailCache,
     StreamingParseState,
 };
 use super::syntax_highlighter;
+use std::sync::Arc;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -343,6 +344,11 @@ pub(super) fn build_streaming_parse_result(
             content.len() >= p.content_len && content_segment_count == p.content_segment_count
         });
 
+    // The settled-prefix math parse survives any reuse decision above: it is
+    // keyed by its own text, so a stale one is simply not matched.
+    let mut live_tail = prev.and_then(|p| p.live_tail.clone());
+    let mut last_text_md_count = 0;
+
     let cached_segments: Vec<CachedContentSegment> = if can_reuse_prefix {
         // SAFETY: can_reuse_prefix checks prev.is_some_and(...)
         let prev_state = prev.unwrap();
@@ -360,28 +366,32 @@ pub(super) fn build_streaming_parse_result(
         // Re-parse only the last content segment
         // SAFETY: can_reuse_prefix requires content_segment_count > 0
         let last = content_segments.into_iter().last().unwrap();
-        segments.push(parse_content_segment_streaming(last, prev_state, cx));
+        segments.push(parse_content_segment_streaming(
+            last,
+            prev_state,
+            &mut live_tail,
+            &mut last_text_md_count,
+            cx,
+        ));
 
         segments
     } else {
         // Full parse (first render or segment count changed)
+        let count = content_segments.len();
         content_segments
             .into_iter()
-            .map(|seg| parse_content_segment_streaming_fresh(seg, cx))
+            .enumerate()
+            .map(|(ix, seg)| {
+                parse_content_segment_streaming_fresh(
+                    seg,
+                    ix + 1 == count,
+                    &mut live_tail,
+                    &mut last_text_md_count,
+                    cx,
+                )
+            })
             .collect()
     };
-
-    // Count md segments in last text segment (for next render's reuse check)
-    let last_text_md_count = cached_segments
-        .last()
-        .map(|s| {
-            if let CachedContentSegment::Text(mds) = s {
-                mds.len()
-            } else {
-                0
-            }
-        })
-        .unwrap_or(0);
 
     StreamingParseState {
         result: CachedParseResult {
@@ -390,6 +400,63 @@ pub(super) fn build_streaming_parse_result(
         content_len: content.len(),
         content_segment_count,
         last_text_md_count,
+        live_tail,
+    }
+}
+
+/// Split the growing text segment into the settled prefix (through the last
+/// newline) and the line still being streamed.
+pub(super) fn split_live_tail(text: &str) -> (&str, &str) {
+    match text.rfind('\n') {
+        Some(ix) => text.split_at(ix + 1),
+        None => ("", text),
+    }
+}
+
+/// Parse the last markdown segment of a streaming message when it is text.
+///
+/// The settled prefix gets the full math parse, reused from `cache` while the
+/// prefix is byte-identical; the open line is emitted as [`PlainTail`] and
+/// never reaches the math parser, the markdown parser or Typst until a
+/// newline promotes it (AGE-167).
+///
+/// [`PlainTail`]: CachedMarkdownSegment::PlainTail
+fn parse_live_text_tail(
+    text: &str,
+    cache: &mut Option<LiveTailCache>,
+) -> Vec<CachedMarkdownSegment> {
+    let (settled_text, tail) = split_live_tail(text);
+    let entry = match cache.take() {
+        Some(prev) if prev.settled_text == settled_text => prev,
+        _ => LiveTailCache {
+            settled_text: settled_text.to_string(),
+            settled: Arc::new(parse_math_segments(settled_text)),
+        },
+    };
+    let mut out = Vec::with_capacity(2);
+    if !entry.settled.is_empty() {
+        out.push(CachedMarkdownSegment::TextWithMath(
+            entry.settled.as_ref().clone(),
+        ));
+    }
+    if !tail.is_empty() {
+        out.push(CachedMarkdownSegment::PlainTail(tail.to_string()));
+    }
+    *cache = Some(entry);
+    out
+}
+
+/// Convert the last markdown segment of the last text block: text becomes a
+/// settled prefix plus a plain tail, everything else takes the ordinary path.
+fn parse_last_markdown_segment_streaming(
+    segment: MarkdownSegment,
+    prev_mds: &[CachedMarkdownSegment],
+    live_tail: &mut Option<LiveTailCache>,
+    cx: &App,
+) -> Vec<CachedMarkdownSegment> {
+    match segment {
+        MarkdownSegment::Text(t) => parse_live_text_tail(&t, live_tail),
+        other => vec![parse_markdown_segment_streaming(other, prev_mds, cx)],
     }
 }
 
@@ -400,6 +467,8 @@ pub(super) fn build_streaming_parse_result(
 fn parse_content_segment_streaming(
     segment: ContentSegment,
     prev: &StreamingParseState,
+    live_tail: &mut Option<LiveTailCache>,
+    last_text_md_count: &mut usize,
     cx: &App,
 ) -> CachedContentSegment {
     match segment {
@@ -407,6 +476,7 @@ fn parse_content_segment_streaming(
         ContentSegment::Text(text) => {
             let markdown_segs = parse_markdown_segments(&text, true);
             let md_count = markdown_segs.len();
+            *last_text_md_count = md_count;
 
             // Try markdown-level reuse: same count → reuse all but last
             let prev_md = prev
@@ -423,9 +493,11 @@ fn parse_content_segment_streaming(
                 .filter(|_| md_count == prev.last_text_md_count && md_count > 0);
 
             let cached_md = if let Some(prev_mds) = prev_md {
-                let mut result = Vec::with_capacity(md_count);
+                let mut result = Vec::with_capacity(md_count + 1);
 
-                // Reuse all md segments except the last
+                // Reuse all md segments except the last. The cached list may
+                // hold one more entry than `md_count` (the tail splits in two),
+                // but its stable prefix is the first `md_count - 1` either way.
                 for seg in &prev_mds[..prev_mds.len().min(md_count - 1)] {
                     result.push(seg.clone());
                 }
@@ -433,7 +505,9 @@ fn parse_content_segment_streaming(
                 // Parse only the last md segment
                 // SAFETY: md_count > 0 (checked above)
                 let last = markdown_segs.into_iter().last().unwrap();
-                result.push(parse_markdown_segment_streaming(last, prev_mds, cx));
+                result.extend(parse_last_markdown_segment_streaming(
+                    last, prev_mds, live_tail, cx,
+                ));
 
                 result
             } else {
@@ -453,10 +527,21 @@ fn parse_content_segment_streaming(
                         }
                     })
                     .unwrap_or(&[]);
-                markdown_segs
-                    .into_iter()
-                    .map(|ms| parse_markdown_segment_streaming(ms, prev_mds_for_reuse, cx))
-                    .collect()
+                let mut result = Vec::with_capacity(md_count + 1);
+                let mut iter = markdown_segs.into_iter().peekable();
+                while let Some(ms) = iter.next() {
+                    if iter.peek().is_none() {
+                        result.extend(parse_last_markdown_segment_streaming(
+                            ms,
+                            prev_mds_for_reuse,
+                            live_tail,
+                            cx,
+                        ));
+                    } else {
+                        result.push(parse_markdown_segment_streaming(ms, prev_mds_for_reuse, cx));
+                    }
+                }
+                result
             };
 
             CachedContentSegment::Text(cached_md)
@@ -465,18 +550,38 @@ fn parse_content_segment_streaming(
 }
 
 /// Parse a content segment without incremental reuse (first render or segment count changed).
+///
+/// `is_last` marks the content segment that is still growing: only its final
+/// markdown segment is split into a settled prefix and a plain tail.
 fn parse_content_segment_streaming_fresh(
     segment: ContentSegment,
+    is_last: bool,
+    live_tail: &mut Option<LiveTailCache>,
+    last_text_md_count: &mut usize,
     cx: &App,
 ) -> CachedContentSegment {
     match segment {
         ContentSegment::Thinking(text) => CachedContentSegment::Thinking(text),
         ContentSegment::Text(text) => {
             let markdown_segs = parse_markdown_segments(&text, true);
-            let cached_md: Vec<CachedMarkdownSegment> = markdown_segs
-                .into_iter()
-                .map(|ms| parse_markdown_segment_streaming(ms, &[], cx))
-                .collect();
+            if is_last {
+                *last_text_md_count = markdown_segs.len();
+            }
+            let mut cached_md: Vec<CachedMarkdownSegment> =
+                Vec::with_capacity(markdown_segs.len() + 1);
+            let mut iter = markdown_segs.into_iter().peekable();
+            while let Some(ms) = iter.next() {
+                if is_last && iter.peek().is_none() {
+                    cached_md.extend(parse_last_markdown_segment_streaming(
+                        ms,
+                        &[],
+                        live_tail,
+                        cx,
+                    ));
+                } else {
+                    cached_md.push(parse_markdown_segment_streaming(ms, &[], cx));
+                }
+            }
             CachedContentSegment::Text(cached_md)
         }
     }
@@ -689,6 +794,136 @@ mod tests {
         // Empty thinking block is skipped, so we get Text + Text
         assert_eq!(segs.len(), 2);
         assert!(segs.iter().all(|s| matches!(s, ContentSegment::Text(_))));
+    }
+
+    // ── live tail (AGE-167) ───────────────────────────────────────────
+
+    use super::super::math_parser::MathSegment;
+
+    fn last_mds(state: &StreamingParseState) -> &[CachedMarkdownSegment] {
+        match state.result.segments.last() {
+            Some(CachedContentSegment::Text(mds)) => mds,
+            other => panic!("expected a text segment, got {other:?}"),
+        }
+    }
+
+    fn has_math(mds: &[CachedMarkdownSegment]) -> bool {
+        mds.iter().any(|md| match md {
+            CachedMarkdownSegment::TextWithMath(segs) => {
+                segs.iter().any(|s| !matches!(s, MathSegment::Text(_)))
+            }
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn split_live_tail_keeps_the_newline_on_the_settled_side() {
+        assert_eq!(split_live_tail("no newline yet"), ("", "no newline yet"));
+        assert_eq!(split_live_tail("a\nb\nc"), ("a\nb\n", "c"));
+        assert_eq!(split_live_tail("a\n"), ("a\n", ""));
+    }
+
+    #[gpui::test]
+    fn the_open_line_is_plain_and_the_settled_prefix_keeps_its_math(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let s1 = build_streaming_parse_result("Let $x$ be\nthe **bold", None, cx);
+            let mds = last_mds(&s1);
+            assert_eq!(mds.len(), 2, "{mds:?}");
+            assert!(matches!(&mds[0], CachedMarkdownSegment::TextWithMath(segs)
+                    if segs.contains(&MathSegment::InlineMath("x".into()))));
+            assert!(matches!(&mds[1], CachedMarkdownSegment::PlainTail(t) if t == "the **bold"));
+
+            // Growing the open line does not re-parse the settled prefix.
+            let s2 = build_streaming_parse_result("Let $x$ be\nthe **bold** one", Some(&s1), cx);
+            let (Some(a), Some(b)) = (&s1.live_tail, &s2.live_tail) else {
+                panic!("live tail cache missing");
+            };
+            assert!(
+                Arc::ptr_eq(&a.settled, &b.settled),
+                "settled prefix was re-parsed"
+            );
+            assert!(
+                matches!(last_mds(&s2).last(), Some(CachedMarkdownSegment::PlainTail(t))
+                    if t == "the **bold** one")
+            );
+
+            // A newline promotes the line: it now sits in the settled prefix.
+            let s3 =
+                build_streaming_parse_result("Let $x$ be\nthe **bold** one\nnext", Some(&s2), cx);
+            assert!(!Arc::ptr_eq(
+                &b.settled,
+                &s3.live_tail.as_ref().unwrap().settled
+            ));
+            assert_eq!(
+                s3.live_tail.as_ref().unwrap().settled_text,
+                "Let $x$ be\nthe **bold** one\n"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_open_math_fence_never_reaches_the_math_parser(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut prev: Option<StreamingParseState> = None;
+            let mut text = String::from("Consider\n\n$$\n");
+            for piece in ["E = ", "mc^2 + ", "$", "5 \\\\ ", "\\int_0^1 f"] {
+                text.push_str(piece);
+                let state = build_streaming_parse_result(&text, prev.as_ref(), cx);
+                let mds = last_mds(&state);
+                assert!(!has_math(mds), "open fence rendered math: {mds:?}");
+                assert!(
+                    matches!(mds.last(), Some(CachedMarkdownSegment::PlainTail(_))),
+                    "{mds:?}"
+                );
+                prev = Some(state);
+            }
+            // Closing the fence promotes it to block math.
+            text.push_str("\n$$\n");
+            let state = build_streaming_parse_result(&text, prev.as_ref(), cx);
+            assert!(has_math(last_mds(&state)), "{:?}", last_mds(&state));
+        });
+    }
+
+    #[gpui::test]
+    fn an_open_code_fence_is_not_highlighted(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let s1 = build_streaming_parse_result("Code:\n```rust\nfn main() {", None, cx);
+            let mds = last_mds(&s1);
+            assert!(
+                matches!(mds.last(), Some(CachedMarkdownSegment::IncompleteCodeBlock { code, .. })
+                    if code == "fn main() {"),
+                "{mds:?}"
+            );
+            assert!(
+                !mds.iter()
+                    .any(|md| matches!(md, CachedMarkdownSegment::CodeBlock(_))),
+            );
+            // The text before the fence is settled, not a live tail.
+            assert!(
+                matches!(&mds[0], CachedMarkdownSegment::TextWithMath(_)),
+                "{mds:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn stream_end_promotes_the_tail(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let streaming = build_streaming_parse_result("Sum $a+b$ done", None, cx);
+            assert!(matches!(
+                last_mds(&streaming).last(),
+                Some(CachedMarkdownSegment::PlainTail(_))
+            ));
+            let done = build_cached_parse_result("Sum $a+b$ done", cx);
+            let CachedContentSegment::Text(mds) = &done.segments[0] else {
+                panic!()
+            };
+            assert!(has_math(mds), "{mds:?}");
+            assert!(
+                !mds.iter()
+                    .any(|md| matches!(md, CachedMarkdownSegment::PlainTail(_)))
+            );
+        });
     }
 
     #[test]
