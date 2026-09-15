@@ -489,7 +489,7 @@ with its own model and tool set:
 | `model` | Optional. Passed as `--model` to each child, resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the child runs the roster's default, as an undeclared worker does. |
 | `tools` | Optional. A named tool profile passed as `--tools`: `coordinator`, `coder` or `reviewer`. An allowlist of tool *names* — see below. |
 | `preamble` | Optional. The role's standing instructions, passed as `--preamble` and appended to the worker's system prompt after the base preamble, before the tool summary. |
-| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. Ignored when `tools` is set. |
+| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. Composes with `tools`: it can narrow a named profile further, but never re-enables a tool the profile already excludes. |
 | `max_agent_turns` | Optional. This worker's own turn budget (AGE-440), passed as `--max-agent-turns <n>` ahead of `extra_args` and applied to the child's execution settings before its loop guard is sized. Absent: the child runs with the persisted default of 10. Independent of the team file's `max_agent_turns`, which is the leader's. |
 | `extra_args` | Optional. Any further `chatty-tui` flags, appended verbatim. |
 
@@ -566,14 +566,14 @@ The verification command is the team's, not an agent's, and lives next to
 
 It is skipped for any agent **whose profile has no shell**: a worker that could not run
 commands produced no build, so running the suite in its tree would report the leader's
-own state back as the worker's. Which declaration answers that follows the precedence
-above — a named `tools` profile is an allowlist and wins, so a `reviewer` runs the suite
-(its profile allows `shell_execute`) even alongside `disable_tools: ["shell"]`, while a
-`coordinator` never does; with no profile named, `disable_tools` containing `shell` is
-what skips it. The command is a plain subprocess in a process group of its own, not one
-of the agent's tools — the point of the envelope is that it is the runner's fact and not
-the worker's account of one — and the timeout kills that whole group, so a suite that
-hangs cannot outlive the delegation that started it.
+own state back as the worker's. `tools` and `disable_tools` compose (AGE-452), so both
+have to allow it: a `reviewer` runs the suite unless `disable_tools` also names `shell`,
+a `coordinator` never does regardless, and with no profile named, `disable_tools`
+containing `shell` alone is what skips it. The command is a plain subprocess in a
+process group of its own, not one of the agent's tools — the point of the envelope is
+that it is the runner's fact and not the worker's account of one — and the timeout
+kills that whole group, so a suite that hangs cannot outlive the delegation that
+started it.
 
 ### Teams
 
