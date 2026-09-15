@@ -470,6 +470,57 @@ mod runner {
         assert_eq!(text(&second), "And the tests?");
     }
 
+    /// AGE-441: a `--team` leader shares the workspace with its workers, so
+    /// the task's answer file appearing on disk is a worker's result — the
+    /// leader's turn goes on to whatever its protocol says comes next (a
+    /// second delegation, a REVISE loop) instead of stopping on the spot as a
+    /// lone agent would.
+    #[tokio::test]
+    async fn a_team_leader_keeps_going_when_a_worker_writes_the_answer_file() {
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
+            .expect("the preset loads");
+        let (mut leader, _event_rx) = test_runner_with_team(Some(team)).await;
+        leader.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        assert!(
+            leader.is_team_leader(),
+            "the role comes from the team config"
+        );
+        assert!(!answer_file_exists(&leader));
+        assert!(!stops_on_answer_file(&leader, true));
+
+        // The first worker's `final_answer` lands in the shared workspace
+        // while the leader is still waiting on its `invoke_agent` result.
+        std::fs::write(workspace.path().join("answer.txt"), "42").unwrap();
+        assert!(answer_file_exists(&leader));
+        assert!(
+            !stops_on_answer_file(&leader, true),
+            "a worker's answer file must not end the leader's turn"
+        );
+    }
+
+    /// AGE-441 regression: a lone `--headless` agent (and a worker, which
+    /// runs without `--team`) still stops the moment the task's answer file
+    /// exists after one of its own tool calls — and only on tasks that use
+    /// the answer-file convention at all.
+    #[tokio::test]
+    async fn a_lone_agent_still_stops_once_its_answer_file_exists() {
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let (mut lone, _event_rx) = test_runner().await;
+        lone.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        assert!(!lone.is_team_leader());
+        assert!(!stops_on_answer_file(&lone, true), "no file yet");
+
+        std::fs::write(workspace.path().join("answer.txt"), "42").unwrap();
+        assert!(stops_on_answer_file(&lone, true));
+        assert!(
+            !stops_on_answer_file(&lone, false),
+            "a task that never asked for an answer file is not stopped by one"
+        );
+    }
+
     /// T3/AGE-242: `stop_stream()` only sets the cancel flag, so a
     /// `send_message()` right after it is refused; the deferred-send pattern
     /// in `run_headless` holds the prompt until the cancellation completes.

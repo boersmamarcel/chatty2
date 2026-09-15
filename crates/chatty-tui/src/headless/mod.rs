@@ -176,10 +176,21 @@ pub async fn run_headless(
                     // Check for repeated identical tool call (loop detection).
                     pivot_msg = loop_guard.on_tool_completed(&tc.name, &tc.input);
                 }
+                if !called_final_answer
+                    && answer_file_required
+                    && engine.is_team_leader()
+                    && answer_file_exists(&engine)
+                {
+                    // A worker's result, not the end of this turn (AGE-441);
+                    // said out loud because a lone agent would stop here.
+                    eprintln!(
+                        "Answer file exists (a worker's or our own); the team leader keeps going."
+                    );
+                }
                 if called_final_answer {
                     eprintln!("final_answer completed and answer file exists; stopping stream.");
                     engine.stop_stream();
-                } else if answer_file_required && answer_file_exists(&engine) {
+                } else if stops_on_answer_file(&engine, answer_file_required) {
                     // Answer file was written by a non-final_answer tool (e.g. echo via shell).
                     // Stop the stream so the model doesn't loop writing the same answer repeatedly.
                     eprintln!("Answer file exists after tool call; stopping stream early.");
@@ -503,6 +514,18 @@ pub async fn run_headless(
     println!("{}", response);
 
     Ok(())
+}
+
+/// Whether a tool result ends the turn because the task's answer file now
+/// exists (AGE-441).
+///
+/// A lone `--headless` agent — and a worker, which never runs with `--team`
+/// — is done once the file is there: staying in the loop only rewrites the
+/// same answer. A `--team` leader shares the workspace with its workers, so
+/// the file is one of *their* results; its own turn ends when its delegation
+/// flow does, or its turns run out, never on a file somebody else wrote.
+fn stops_on_answer_file(engine: &HeadlessRunner, answer_file_required: bool) -> bool {
+    answer_file_required && !engine.is_team_leader() && answer_file_exists(engine)
 }
 
 fn should_infer_missing_answer(original_prompt: &str) -> bool {
