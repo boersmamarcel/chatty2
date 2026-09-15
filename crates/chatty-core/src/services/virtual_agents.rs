@@ -78,27 +78,24 @@ pub fn resolve_virtual_agents(
                 args.push(model.to_string());
             }
             // A profile is an allowlist of tool names and `--disable` a list
-            // of groups; when both are declared the profile wins, so the two
-            // never fight over the same tool (ADR-0011 C11).
-            match agent.tools.as_deref() {
-                Some(profile) => {
-                    if tool_profile(profile).is_none() {
-                        tracing::warn!(
-                            agent = %agent.name,
-                            profile,
-                            valid = ?tool_profile_names(),
-                            "Virtual agent names an unknown tool profile; its workers will fail to start"
-                        );
-                    }
-                    args.push("--tools".to_string());
-                    args.push(profile.to_string());
+            // of groups; `chatty-tui` composes the two (a profile only ever
+            // takes tools away, it never turns a disabled group back on), so
+            // both ride along whenever they're set (AGE-452).
+            if let Some(profile) = agent.tools.as_deref() {
+                if tool_profile(profile).is_none() {
+                    tracing::warn!(
+                        agent = %agent.name,
+                        profile,
+                        valid = ?tool_profile_names(),
+                        "Virtual agent names an unknown tool profile; its workers will fail to start"
+                    );
                 }
-                None => {
-                    if !agent.disable_tools.is_empty() {
-                        args.push("--disable".to_string());
-                        args.push(agent.disable_tools.join(","));
-                    }
-                }
+                args.push("--tools".to_string());
+                args.push(profile.to_string());
+            }
+            if !agent.disable_tools.is_empty() {
+                args.push("--disable".to_string());
+                args.push(agent.disable_tools.join(","));
             }
             if let Some(preamble) = agent.preamble.as_deref().map(str::trim)
                 && !preamble.is_empty()
@@ -149,23 +146,25 @@ const SHELL_TOOL_NAME: &str = "shell_execute";
 ///
 /// A worker that cannot run commands did not produce a build, so running
 /// the suite in its tree would report the leader's own state back as the
-/// worker's. Which of the two tool declarations answers that follows
-/// AGE-405's own precedence: a named `tools` profile is an allowlist and
-/// wins when both are set, so a `reviewer` runs the suite even though it
-/// also disables the `shell` group, and a `coordinator` never does.
+/// worker's. `tools` and `disable_tools` compose (AGE-452): a named profile
+/// has to allow `shell_execute` *and* `disable_tools` has to leave `shell`
+/// enabled, so a `reviewer` runs the suite unless it also disables `shell`,
+/// and a `coordinator` never does regardless of `disable_tools`.
 fn verification_for(
     agent: &VirtualAgentConfig,
     module_settings: &ModuleSettingsModel,
 ) -> Option<String> {
-    let has_shell = match agent.tools.as_deref() {
+    let profile_has_shell = match agent.tools.as_deref() {
         // An unknown profile name is warned about above and fails the
         // child at start-up, so what this answers for it never matters.
         Some(profile) => tool_profile(profile).is_none_or(|p| p.allows(SHELL_TOOL_NAME)),
-        None => !agent
-            .disable_tools
-            .iter()
-            .any(|group| group == SHELL_TOOL_GROUP),
+        None => true,
     };
+    let not_disabled = !agent
+        .disable_tools
+        .iter()
+        .any(|group| group == SHELL_TOOL_GROUP);
+    let has_shell = profile_has_shell && not_disabled;
     has_shell
         .then(|| module_settings.team.verification.clone())
         .flatten()
@@ -186,13 +185,16 @@ fn describe(agent: &VirtualAgentConfig, models: &[ModelConfig]) -> String {
             None => text.push_str(" Model: the configured default."),
         },
     }
-    match agent.tools.as_deref() {
-        Some(profile) => text.push_str(&format!(" Tool profile: {profile}.")),
-        None if agent.disable_tools.is_empty() => text.push_str(" Tools: the full set."),
-        None => text.push_str(&format!(
+    if let Some(profile) = agent.tools.as_deref() {
+        text.push_str(&format!(" Tool profile: {profile}."));
+    } else if agent.disable_tools.is_empty() {
+        text.push_str(" Tools: the full set.");
+    }
+    if !agent.disable_tools.is_empty() {
+        text.push_str(&format!(
             " Tool groups disabled: {}.",
             agent.disable_tools.join(", ")
-        )),
+        ));
     }
     if let Some(sentence) = first_sentence(agent.preamble.as_deref()) {
         text.push_str(&format!(" Role: {sentence}"));
@@ -441,10 +443,11 @@ mod tests {
         );
     }
 
-    /// AGE-405's precedence, applied to AGE-406: a named `tools` profile is
-    /// an allowlist and wins over `disable_tools`, so what decides is what
-    /// the profile allows — `coordinator` has no `shell_execute` and
-    /// `reviewer` does, even alongside `disable_tools: ["shell"]`.
+    /// AGE-452, applied to AGE-406: `tools` and `disable_tools` compose, so
+    /// both have to allow `shell_execute` — `coordinator` has no
+    /// `shell_execute` regardless, `reviewer` does but loses it once
+    /// `disable_tools` also names `shell`, and `coder` with neither
+    /// restriction keeps it.
     #[test]
     fn a_named_profile_decides_whether_the_verification_command_runs() {
         let settings = ModuleSettingsModel {
@@ -479,9 +482,9 @@ mod tests {
             "a coordinator cannot run commands, so its tree was never built"
         );
         assert_eq!(
-            specs[1].verification.as_deref(),
-            Some("cargo test"),
-            "the profile is the allowlist and it allows shell_execute; `disable_tools` loses"
+            specs[1].verification, None,
+            "the reviewer profile allows shell_execute, but disable_tools also names \
+             shell, and the two compose rather than one winning"
         );
         assert_eq!(specs[2].verification.as_deref(), Some("cargo test"));
     }
@@ -541,10 +544,12 @@ mod tests {
         );
     }
 
-    /// Do item 1: `tools` wins when both are set, so the two never disagree
-    /// about one tool.
+    /// AGE-452: `tools` and `disable_tools` compose, so a worker can run a
+    /// named profile and still have a group disabled the profile alone
+    /// would have allowed (e.g. a `reviewer` an author wants to keep off
+    /// `ask_user` for — see `resolve_virtual_agents`'s doc comment).
     #[test]
-    fn a_profile_replaces_the_disabled_groups_rather_than_joining_them() {
+    fn a_profile_and_disabled_groups_ride_along_together() {
         let settings = ModuleSettingsModel {
             virtual_agents: vec![VirtualAgentConfig {
                 name: "local-reviewer".to_string(),
@@ -557,14 +562,19 @@ mod tests {
 
         let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
 
-        assert_eq!(specs[0].args, vec!["--tools", "reviewer"]);
+        assert_eq!(
+            specs[0].args,
+            vec!["--tools", "reviewer", "--disable", "fs-write"]
+        );
         assert!(
             specs[0].description.contains("Tool profile: reviewer."),
             "{}",
             specs[0].description
         );
         assert!(
-            !specs[0].description.contains("Tool groups disabled"),
+            specs[0]
+                .description
+                .contains("Tool groups disabled: fs-write."),
             "{}",
             specs[0].description
         );
