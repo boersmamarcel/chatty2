@@ -577,10 +577,17 @@ impl StreamManager {
         chunk: StreamChunk,
         cx: &mut gpui::Context<Self>,
     ) {
-        if !matches!(chunk, StreamChunk::Text(_)) {
+        // Reasoning and tool-argument deltas are liveness for the stall
+        // watchdog, not output (AGE-453); they must not flush the text batch
+        // per token or the batching AGE-166 introduced is defeated.
+        if !matches!(
+            chunk,
+            StreamChunk::Text(_) | StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta
+        ) {
             self.flush_text(conv_id, conv_id, cx);
         }
         match chunk {
+            StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta => {}
             StreamChunk::Text(text) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.pending_text.push_str(&text);

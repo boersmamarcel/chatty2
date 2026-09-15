@@ -20,6 +20,18 @@ use crate::services::stream_processor::{StreamError, StreamErrorKind};
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     Text(String),
+    /// A fragment of the model's reasoning, streamed ahead of its answer
+    /// (`reasoning_content` on OpenAI-compatible wires, `<think>` blocks
+    /// Ollama and vLLM split out). No frontend renders it today; it exists
+    /// so the stall watchdog counts a thinking model as active — a model
+    /// that reasons for longer than `STALL_TIMEOUT` used to be cut off as
+    /// "stopped responding" while streaming the whole time (AGE-453).
+    Reasoning(String),
+    /// A fragment of a tool call's arguments still being streamed. The call
+    /// arrives complete as `ToolCallStarted`/`ToolCallInput` once its
+    /// arguments parse; this only marks the stream as live while a long
+    /// argument — a whole file for `write_file`, say — is written (AGE-453).
+    ToolCallDelta,
     ToolCallStarted {
         id: String,
         name: String,
@@ -186,8 +198,13 @@ fn resolve_call_id(
 /// [`tool_result_looks_like_error`]); a `CompletionCall` yields one
 /// (`ApiCallUsage`); a `FinalResponse` yields the turn's usage aggregate
 /// (`TurnUsage`) and, when rig recorded the turn, its messages
-/// (`TurnMessages`). An item this stream does not render (e.g.
-/// `ToolExecutionCommitted`, `ModelTurnRetried`, a streamed delta) yields none.
+/// (`TurnMessages`). A reasoning delta yields `Reasoning` and a tool-call
+/// delta yields `ToolCallDelta`: neither is rendered, but each is one
+/// `stream.next()` for the stall watchdog, which otherwise sees a model
+/// thinking or writing a long tool argument as silence (AGE-453). An item
+/// this stream does not render and that carries no liveness of its own
+/// (e.g. `ToolExecutionCommitted`, `ModelTurnRetried`, the completed
+/// `Reasoning` block that repeats its deltas) yields none.
 fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamChunk> {
     match item {
         MultiTurnStreamItem::StreamAssistantItem(content) => match content {
@@ -214,6 +231,10 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
                     },
                 ]
             }
+            StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                vec![StreamChunk::Reasoning(reasoning)]
+            }
+            StreamedAssistantContent::ToolCallDelta { .. } => vec![StreamChunk::ToolCallDelta],
             _ => Vec::new(),
         },
         MultiTurnStreamItem::StreamUserItem(user_content) => {
@@ -440,6 +461,7 @@ mod tests {
     use rig_core::completion::message::{
         ProviderCallId, Text, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
     };
+    use rig_core::streaming::ToolCallDeltaContent;
 
     use super::{
         Message, MultiTurnStreamItem, PromptError, StreamChunk, StreamErrorKind,
@@ -574,6 +596,44 @@ mod tests {
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Text(t) if t == "hello"));
+    }
+
+    /// AGE-453: a thinking model streams `reasoning_content` deltas for
+    /// minutes before its first answer token. Each must reach the stream
+    /// loop as a chunk, or the stall watchdog ends the turn as "stopped
+    /// responding" while the provider is busy the whole time.
+    #[test]
+    fn map_item_maps_reasoning_delta_to_a_chunk() {
+        let item =
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ReasoningDelta {
+                id: "r-1".into(),
+                provider_id: None,
+                reasoning: "Let me think".into(),
+            });
+        let chunks = map_item(item, UsageSemantics::InputIncludesCache);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::Reasoning(t) if t == "Let me think"));
+    }
+
+    /// AGE-453: the arguments of a long tool call (a whole file for
+    /// `write_file`) stream for as long as the model takes to write them;
+    /// the completed `ToolCall` only arrives at the end. The deltas must
+    /// count as activity in the meantime.
+    #[test]
+    fn map_item_maps_tool_call_delta_to_a_chunk() {
+        for content in [
+            ToolCallDeltaContent::Name("write_file".into()),
+            ToolCallDeltaContent::Delta("{\"path\": \"src/".into()),
+        ] {
+            let item =
+                MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCallDelta {
+                    internal_call_id: "internal-1".into(),
+                    content,
+                });
+            let chunks = map_item(item, UsageSemantics::InputIncludesCache);
+            assert_eq!(chunks.len(), 1);
+            assert!(matches!(&chunks[0], StreamChunk::ToolCallDelta));
+        }
     }
 
     #[test]
