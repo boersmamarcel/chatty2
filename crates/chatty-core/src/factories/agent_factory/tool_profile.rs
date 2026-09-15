@@ -67,6 +67,15 @@ const GIT_MERGE: &[&str] = &["git_merge"];
 /// Running code in the sandbox.
 const CODE_EXEC: &[&str] = &["execute_code"];
 
+/// Querying CSV/Parquet/JSON/Excel files directly with DuckDB SQL, without
+/// loading them through `execute_code` first.
+const DATA_QUERY: &[&str] = &[
+    "query_data",
+    "describe_data",
+    "profile_data",
+    "file_structure_detector",
+];
+
 /// One named tool set, as a list of groups so the three profiles share their
 /// common parts rather than repeating them.
 #[derive(Debug, PartialEq, Eq)]
@@ -184,17 +193,20 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 };
 
 /// A worker that writes code: the read set plus everything needed to change
-/// the tree and prove it builds. It does not delegate further.
+/// the tree and prove it builds, plus querying data files directly with SQL.
+/// It does not delegate further.
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
-    groups: &[READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC],
+    groups: &[READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY],
 };
 
 /// A worker that judges someone else's work: the read set plus a shell to run
-/// the tests with. No writes, no commits, no delegation.
+/// the tests with, plus the same data-query tool a coder used, so it can
+/// independently re-derive a claimed data-derived value instead of only
+/// judging plausibility. No writes, no commits, no delegation.
 pub static REVIEWER: ToolProfile = ToolProfile {
     name: "reviewer",
-    groups: &[READ_SET, SHELL],
+    groups: &[READ_SET, SHELL, DATA_QUERY],
 };
 
 /// Every profile, in the order `--tools` documents them.
@@ -298,6 +310,23 @@ mod tests {
         assert!(!REVIEWER.allows("git_commit"));
         assert!(!REVIEWER.allows("git_merge"), "a reviewer merges nothing");
         assert!(!REVIEWER.allows("invoke_agent"));
+
+        for tool in [
+            "query_data",
+            "describe_data",
+            "profile_data",
+            "file_structure_detector",
+        ] {
+            assert!(CODER.allows(tool), "a coder can query data files with SQL");
+            assert!(
+                REVIEWER.allows(tool),
+                "a reviewer can independently re-query the data a coder claimed to derive from"
+            );
+            assert!(
+                !COORDINATOR.allows(tool),
+                "a leader delegates data analysis, it does not do it itself"
+            );
+        }
     }
 
     /// A profile naming a tool that does not exist would silently allow
@@ -348,6 +377,10 @@ mod tests {
         assert!(narrowed.shell);
         assert!(narrowed.search);
         assert!(narrowed.git, "git_diff keeps the group");
+        assert!(
+            narrowed.data_query,
+            "a reviewer can query data files to check a claimed value"
+        );
     }
 
     /// A profile never turns a group back on: it is applied on top of the
