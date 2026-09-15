@@ -162,6 +162,19 @@ struct Cli {
     #[arg(long, value_name = "TEXT")]
     preamble: Option<String>,
 
+    /// Override this process's turn budget, replacing the persisted
+    /// `execution_settings.max_agent_turns` (default 10) for this run.
+    ///
+    /// Declared as a virtual agent's `max_agent_turns` in module settings
+    /// and forwarded here so a delegated worker can run longer than the
+    /// default without raising the leader's own budget (`--team`'s
+    /// `max_agent_turns`, which this does not change). Applied after
+    /// `--team`, so it wins over a team's persisted budget too.
+    ///
+    /// Example: --max-agent-turns 30
+    #[arg(long, value_name = "N")]
+    max_agent_turns: Option<u32>,
+
     /// Auto-approve all tool executions without prompting.
     ///
     /// Skips the y/n approval prompt for shell commands, file writes,
@@ -415,6 +428,14 @@ async fn main() -> Result<()> {
         None => module_settings.clone(),
     };
     let leader = team.as_ref().map(|t| &t.file.leader);
+
+    // --max-agent-turns (AGE-440): a delegated worker's own turn budget,
+    // set via its `VirtualAgentConfig`/`extra_args`. Applied after --team
+    // so it wins over a team's persisted (leader) budget too, and never
+    // changes anything when unset.
+    if let Some(turns) = cli.max_agent_turns {
+        execution_settings.max_agent_turns = turns;
+    }
 
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
@@ -1241,6 +1262,30 @@ mod resolve_model_tests {
     #[test]
     fn no_models_configured_is_an_error() {
         assert!(resolve_model(cli(&[]).model.as_deref(), &ModelsModel::new()).is_err());
+    }
+
+    /// AGE-440: unset leaves `execution_settings.max_agent_turns` at
+    /// whatever it already was (the persisted default, or a team's), and an
+    /// explicit flag replaces it — the same shape `main` applies it in,
+    /// after `--team`'s own budget.
+    #[test]
+    fn max_agent_turns_flag_overrides_execution_settings_when_set() {
+        let mut execution_settings =
+            chatty_core::settings::models::ExecutionSettingsModel::default();
+        let before = execution_settings.max_agent_turns;
+
+        if let Some(turns) = cli(&[]).max_agent_turns {
+            execution_settings.max_agent_turns = turns;
+        }
+        assert_eq!(
+            execution_settings.max_agent_turns, before,
+            "no flag must not change the default"
+        );
+
+        if let Some(turns) = cli(&["--max-agent-turns", "30"]).max_agent_turns {
+            execution_settings.max_agent_turns = turns;
+        }
+        assert_eq!(execution_settings.max_agent_turns, 30);
     }
 }
 

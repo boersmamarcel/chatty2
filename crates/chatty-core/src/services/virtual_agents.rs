@@ -106,6 +106,10 @@ pub fn resolve_virtual_agents(
                 args.push("--preamble".to_string());
                 args.push(preamble.to_string());
             }
+            if let Some(turns) = agent.max_agent_turns {
+                args.push("--max-agent-turns".to_string());
+                args.push(turns.to_string());
+            }
             args.extend(agent.extra_args.iter().cloned());
             args.extend(common_args.iter().cloned());
 
@@ -320,6 +324,32 @@ mod tests {
                 "--ollama",
                 "http://localhost:11434"
             ]
+        );
+    }
+
+    /// AGE-440: a worker with its own `max_agent_turns` gets
+    /// `--max-agent-turns <n>` in its argv, ahead of `extra_args`; a worker
+    /// that does not set it gets no such flag at all, so its child falls
+    /// back to `execution_settings`' own default (regression).
+    #[test]
+    fn max_agent_turns_becomes_a_cli_flag_only_when_set() {
+        let mut settings = team();
+        settings.virtual_agents[0].max_agent_turns = Some(30);
+        // local-reviewer (index 1) leaves it unset.
+
+        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
+
+        assert_eq!(specs[0].name, "local-coder");
+        assert_eq!(
+            specs[0].args,
+            vec!["--model", "qwen", "--max-agent-turns", "30"]
+        );
+
+        assert_eq!(specs[1].name, "local-reviewer");
+        assert!(
+            !specs[1].args.contains(&"--max-agent-turns".to_string()),
+            "an agent with no max_agent_turns must get no CLI flag for it: {:?}",
+            specs[1].args
         );
     }
 
