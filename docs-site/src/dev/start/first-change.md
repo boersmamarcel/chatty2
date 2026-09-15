@@ -141,6 +141,9 @@ Tool registration is spread over three files in `crates/chatty-core/src/factorie
 
 3. **[`tool_registry.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/src/factories/agent_factory/tool_registry.rs)** — add a `word_count: bool` flag to `ToolAvailability` and insert `"word_count"` in `active_native_tool_names` when it is set (or add the name to the always-on set at the top of that function). Then set the flag in both `ToolAvailability { … }` literals in `mod.rs`. These names are what `list_tools` reports, what the preamble's tool summary lists, and what `filter_mcp_tool_info` uses to drop MCP tools that would collide with a native name — a tool that is registered but not named here is invisible to the model's own inventory. The registry tests spell out every flag (`all_flags_enabled_produces_superset`), so the new field breaks them until you add it; if you chose the always-on set, `always_includes_baseline_tools` counts them.
 
+> [!NOTE]
+> A delegated worker started with `--tools <profile>` sees **only** the tool names that profile lists in [`tool_profile.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/src/factories/agent_factory/tool_profile.rs) (`coordinator`, `coder`, `reviewer`; AGE-405). A new tool is invisible to every team worker until you add its name to the profiles that should have it — the read set if every role needs it, `coder` for a write-side tool. Leaders and plain sessions are unaffected.
+
 ### 5. Add the Gemini schema guard
 
 Gemini rejects any schema node with an empty `type`. `gemini_compat_tests` in `tools/mod.rs` converts each tool's definition to a Gemini `Tool` and walks the result. Add one:

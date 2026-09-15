@@ -22,7 +22,9 @@ are gated behind the `gpui-globals` feature; `chatty-gpui` enables it,
 | `models/` | Pure data types: `Conversation`, `Message`, stores |
 | `repositories/` | Persistence abstractions (SQLite for conversations) |
 | `sandbox/` | Bollard/Docker sandbox backend + manager |
-| `services/` | Math/Mermaid renderers, shell, MCP, sync, … |
+| `services/` | Math/Mermaid renderers, shell, MCP, git, memory, skills, … and the delegation seams: `worker_tree` (one `git worktree` per worker), `virtual_agents` / `worker_endpoint` (roster → runner specs and per-endpoint budgets), `team` (team directories), `spend_gate` (hosted cap hook) |
+| `session/` | `AgentSession`: the frontend-agnostic turn loop, usage pricing and delegated-usage rollup |
+| `settings_snapshot.rs` | `SettingsSnapshot` / `SettingsDelta`: canonical serialization, delta and apply across every settings family |
 | `settings/` | Settings models + JSON repositories |
 | `token_budget/` | Tokenization, context-window accounting, summarizer |
 | `tools/` | LLM tool implementations (filesystem, shell, MCP, …) |

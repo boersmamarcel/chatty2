@@ -58,6 +58,7 @@ Tutorials (learn by building) live under [Start here](./start/build-and-run.md):
 | Fix stream/cancel bugs | [Stream lifecycle](./architecture/stream-manager.md) · [Debug](./guides/debug.md) |
 | Fix rendering/layout | [Debug](./guides/debug.md) · [Rendering pipeline](./architecture/rendering-system.md) |
 | Look up a tool name | [Tools catalog](./reference/tools-catalog.md) |
+| Change delegation, the broker, virtual agents or teams | [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md) · [Team smoke test](./architecture/team-smoke-test.md) · [Sub-agents](../user/sub-agents.md) |
 | Run tests like CI | [Test](./guides/test.md) · [Make targets & CI workflows](./ci-reference.md) |
 | Look up a term | [Glossary](./glossary.md) |
 | Research / reserved code | [RESERVED.md](https://github.com/boersmamarcel/chatty2/blob/main/RESERVED.md) |

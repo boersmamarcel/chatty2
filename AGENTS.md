@@ -250,7 +250,8 @@ examples.
    it; chatty-tui does not. If a `Global` impl is missing, add it in
    `crates/chatty-core/src/gpui_globals.rs`.
 
-7. **Sub-agent worktrees.** `sub_agent` tool workers each get their own
+7. **Sub-agent worktrees.** Delegated workers (`invoke_agent` → `local-agent`
+   or a named virtual agent; `sub_agent` was retired in AGE-303) each get their own
    `git worktree` under `<workspace>/.chatty/worktrees/<name>` on a
    `sub-agent/<name>` branch (AGE-314), passed to the child via chatty-tui's
    `--workspace <DIR>` flag. `<name>` is a wish, not a guarantee: if that

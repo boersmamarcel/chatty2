@@ -58,12 +58,42 @@ schema = section(gen, "# Settings schema reference", "EOF")
 for path, name, heading in [
     ("crates/chatty-core/src/settings/models/execution_settings.rs", "ExecutionSettingsModel", "— `ExecutionSettingsModel`"),
     ("crates/chatty-core/src/settings/models/models_store.rs", "ModelConfig", "— `[ModelConfig]`"),
+    ("crates/chatty-core/src/settings/models/token_tracking_settings.rs", "TokenTrackingSettings", "— `TokenTrackingSettings`"),
+    ("crates/chatty-core/src/settings/models/module_settings.rs", "ModuleSettingsModel", "— `ModuleSettingsModel`"),
 ]:
     fields = struct_fields(path, name)
     table = section(schema, heading, "\n---")
     missing = sorted(f for f in fields if f"`{f}`" not in table)
     if missing:
         failures.append(f"settings-schema: {name} fields without a row: {', '.join(missing)}")
+
+# The nested module-settings structs are described inside their parent's row
+# (AGE-451): every field must at least be named there.
+module_table = section(schema, "— `ModuleSettingsModel`", "\n---")
+for name in ("VirtualAgentConfig", "TeamConfig"):
+    fields = struct_fields("crates/chatty-core/src/settings/models/module_settings.rs", name)
+    missing = sorted(f for f in fields if f"`{f}`" not in module_table)
+    if missing:
+        failures.append(f"settings-schema: {name} fields not named in the module_settings row: {', '.join(missing)}")
+
+# ── TUI slash commands: every `"/name" =>` arm in engine/commands.rs ──
+commands = Path("crates/chatty-tui/src/engine/commands.rs").read_text()
+src_cmds = set()
+for arm in re.findall(r'^\s*((?:"/[a-z-]+"\s*\|\s*)*"/[a-z-]+")\s*=>', commands, re.M):
+    src_cmds.update(re.findall(r'"(/[a-z-]+)"', arm))
+slash = section(gen, "# Slash commands", "EOF")
+doc_cmds = set(re.findall(r"`(/[a-z-]+)", slash))
+missing = sorted(src_cmds - doc_cmds)
+if missing:
+    failures.append(f"slash-commands: TUI commands without a row: {', '.join(missing)}")
+
+# ── GitHub workflows: every file under .github/workflows has a row on the CI page ──
+ci_page = Path("docs-site/src/dev/ci-reference.md").read_text()
+missing = sorted(
+    p.name for p in Path(".github/workflows").glob("*.yml") if f"`{p.name}`" not in ci_page
+)
+if missing:
+    failures.append(f"ci-reference: workflows without a row in docs-site/src/dev/ci-reference.md: {', '.join(missing)}")
 
 # ── Singletons: every OnceLock/LazyLock static that is not a regex/font cache ──
 singletons = set()
@@ -80,7 +110,7 @@ if missing:
 if failures:
     for f in failures:
         print("reference drift:", f)
-    print("  → update the table in scripts/gen-docs-reference.sh")
+    print("  → update the table in scripts/gen-docs-reference.sh (or docs-site/src/dev/ci-reference.md)")
     sys.exit(1)
 print("reference drift check: OK")
 PY
