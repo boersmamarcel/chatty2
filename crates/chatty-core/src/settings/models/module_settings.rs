@@ -79,8 +79,8 @@ impl TeamConfig {
 /// One named virtual agent the broker publishes (ADR-0011 C10).
 ///
 /// Each becomes a worker runner whose children get `--model <model>` when
-/// set, `--disable <groups>` when set, then `extra_args`, on top of the
-/// flags every worker gets.
+/// set, `--disable <groups>` when set, `--max-agent-turns <n>` when set,
+/// then `extra_args`, on top of the flags every worker gets.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VirtualAgentConfig {
     /// The name callers address at `/a2a/{name}`, e.g. `local-reviewer`.
@@ -106,6 +106,15 @@ pub struct VirtualAgentConfig {
     /// when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<String>,
+    /// This worker's own turn budget, overriding the default (10,
+    /// `execution_settings::default_max_agent_turns`) its `chatty-tui`
+    /// child would otherwise run with. Unlike `TeamFile::max_agent_turns`
+    /// (the leader's budget, `services::team::Team::apply_turn_budget`),
+    /// this is per named agent, so one roster can give a multi-step worker
+    /// more turns without changing the leader's own budget or any other
+    /// worker's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agent_turns: Option<u32>,
     /// Any further `chatty-tui` flags, appended verbatim.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
@@ -340,6 +349,7 @@ mod tests {
                     disable_tools: vec!["fs-write".into(), "shell".into(), "git".into()],
                     preamble: Some("You review, you do not edit.".to_string()),
                     tools: Some("reviewer".to_string()),
+                    max_agent_turns: Some(30),
                     extra_args: vec!["--enable".into(), "fetch".into()],
                 },
             ],
@@ -361,12 +371,14 @@ mod tests {
             reviewer.preamble.as_deref(),
             Some("You review, you do not edit.")
         );
+        assert_eq!(reviewer.max_agent_turns, Some(30));
 
         // Neither is written out when unset, so a pre-C11 file round-trips
         // byte for byte.
         let coder = serde_json::to_string(&original.virtual_agents[0]).unwrap();
         assert!(!coder.contains("preamble"), "{coder}");
         assert!(!coder.contains("tools"), "{coder}");
+        assert!(!coder.contains("max_agent_turns"), "{coder}");
 
         // The schema the docs promise: a declaration needs only a name.
         let minimal: ModuleSettingsModel =
