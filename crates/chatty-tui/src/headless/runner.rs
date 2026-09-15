@@ -88,6 +88,12 @@ impl HeadlessRunner {
         self.event_observer = Some(observer);
     }
 
+    /// Whether this process leads a `--team` run (AGE-441). A worker never
+    /// gets `--team`, so it — like a lone `--headless` agent — is not one.
+    pub fn is_team_leader(&self) -> bool {
+        self.config.team.is_some()
+    }
+
     /// Build the agent (with the session's store handles) and its conversation.
     pub async fn init_conversation(&mut self) -> Result<()> {
         let mcp_tools = match self.config.mcp_service {
