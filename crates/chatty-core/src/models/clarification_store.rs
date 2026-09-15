@@ -198,6 +198,20 @@ impl ClarificationStore {
         let mut state = self.pending_requests.lock();
         state.requests.clear();
     }
+
+    /// The ids of every request currently parked, for a test that spawns a
+    /// real [`request_clarification`] call and needs the id it was assigned
+    /// (normally learned from the notifier, which a unit test outside this
+    /// crate has no way to install — see AGE-452's `runner.rs` test).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending_requests
+            .lock()
+            .requests
+            .keys()
+            .cloned()
+            .collect()
+    }
 }
 
 impl Default for ClarificationStore {

@@ -17,6 +17,7 @@ use chatty_core::factories::agent_factory::{
     AgentBuildContext, AgentServices, gated_exec_settings,
 };
 use chatty_core::models::TurnOutcome;
+use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::services::StreamSurface;
 use chatty_core::services::team::Team;
 use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
@@ -285,6 +286,29 @@ impl HeadlessRunner {
                     // up the chain as `input-required`, and the answer comes
                     // back through the participant loop (AGE-306).
                     eprintln!("The agent asked a clarifying question; waiting for the parent.");
+                } else if self.is_team_leader() {
+                    // A `--team` leader is the top of its own chain: nothing
+                    // is attended to relay this to (its own event_observer is
+                    // always None — see `is_team_leader`'s doc), whether the
+                    // question is the leader's own or one AGE-306 relayed up
+                    // from a delegated worker's `ask_user`. `cancel_all()`
+                    // would surface as a hard failure of whichever turn asked
+                    // (AGE-452), so answer with a default instead of failing.
+                    eprintln!(
+                        "The agent asked a clarifying question; no human is available in this \
+                         headless --team run, answering with a default."
+                    );
+                    let answers = questions
+                        .iter()
+                        .map(|q| ClarificationAnswer {
+                            id: q.id.clone(),
+                            answer: "No human is available to answer this; use your best \
+                                     judgment and proceed."
+                                .to_string(),
+                            custom: true,
+                        })
+                        .collect();
+                    self.session.clarifications().resolve(&id, answers);
                 } else {
                     // Nobody can answer in plain headless mode: unblock the
                     // tool now rather than letting it wait out its timeout.

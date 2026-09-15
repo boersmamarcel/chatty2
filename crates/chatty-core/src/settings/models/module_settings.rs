@@ -92,7 +92,9 @@ pub struct VirtualAgentConfig {
     pub model: Option<String>,
     /// Tool groups the worker runs without, as `chatty-tui --disable` names
     /// them: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`,
-    /// `docker-exec`. Ignored when `tools` names a profile.
+    /// `docker-exec`. Composes with `tools` (AGE-452): a profile only ever
+    /// takes tools away, so this can narrow a named profile further, e.g.
+    /// disabling `ask_user` for a worker that otherwise uses `reviewer`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disable_tools: Vec<String>,
     /// The role's standing instructions, appended to the worker's system
@@ -102,8 +104,9 @@ pub struct VirtualAgentConfig {
     pub preamble: Option<String>,
     /// The named tool profile the worker runs — `coordinator`, `coder` or
     /// `reviewer` (`chatty_core::factories::tool_profile`). An allowlist of
-    /// tool *names*, where `disable_tools` removes whole groups; it wins
-    /// when both are set.
+    /// tool *names*, composed with `disable_tools`' whole groups (AGE-452):
+    /// both apply, so `disable_tools` can only ever narrow the profile
+    /// further, never re-enable a tool the profile already excludes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<String>,
     /// This worker's own turn budget, overriding the default (10,

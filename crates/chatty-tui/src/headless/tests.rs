@@ -521,6 +521,127 @@ mod runner {
         );
     }
 
+    /// AGE-452: a `--team` leader has no `event_observer` of its own —
+    /// nothing upstream to relay a clarification to, whether the question is
+    /// the leader's own `ask_user` call or one AGE-306 relayed up from a
+    /// delegated worker's. `cancel_all()` would hard-fail whichever turn
+    /// asked it (the "Clarification cancelled" error), so the leader must
+    /// answer it with a default instead. This spawns a real
+    /// `request_clarification` call against the leader's own store — the
+    /// same call a worker's relayed question or the leader's own `ask_user`
+    /// tool makes — and drives the resulting event through `handle_event`
+    /// exactly as `run_headless` would.
+    #[tokio::test]
+    async fn a_team_leaders_clarification_is_answered_not_cancelled() {
+        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
+            .expect("the preset loads");
+        let (mut leader, _event_rx) = test_runner_with_team(Some(team)).await;
+        assert!(leader.is_team_leader());
+
+        let pending = leader.session.approval_handles().pending_clarifications;
+        let question = chatty_core::models::clarification_store::ClarifyingQuestion {
+            id: "q1".to_string(),
+            question: "Which database?".to_string(),
+            options: vec![],
+        };
+        let waiter = tokio::spawn({
+            let pending = pending.clone();
+            let question = question.clone();
+            async move {
+                chatty_core::models::clarification_store::request_clarification(
+                    &pending,
+                    vec![question],
+                )
+                .await
+            }
+        });
+
+        // Learned the way a unit test outside chatty-core has to: poll the
+        // store rather than install a notifier (only `AgentSession`'s own
+        // turn machinery can do that — see `ClarificationStore::pending_ids`).
+        let id = loop {
+            if let Some(id) = leader
+                .session
+                .clarifications()
+                .pending_ids()
+                .into_iter()
+                .next()
+            {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        leader.handle_event(AppEvent::ClarificationRequested {
+            id,
+            questions: vec![question],
+        });
+
+        let answers = waiter
+            .await
+            .unwrap()
+            .expect("a --team leader must answer a clarification, not cancel it");
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].id, "q1");
+        assert!(
+            answers[0].custom,
+            "a canned default is not one of the question's pre-made options"
+        );
+    }
+
+    /// AGE-452 regression: a lone `--headless` agent (no `--team`, no
+    /// parent) keeps the pre-existing behavior — nobody can answer it, so
+    /// the tool is unblocked with an error rather than a canned default.
+    #[tokio::test]
+    async fn a_lone_agents_clarification_is_still_cancelled() {
+        let (mut lone, _event_rx) = test_runner().await;
+        assert!(!lone.is_team_leader());
+
+        let pending = lone.session.approval_handles().pending_clarifications;
+        let question = chatty_core::models::clarification_store::ClarifyingQuestion {
+            id: "q1".to_string(),
+            question: "Which database?".to_string(),
+            options: vec![],
+        };
+        let waiter = tokio::spawn({
+            let pending = pending.clone();
+            async move {
+                chatty_core::models::clarification_store::request_clarification(
+                    &pending,
+                    vec![question],
+                )
+                .await
+            }
+        });
+
+        let id = loop {
+            if let Some(id) = lone
+                .session
+                .clarifications()
+                .pending_ids()
+                .into_iter()
+                .next()
+            {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        lone.handle_event(AppEvent::ClarificationRequested {
+            id,
+            questions: vec![
+                chatty_core::models::clarification_store::ClarifyingQuestion {
+                    id: "q1".to_string(),
+                    question: "Which database?".to_string(),
+                    options: vec![],
+                },
+            ],
+        });
+
+        let err = waiter.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "got: {err}");
+    }
+
     /// T3/AGE-242: `stop_stream()` only sets the cancel flag, so a
     /// `send_message()` right after it is refused; the deferred-send pattern
     /// in `run_headless` holds the prompt until the cancellation completes.
