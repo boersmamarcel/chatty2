@@ -115,6 +115,9 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/cd [dir]` | Change per-chat working directory | Yes | Yes |
 | `/add-dir <dir>` | Add workspace directory | Yes | Yes |
 | `/agent [name] <prompt>` | Launch local sub-agent or named A2A agent | Yes | Yes |
+| `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
+| `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
+| `/paste [n]` | Print the full text of an elided long paste | — | Yes |
 | `/model [query]` | Switch / list models | — | Yes |
 | `/tools [name]` | Open tool picker or toggle by name | — | Yes |
 | `/modules …` | Module runtime settings | — | Yes |
@@ -373,6 +376,10 @@ and the legacy `.chatty/modules` fallback become the platform data-dir default.
 | `enabled` | `bool` | `false` | WASM module runtime |
 | `module_dir` | `String` | platform data dir + `/chatty/modules` | Linux `~/.local/share/chatty/modules`; macOS `~/Library/Application Support/chatty/modules`; Windows `%APPDATA%\chatty\modules`. Last-resort fallback: `.chatty/modules` |
 | `gateway_port` | `u16` | `8420` | Local protocol gateway |
+| `default_endpoint_budget` | `usize` | `1` | Delegated workers the broker runs at once against one model endpoint when nothing more specific is known (ADR-0011 C6, AGE-305). Ollama's `OLLAMA_NUM_PARALLEL` / a provider's `num_parallel` beat it |
+| `endpoint_budgets` | `HashMap<String, usize>` | `{}` | Per-endpoint overrides keyed by the server's base URL (`http://localhost:11434`); beats the default and what the provider reports. Omitted when empty |
+| `virtual_agents` | `[VirtualAgentConfig]` | `[]` | The broker's named workers (ADR-0011 C10, AGE-377): `name`, `model`, `tools` (profile: `coordinator`/`coder`/`reviewer`), `preamble`, `disable_tools`, `max_agent_turns` (AGE-440), `extra_args`. Empty = the one `local-agent`. A `--team` run replaces this roster for that run only. Field table: [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process) |
+| `team` | `TeamConfig` | `{}` | What the team shares: `verification` — a shell command run in each worker's worktree at task end, whose exit code and tail go into the evidence envelope (ADR-0011 C12, AGE-406). Omitted when empty |
 
 ---
 
@@ -602,7 +609,11 @@ cat > "$OUT/env-vars.md" << 'EOF'
 | `CHATTY_PROGRESS` prefix | Sub-agent stderr progress lines | protocol constant |
 | `XDG_RUNTIME_DIR` | Required for GPUI on Linux/X11 | `/tmp/...` |
 | `XDG_DATA_HOME` | Linux data dir override | `~/.local/share` |
-| `GITHUB_TOKEN` | Auto-updater GitHub API | unset |
+| `GITHUB_TOKEN` | Auto-updater GitHub API; REST fallback for the branch's PR status when `gh` is unavailable | unset |
+| `GH_TOKEN` | Second choice after `GITHUB_TOKEN` for the PR-status REST fallback | unset |
+| `OLLAMA_NUM_PARALLEL` | Read for a loopback Ollama provider to size its delegation endpoint budget (AGE-305) | unset = `default_endpoint_budget` |
+| `ECHO_AGENT_WASM` | Tests: path to the echo-agent module when it is not under `modules/` (AGE-176) | `modules/echo-agent/echo_agent.wasm` |
+| `UPDATE_GOLDENS` | Tests: rewrite the stream-fixture goldens instead of diffing them | unset |
 | `APPIMAGE` | AppImage self-update path | set by AppImage |
 | `DISPLAY` | X11 display for GPUI | `:0` / `:1` |
 | `HOME` | User home for paths | required |

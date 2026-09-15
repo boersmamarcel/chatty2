@@ -88,8 +88,9 @@ struct Cli {
     ///
     /// Accepts a model ID, display name, or partial model identifier.
     /// Matching is tried in this order: exact ID, case-insensitive name,
-    /// substring match on model identifier. If omitted, uses the first
-    /// configured model. On mismatch, lists all available models.
+    /// substring match on model identifier. If omitted, uses the model marked
+    /// default in the desktop app's model list (the first configured model
+    /// when none is). On mismatch, lists all available models.
     #[arg(long, value_name = "MODEL")]
     model: Option<String>,
 

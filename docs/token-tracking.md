@@ -180,17 +180,26 @@ pub struct TokenTrackingSettings {
 ```
 
 > [!NOTE]
-> `TokenTrackingSettings` is **not persisted** by the desktop. The struct derives
-> `Serialize` / `Deserialize`, but no repository here reads or writes it and no settings
-> page edits it; `main.rs` installs `TokenTrackingSettings::default()` at startup and that
-> is the value the app runs with. Hive stores it as the user's JSON, which is why
-> `cap_usd` is omitted from the output when unset: a file written before the field
-> existed round-trips unchanged.
+> Since AGE-381, `TokenTrackingSettings` is the `token_tracking` settings family:
+> `token_tracking_repository()` (`TokenTrackingRepository`, JSON at
+> `token_tracking.json` in the config directory, in-memory in tests) is a field on
+> `SettingsSnapshot` / `SettingsDelta` and is covered by the AGE-280 conformance
+> suite. `main.rs` registers `TokenTrackingSettings::default()` as the global for the
+> first frame and a spawned task replaces it with the loaded file (defaults on a
+> missing or unreadable file). No settings page edits it yet; hive stores the same
+> struct as the user's JSON. `cap_usd` is omitted from the output when unset, so a
+> file written before the field existed round-trips unchanged.
 
 `cap_usd` (AGE-416 / ADR-0010) is only ever set by hive. Nothing in chatty2 reads it: the
 enforcement is a `SpendGate` (`services/spend_gate.rs`) that hive implements and sets on
 `AgentBuildContext.spend_gate`, which `invoke_agent` asks before it starts a delegation.
 With no gate — the desktop, chatty-tui — there is no check.
+
+A delegation's spend is part of the conversation's total: `invoke_agent` reads the
+worker's `metadata.usage` off the terminal status and `AgentSession` prices it at the
+leader's rates as a `TokenUsage` line marked `delegated_to`, rolled up through nested
+leaders (AGE-415). `context_tokens` and `last_usage` stay the leader's own. Details in
+[a2a-and-wasm-modules.md](a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
 
 **Read by:**
 - `gather_snapshot_inputs()` — `response_reserve`

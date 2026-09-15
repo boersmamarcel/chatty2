@@ -490,6 +490,7 @@ with its own model and tool set:
 | `tools` | Optional. A named tool profile passed as `--tools`: `coordinator`, `coder` or `reviewer`. An allowlist of tool *names* — see below. |
 | `preamble` | Optional. The role's standing instructions, passed as `--preamble` and appended to the worker's system prompt after the base preamble, before the tool summary. |
 | `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. Ignored when `tools` is set. |
+| `max_agent_turns` | Optional. This worker's own turn budget (AGE-440), passed as `--max-agent-turns <n>` ahead of `extra_args` and applied to the child's execution settings before its loop guard is sized. Absent: the child runs with the persisted default of 10. Independent of the team file's `max_agent_turns`, which is the leader's. |
 | `extra_args` | Optional. Any further `chatty-tui` flags, appended verbatim. |
 
 **Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `disable_tools` removes
@@ -604,7 +605,7 @@ beside it.
 | `agents` | The roster, each entry a `VirtualAgentConfig` exactly as `module_settings.virtual_agents` declares one. Replaces that list for the run. |
 | `verification` | Optional. The team's verification command (`team.verification` above) for the run. |
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
-| `max_agent_turns` | Optional. The leader's turn budget for the run; the persisted default of 10 kills a delegating flow. |
+| `max_agent_turns` | Optional. The leader's turn budget for the run; the persisted default of 10 kills a delegating flow. A worker's budget is its own `max_agent_turns` in `agents` (above), not this. |
 
 `chatty-tui --team <id>` runs as that team's leader. It implies `--broker`, declares the
 roster from the team file (nothing is written back to `module_settings.json`), applies

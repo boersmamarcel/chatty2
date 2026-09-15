@@ -56,10 +56,10 @@ flowchart TB
 |-------|-------------------|
 | **chatty-core** | Single source of business logic: conversations, tools, LLM agents, settings persistence, sandbox, MCP, memory |
 | **chatty-gpui** | Desktop shell: renders UI, owns `StreamManager`, routes entity events through `ChattyApp` |
-| **chatty-tui** | Terminal shell + headless/pipe mode for scripting and sub-agents |
+| **chatty-tui** | Terminal shell + headless/pipe mode for scripting; also the worker process behind every delegation and, with `--broker` / `--team`, a leader of its own |
 | **chatty-wasm-runtime** | Wasmtime host for agent modules (`wasm32-wasip2`) |
 | **chatty-module-registry** | Discovers, validates, and loads WASM module manifests |
-| **chatty-protocol-gateway** | HTTP façade so external clients can call modules via standard APIs |
+| **chatty-protocol-gateway** | HTTP façade so external clients can call modules via standard APIs, and the ADR-0011 broker: local participants and named virtual agents (`local-agent`, a declared team) served at the same `/a2a/{name}` routes |
 | **chatty-module-sdk** | Authoring SDK for third-party WASM agents |
 | **chatty-trace / playbook / flow / optimize** | Research crates (self-improvement papers); see [`RESERVED.md`](https://github.com/boersmamarcel/chatty2/blob/main/RESERVED.md) |
 | **hive-client / hive-billing-sdk** | Hive registry and billing integration |
@@ -73,17 +73,26 @@ lets core types act as GPUI globals.
 `chatty-gpui/src/main.rs` runs, in order:
 
 1. Create the Tokio runtime and enter it for the whole process lifetime.
-2. Initialise the settings repositories and open the SQLite conversation repository.
-3. Start the GPUI `Application`; inside `run`, load the theme and register every
-   global with defaults (`GeneralSettingsModel`, `ProviderModel`, `ModelsModel`,
-   `McpServersModel`, `ExecutionSettingsModel`, `TokenTrackingSettings`,
-   `GlobalStreamManager`, approval stores, …).
-4. Spawn async tasks that load settings JSON, conversation metadata, the memory
-   service and enabled MCP servers from disk and overwrite the defaults as they arrive.
-5. Open the window and create the `ChattyApp` entity.
+2. Initialise the settings repositories (`RepositoryRegistry`) and resolve — but do
+   not open — the SQLite conversation database path (`ConversationSqliteRepository::deferred`).
+3. Start the GPUI `Application`; inside `run`, do only what the first frame needs:
+   `gpui_component::init`, the theme registry (baked-in default applied now, theme
+   pack loaded later), and every global the root view reads, registered with defaults
+   (`GeneralSettingsModel`, `ProviderModel`, `ModelsModel`, `McpServersModel`,
+   `ExecutionSettingsModel`, `TokenTrackingSettings`, `GlobalStreamManager`,
+   approval stores, …). No I/O happens here.
+4. Open the window and create the `ChattyApp` entity; `open_window` paints the first
+   frame synchronously.
+5. Only then spawn the async tasks that load settings JSON, conversation metadata
+   (the first query opens the SQLite pool), token-tracking settings, the memory
+   service, the skills listing and enabled MCP servers from disk, overwriting the
+   defaults as they arrive. The updater poll and the MCP update channel start here too.
 
-Nothing on the UI thread waits for disk or network; each loader updates its global
-and refreshes the windows when done.
+Since AGE-161 the rule is: anything that reads a file, touches the network or spawns a
+task belongs *after* `open_window`. Nothing on the UI thread waits for disk or network;
+each loader updates its global and refreshes the windows when done.
+`boot_timing::checkpoint` marks each stage (`main_to_run`, `run_to_open_window`, …) and
+`log_summary` prints the timeline at info level once the conversation list has loaded and the app is ready to send.
 
 ## End-to-end message path
 

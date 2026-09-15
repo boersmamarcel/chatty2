@@ -33,6 +33,9 @@ Nothing leaves your machine unless a provider, extension or website you use rece
 | Rendered math and diagram caches | `…/chatty/math_cache/`, `…/chatty/mermaid_cache/` | `~/.config/chatty/math_cache/`, `~/.config/chatty/mermaid_cache/` | `…\chatty\math_cache\`, `…\chatty\mermaid_cache\` |
 | Browser screenshots and console logs | `<workspace>/.chatty/browser/` | same | same |
 | Workspace skills | `<workspace>/.claude/skills/` | same | same |
+| Sub-agent worktrees (one per delegated worker, left in place; delete when done) | `<workspace>/.chatty/worktrees/<name>/` | same | same |
+| Team directories (`<id>/team.json` + `SKILL.md`) | `<workspace>/.chatty/teams/`, then `…/chatty/teams/` | same, then `~/.local/share/chatty/teams/` | same, then `…\chatty\teams\` |
+| Context-window thresholds (`token_tracking.json`) | same folder as settings | `~/.config/chatty/` | same folder |
 | Terminal app binary | `/usr/local/bin/chatty-tui` | `~/.local/bin/chatty-tui` | the app's install folder |
 
 The caches can be deleted at any time; they are rebuilt on demand (the first browser call after deleting the Chrome cache downloads it again). Settings and conversations are plain files, so back them up by copying the folder.

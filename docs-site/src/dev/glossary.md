@@ -32,6 +32,16 @@
 
 **Sub-agent.** A delegated worker: a separate `chatty-tui` process with the parent's tool set that works on one task and reports back. The parent asks for one through `invoke_agent` against the broker's `local-agent`, and the worker reports over the broker's participant socket. Owning page: [Sub-agents](../user/sub-agents.md).
 
+**Broker.** The half of the protocol gateway that serves *local participants* — `chatty-tui` processes that register over a Unix socket and answer delegated tasks at `/a2a/{name}` (ADR-0011). The desktop starts it from the module settings; a terminal leader starts its own with `--broker`. Unix only. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md#local-participants-adr-0011).
+
+**Virtual agent.** A named worker the broker publishes — `local-agent` by default, or each entry of `module_settings.virtual_agents` / a team's `agents`: a name, an optional model, a tool profile or disabled groups, a preamble and its own turn budget. Roles live in settings, never on the `invoke_agent` call. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
+
+**Tool profile.** A named allowlist of tool *names* (`coordinator`, `coder`, `reviewer` in `tool_profile.rs`) that is a worker's whole tool set, MCP included; it only ever removes tools. Passed as `chatty-tui --tools`. Contrast tool *groups*, which `--enable` / `--disable` switch.
+
+**Team.** A directory `teams/<id>/team.json` + `SKILL.md` declaring a leader (model, profile, preamble), a roster of virtual agents, a verification command, the skill the leader follows and a turn budget; run with `chatty-tui --team <id>`. One preset ships: `coder-reviewer`. Owning page: [Sub-agents › Teams](../user/sub-agents.md#teams).
+
+**Evidence envelope.** The runner's — not the model's — account of a worker's output, appended to every delegation reply as a fenced `evidence` block and carried on the terminal status's `metadata.evidence`: branch, base, commit count, diff stat and, when the team declares one, the verification command's exit code and tail. Empty branch, no envelope.
+
 **Skill.** A `SKILL.md` in `<workspace>/.claude/skills/<name>/` (project-local) or `<data dir>/chatty/skills/<name>/` (global), loaded by `SkillService`, read with `read_skill`, written with `save_skill`, and offered in the slash-command picker. Owning page: [Memory & skills](../user/memory-and-skills.md); internals in [Agent memory](./architecture/agent-memory.md).
 
 **MCP.** Model Context Protocol: external tool servers configured under Settings → Extensions, started by `McpService`, and attached to the agent as tools. Their environment variables are shown to the model only through `masked_env()`. Owning page: [Extensions & MCP](../user/extensions.md); the shipped list is the [curated MCP catalog](./architecture/curated-mcp-catalog.md).
