@@ -229,6 +229,21 @@ pub const STALL_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// than showing "working" for another minute.
 pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// The watchdog's timing, so a test can run it in milliseconds; production
+/// callers go through [`run_stream_loop`], which uses the constants above.
+#[derive(Debug, Clone, Copy)]
+struct StallPolicy {
+    tick: std::time::Duration,
+    timeout: std::time::Duration,
+}
+
+impl StallPolicy {
+    const DEFAULT: Self = Self {
+        tick: STALL_TICK,
+        timeout: STALL_TIMEOUT,
+    };
+}
+
 /// Reported as a stream error when the watchdog above fires.
 pub const STALLED_STREAM_MESSAGE: &str = "The model stopped responding (no output for 3 minutes). The turn was ended \
      — send a message to continue.";
@@ -261,6 +276,23 @@ pub async fn run_stream_loop(
     cancel_flag: &Arc<AtomicBool>,
     handler: &mut impl StreamChunkHandler,
 ) -> Result<()> {
+    run_stream_loop_with(
+        stream,
+        progress_rx,
+        cancel_flag,
+        handler,
+        StallPolicy::DEFAULT,
+    )
+    .await
+}
+
+async fn run_stream_loop_with(
+    stream: &mut ResponseStream,
+    progress_rx: &mut mpsc::UnboundedReceiver<InvokeAgentProgress>,
+    cancel_flag: &Arc<AtomicBool>,
+    handler: &mut impl StreamChunkHandler,
+    stall: StallPolicy,
+) -> Result<()> {
     handler.on_stream_started();
 
     let mut last_activity = std::time::Instant::now();
@@ -286,12 +318,12 @@ pub async fn run_stream_loop(
             // `stream.next()` has no timeout, so a provider or tool that stops
             // yielding parked this loop indefinitely while the UI still showed
             // the turn as running (AGE-188).
-            _ = tokio::time::sleep(STALL_TICK) => {
+            _ = tokio::time::sleep(stall.tick) => {
                 if cancel_flag.load(Ordering::Relaxed) {
                     handler.on_cancelled();
                     break;
                 }
-                if last_activity.elapsed() >= STALL_TIMEOUT {
+                if last_activity.elapsed() >= stall.timeout {
                     tracing::warn!(
                         idle_secs = last_activity.elapsed().as_secs(),
                         "Stream produced nothing for too long; ending the turn as stalled"
@@ -308,6 +340,9 @@ pub async fn run_stream_loop(
                 }
             }
 
+            // Any chunk counts, including `Reasoning` and `ToolCallDelta`,
+            // which no frontend renders: a model thinking for minutes or
+            // writing a long tool argument is busy, not stalled (AGE-453).
             chunk_result = stream.next() => {
                 last_activity = std::time::Instant::now();
                 match chunk_result {
@@ -457,6 +492,90 @@ mod tests {
         assert!(matches!(handler.chunks[2], StreamChunk::Done));
     }
 
+    /// AGE-453: a stream that carries only reasoning deltas for longer than
+    /// the stall timeout is a busy model, not a stalled one. Before the fix
+    /// `map_item` dropped those deltas, so this loop saw nothing and ended
+    /// the turn as `Stalled` while the provider streamed the whole time.
+    #[tokio::test]
+    async fn reasoning_only_stream_is_not_a_stall() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+        };
+        // 20 deltas, 10 ms apart: 200 ms of nothing but reasoning, more
+        // than three timeouts long, then the answer.
+        let chunks = futures::stream::iter(0..20)
+            .then(|_| async {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                Ok(StreamChunk::Reasoning("hmm ".into()))
+            })
+            .chain(futures::stream::iter(vec![
+                Ok(StreamChunk::Text("42".into())),
+                Ok(StreamChunk::Done),
+            ]));
+        let mut stream: ResponseStream = Box::pin(chunks);
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        run_stream_loop_with(
+            &mut stream,
+            &mut progress_rx,
+            &cancel_flag,
+            &mut handler,
+            stall,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !handler
+                .chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Error(e) if e.kind == StreamErrorKind::Stalled)),
+            "a reasoning-only stream was ended as stalled: {:?}",
+            handler.chunks
+        );
+        assert!(matches!(handler.chunks.last(), Some(StreamChunk::Done)));
+        assert_eq!(
+            handler
+                .chunks
+                .iter()
+                .filter(|c| matches!(c, StreamChunk::Reasoning(_)))
+                .count(),
+            20
+        );
+    }
+
+    /// The same policy still ends a genuinely silent stream, so the test
+    /// above is not passing because the watchdog stopped firing.
+    #[tokio::test]
+    async fn silent_stream_is_still_a_stall() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+        };
+        let mut stream: ResponseStream = Box::pin(futures::stream::pending());
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        run_stream_loop_with(
+            &mut stream,
+            &mut progress_rx,
+            &cancel_flag,
+            &mut handler,
+            stall,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            handler.chunks.last(),
+            Some(StreamChunk::Error(e)) if e.kind == StreamErrorKind::Stalled
+        ));
+    }
+
     #[tokio::test]
     async fn stream_loop_respects_cancellation() {
         // Stream that never ends
@@ -562,6 +681,8 @@ mod tests {
     fn label(chunk: &StreamChunk) -> &'static str {
         match chunk {
             StreamChunk::Text(_) => "Text",
+            StreamChunk::Reasoning(_) => "Reasoning",
+            StreamChunk::ToolCallDelta => "ToolCallDelta",
             StreamChunk::ToolCallStarted { .. } => "ToolCallStarted",
             StreamChunk::ToolCallInput { .. } => "ToolCallInput",
             StreamChunk::ToolCallResult { .. } => "ToolCallResult",

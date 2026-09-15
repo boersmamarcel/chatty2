@@ -308,6 +308,11 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 }
                 (self.emit)(SessionEvent::Text(text));
             }
+            // Liveness only (AGE-453): the stream loop already reset its
+            // stall watchdog on the way here. Neither is rendered, and
+            // neither counts as output — a call that only thinks and then
+            // answers nothing is still the empty completion AGE-401 nudges.
+            StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta => {}
             StreamChunk::ToolCallStarted { id, name } => {
                 self.output_in_call = true;
                 self.pending_tool_names.insert(id.clone(), name.clone());
