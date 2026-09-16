@@ -64,9 +64,60 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 `--broker` works with `--headless`, `--pipe`, and the interactive TUI, and is Unix only.
 
+## Named workers and roles
+
+Out of the box every sub-agent is the same worker, `local-agent`: your default model with the parent's tools. You can instead declare **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
+
+Declare them in `module_settings.json` next to your other settings ([where that is](./advanced.md)), under `virtual_agents`. There is no settings page for this yet, so edit the file and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
+
+```json
+{
+  "enabled": true,
+  "virtual_agents": [
+    {
+      "name": "local-coder",
+      "model": "qwen3:14b",
+      "tools": "coder",
+      "preamble": "You are the coder. Make the smallest change that makes the task's check pass, run it, and report the files you touched.",
+      "max_agent_turns": 30
+    },
+    {
+      "name": "local-reviewer",
+      "model": "gemma3:27b",
+      "tools": "reviewer",
+      "preamble": "You are the reviewer. Read the diff, run the tests, and report what you found; never edit the tree."
+    }
+  ],
+  "team": { "verification": "python3 -m pytest -q" }
+}
+```
+
+| Field | What it does |
+|-------|--------------|
+| `name` | What the parent addresses; also the branch name, `sub-agent/<name>`. |
+| `model` | This worker's model, matched the way `chatty-tui --model` matches (id, name, or part of the id). Leave it out to use the default model. A worker on a different model server is queued on that server's budget, not the parent's. |
+| `tools` | A **role**: `coordinator`, `coder` or `reviewer`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
+| `preamble` | Standing instructions, added to the worker's system prompt. Its first sentence is what the parent reads on the card, so lead with the role. |
+| `max_agent_turns` | How many tool rounds this worker may take before it has to answer; the default of 10 is too few for a multi-step coding task. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
+| `disable_tools` | The older, coarser switch: tool groups to remove (`shell`, `fs-write`, `git`, …). Ignored when `tools` is set. |
+
+The three roles:
+
+| Role | Can | Cannot |
+|------|-----|--------|
+| **`coordinator`** | Read files, search, read git history and diffs, delegate to other workers, merge a worker's branch, ask you a question. | Edit, run commands, commit. It hands work out; it never does it. |
+| **`coder`** | Everything a coordinator can read, plus write files, run commands, commit on its own branch, run code, query data, remember and save skills. | Delegate further: a coder does not fan out. |
+| **`reviewer`** | Read and search, read diffs (including another worker's branch), run commands so it can run the tests, query data. | Write, commit, or delegate. It reports; it never fixes. |
+
+A role only ever removes tools: it cannot turn on a tool group you switched off under **Settings → Code Execution** (or with `--disable`).
+
+`team.verification` is one command for the whole roster. When a worker finishes, Chatty commits its branch and then runs that command *itself* in the worker's tree — not through the worker — and puts the exit code and last lines into the `evidence` block the parent reads, next to the branch name, commit count and diff summary. That's the parent's proof that the coder's "tests pass" is true. It is skipped for a worker whose role has no shell, since that worker could not have built anything for it to check.
+
+Every worker still needs a way to run its side-effect tools without asking you, so under any approval mode other than **Auto-approve All** keep the roster to reading roles or run your leader with `--auto-approve` from the terminal ([Security & approvals](./security.md)). The full field reference, including how a worker is metered and started, is on the developer page: [Named virtual agents](../dev/architecture/a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
+
 ## Teams
 
-`--team <id>` runs a fixed roster instead of letting the leader spawn ad-hoc sub-agents: a named leader plus co-workers, each with its own model, tool profile and standing instructions, defined once in a `teams/<id>/team.json` directory. It implies `--broker`.
+`--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
 
 One team ships built in, `coder-reviewer` — a leader that only delegates, a coder, and a reviewer who checks the diff against the default branch before the leader merges it:
 

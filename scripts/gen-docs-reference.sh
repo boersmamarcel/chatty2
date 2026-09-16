@@ -233,6 +233,7 @@ opt-in (`false`) for security.
 | `fetch_enabled` | `bool` | `true` | Built-in read-only HTTP GET |
 | `git_enabled` | `bool` | `false` | Opt-in; workspace must be a git repo |
 | `browser_enabled` | `bool` | `false` | Opt-in built-in browser tools; may download a pinned Chrome on first use |
+| `allow_private_network_access` | `bool` | `false` | With internet access on, let the browser reach private/internal IPs (RFC-1918) on your own network; the SSRF guard refuses them otherwise. Cloud-metadata `169.254.0.0/16` stays refused regardless (AGE-459) |
 | `execute_code_enabled` | `bool` | `false` | Exposes `execute_code` to the model |
 | `docker_code_execution_enabled` | `bool` | `false` | Docker fallback for non-Monty code |
 | `docker_host` | `Option<String>` | `null` | Socket / URI; `null` = auto-detect |
