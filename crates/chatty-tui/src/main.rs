@@ -220,6 +220,21 @@ struct Cli {
     #[arg(long, value_name = "KEY")]
     api_key: Option<String>,
 
+    /// Force a reasoning model's extended-thinking mode on or off for this
+    /// session, overriding any persisted model config (AGE-455).
+    ///
+    /// Ollama gets the request's top-level `think` field (the same switch
+    /// AGE-400 wired up via a persisted `extra_params.think`); OpenAI-compat
+    /// servers with a reasoning parser (e.g. vLLM's `--reasoning-parser`) get
+    /// `chat_template_kwargs.enable_thinking`. Works with a bare
+    /// `--openai-compat-url`/`--ollama` session — no `~/.config/chatty/`
+    /// directory required. Omit to leave the provider's default behavior
+    /// untouched.
+    ///
+    /// Example: --think false
+    #[arg(long, value_name = "BOOL")]
+    think: Option<bool>,
+
     /// Workspace root for this session, overriding the persisted setting.
     ///
     /// Every filesystem, shell and git tool resolves paths against this root.
@@ -478,12 +493,22 @@ async fn main() -> Result<()> {
 
     // Resolve which model to use: --model, else the team leader's, else the
     // roster's default.
-    let model_config = resolve_model(
+    let mut model_config = resolve_model(
         cli.model
             .as_deref()
             .or(leader.and_then(|l| l.model.as_deref())),
         &models,
     )?;
+
+    // --think (AGE-455): explicit override of the model's `extra_params.think`
+    // switch, so a bare `--openai-compat-url`/`--ollama` session can toggle
+    // extended thinking with no persisted config. `ollama_think` and
+    // `openai_compat_think` in provider_builder.rs both read this same field.
+    if let Some(think) = cli.think {
+        model_config
+            .extra_params
+            .insert("think".to_string(), think.to_string());
+    }
 
     // Find the provider config for this model
     let provider_config = providers
@@ -1287,6 +1312,40 @@ mod resolve_model_tests {
             execution_settings.max_agent_turns = turns;
         }
         assert_eq!(execution_settings.max_agent_turns, 30);
+    }
+
+    /// AGE-455: unset leaves a resolved model's `extra_params` untouched (the
+    /// provider default applies), and an explicit `--think` writes the same
+    /// `extra_params.think` field `ollama_think`/`openai_compat_think` read —
+    /// the override `main` applies right after `resolve_model`.
+    #[test]
+    fn think_flag_overrides_model_extra_params_when_set() {
+        let models = store(&["first"]);
+
+        let mut model =
+            resolve_model(cli(&[]).model.as_deref(), &models).expect("a model resolves");
+        if let Some(think) = cli(&[]).think {
+            model
+                .extra_params
+                .insert("think".to_string(), think.to_string());
+        }
+        assert_eq!(
+            model.extra_params.get("think"),
+            None,
+            "no flag must not set it"
+        );
+
+        let mut model =
+            resolve_model(cli(&[]).model.as_deref(), &models).expect("a model resolves");
+        if let Some(think) = cli(&["--think", "false"]).think {
+            model
+                .extra_params
+                .insert("think".to_string(), think.to_string());
+        }
+        assert_eq!(
+            model.extra_params.get("think").map(String::as_str),
+            Some("false")
+        );
     }
 }
 

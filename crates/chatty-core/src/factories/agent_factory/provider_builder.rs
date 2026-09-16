@@ -88,6 +88,12 @@ pub(super) async fn build_provider_agent(
                 builder = builder.max_tokens(max_tokens as u64);
             }
 
+            if let Some(think) = openai_compat_think(model_config) {
+                builder = builder.additional_params(serde_json::json!({
+                    "chat_template_kwargs": { "enable_thinking": think }
+                }));
+            }
+
             let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
             let builder = chat_agent_builder(native_tools, builder);
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
@@ -349,6 +355,20 @@ pub(crate) fn ollama_think(model_config: &ModelConfig) -> Option<bool> {
         .and_then(|v| v.trim().parse::<bool>().ok())
 }
 
+/// The OpenAI-compat request's reasoning-mode switch, from the same
+/// `extra_params.think` field `ollama_think` reads (AGE-455). vLLM and other
+/// `--reasoning-parser` OpenAI-compat servers toggle extended thinking via
+/// `chat_template_kwargs.enable_thinking` in the request body rather than a
+/// top-level field; rig's OpenAI-compat request flattens `additional_params`
+/// into the body, so the caller nests it there. Absent or unparsable: no
+/// override, so a server without a reasoning parser gets no extra field.
+pub(crate) fn openai_compat_think(model_config: &ModelConfig) -> Option<bool> {
+    model_config
+        .extra_params
+        .get("think")
+        .and_then(|v| v.trim().parse::<bool>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +424,28 @@ mod tests {
             .extra_params
             .insert("think".to_string(), "maybe".to_string());
         assert_eq!(ollama_think(&model), None);
+    }
+
+    /// AGE-455: same field, same parsing, for the OpenAI-compat arm.
+    #[test]
+    fn openai_compat_think_reads_extra_params() {
+        let mut model = ModelConfig::new(
+            "compat".into(),
+            "some-model".into(),
+            ProviderType::OpenRouter,
+            "some-model".into(),
+        );
+        assert_eq!(openai_compat_think(&model), None);
+
+        model
+            .extra_params
+            .insert("think".to_string(), "false".to_string());
+        assert_eq!(openai_compat_think(&model), Some(false));
+
+        model
+            .extra_params
+            .insert("think".to_string(), "true".to_string());
+        assert_eq!(openai_compat_think(&model), Some(true));
     }
 
     #[test]
