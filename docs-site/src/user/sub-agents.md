@@ -130,5 +130,7 @@ chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
 
 ## Next
 
+- [Tutorial: your first named worker](./tutorial-named-worker.md) — twenty minutes, one reviewer, real hand-off
+- [Tutorial: a small agentic team](./tutorial-team.md) — a team directory of your own, from the built-in preset to your own playbook
 - [Terminal interface](./terminal.md)
 - [Agents & tools](./agents-and-tools.md)
