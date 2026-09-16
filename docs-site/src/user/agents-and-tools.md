@@ -78,6 +78,8 @@ The browser tools drive a real Chrome on your machine, so the agent can look at 
 
 One limit worth knowing: the screenshot reaches the model on its **next** turn, not inside the tool result. In practice the agent captures the screenshot, finishes its turn, and reviews the image on the turn after. Say *keep going* if it stops after capturing.
 
+A link that opens a new tab or window — `target="_blank"`, `window.open`, a "Sign in with…" popup — is followed automatically: the live view, your clicks and typing, and the agent's own tools all switch to the new tab, and switch back once you close it. The same address filtering applies to whatever the new tab navigates to.
+
 By default the browser is limited to `localhost` and files inside your workspace — it is for reviewing your own work. With Internet access on it can also open public websites, with the same address filtering as fetch and search so private and internal network targets stay out of reach. The browser profile is never signed in to anything, so none of these tools asks for approval either way. Turn them on with **Enable Browser Tools**; they need a workspace, where screenshots and console logs are kept.
 
 Chrome is not bundled. If you already have Chrome, Chromium or Edge installed, that is used; otherwise the first browser call downloads a pinned Chrome for Testing build — roughly 190 MB, once — and verifies it before use. Expect that first call to take a minute.
