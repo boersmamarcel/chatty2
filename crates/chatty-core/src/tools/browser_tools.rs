@@ -390,7 +390,7 @@ impl Tool for BrowserConsoleTool {
     ) -> Result<Self::Output, Self::Error> {
         let dir = self.manager.output_dir().await?;
         let session = self.manager.session().await?;
-        let (entries, dropped) = session.events().drain_console();
+        let (entries, dropped) = session.events()?.drain_console();
 
         let problems: Vec<String> = entries
             .iter()
@@ -464,7 +464,7 @@ impl Tool for BrowserNetworkTool {
     ) -> Result<Self::Output, Self::Error> {
         let dir = self.manager.output_dir().await?;
         let session = self.manager.session().await?;
-        let (entries, dropped) = session.events().drain_network();
+        let (entries, dropped) = session.events()?.drain_network();
 
         let describe = |e: &crate::services::browser::NetworkEntry| match (&e.error, e.status) {
             (Some(err), _) => format!("FAILED {} — {}", e.url, err),
