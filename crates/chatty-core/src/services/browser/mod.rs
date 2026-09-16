@@ -20,6 +20,7 @@
 //!   session's manager (AGE-155)
 //! - [`control`] — the control lock: who is driving (AGE-156)
 //! - [`input`] — forwarded mouse/keyboard input over CDP (AGE-156)
+//! - `targets` — following a tab or window the page opened (AGE-458)
 
 pub mod control;
 pub mod error;
@@ -31,6 +32,7 @@ pub mod registry;
 pub mod screencast;
 pub mod session;
 pub mod snapshot;
+mod targets;
 
 use std::path::PathBuf;
 use std::sync::Arc;
