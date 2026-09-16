@@ -100,24 +100,21 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), BrowserError> {
 
 /// Start a screencast, or retarget one already running to a new size.
 ///
-/// Pass the session's current `ScreencastState` (if any) as `existing`; the
-/// caller is responsible for storing back whatever this returns.
+/// `slot` is the session's live state, borrowed rather than moved in: a
+/// failed retarget must leave whatever is running exactly where it was
+/// (AGE-457). Dropping it would abandon a screencast Chrome is still
+/// encoding, with nothing left to `stop` it — and the next fresh
+/// `Page.startScreencast` against that target is refused with
+/// `-32000: Screencast is already active`.
 pub(super) async fn start(
     page: &Page,
-    existing: Option<ScreencastState>,
+    slot: &mut Option<ScreencastState>,
     width: u32,
     height: u32,
-) -> Result<(ScreencastState, watch::Receiver<ScreencastUpdate>), BrowserError> {
+) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
     validate_dimensions(width, height)?;
 
-    if let Some(state) = existing {
-        // A caller (the artifact window on every layout pass) may ask for
-        // the size it already has; skip the CDP round trips entirely then.
-        if state.width == width && state.height == height {
-            let rx = state.tx.subscribe();
-            return Ok((state, rx));
-        }
-
+    if let Some(rx) = retarget(slot, width, height, async || {
         page.execute(SetDeviceMetricsOverrideParams::new(
             width as i64,
             height as i64,
@@ -132,15 +129,11 @@ pub(super) async fn start(
         page.execute(start_screencast_params(width, height))
             .await
             .map_err(|e| BrowserError::Protocol(format!("screencast retarget failed: {e}")))?;
-        let rx = state.tx.subscribe();
-        return Ok((
-            ScreencastState {
-                width,
-                height,
-                ..state
-            },
-            rx,
-        ));
+        Ok(())
+    })
+    .await?
+    {
+        return Ok(rx);
     }
 
     page.execute(SetDeviceMetricsOverrideParams::new(
@@ -198,15 +191,39 @@ pub(super) async fn start(
         }
     });
 
-    Ok((
-        ScreencastState {
-            tx,
-            handle,
-            width,
-            height,
-        },
-        rx,
-    ))
+    *slot = Some(ScreencastState {
+        tx,
+        handle,
+        width,
+        height,
+    });
+    Ok(rx)
+}
+
+/// Retarget the screencast `slot` already holds, `cdp` doing the CDP half.
+///
+/// `Ok(None)` means there was nothing to retarget and the caller should
+/// start a fresh cast. The state is only ever borrowed out of `slot`, never
+/// taken: when `cdp` fails, the previous screencast is still running in
+/// Chrome, so the session must keep owning it (AGE-457).
+async fn retarget(
+    slot: &mut Option<ScreencastState>,
+    width: u32,
+    height: u32,
+    cdp: impl AsyncFnOnce() -> Result<(), BrowserError>,
+) -> Result<Option<watch::Receiver<ScreencastUpdate>>, BrowserError> {
+    let Some(state) = slot.as_mut() else {
+        return Ok(None);
+    };
+    // A caller (the artifact window on every layout pass) may ask for the
+    // size it already has; skip the CDP round trips entirely then.
+    if state.width == width && state.height == height {
+        return Ok(Some(state.tx.subscribe()));
+    }
+    cdp().await?;
+    state.width = width;
+    state.height = height;
+    Ok(Some(state.tx.subscribe()))
 }
 
 /// Stop an active screencast: abort the task and tell Chrome to stop encoding.
@@ -328,6 +345,107 @@ mod tests {
             decode_frame(&event),
             Err(BrowserError::Protocol(_))
         ));
+    }
+
+    /// A slot holding a screencast Chrome is streaming: a live channel and a
+    /// task that only ends when someone aborts it, exactly like the real
+    /// frame pump.
+    fn live_slot(
+        width: u32,
+        height: u32,
+    ) -> (Option<ScreencastState>, watch::Receiver<ScreencastUpdate>) {
+        let (tx, rx) = watch::channel(ScreencastUpdate::Starting);
+        let handle = tokio::spawn(std::future::pending::<()>());
+        (
+            Some(ScreencastState {
+                tx,
+                handle,
+                width,
+                height,
+            }),
+            rx,
+        )
+    }
+
+    /// AGE-457: a CDP error mid-retarget must not lose the running
+    /// screencast. Chrome keeps encoding it, so a slot left empty here makes
+    /// the next fresh start fail with `-32000: Screencast is already active`
+    /// and the session is unusable for the rest of the conversation.
+    #[tokio::test]
+    async fn a_failed_retarget_keeps_the_live_screencast_in_the_slot() {
+        let (mut slot, rx) = live_slot(800, 600);
+
+        let result = retarget(&mut slot, 1024, 768, async || {
+            Err(BrowserError::Protocol("screencast retarget failed".into()))
+        })
+        .await;
+
+        assert!(matches!(result, Err(BrowserError::Protocol(_))));
+        let state = slot
+            .as_ref()
+            .expect("the previous screencast must survive a failed retarget");
+        // Still the size Chrome is actually streaming, and still the same
+        // task and channel — so the next call retargets or stops *this*
+        // cast instead of starting a second one.
+        assert_eq!((state.width, state.height), (800, 600));
+        assert!(!state.handle.is_finished());
+        state
+            .tx
+            .send(ScreencastUpdate::Error("still live".to_string()))
+            .expect("the frame channel outlived the failure");
+        assert!(matches!(&*rx.borrow(), ScreencastUpdate::Error(msg) if msg == "still live"));
+    }
+
+    #[tokio::test]
+    async fn a_successful_retarget_updates_the_size_and_keeps_the_channel() {
+        let (mut slot, rx) = live_slot(800, 600);
+
+        let retargeted = retarget(&mut slot, 1024, 768, async || Ok(()))
+            .await
+            .expect("retarget succeeds")
+            .expect("a live screencast is retargeted, not started fresh");
+
+        let state = slot.as_ref().expect("the screencast stays in the slot");
+        assert_eq!((state.width, state.height), (1024, 768));
+        assert!(!state.handle.is_finished());
+        state
+            .tx
+            .send(ScreencastUpdate::Error("same channel".to_string()))
+            .expect("send");
+        assert!(matches!(&*retargeted.borrow(), ScreencastUpdate::Error(_)));
+        drop(rx);
+    }
+
+    #[tokio::test]
+    async fn a_retarget_to_the_same_size_skips_the_cdp_round_trips() {
+        let (mut slot, _rx) = live_slot(800, 600);
+        let called = std::cell::Cell::new(false);
+
+        let subscribed = retarget(&mut slot, 800, 600, async || {
+            called.set(true);
+            Ok(())
+        })
+        .await
+        .expect("retarget succeeds")
+        .expect("a live screencast is retargeted, not started fresh");
+
+        assert!(!called.get());
+        assert!(matches!(&*subscribed.borrow(), ScreencastUpdate::Starting));
+        assert_eq!(slot.as_ref().map(|s| (s.width, s.height)), Some((800, 600)));
+    }
+
+    #[tokio::test]
+    async fn an_empty_slot_reports_nothing_to_retarget() {
+        let mut slot = None;
+
+        let outcome = retarget(&mut slot, 800, 600, async || {
+            unreachable!("an empty slot must not reach CDP")
+        })
+        .await
+        .expect("no CDP call, no error");
+
+        assert!(outcome.is_none());
+        assert!(slot.is_none());
     }
 
     #[test]
