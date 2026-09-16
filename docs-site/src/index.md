@@ -46,6 +46,7 @@ All builds are on [GitHub Releases](https://github.com/boersmamarcel/chatty2/rel
 | Install and start chatting | [Getting started](./user/getting-started.md) |
 | Understand what the agent can do | [Agents & tools](./user/agents-and-tools.md) · [Security & approvals](./user/security.md) |
 | Use the terminal app or sub-agents | [Terminal interface](./user/terminal.md) · [Sub-agents](./user/sub-agents.md) |
+| Build a team of named workers | [Tutorial: your first named worker](./user/tutorial-named-worker.md) · [Tutorial: a small agentic team](./user/tutorial-team.md) |
 | Write a plugin or an MCP integration | [Build a WASM plugin](./dev/guides/build-wasm-module.md) · [Extensions & MCP](./user/extensions.md) |
 | Contribute to the code | [Build and run](./dev/start/build-and-run.md) · [Contributing patterns](./dev/contributing-patterns.md) |
 | Look something up | [Reference](./dev/crates.md) · [Glossary](./dev/glossary.md) |
