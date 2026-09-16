@@ -106,7 +106,15 @@ impl Tool for BrowserNavigateTool {
     type Output = NavigateOutput;
 
     fn description(&self) -> String {
-        if self.manager.allows_open_web() {
+        if self.manager.allows_open_web() && self.manager.allows_private_network_access() {
+            "Open a URL in the built-in browser. Internet access is enabled, so any public \
+             http(s) URL is allowed, plus localhost URLs (http://localhost:PORT, \
+             http://127.0.0.1:PORT), file:// URLs inside the workspace, and private/internal \
+             network targets (e.g. 192.168.x.x, 10.x.x.x) on the user's own network — only \
+             link-local/cloud-metadata addresses (169.254.x.x) stay refused. Navigating \
+             invalidates every element ref from a previous browser_snapshot."
+                .to_string()
+        } else if self.manager.allows_open_web() {
             "Open a URL in the built-in browser. Internet access is enabled, so any public \
              http(s) URL is allowed, plus localhost URLs (http://localhost:PORT, \
              http://127.0.0.1:PORT) and file:// URLs inside the workspace — private/internal \
@@ -660,6 +668,29 @@ mod tests {
         let description = tool_definition(&nav).description;
         assert!(description.contains("localhost"));
         assert!(description.contains("file://"));
+    }
+
+    /// AGE-459: the model is told when the workspace toggle has opened up
+    /// private/internal targets, so it will actually try them instead of
+    /// assuming they are refused.
+    #[test]
+    fn navigate_description_reflects_private_network_toggle() {
+        let open_manager = Arc::new(BrowserManager::open_web(
+            Some(std::path::PathBuf::from("/ws")),
+            false,
+        ));
+        let (nav, ..) = build_browser_tools(open_manager, artifacts());
+        let description = tool_definition(&nav).description;
+        assert!(description.contains("stay refused either way"));
+
+        let private_manager = Arc::new(BrowserManager::open_web(
+            Some(std::path::PathBuf::from("/ws")),
+            true,
+        ));
+        let (nav, ..) = build_browser_tools(private_manager, artifacts());
+        let description = tool_definition(&nav).description;
+        assert!(description.contains("192.168.x.x"));
+        assert!(!description.contains("stay refused either way"));
     }
 
     #[tokio::test]

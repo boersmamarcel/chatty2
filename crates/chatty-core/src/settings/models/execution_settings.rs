@@ -44,6 +44,13 @@ pub struct ExecutionSettingsModel {
     /// no suitable system Chrome is installed.
     #[serde(default)]
     pub browser_enabled: bool,
+    /// When the browser's open-web policy is active (internet access on),
+    /// also allow navigation to private/internal IPs (RFC-1918, etc.) on the
+    /// user's own network. Off by default: an SSRF guard refuses these the
+    /// same as any other private target. The link-local/cloud-metadata range
+    /// (169.254.0.0/16) stays refused regardless of this setting (AGE-459).
+    #[serde(default)]
+    pub allow_private_network_access: bool,
     /// Expose the execute_code tool to the model.
     /// Python may run via Monty; other languages require Docker fallback.
     #[serde(default)]
@@ -121,6 +128,7 @@ impl Default for ExecutionSettingsModel {
             fetch_enabled: true,           // Enabled by default for zero-config web access
             git_enabled: false,            // Opt-in: requires workspace with git repo
             browser_enabled: false,        // Opt-in: may download a Chrome build on first use
+            allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,   // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
             docker_host: None,

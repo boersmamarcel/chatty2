@@ -676,6 +676,10 @@ impl AgentClient {
                 .as_ref()
                 .map(|s| s.fetch_enabled)
                 .unwrap_or(true);
+            let allow_private_network_access = exec_settings
+                .as_ref()
+                .map(|s| s.allow_private_network_access)
+                .unwrap_or(false);
             let workspace = exec_settings
                 .as_ref()
                 .and_then(|s| s.workspace_dir.clone())
@@ -690,7 +694,10 @@ impl AgentClient {
                         "Browser tools enabled"
                     );
                     let manager = std::sync::Arc::new(if internet_access {
-                        crate::services::browser::BrowserManager::open_web(Some(workspace))
+                        crate::services::browser::BrowserManager::open_web(
+                            Some(workspace),
+                            allow_private_network_access,
+                        )
                     } else {
                         crate::services::browser::BrowserManager::lane_a(Some(workspace))
                     });

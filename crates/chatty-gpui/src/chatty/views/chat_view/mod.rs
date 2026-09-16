@@ -594,8 +594,14 @@ impl ChatView {
                     .and_then(|s| s.workspace_dir.clone())
                     .map(std::path::PathBuf::from);
                 let internet_access = settings.map(|s| s.fetch_enabled).unwrap_or(true);
+                let allow_private_network_access = settings
+                    .map(|s| s.allow_private_network_access)
+                    .unwrap_or(false);
                 let manager = std::sync::Arc::new(if internet_access {
-                    chatty_core::services::browser::BrowserManager::open_web(workspace)
+                    chatty_core::services::browser::BrowserManager::open_web(
+                        workspace,
+                        allow_private_network_access,
+                    )
                 } else {
                     chatty_core::services::browser::BrowserManager::lane_a(workspace)
                 });

@@ -223,6 +223,35 @@ pub fn toggle_browser(cx: &mut App) {
     .detach();
 }
 
+/// Toggle whether the browser's open-web policy may also reach private/
+/// internal IPs on the user's own network (AGE-459), and persist to disk.
+///
+/// Off by default: the SSRF guard refuses RFC-1918/loopback-IP targets same
+/// as any other private host. The link-local/cloud-metadata range stays
+/// refused regardless of this setting. This is a tool-behavior toggle — it
+/// changes what the already-built `BrowserManager`'s navigation policy
+/// allows — so, like `toggle_browser`/`toggle_fetch`, the agent must be
+/// rebuilt for it to take effect on the active conversation.
+pub fn toggle_allow_private_network_access(cx: &mut App) {
+    let new_enabled = !cx
+        .global::<ExecutionSettingsModel>()
+        .allow_private_network_access;
+    cx.global_mut::<ExecutionSettingsModel>()
+        .allow_private_network_access = new_enabled;
+
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Toggle the per-conversation move between local and hosted, and persist to
 /// disk (AGE-308).
 ///
