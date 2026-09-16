@@ -78,10 +78,15 @@ impl BrowserManager {
     /// An ephemeral manager with the open-web policy: everything Lane A allows,
     /// plus any public http(s) host. Gated by the caller on the app's
     /// internet-access setting — this constructor itself does not check it.
-    pub fn open_web(workspace: Option<PathBuf>) -> Self {
+    ///
+    /// `allow_private_network_access` is the workspace-level toggle (AGE-459,
+    /// default `false`) that additionally allows private/internal IPs
+    /// (RFC-1918, etc.); the link-local/cloud-metadata range stays refused
+    /// regardless. Also gated by the caller, not this constructor.
+    pub fn open_web(workspace: Option<PathBuf>, allow_private_network_access: bool) -> Self {
         Self {
             profile: BrowserProfile::Ephemeral,
-            policy: NavigationPolicy::open(workspace.clone()),
+            policy: NavigationPolicy::open(workspace.clone(), allow_private_network_access),
             workspace,
             session: Mutex::new(None),
             snapshot: Mutex::new(None),
@@ -92,6 +97,19 @@ impl BrowserManager {
     /// descriptions can tell the model what is actually allowed right now.
     pub fn allows_open_web(&self) -> bool {
         matches!(self.policy, NavigationPolicy::Open { .. })
+    }
+
+    /// Whether this manager's policy also allows navigating to private/
+    /// internal IPs on the user's own network (AGE-459's workspace toggle),
+    /// so tool descriptions can tell the model what is actually reachable.
+    pub fn allows_private_network_access(&self) -> bool {
+        matches!(
+            self.policy,
+            NavigationPolicy::Open {
+                allow_private_network_access: true,
+                ..
+            }
+        )
     }
 
     /// The configured workspace, which the tools need somewhere to write into.

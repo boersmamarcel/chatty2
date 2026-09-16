@@ -43,8 +43,14 @@ pub enum NavigationPolicy {
     /// gates `fetch_tool`/`search_web`. A superset of `LocalOnly` — loopback and
     /// workspace `file://` still work — plus any public http(s) host. Uses the
     /// same SSRF denylist as `fetch_tool` so private/internal network targets
-    /// (RFC-1918, link-local, cloud metadata) stay refused either way.
-    Open { workspace: Option<PathBuf> },
+    /// (RFC-1918, link-local, cloud metadata) stay refused either way, unless
+    /// `allow_private_network_access` opts a workspace into reaching its own
+    /// LAN (AGE-459) — link-local/cloud-metadata targets stay refused even
+    /// then.
+    Open {
+        workspace: Option<PathBuf>,
+        allow_private_network_access: bool,
+    },
     /// Lane B (AGE-158): a per-task origin allowlist. Not constructed yet.
     #[allow(dead_code)]
     Allowlist { origins: Vec<String> },
@@ -57,8 +63,16 @@ impl NavigationPolicy {
     }
 
     /// Open-web policy anchored at the configured workspace directory.
-    pub fn open(workspace: Option<PathBuf>) -> Self {
-        NavigationPolicy::Open { workspace }
+    ///
+    /// `allow_private_network_access` is the workspace-level toggle (AGE-459,
+    /// default `false`): when true, navigation to private/internal IPs
+    /// (RFC-1918, etc.) succeeds instead of being refused as SSRF. The
+    /// link-local/cloud-metadata range stays refused regardless.
+    pub fn open(workspace: Option<PathBuf>, allow_private_network_access: bool) -> Self {
+        NavigationPolicy::Open {
+            workspace,
+            allow_private_network_access,
+        }
     }
 
     /// Check a single URL against the policy.
@@ -70,7 +84,10 @@ impl NavigationPolicy {
             NavigationPolicy::LocalOnly { workspace } => {
                 check_local_only(url, workspace.as_deref())
             }
-            NavigationPolicy::Open { workspace } => check_open(url, workspace.as_deref()),
+            NavigationPolicy::Open {
+                workspace,
+                allow_private_network_access,
+            } => check_open(url, workspace.as_deref(), *allow_private_network_access),
             NavigationPolicy::Allowlist { origins } => check_allowlist(url, origins),
         }
     }
@@ -132,8 +149,14 @@ fn check_local_only(url: &str, workspace: Option<&Path>) -> Result<(), BrowserEr
 
 /// Open-web policy: loopback and workspace `file://` still work (same as
 /// [`check_local_only`]), plus any public http(s) host that clears the
-/// shared SSRF denylist.
-fn check_open(url: &str, workspace: Option<&Path>) -> Result<(), BrowserError> {
+/// shared SSRF denylist — or, with `allow_private_network_access` on, any
+/// private/internal host too (except link-local/cloud-metadata, which stays
+/// refused either way; AGE-459).
+fn check_open(
+    url: &str,
+    workspace: Option<&Path>,
+    allow_private_network_access: bool,
+) -> Result<(), BrowserError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| BrowserError::NavigationRefused(format!("invalid URL {url}: {e}")))?;
 
@@ -145,8 +168,11 @@ fn check_open(url: &str, workspace: Option<&Path>) -> Result<(), BrowserError> {
             if is_loopback_host(host) {
                 return Ok(());
             }
-            crate::services::ssrf_guard::check_public_host(url)
-                .map_err(BrowserError::NavigationRefused)
+            crate::services::ssrf_guard::check_public_host_with_bypass(
+                url,
+                allow_private_network_access,
+            )
+            .map_err(BrowserError::NavigationRefused)
         }
         "file" => check_workspace_file_url(url, &parsed, workspace),
         other => Err(BrowserError::NavigationRefused(format!(
@@ -351,7 +377,11 @@ mod tests {
     }
 
     fn open() -> NavigationPolicy {
-        NavigationPolicy::open(Some(PathBuf::from("/ws")))
+        NavigationPolicy::open(Some(PathBuf::from("/ws")), false)
+    }
+
+    fn open_with_private_access() -> NavigationPolicy {
+        NavigationPolicy::open(Some(PathBuf::from("/ws")), true)
     }
 
     #[test]
@@ -407,5 +437,81 @@ mod tests {
                 "{url} should be refused"
             );
         }
+    }
+
+    /// AGE-459, toggle off: unchanged from today — private/internal IPs are
+    /// refused exactly as before.
+    #[test]
+    fn open_toggle_off_rejects_private_ip() {
+        let policy = open();
+        assert!(matches!(
+            policy.check("http://192.168.1.10/"),
+            Err(BrowserError::NavigationRefused(_))
+        ));
+    }
+
+    /// AGE-459, toggle on: navigation to a private IP succeeds.
+    #[test]
+    fn open_toggle_on_allows_private_ip() {
+        let policy = open_with_private_access();
+        for url in [
+            "http://192.168.1.10/",
+            "http://10.0.0.1/internal",
+            "http://172.16.0.5/service",
+        ] {
+            assert!(policy.check(url).is_ok(), "{url} should be allowed");
+        }
+    }
+
+    /// AGE-459: the link-local/cloud-metadata carve-out holds even with the
+    /// toggle on — it is deliberately not lumped in with "private".
+    #[test]
+    fn open_toggle_on_still_blocks_metadata_range() {
+        let policy = open_with_private_access();
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.1.1/",
+        ] {
+            assert!(
+                matches!(policy.check(url), Err(BrowserError::NavigationRefused(_))),
+                "{url} must stay refused even with the toggle on"
+            );
+        }
+    }
+
+    /// AGE-459: the toggle only widens the SSRF/private-IP branch — it does
+    /// not touch the workspace `file://` containment or scheme allowlist
+    /// that `check_open` shares with `check_local_only`'s logic.
+    #[test]
+    fn open_toggle_on_still_enforces_workspace_and_scheme_rules() {
+        let policy = open_with_private_access();
+        assert!(matches!(
+            policy.check("file:///etc/passwd"),
+            Err(BrowserError::NavigationRefused(_))
+        ));
+        assert!(matches!(
+            policy.check("ftp://192.168.1.10/x"),
+            Err(BrowserError::NavigationRefused(_))
+        ));
+        // Public-host SSRF-adjacent rules (the hostname denylist) still apply too.
+        assert!(matches!(
+            policy.check("http://metadata.google.internal/computeMetadata/v1/"),
+            Err(BrowserError::NavigationRefused(_))
+        ));
+    }
+
+    /// AGE-459: a redirect to a private IP is allowed only when the toggle is on.
+    #[test]
+    fn redirect_to_private_ip_gated_by_toggle() {
+        let hops = vec![
+            "http://example.com/".to_string(),
+            "http://192.168.1.10/internal".to_string(),
+        ];
+
+        assert!(matches!(
+            open().check_chain(&hops),
+            Err(BrowserError::NavigationRefused(_))
+        ));
+        assert!(open_with_private_access().check_chain(&hops).is_ok());
     }
 }

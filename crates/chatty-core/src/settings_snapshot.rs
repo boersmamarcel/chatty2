@@ -446,6 +446,7 @@ mod tests {
                 fetch_enabled: false,
                 git_enabled: true,
                 browser_enabled: true,
+                allow_private_network_access: true,
                 execute_code_enabled: true,
                 docker_code_execution_enabled: true,
                 docker_host: Some("unix:///var/run/docker.sock".to_string()),

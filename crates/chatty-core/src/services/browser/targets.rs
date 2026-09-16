@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn the_open_web_policy_still_refuses_internal_targets() {
-        let policy = NavigationPolicy::open(Some("/ws".into()));
+        let policy = NavigationPolicy::open(Some("/ws".into()), false);
         assert!(may_drive_url(&policy, "http://127.0.0.1:3000/callback"));
         assert!(
             !may_drive_url(&policy, "http://169.254.169.254/latest/meta-data/"),

@@ -65,6 +65,29 @@ pub fn execution_settings_page() -> SettingPage {
                          build (~190MB, once).",
                     ),
                     SettingItem::new(
+                        "Allow Browser Access to Private Network",
+                        SettingField::switch(
+                            |cx: &App| {
+                                cx.global::<ExecutionSettingsModel>()
+                                    .allow_private_network_access
+                            },
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_allow_private_network_access(
+                                    cx,
+                                );
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "When internet access is on, also let the browser navigate to private \
+                         IPs on your own network (e.g. 192.168.x.x, 10.x.x.x) — useful for \
+                         reaching another machine on your LAN. Off by default: these are blocked \
+                         as a server-side request forgery (SSRF) protection, same as any other \
+                         private target. Cloud-metadata addresses (169.254.x.x) stay blocked \
+                         either way.",
+                    ),
+                    SettingItem::new(
                         "Enable Code Execution Tool",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().execute_code_enabled,
