@@ -505,8 +505,8 @@ switched off.
 | Profile | What it can call |
 |---------|------------------|
 | `coordinator` | The read set below, plus `list_agents`, `invoke_agent` and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It delegates; it does not edit. |
-| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`) and `execute_code`. No agent tools: a coder does not fan out further. |
-| `reviewer` | The read set, plus the shell so it can run the tests. No writes, no commits, no delegation. |
+| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). No agent tools: a coder does not fan out further. |
+| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value. No writes, no commits, no delegation. |
 
 The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
 `search_code`, `git_status`, `git_log`, `git_diff` (which takes a `base..head` `range`, so

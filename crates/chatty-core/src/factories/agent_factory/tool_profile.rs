@@ -76,6 +76,10 @@ const DATA_QUERY: &[&str] = &[
     "file_structure_detector",
 ];
 
+/// Writing to the embedding-backed memory/skill store. Writes, so `CODER`
+/// only — `REVIEWER`'s whole design invariant is no writes (AGE-456).
+const MEMORY: &[&str] = &["remember", "save_skill", "search_memory"];
+
 /// One named tool set, as a list of groups so the three profiles share their
 /// common parts rather than repeating them.
 #[derive(Debug, PartialEq, Eq)]
@@ -193,11 +197,14 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 };
 
 /// A worker that writes code: the read set plus everything needed to change
-/// the tree and prove it builds, plus querying data files directly with SQL.
-/// It does not delegate further.
+/// the tree and prove it builds, plus querying data files directly with SQL,
+/// plus building and consulting a playbook/skill memory (AGE-456). It does
+/// not delegate further.
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
-    groups: &[READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY],
+    groups: &[
+        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, MEMORY,
+    ],
 };
 
 /// A worker that judges someone else's work: the read set plus a shell to run
@@ -325,6 +332,21 @@ mod tests {
             assert!(
                 !COORDINATOR.allows(tool),
                 "a leader delegates data analysis, it does not do it itself"
+            );
+        }
+
+        for tool in ["remember", "save_skill", "search_memory"] {
+            assert!(
+                CODER.allows(tool),
+                "a coder can build and consult a playbook/skill memory"
+            );
+            assert!(
+                !REVIEWER.allows(tool),
+                "a reviewer writes nothing, memory included"
+            );
+            assert!(
+                !COORDINATOR.allows(tool),
+                "no evidence yet a leader needs to write memory itself"
             );
         }
     }
