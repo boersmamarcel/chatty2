@@ -39,6 +39,8 @@ chatty-tui --openai-compat-url http://localhost:8000
 chatty-tui --openai-compat-url http://localhost:8000 --model my-model --api-key sk-...
 ```
 
+Add `--think true` / `--think false` to force a reasoning model's extended-thinking mode on or off for the session — useful here since a zero-config session has no saved model settings to toggle it in otherwise. Works with Ollama and OpenAI-compatible servers that support a reasoning parser (for example vLLM's `--reasoning-parser`).
+
 ## Welcome screen and status bar
 
 An empty interactive session shows what is active: model and context window, workspace and git branch, enabled tool groups, internet capabilities (fetch, search, browser, cloud sandbox, MCP) and runtime features (memory, modules, remote agents). MCP, memory and embeddings load in the background — badges show `⟳` (for example `[MCP ⟳]`) and the status bar reads *loading services…* until they are ready.
