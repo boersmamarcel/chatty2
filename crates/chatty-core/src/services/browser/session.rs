@@ -319,10 +319,11 @@ impl BrowserSession {
     ) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
         self.ensure_alive()?;
         let mut guard = self.screencast.lock().await;
-        let existing = guard.take();
-        let (state, rx) = screencast::start(&self.page, existing, width, height).await?;
-        *guard = Some(state);
-        Ok(rx)
+        // The state is handed over by mutable borrow, never taken out: a
+        // failed retarget leaves the previous screencast — which Chrome is
+        // still encoding — in place, so a later call retargets or stops it
+        // instead of asking Chrome to start a second one (AGE-457).
+        screencast::start(&self.page, &mut guard, width, height).await
     }
 
     /// Stop the screencast. Idle handling (AGE-155) calls this when the
