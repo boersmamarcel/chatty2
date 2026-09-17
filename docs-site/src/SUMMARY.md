@@ -13,6 +13,8 @@
 - [Extensions & MCP](./user/extensions.md)
 - [Memory & skills](./user/memory-and-skills.md)
 - [Sub-agents](./user/sub-agents.md)
+  - [Tutorial: your first named worker](./user/tutorial-named-worker.md)
+  - [Tutorial: a small agentic team](./user/tutorial-team.md)
 - [Security & approvals](./user/security.md)
 - [Terminal interface](./user/terminal.md)
 - [Advanced](./user/advanced.md)
