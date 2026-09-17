@@ -69,6 +69,25 @@ pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Option<TokenUsage
     })
 }
 
+/// The key under a terminal status's `metadata` that carries the worker's
+/// compacted tool-call trace, as the broker's worker mapper writes it
+/// (`chatty_protocol_gateway::worker::mapper`). Rides next to `usage`
+/// (AGE-467): a leader that wants to judge a worker's derivation, not just
+/// its answer, asks `invoke_agent` for it with `include_trace`.
+pub const TRACE_METADATA_KEY: &str = "trace";
+
+/// The trace a delegated task's terminal status carries, if any: the
+/// compacted string the worker's mapper wrote under
+/// [`TRACE_METADATA_KEY`]. `None` when the metadata carries no trace — every
+/// delegation that did not ask for one, and any task that made no tool
+/// calls.
+pub fn trace_from_status_metadata(metadata: Option<&Value>) -> Option<String> {
+    metadata?
+        .get(TRACE_METADATA_KEY)?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Discovered capabilities from a remote A2A agent card.
 #[derive(Clone, Debug)]
 pub struct AgentCard {
@@ -719,6 +738,47 @@ mod tests {
         assert!(usage_from_status_metadata(None).is_none());
         let clarification_only = json!({ "clarification": { "id": "r", "questions": [] } });
         assert!(usage_from_status_metadata(Some(&clarification_only)).is_none());
+    }
+
+    /// AGE-467: a worker's compacted trace rides the terminal status next to
+    /// its usage, under its own key, and only when the metadata carries one.
+    #[test]
+    fn a_terminal_status_carries_the_workers_trace() {
+        let trace = "### read_file (ok)\ninput: {}\noutput: # Chatty";
+        let metadata = json!({ "trace": trace });
+        assert_eq!(
+            trace_from_status_metadata(Some(&metadata)).as_deref(),
+            Some(trace)
+        );
+
+        assert!(trace_from_status_metadata(None).is_none());
+        let usage_only = json!({ "usage": { "inputTokens": 1 } });
+        assert!(trace_from_status_metadata(Some(&usage_only)).is_none());
+    }
+
+    /// The two keys ride the same metadata object without disturbing each
+    /// other — what the mapper's terminal status actually sends when a
+    /// parent asked for both (AGE-467).
+    #[test]
+    fn usage_and_trace_round_trip_from_the_same_metadata() {
+        let trace = "### read_file (ok)\ninput: {}\noutput: # Chatty";
+        let metadata = json!({
+            "usage": {
+                "inputTokens": 120,
+                "outputTokens": 34,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+            },
+            "trace": trace,
+        });
+
+        let usage = usage_from_status_metadata(Some(&metadata)).expect("usage is in the metadata");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (120, 34));
+        assert_eq!(
+            trace_from_status_metadata(Some(&metadata)).as_deref(),
+            Some(trace),
+            "the trace reads back independently of the usage key"
+        );
     }
 
     #[test]

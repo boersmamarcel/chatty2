@@ -214,6 +214,7 @@ async fn child(broker: &Broker) {
                     InvokeAgentArgs {
                         agent: GRANDCHILD.to_string(),
                         prompt: task.text,
+                        include_trace: false,
                     },
                 )
                 .await
@@ -248,6 +249,7 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
             InvokeAgentArgs {
                 agent: CHILD.to_string(),
                 prompt: "Set up the database.".to_string(),
+                include_trace: false,
             },
         )
         .await
@@ -318,6 +320,7 @@ async fn a_question_nobody_can_answer_ends_the_delegation() {
             InvokeAgentArgs {
                 agent: GRANDCHILD.to_string(),
                 prompt: "Set up the database.".to_string(),
+                include_trace: false,
             },
         ),
     )

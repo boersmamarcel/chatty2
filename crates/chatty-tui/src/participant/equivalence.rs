@@ -181,6 +181,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
             InvokeAgentArgs {
                 agent: LOCAL_AGENT_NAME.to_string(),
                 prompt: "do the delegated task".to_string(),
+                include_trace: false,
             },
         )
         .await;
@@ -565,6 +566,7 @@ mod evidence {
                 InvokeAgentArgs {
                     agent: LOCAL_AGENT_NAME.to_string(),
                     prompt: "delegate this".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -926,6 +928,7 @@ pub(super) mod named_virtual_agents {
             InvokeAgentArgs {
                 agent: agent.to_string(),
                 prompt: format!("a task for {agent}"),
+                include_trace: false,
             },
         )
         .await
@@ -1444,6 +1447,7 @@ mod spend_cap {
             InvokeAgentArgs {
                 agent: LOCAL_AGENT_NAME.to_string(),
                 prompt: "do the delegated task".to_string(),
+                include_trace: false,
             },
         )
         .await
