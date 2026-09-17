@@ -19,7 +19,9 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`agents-and-tools.md`](../docs-site/src/user/agents-and-tools.md) | The agent loop and what the agent can do |
 | [`extensions.md`](../docs-site/src/user/extensions.md) | Hive marketplace, built-in integrations, custom MCP servers |
 | [`memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and saved skills |
-| [`sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless child agents |
+| [`sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless child agents, named workers and roles, teams |
+| [`tutorial-named-worker.md`](../docs-site/src/user/tutorial-named-worker.md) | Tutorial: declare one named worker with a role and watch it delegate |
+| [`tutorial-team.md`](../docs-site/src/user/tutorial-team.md) | Tutorial: build a coder-reviewer team directory, run it, change it |
 | [`security.md`](../docs-site/src/user/security.md) | Approval modes, sandboxing, secrets |
 | [`terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` install, modes, keybindings |
 | [`advanced.md`](../docs-site/src/user/advanced.md) | Training-data export, where Chatty stores data, updates |
