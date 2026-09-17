@@ -70,6 +70,7 @@
 use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::token_usage::TokenUsage;
+use chatty_core::services::a2a_client::TRACE_METADATA_KEY;
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
@@ -112,6 +113,125 @@ pub fn clarification_answers(input: TaskInput) -> Vec<ClarificationAnswer> {
         .collect()
 }
 
+// ── AGE-467: the worker's tool-call trace ───────────────────────────────────
+//
+// A leader that delegates the same task to several workers and wants to
+// *judge* their derivations, not just count their answers, needs to see what
+// each worker did. `TaskMapper` already sees every tool call a worker makes
+// (that is how the progress lines above are built); this accumulates the
+// same events into a compacted trace, kept separate from the rendered wire
+// string so a later structured export (e.g. an ATIF trajectory) can read the
+// steps without touching `metadata["trace"]`'s shape.
+
+/// One tool call as a judge would want to see it: what the worker ran, what
+/// it was asked to run with, and how it came out.
+#[derive(Debug, Clone)]
+struct TraceStep {
+    name: String,
+    arguments: String,
+    outcome: StepOutcome,
+}
+
+#[derive(Debug, Clone)]
+enum StepOutcome {
+    Ok(String),
+    Failed(String),
+    /// The call started but the worker never reported a result or error —
+    /// it died mid-call.
+    NoResult,
+}
+
+/// A traced tool call's `input` is cut at this many characters.
+const TRACE_INPUT_CAP: usize = 2000;
+/// A traced tool call's `output`/`error` is cut at this many characters.
+const TRACE_OUTPUT_CAP: usize = 1200;
+/// At most this many steps are kept; beyond it the middle is summarised by
+/// one line — the first [`TRACE_HEAD_STEPS`] and the last [`TRACE_TAIL_STEPS`].
+const TRACE_MAX_STEPS: usize = 40;
+/// How many of the earliest steps survive the step-count cap.
+const TRACE_HEAD_STEPS: usize = 2;
+/// How many of the most recent steps survive the step-count cap.
+const TRACE_TAIL_STEPS: usize = TRACE_MAX_STEPS - TRACE_HEAD_STEPS;
+/// The whole trace is cut to this many characters, dropping steps from the
+/// middle when the step-count cap alone still leaves it too big.
+const TRACE_MAX_CHARS: usize = 12_000;
+
+/// Cut `s` to `limit` characters, noting how much was removed. A cut always
+/// gets its own line, so the marker never runs into the content it follows.
+fn cap(s: &str, limit: usize) -> String {
+    let total = s.chars().count();
+    if total <= limit {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(limit).collect();
+    format!("{kept}\n\u{2026}[truncated {} chars]", total - limit)
+}
+
+/// One step's rendered block: `### name (ok|FAILED|no result)`, its input,
+/// and its output or error.
+fn render_step(step: &TraceStep) -> String {
+    let input = cap(&step.arguments, TRACE_INPUT_CAP);
+    match &step.outcome {
+        StepOutcome::Ok(result) => format!(
+            "### {} (ok)\ninput: {input}\noutput: {}",
+            step.name,
+            cap(result, TRACE_OUTPUT_CAP)
+        ),
+        StepOutcome::Failed(error) => format!(
+            "### {} (FAILED)\ninput: {input}\nerror: {}",
+            step.name,
+            cap(error, TRACE_OUTPUT_CAP)
+        ),
+        StepOutcome::NoResult => format!("### {} (no result)\ninput: {input}", step.name),
+    }
+}
+
+/// Render and compact `steps` into the wire's trace string: a port of
+/// `/tmp/age9-judge/compact.py`'s global cap, with this issue's uniform
+/// per-field caps rather than per-tool ones. `None` for a task with no tool
+/// calls, so `terminal()` attaches no `trace` key at all.
+fn compact_trace(steps: &[TraceStep]) -> Option<String> {
+    if steps.is_empty() {
+        return None;
+    }
+
+    let blocks: Vec<String> = steps.iter().map(render_step).collect();
+
+    let head_n = TRACE_HEAD_STEPS.min(blocks.len());
+    let head = &blocks[..head_n];
+    let mut tail = &blocks[head_n..];
+    if blocks.len() > TRACE_MAX_STEPS {
+        tail = &blocks[blocks.len() - TRACE_TAIL_STEPS..];
+    }
+
+    // Whole-trace cap: drop further from the oldest end of what step-count
+    // capping kept, preserving the head and as many of the most recent steps
+    // as fit.
+    let head_chars: usize = head.iter().map(|b| b.chars().count()).sum();
+    let tail_chars: usize = tail.iter().map(|b| b.chars().count()).sum();
+    if head_chars + tail_chars > TRACE_MAX_CHARS {
+        let mut budget = TRACE_MAX_CHARS.saturating_sub(head_chars);
+        let mut start = tail.len();
+        for block in tail.iter().rev() {
+            let len = block.chars().count();
+            if len > budget {
+                break;
+            }
+            budget -= len;
+            start -= 1;
+        }
+        tail = &tail[start..];
+    }
+
+    let dropped = blocks.len() - head.len() - tail.len();
+    let mut rendered: Vec<String> = head.to_vec();
+    if dropped > 0 {
+        rendered.push(format!("\u{2026}[{dropped} intermediate steps omitted]"));
+    }
+    rendered.extend(tail.iter().cloned());
+    Some(rendered.join("\n"))
+}
+
 /// Folds one delegated task's events into frames.
 pub struct TaskMapper {
     task_id: String,
@@ -122,6 +242,11 @@ pub struct TaskMapper {
     usage: Option<TokenUsage>,
     /// What this worker's own delegations spent, summed (AGE-415).
     delegated_usage: Option<TokenUsage>,
+    /// This task's tool calls, in the order they started (AGE-467).
+    trace: Vec<TraceStep>,
+    /// Tool call id → index into `trace`, for a call still waiting on its
+    /// result or error.
+    open_calls: HashMap<String, usize>,
 }
 
 impl TaskMapper {
@@ -135,11 +260,45 @@ impl TaskMapper {
             failure: None,
             usage: None,
             delegated_usage: None,
+            trace: Vec::new(),
+            open_calls: HashMap::new(),
+        }
+    }
+
+    /// Fold a tool-call event into the trace, if it is one (AGE-467). `Text`
+    /// fragments are not traced — the response already carries them.
+    fn record_trace_event(&mut self, event: &SessionEvent) {
+        match event {
+            SessionEvent::ToolCallStarted { id, name } => {
+                self.open_calls.insert(id.clone(), self.trace.len());
+                self.trace.push(TraceStep {
+                    name: name.clone(),
+                    arguments: String::new(),
+                    outcome: StepOutcome::NoResult,
+                });
+            }
+            SessionEvent::ToolCallInput { id, arguments } => {
+                if let Some(&index) = self.open_calls.get(id) {
+                    self.trace[index].arguments = arguments.clone();
+                }
+            }
+            SessionEvent::ToolCallResult { id, result } => {
+                if let Some(index) = self.open_calls.remove(id) {
+                    self.trace[index].outcome = StepOutcome::Ok(result.clone());
+                }
+            }
+            SessionEvent::ToolCallError { id, error } => {
+                if let Some(index) = self.open_calls.remove(id) {
+                    self.trace[index].outcome = StepOutcome::Failed(error.clone());
+                }
+            }
+            _ => {}
         }
     }
 
     /// The frame for `event`, or `None` for the events that stay in the child.
     pub fn map(&mut self, event: &SessionEvent) -> Option<ParticipantFrame> {
+        self.record_trace_event(event);
         match event {
             SessionEvent::TurnStarted => Some(self.status(TaskState::Working, None)),
 
@@ -218,9 +377,30 @@ impl TaskMapper {
             task_id: self.task_id.clone(),
             state: self.state,
             message: self.failure.clone(),
-            metadata: self.reported_usage().as_ref().map(usage_metadata),
+            metadata: self.terminal_metadata(),
             input: None,
         }
+    }
+
+    /// Everything that rides on the terminal status's `metadata`: usage
+    /// under `USAGE_METADATA_KEY` (ADR-0011) and, when this task made any
+    /// tool calls, the compacted trace under [`TRACE_METADATA_KEY`]
+    /// (AGE-467). `None` when neither has anything to report.
+    fn terminal_metadata(&self) -> Option<Value> {
+        let usage = self.reported_usage();
+        let trace = compact_trace(&self.trace);
+        if usage.is_none() && trace.is_none() {
+            return None;
+        }
+
+        let mut metadata = match usage.as_ref().map(usage_metadata) {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        if let Some(trace) = trace {
+            metadata.insert(TRACE_METADATA_KEY.to_string(), Value::String(trace));
+        }
+        Some(Value::Object(metadata))
     }
 
     /// The task's usage as the parent is told it: this worker's own turn
@@ -626,6 +806,192 @@ mod tests {
             outcome(&mapper),
             TaskState::Completed,
             "input-required is not terminal; AGE-306 routes it to a human"
+        );
+    }
+
+    // ── AGE-467: the worker's tool-call trace ───────────────────────────────
+
+    /// The terminal metadata's `trace` string for a mapper, or a panic if the
+    /// frame isn't a status.
+    fn trace_of(mapper: &TaskMapper) -> Option<String> {
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        metadata.and_then(|m| m["trace"].as_str().map(str::to_string))
+    }
+
+    #[test]
+    fn two_tool_round_trips_both_appear_in_the_trace_with_their_input_and_output() {
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.map(&tool_started("c1", "read_file"));
+        mapper.map(&SessionEvent::ToolCallInput {
+            id: "c1".into(),
+            arguments: r#"{"path":"README.md"}"#.into(),
+        });
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: "c1".into(),
+            result: "# Chatty".into(),
+        });
+        mapper.map(&tool_started("c2", "write_file"));
+        mapper.map(&SessionEvent::ToolCallInput {
+            id: "c2".into(),
+            arguments: r#"{"path":"out.txt"}"#.into(),
+        });
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: "c2".into(),
+            result: "wrote 2 bytes".into(),
+        });
+
+        let trace = trace_of(&mapper).expect("two tool calls produce a trace");
+        assert!(trace.contains("### read_file (ok)"), "{trace}");
+        assert!(trace.contains(r#"input: {"path":"README.md"}"#), "{trace}");
+        assert!(trace.contains("output: # Chatty"), "{trace}");
+        assert!(trace.contains("### write_file (ok)"), "{trace}");
+        assert!(trace.contains(r#"input: {"path":"out.txt"}"#), "{trace}");
+        assert!(trace.contains("output: wrote 2 bytes"), "{trace}");
+    }
+
+    #[test]
+    fn a_failing_tool_traces_as_failed_with_its_error() {
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.map(&tool_started("c1", "shell"));
+        mapper.map(&SessionEvent::ToolCallInput {
+            id: "c1".into(),
+            arguments: r#"{"command":"false"}"#.into(),
+        });
+        mapper.map(&SessionEvent::ToolCallError {
+            id: "c1".into(),
+            error: "exit 1".into(),
+        });
+
+        let trace = trace_of(&mapper).expect("a failed call still produces a trace");
+        assert!(trace.contains("### shell (FAILED)"), "{trace}");
+        assert!(trace.contains("error: exit 1"), "{trace}");
+    }
+
+    #[test]
+    fn an_oversized_input_or_output_is_cut_with_a_truncation_marker() {
+        let mut mapper = TaskMapper::new("task-1");
+        let long_input = "a".repeat(2500);
+        let long_output = "b".repeat(1500);
+        mapper.map(&tool_started("c1", "search_web"));
+        mapper.map(&SessionEvent::ToolCallInput {
+            id: "c1".into(),
+            arguments: long_input,
+        });
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: "c1".into(),
+            result: long_output,
+        });
+
+        let trace = trace_of(&mapper).expect("the call produces a trace");
+        assert!(
+            trace.contains("\u{2026}[truncated 500 chars]"),
+            "the input's overflow (2500 - 2000) is not reported: {trace}"
+        );
+        assert!(
+            trace.contains("\u{2026}[truncated 300 chars]"),
+            "the output's overflow (1500 - 1200) is not reported: {trace}"
+        );
+        assert!(
+            !trace.contains(&"a".repeat(2001)),
+            "input over the cap leaked through uncut"
+        );
+        assert!(
+            !trace.contains(&"b".repeat(1201)),
+            "output over the cap leaked through uncut"
+        );
+    }
+
+    #[test]
+    fn sixty_steps_are_compacted_to_forty_with_an_omission_line() {
+        let mut mapper = TaskMapper::new("task-1");
+        for i in 0..60 {
+            let id = format!("c{i}");
+            mapper.map(&tool_started(&id, "read_file"));
+            mapper.map(&SessionEvent::ToolCallResult {
+                id: id.clone(),
+                result: format!("result {i}"),
+            });
+        }
+
+        let trace = trace_of(&mapper).expect("sixty tool calls produce a trace");
+        assert!(
+            trace.contains("\u{2026}[20 intermediate steps omitted]"),
+            "{trace}"
+        );
+        assert_eq!(
+            trace.matches("### read_file").count(),
+            40,
+            "2 head + 38 tail steps should remain: {trace}"
+        );
+        assert!(trace.contains("output: result 0"), "the first step remains");
+        assert!(
+            trace.contains("output: result 1\n"),
+            "the second step remains"
+        );
+        assert!(
+            !trace.contains("output: result 2\n"),
+            "the third step is inside the omitted middle: {trace}"
+        );
+        assert!(trace.contains("output: result 59"), "the last step remains");
+    }
+
+    /// A trace whose steps are individually within the field caps can still
+    /// add up past the whole-trace cap; the middle gives way, not the ends.
+    #[test]
+    fn a_trace_over_the_whole_cap_drops_middle_steps_and_stays_under_it() {
+        let mut mapper = TaskMapper::new("task-1");
+        // Four steps at ~3.2 KB each (a 2000-char input, a 1200-char output)
+        // sum past TRACE_MAX_CHARS (12 000), so the char cap must trim what
+        // the step-count cap (well under 40) would otherwise keep whole.
+        for i in 0..4 {
+            let id = format!("c{i}");
+            mapper.map(&tool_started(&id, "read_file"));
+            mapper.map(&SessionEvent::ToolCallInput {
+                id: id.clone(),
+                arguments: "x".repeat(2000),
+            });
+            mapper.map(&SessionEvent::ToolCallResult {
+                id: id.clone(),
+                result: format!("{}{}", "y".repeat(1199), i),
+            });
+        }
+
+        let trace = trace_of(&mapper).expect("four tool calls produce a trace");
+        assert!(
+            trace.chars().count() <= 12_000,
+            "the trace exceeds the whole-trace cap: {} chars",
+            trace.chars().count()
+        );
+        assert!(
+            trace.contains("intermediate steps omitted"),
+            "some step had to be dropped for this to fit: {trace}"
+        );
+        // The most recent step is kept over an older one in the middle.
+        assert!(
+            trace.ends_with('3'),
+            "the last step's output should survive: {trace}"
+        );
+        assert!(
+            !trace.contains(&format!("{}{}", "y".repeat(1199), 2)),
+            "a middle step should have been dropped: {trace}"
+        );
+    }
+
+    #[test]
+    fn a_task_with_no_tool_calls_attaches_no_trace_key() {
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.map(&SessionEvent::TurnStarted);
+        mapper.map(&SessionEvent::Text("hi".into()));
+        mapper.map(&SessionEvent::TurnEnded);
+
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        assert!(
+            metadata.is_none(),
+            "nothing to report: no usage, no trace: {metadata:?}"
         );
     }
 }

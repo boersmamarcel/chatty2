@@ -370,6 +370,13 @@ and anything quoted in it are about to go to an agent whose origin is not `local
 agent should need an allowlist, a one-time confirmation, or nothing at all is a product
 decision that has not been made, and this is the hook it will hang from.
 
+**`include_trace`** (AGE-467, default `false`): a leader that delegates the same task to
+several workers and wants to judge *how* each one got its answer, not just what it
+concluded, sets `include_trace: true` on the call. `InvokeAgentOutput.trace` is then the
+worker's compacted tool-call trace — otherwise the field is absent from the JSON the
+model sees, so an ordinary delegation costs no more context than it did before this
+existed.
+
 ### `local-agent` — a chatty agent in its own process
 
 `invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
@@ -381,14 +388,21 @@ ledger.
 The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
 finishes become `working` status messages, assistant text becomes artifact chunks, and
-the turn's token usage rides in the terminal status's `metadata` (A2A has no usage
-concept; usage belongs to the ledger). That number already includes whatever the child
-itself delegated, and the parent's `invoke_agent` folds it into its own conversation as
-one usage line per delegation, marked `delegated_to` and priced at the parent's rates
-in `finish_turn` — so a leader's `total_cost` carries the whole tree below it, and the
-bill follows the bearer (AGE-415). The mapper and the one-task loop around it live
-beside the broker's own half of the protocol, not in this crate, because a microVM's
-`chatty-server` is a worker too and the parent must not be able to tell the two apart.
+the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
+no usage concept; usage belongs to the ledger). That number already includes whatever
+the child itself delegated, and the parent's `invoke_agent` folds it into its own
+conversation as one usage line per delegation, marked `delegated_to` and priced at the
+parent's rates in `finish_turn` — so a leader's `total_cost` carries the whole tree
+below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
+second, independent key, `trace` (AGE-467): the worker's compacted tool-call trace —
+one `### <tool> (ok|FAILED|no result)` block per call it made, with the call's input and
+output or error, capped and (past 40 calls or 12 000 characters) trimmed from the middle
+— present only when the mapper saw at least one tool call. It rides unconditionally;
+whether it reaches the model is `invoke_agent`'s call, gated on `include_trace` (below),
+so a plain delegation's wire cost is unchanged. The mapper and the one-task loop around
+it live beside the broker's own half of the protocol, not in this crate, because a
+microVM's `chatty-server` is a worker too and the parent must not be able to tell the
+two apart.
 `crates/chatty-tui/src/participant/equivalence.rs` asserts the
 parent's tool-call trace carries every tool call the child reported, for every
 scripted scenario — how ADR-0011's first kill criterion is checked in CI rather than

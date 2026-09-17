@@ -9,7 +9,8 @@ use crate::models::clarification_store::{PendingClarifications, request_clarific
 use crate::models::message_types::ToolSource;
 use crate::models::token_usage::TokenUsage;
 use crate::services::a2a_client::{
-    A2aClarificationRequest, A2aClient, A2aStreamEvent, usage_from_status_metadata,
+    A2aClarificationRequest, A2aClient, A2aStreamEvent, trace_from_status_metadata,
+    usage_from_status_metadata,
 };
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
@@ -64,6 +65,11 @@ pub struct InvokeAgentArgs {
     pub agent: String,
     /// The prompt or task to send to the agent.
     pub prompt: String,
+    /// Ask the worker for its compacted tool-call trace alongside its
+    /// response (AGE-467). Off by default: the parent's context must not
+    /// grow unless it asks for this.
+    #[serde(default)]
+    pub include_trace: bool,
 }
 
 /// Output from the invoke_agent tool
@@ -75,6 +81,12 @@ pub struct InvokeAgentOutput {
     pub agent: String,
     /// Whether the invocation completed successfully.
     pub success: bool,
+    /// The worker's compacted tool-call trace (AGE-467), present only when
+    /// `include_trace` was set and the worker's terminal status carried one.
+    /// Absent from the JSON the model sees otherwise, so a plain delegation
+    /// costs no more context than it did before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 /// Error type for invoke_agent tool
@@ -254,6 +266,14 @@ impl Tool for InvokeAgentTool {
                 "prompt": {
                     "type": "string",
                     "description": "The prompt or task to send to the agent."
+                },
+                "include_trace": {
+                    "type": "boolean",
+                    "description": "Return the worker's compacted tool trace (calls, inputs, \
+                                   outputs) alongside its response. Off by default; costs \
+                                   context. Use only when you must judge *how* the worker \
+                                   reached its answer, e.g. to compare several workers' \
+                                   derivations."
                 }
             },
             "required": ["agent", "prompt"]
@@ -320,7 +340,9 @@ impl Tool for InvokeAgentTool {
                     name: agent_name.clone(),
                 },
             });
-            return self.call_streaming(config, &prompt).await;
+            return self
+                .call_streaming(config, &prompt, args.include_trace)
+                .await;
         }
 
         // 2. The broker's local workers: a chatty child in its own process.
@@ -352,7 +374,9 @@ impl Tool for InvokeAgentTool {
                 prompt: prompt.clone(),
                 source: ToolSource::Local,
             });
-            return self.call_streaming(&config, &prompt).await;
+            return self
+                .call_streaming(&config, &prompt, args.include_trace)
+                .await;
         }
 
         // 3. Check local WASM module agents
@@ -389,7 +413,9 @@ impl Tool for InvokeAgentTool {
                     ToolSource::Local
                 },
             });
-            return self.call_streaming(&config, &prompt).await;
+            return self
+                .call_streaming(&config, &prompt, args.include_trace)
+                .await;
         }
 
         // 4. Not found
@@ -419,6 +445,7 @@ impl InvokeAgentTool {
         &self,
         config: &A2aAgentConfig,
         prompt: &str,
+        include_trace: bool,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         use futures::StreamExt;
 
@@ -443,6 +470,7 @@ impl InvokeAgentTool {
         let mut success = true;
         let mut error_msg = None;
         let mut usage = None;
+        let mut trace = None;
 
         while let Some(event) = stream.next().await {
             match event {
@@ -478,9 +506,13 @@ impl InvokeAgentTool {
                         success = false;
                         error_msg = Some(e);
                         break;
+                    } else if state == "completed" && include_trace {
+                        // The worker's trace rides the same terminal status
+                        // as its usage (AGE-467); a failed task never
+                        // reaches this branch, so it never returns one.
+                        trace = trace_from_status_metadata(metadata.as_ref());
                     }
-                    // "completed" — just let the stream end naturally. An
-                    // "input-required" without a request is an approval
+                    // An "input-required" without a request is an approval
                     // the worker is waiting on, which the worker settles
                     // itself; nothing to do here.
                 }
@@ -543,6 +575,7 @@ impl InvokeAgentTool {
                 response
             },
             success: true,
+            trace,
         })
     }
 }
@@ -668,6 +701,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -702,6 +736,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -732,6 +767,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
+                    include_trace: false,
                 },
             )
             .await
@@ -799,6 +835,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
+                    include_trace: false,
                 },
             )
             .await
@@ -827,6 +864,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "nonexistent".to_string(),
                     prompt: "hello".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -848,6 +886,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "my-agent".to_string(),
                     prompt: "hello".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -867,6 +906,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "benford-agent".to_string(),
                     prompt: "analyze data".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -888,6 +928,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "basic-module".to_string(),
                     prompt: "hello".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -911,6 +952,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "  ".to_string(),
                     prompt: "hello".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -929,6 +971,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "some-agent".to_string(),
                     prompt: "".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
@@ -953,6 +996,7 @@ mod tests {
                 InvokeAgentArgs {
                     agent: "shared-name".to_string(),
                     prompt: "hello".to_string(),
+                    include_trace: false,
                 },
             )
             .await;
