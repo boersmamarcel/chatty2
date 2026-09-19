@@ -1,7 +1,7 @@
 mod read;
-mod write;
+pub(crate) mod write;
 
-pub use read::{PptxSlide, PptxTextBlock, ReadPptxTool, pptx_slides_to_text, read_pptx_slides};
+pub use read::{PptxSlide, ReadPptxTool, pptx_slides_to_text, read_pptx_slides};
 pub use write::WritePptxTool;
 
 #[derive(Debug, thiserror::Error)]
@@ -168,13 +168,8 @@ mod tests {
         assert_eq!(slides[0].title.as_deref(), Some("Opening"));
         assert_eq!(slides[0].body.len(), 1, "one bullet-list shape");
         assert_eq!(
-            slides[0].body[0].lines,
-            vec!["First point".to_string(), "Second point".to_string()],
+            slides[0].body[0], "First point\nSecond point",
             "each bullet stays its own line, not one run-on paragraph"
-        );
-        assert!(
-            slides[0].body[0].bulleted,
-            "write_pptx's bullet_list must come back marked as bulleted"
         );
         assert!(slides[0].tables.is_empty());
 
@@ -274,8 +269,9 @@ Second point
         std::fs::write(&path, b"not a zip at all").unwrap();
         let err = read_pptx_slides(&path, false).expect_err("garbage is not a deck");
         assert!(
-            err.to_string().contains("not a valid PPTX/ZIP file"),
-            "unexpected message: {err}"
+            err.to_string().contains("Failed to read PPTX")
+                && err.to_string().contains("broken.pptx"),
+            "the panel shows this verbatim, so it has to name the file: {err}"
         );
 
         let missing = tmp.path().join("gone.pptx");

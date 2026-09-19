@@ -10,7 +10,7 @@
 //!   (`filesystem_service`), path validation (`path_validator`), git operations (`git_service`).
 //! - **Rendering**: Math/LaTeX (`math_renderer_service`), Mermaid diagrams
 //!   (`mermaid_renderer_service`), chart SVGs (`chart_svg_renderer`), PDF thumbnails
-//!   (`pdf_thumbnail`).
+//!   (`pdf_thumbnail`), PPTX slides (`pptx_render`).
 //! - **Memory & context**: Agent memory (`memory_service`), skill persistence (`skill_service`).
 //!
 //! ## When to use services vs tools vs repositories
@@ -49,6 +49,8 @@ pub mod path_validator;
 pub mod pdf_thumbnail;
 #[cfg(feature = "pdf")]
 pub mod pdfium_utils;
+#[cfg(feature = "pptx")]
+pub mod pptx_render;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
