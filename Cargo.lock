@@ -7989,9 +7989,9 @@ dependencies = [
 
 [[package]]
 name = "oxml-chart"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a82540a9583721d6ae3b655f888ae535e565a4bf7ca061591c6cdda2b5eb8d05"
+checksum = "986e2ed5f2bec497ffcc065a5b3b32648d778ab6ac47e47ef9f09202d9bfa53d"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -8002,9 +8002,9 @@ dependencies = [
 
 [[package]]
 name = "oxml-core"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d4d1c3f39307cc29efa942fe847a512aafa18810b7691a3643108ad6b975726"
+checksum = "6ac24101bf8afc5e0a93372269e5791e0f4d8eb82fad6529f5e2ab8e86b26787"
 dependencies = [
  "quick-xml 0.41.0",
  "thiserror 2.0.20",
@@ -8012,9 +8012,9 @@ dependencies = [
 
 [[package]]
 name = "oxml-drawing"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21720c841aeafad4d661b9676de34631bd5f3265e0855fecd10d76dd01351caf"
+checksum = "098c9beeae3e7a5d64f29ff30f65670a443c214b7ea678cf7837fcf4e5bf6af1"
 dependencies = [
  "oxml-core",
  "quick-xml 0.41.0",
@@ -8022,9 +8022,9 @@ dependencies = [
 
 [[package]]
 name = "oxml-layout"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb6fc7253811327f7c2f1673a9bc97cbdb128ee7ac321ea9cb61c64b9f3368cb"
+checksum = "6955a1dfb5ad0ca6b238dd903496119c24c25f9d45c7d1317d56cdf87b189060"
 dependencies = [
  "fontdb 0.23.0",
  "harfrust",
@@ -8038,15 +8038,15 @@ dependencies = [
 
 [[package]]
 name = "oxml-media"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d492887f06e21ef8803d9034cf2ffc3c90a86fe024dadb9b6a18a85ec12575e0"
+checksum = "d920d2bbe7040ace55148ddf1c4bbb15efda0ecd7079135a60b64569fb0b3106"
 
 [[package]]
 name = "oxml-opc"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6daa8628cd6e388a81b6081f677c7e6549a67ff6eae97d4e36161eb496cafd51"
+checksum = "15d43b253651801f360efa1d5e560102d58b96b6ccc6e772a87b87e4ed3518f7"
 dependencies = [
  "quick-xml 0.41.0",
  "thiserror 2.0.20",
@@ -8055,9 +8055,9 @@ dependencies = [
 
 [[package]]
 name = "oxml-pdf"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35c40f5785745a85311018ab8272ea10148b6c2b60300eb92c9e60c38d358665"
+checksum = "235e6968952a83021b5842fde270772f8f4d24d0996c7a63c54de48e876da670"
 dependencies = [
  "jpeg-encoder",
  "miniz_oxide 0.9.1",
@@ -8073,9 +8073,9 @@ dependencies = [
 
 [[package]]
 name = "oxml-sml"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a703e6049acde626f423a44c3c7da21abc1a78e3b74093756048bd0c71affc19"
+checksum = "d5c5a5fc38155e7ec9aebbde5fa74b3e8e2b61b92326b05242c8a62856bac9e0"
 dependencies = [
  "oxml-opc",
  "quick-xml 0.41.0",
@@ -9725,9 +9725,9 @@ dependencies = [
 
 [[package]]
 name = "rpptx"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dde14c13c850a14ef0e13f64cd89772b13655aa4deeb37262e56a3f17c551a67"
+checksum = "1285aaa1a9097a09a226731ded9e2f3a4a9ed5c67c5cc14e9dd38b8817fd7e1d"
 dependencies = [
  "gif",
  "jpeg-encoder",
@@ -9753,9 +9753,9 @@ dependencies = [
 
 [[package]]
 name = "rpptx-layout"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff2a6703c5c58b964d931a7be4c518825ea788c97fb0fc8a900ff4de7d966c42"
+checksum = "bc719e29359ca4d49323dc287c0625e583616e25d641408ed4d3992d5918c302"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
@@ -9765,9 +9765,9 @@ dependencies = [
 
 [[package]]
 name = "rpptx-oxml"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "681757733074f2bf43e30179bf9a4cb59d9c6986dd1070d2566780c561cb28bb"
+checksum = "ba28a4cd0f319a6f97fa5e893b64a11700526e65d3f62c7f070388d2370e30ea"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -9777,9 +9777,9 @@ dependencies = [
 
 [[package]]
 name = "rpptx-render"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b450a88973d9323397ab751bd2c2ed7fb06b93e55387db80c0a557871b4270b0"
+checksum = "e795dda2da68dbb1b2ce7d7fa19fcc6ebb3accae3264fe338bbbb4c63f2436c3"
 dependencies = [
  "oxml-drawing",
  "oxml-layout",

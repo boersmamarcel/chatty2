@@ -152,7 +152,9 @@ enum PptxPreview {
     Ready {
         slide: usize,
         total: usize,
-        image: PathBuf,
+        /// Decoded off the main thread and painted by hand from a `canvas()`
+        /// like the PDF page, so the slide can follow the panel width.
+        image: Arc<RenderImage>,
     },
     Error(String),
 }
@@ -1315,10 +1317,18 @@ impl ArtifactView {
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
         self.pptx = PptxPreview::Loading { slide };
+        // The slide shares the PDF page's raster width, so a wide panel gets
+        // a sharp slide from the first turn; unlike the PDF page it is not
+        // re-rastered on resize — the fit-to-width canvas scales it instead.
+        let width = self.pdf_raster_width;
         cx.spawn(async move |this, cx| {
             let outcome = tokio::task::spawn_blocking(move || -> Result<_, PptxRenderError> {
                 let total = slide_count(&path)? as usize;
-                let image = render_slide(&path, slide as u32, PREVIEW_WIDTH)?;
+                let png = render_slide(&path, slide as u32, width)?;
+                let decoded = image::open(&png)
+                    .map_err(|e| PptxRenderError::Raster(PdfThumbnailError::Image(e.to_string())))?
+                    .into_rgba8();
+                let image = render_image_from_rgba_buffer(decoded);
                 // Extraction failing must not cost the user the slides: the
                 // Source tab is the lesser half of the workbench.
                 let text = with_text.then(|| {
@@ -2082,6 +2092,49 @@ fn image_rendered_body(path: &Path, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// A rastered page (PDF page or deck slide) fitted to the panel width
+/// (AGE-472): as wide as the scroll container and as tall as its aspect
+/// ratio says, with the container's width coming from the previous frame's
+/// prepaint. The first frame after a size change therefore lays the page
+/// out at the old width; `Contain` keeps that frame unstretched and the
+/// prepaint asks for another frame, which lands on the new width. Zero
+/// width (nothing painted yet) means a 1 px strip whose only job is to run
+/// that prepaint.
+fn fit_to_width_page(
+    image: &Arc<RenderImage>,
+    panel_width: &Rc<RefCell<Pixels>>,
+    cx: &App,
+) -> impl IntoElement {
+    let width = *panel_width.borrow();
+    let raster = image.size(0);
+    let page_height = if raster.width.0 > 0 {
+        f32::from(width) * raster.height.0 as f32 / raster.width.0 as f32
+    } else {
+        f32::from(width)
+    };
+    let width_for_prepaint = panel_width.clone();
+    let page_image = image.clone();
+    let corner_radius = cx.theme().radius;
+    canvas(
+        move |bounds, window, _cx| {
+            let mut known = width_for_prepaint.borrow_mut();
+            if (*known - bounds.size.width).abs() >= px(1.0) {
+                *known = bounds.size.width;
+                window.request_animation_frame();
+            }
+        },
+        move |bounds, _, window, _| {
+            let fitted = ObjectFit::Contain.get_bounds(bounds, page_image.size(0));
+            let corners = Corners::all(corner_radius).clamp_radii_for_quad_size(fitted.size);
+            if let Err(e) = window.paint_image(fitted, corners, page_image.clone(), 0, false) {
+                warn!(error = %e, "painting the page failed");
+            }
+        },
+    )
+    .w_full()
+    .h(px(page_height.max(1.0)))
+}
+
 fn pdf_rendered_body(
     pdf: &PdfPreview,
     panel_width: Rc<RefCell<Pixels>>,
@@ -2106,45 +2159,7 @@ fn pdf_rendered_body(
             let total = *total;
             let can_prev = page > 0;
             let can_next = page + 1 < total;
-            // Fit to width (AGE-472): the page is as wide as the scroll
-            // container and as tall as its aspect ratio says, and the
-            // container's width comes from the previous frame's prepaint.
-            // The first frame after a size change therefore lays the page
-            // out at the old width; `Contain` keeps that frame unstretched
-            // and the prepaint asks for another frame, which lands on the
-            // new width. Zero width (nothing painted yet) means a 1 px
-            // strip whose only job is to run that prepaint.
-            let width = *panel_width.borrow();
-            let raster = image.size(0);
-            let page_height = if raster.width.0 > 0 {
-                f32::from(width) * raster.height.0 as f32 / raster.width.0 as f32
-            } else {
-                f32::from(width)
-            };
-            let width_for_prepaint = panel_width.clone();
-            let page_image = image.clone();
-            let corner_radius = cx.theme().radius;
-            let page_canvas = canvas(
-                move |bounds, window, _cx| {
-                    let mut known = width_for_prepaint.borrow_mut();
-                    if (*known - bounds.size.width).abs() >= px(1.0) {
-                        *known = bounds.size.width;
-                        window.request_animation_frame();
-                    }
-                },
-                move |bounds, _, window, _| {
-                    let fitted = ObjectFit::Contain.get_bounds(bounds, page_image.size(0));
-                    let corners =
-                        Corners::all(corner_radius).clamp_radii_for_quad_size(fitted.size);
-                    if let Err(e) =
-                        window.paint_image(fitted, corners, page_image.clone(), 0, false)
-                    {
-                        warn!(error = %e, "pdf: painting the page failed");
-                    }
-                },
-            )
-            .w_full()
-            .h(px(page_height.max(1.0)));
+            let page_canvas = fit_to_width_page(image, &panel_width, cx);
             div()
                 .flex()
                 .flex_col()
@@ -2236,6 +2251,7 @@ fn slide_pager(index: usize, total: usize) -> (String, bool, bool) {
 /// theme, images and charts survive into the panel.
 fn pptx_rendered_body(
     pptx: &PptxPreview,
+    panel_width: Rc<RefCell<Pixels>>,
     entity: Entity<ArtifactView>,
     cx: &mut App,
 ) -> AnyElement {
@@ -2323,12 +2339,7 @@ fn pptx_rendered_body(
                         .min_h_0()
                         .w_full()
                         .overflow_y_scroll()
-                        .child(
-                            img(image.clone())
-                                .w(px(PDF_PAGE_DISPLAY_WIDTH))
-                                .object_fit(ObjectFit::Fill)
-                                .rounded_md(),
-                        ),
+                        .child(fit_to_width_page(image, &panel_width, cx)),
                 )
                 .into_any_element()
         }
@@ -2616,6 +2627,7 @@ impl Render for ArtifactView {
                                     } else if is_pptx {
                                         this.flex_1().min_h_0().p_2().child(pptx_rendered_body(
                                             &pptx,
+                                            pdf_panel_width.clone(),
                                             entity.clone(),
                                             cx,
                                         ))
