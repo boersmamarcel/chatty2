@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -52,8 +53,17 @@ use super::table::render_table_preview_view;
 use crate::chatty::views::chart_renderer::render_chart_panel;
 use crate::chatty::views::diff_view_component::diff_line_stats_fast;
 
-const PDF_PAGE_DISPLAY_WIDTH: f32 = 348.0;
-const IMAGE_DISPLAY_WIDTH: f32 = PDF_PAGE_DISPLAY_WIDTH;
+const IMAGE_DISPLAY_WIDTH: f32 = 348.0;
+/// PDF page rasters are requested in steps of this many device pixels
+/// (AGE-472), so a split drag settles on one pdfium render rather than one
+/// per pixel of travel; `PDF_RASTER_MAX_WIDTH` keeps a full-window page on a
+/// HiDPI display a sane atlas upload.
+const PDF_RASTER_STEP: u32 = 256;
+const PDF_RASTER_MAX_WIDTH: u32 = 2560;
+/// How long a PDF panel has to hold a new width before the page is
+/// re-rasterised at it — same reasoning as the browser retarget debounce
+/// in `sync_browser_viewport_size`.
+const PDF_RERASTER_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const DOCUMENT_MEASURE_PX: f32 = 680.0;
 const OUTLINE_WIDTH: f32 = 220.0;
 
@@ -111,7 +121,15 @@ enum PdfPreview {
     Ready {
         page: u32,
         total: u32,
-        image: PathBuf,
+        /// Decoded off the main thread and painted by hand from a `canvas()`
+        /// (AGE-472) rather than through `img(path)`: swapping in a sharper
+        /// raster is then atomic — no frame where the new file is still
+        /// loading and the page is blank — and the panel width decides the
+        /// on-screen size, not the raster.
+        image: Arc<RenderImage>,
+        /// Device-pixel width the raster was rendered at; compared against
+        /// `ArtifactView::pdf_raster_width` to know when to re-render.
+        raster_width: u32,
     },
     Error(String),
 }
@@ -219,6 +237,18 @@ pub struct ArtifactView {
     /// this drops (and so cancels, per GPUI's `Task`) whatever retarget
     /// was previously scheduled — see `sync_browser_viewport_size`.
     browser_resize_task: Option<Task<()>>,
+    /// Width the PDF page is laid out at (AGE-472): the page scroll
+    /// container's width, recorded by its `canvas()` prepaint each frame
+    /// the way `browser_frame_bounds` is. Zero until the first paint; the
+    /// page follows the window and the chat/artifact split through it.
+    pdf_panel_width: Rc<RefCell<Pixels>>,
+    /// Device-pixel width the next `render_pdf_page` call asks for — the
+    /// bucketed panel width, kept current by `sync_pdf_raster_width`, so a
+    /// wide panel gets a sharp raster instead of an upscaled preview.
+    pdf_raster_width: u32,
+    /// The in-flight debounced re-raster, if any; dropping it cancels the
+    /// superseded one, exactly like `browser_resize_task`.
+    pdf_reraster_task: Option<Task<()>>,
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
@@ -295,6 +325,9 @@ impl ArtifactView {
             browser_requested_size: (0, 0),
             browser_frame_geometry: None,
             browser_resize_task: None,
+            pdf_panel_width: Rc::new(RefCell::new(Pixels::ZERO)),
+            pdf_raster_width: PREVIEW_WIDTH,
+            pdf_reraster_task: None,
             workspace_root: None,
             load_gen: 0,
             editor,
@@ -361,7 +394,7 @@ impl ArtifactView {
         self.mode = presentation_on_open(self.mode, next_path.as_ref() == self.path.as_ref());
         self.path = next_path;
         self.tabular = TabularPreview::Ready(preview);
-        self.pdf = PdfPreview::Idle;
+        self.set_pdf(PdfPreview::Idle, cx);
         self.pptx = PptxPreview::Idle;
         self.chart = None;
         self.tab = 0;
@@ -379,7 +412,7 @@ impl ArtifactView {
         self.mode = presentation_on_open(self.mode, next_path.as_ref() == self.path.as_ref());
         self.path = next_path;
         self.chart = Some(spec);
-        self.pdf = PdfPreview::Idle;
+        self.set_pdf(PdfPreview::Idle, cx);
         self.pptx = PptxPreview::Idle;
         self.tabular = TabularPreview::Idle;
         self.source.clear();
@@ -407,7 +440,7 @@ impl ArtifactView {
             self.stop_browser_screencast(cx);
         }
         self.path = None;
-        self.pdf = PdfPreview::Idle;
+        self.set_pdf(PdfPreview::Idle, cx);
         self.pptx = PptxPreview::Idle;
         self.tabular = TabularPreview::Idle;
         self.chart = None;
@@ -811,7 +844,7 @@ impl ArtifactView {
             // A deck is binary: `source` arrived empty from
             // `read_artifact_source`, and both the slide pager and the Source
             // tab are filled by the parser once `start_pptx_load` returns.
-            self.pdf = PdfPreview::Idle;
+            self.set_pdf(PdfPreview::Idle, cx);
             self.source.clear();
             self.rendered.clear();
             // Never diff a deck against binary. `old` only ever carries text a
@@ -824,7 +857,7 @@ impl ArtifactView {
             self.headings.clear();
             self.start_pptx_load(cx);
         } else if is_tabular_path(&path) {
-            self.pdf = PdfPreview::Idle;
+            self.set_pdf(PdfPreview::Idle, cx);
             self.pptx = PptxPreview::Idle;
             self.chart = None;
             self.source = source.clone();
@@ -833,7 +866,7 @@ impl ArtifactView {
             self.tab = 0;
             self.start_tabular_load(path, workspace_root, cx);
         } else if is_image_path(&path) {
-            self.pdf = PdfPreview::Idle;
+            self.set_pdf(PdfPreview::Idle, cx);
             self.pptx = PptxPreview::Idle;
             self.tabular = TabularPreview::Idle;
             self.chart = None;
@@ -843,7 +876,7 @@ impl ArtifactView {
             self.tab = 0;
             self.headings.clear();
         } else {
-            self.pdf = PdfPreview::Idle;
+            self.set_pdf(PdfPreview::Idle, cx);
             self.pptx = PptxPreview::Idle;
             self.tabular = TabularPreview::Idle;
             self.chart = None;
@@ -884,7 +917,7 @@ impl ArtifactView {
         self.source.clear();
         self.rendered.clear();
         self.old.clear();
-        self.pdf = PdfPreview::Idle;
+        self.set_pdf(PdfPreview::Idle, cx);
         self.pptx = PptxPreview::Idle;
         self.tabular = TabularPreview::Idle;
         self.chart = None;
@@ -1126,34 +1159,138 @@ impl ArtifactView {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
+    /// Replace the PDF slot, releasing the outgoing page's raster from the
+    /// sprite atlas (AGE-472). Hand-painted `RenderImage`s are not evicted
+    /// by any cache, so without this every page turn and every re-raster
+    /// would leave a texture behind. Deferred because callers may be inside
+    /// a window update, during which that window is absent from
+    /// `App::windows` and `drop_image` would skip it.
+    fn set_pdf(&mut self, next: PdfPreview, cx: &mut App) {
+        if let PdfPreview::Ready { image, .. } = mem::replace(&mut self.pdf, next) {
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+    }
+
     fn start_pdf_load(&mut self, page: u32, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else {
             return;
         };
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
-        self.pdf = PdfPreview::Loading { page };
+        let width = self.pdf_raster_width;
+        self.set_pdf(PdfPreview::Loading { page }, cx);
         cx.spawn(async move |this, cx| {
-            let outcome = tokio::task::spawn_blocking(move || -> Result<_, PdfThumbnailError> {
-                let total = pdf_page_count(&path)?;
-                let image = render_pdf_page(&path, page, PREVIEW_WIDTH)?;
-                Ok((total, image))
-            })
-            .await;
+            let outcome =
+                tokio::task::spawn_blocking(move || load_pdf_page_image(&path, page, width)).await;
             this.update(cx, |this, cx| {
                 if this.load_gen != load_id {
                     return;
                 }
                 match outcome {
                     Ok(Ok((total, image))) => {
-                        this.pdf = PdfPreview::Ready { page, total, image };
+                        this.set_pdf(
+                            PdfPreview::Ready {
+                                page,
+                                total,
+                                image,
+                                raster_width: width,
+                            },
+                            cx,
+                        );
+                        // The panel may have changed size while this render
+                        // was in flight; the re-raster path only acts on a
+                        // `Ready` page, so pick that up now.
+                        this.reraster_pdf_page(cx);
                     }
-                    Ok(Err(e)) => this.pdf = PdfPreview::Error(e.to_string()),
-                    Err(e) => this.pdf = PdfPreview::Error(e.to_string()),
+                    Ok(Err(e)) => this.set_pdf(PdfPreview::Error(e.to_string()), cx),
+                    Err(e) => this.set_pdf(PdfPreview::Error(e.to_string()), cx),
                 }
                 cx.notify();
             })
             .map_err(|e| warn!(error = ?e, "Failed to apply PDF preview"))
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Keep the raster width matched to the panel's device-pixel width
+    /// (AGE-472). The page is *laid out* at the panel width every frame
+    /// regardless; this only decides when the 720 px preview (or whatever
+    /// the page was last rendered at) is worth replacing with a sharper or
+    /// cheaper one. Debounced like `sync_browser_viewport_size`: a split
+    /// drag calls this every frame, and only the width that is still current
+    /// once it settles reaches pdfium.
+    fn sync_pdf_raster_width(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let panel_width = f32::from(*self.pdf_panel_width.borrow());
+        if panel_width <= 0.0 {
+            return;
+        }
+        let target = pdf_raster_width_for(panel_width, window.scale_factor());
+        if target == self.pdf_raster_width {
+            return;
+        }
+        self.pdf_raster_width = target;
+        self.pdf_reraster_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PDF_RERASTER_DEBOUNCE).await;
+            this.update(cx, |this, cx| this.reraster_pdf_page(cx)).ok();
+        }));
+    }
+
+    /// Re-render the page on screen at `pdf_raster_width` if it is not
+    /// already there, swapping the image in place once decoded — the old
+    /// raster stays up meanwhile, so the panel never blanks. A page turn or
+    /// another resize while the render is in flight makes the result stale;
+    /// it is then dropped rather than applied over the newer state.
+    fn reraster_pdf_page(&mut self, cx: &mut Context<Self>) {
+        let PdfPreview::Ready {
+            page, raster_width, ..
+        } = &self.pdf
+        else {
+            return;
+        };
+        let width = self.pdf_raster_width;
+        if *raster_width == width {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let page = *page;
+        let load_id = self.load_gen;
+        cx.spawn(async move |this, cx| {
+            let outcome =
+                tokio::task::spawn_blocking(move || load_pdf_page_image(&path, page, width)).await;
+            this.update(cx, |this, cx| {
+                if this.load_gen != load_id || this.pdf_raster_width != width {
+                    return;
+                }
+                let PdfPreview::Ready {
+                    page: current,
+                    image,
+                    raster_width,
+                    ..
+                } = &mut this.pdf
+                else {
+                    return;
+                };
+                if *current != page {
+                    return;
+                }
+                match outcome {
+                    Ok(Ok((_, new_image))) => {
+                        let old = mem::replace(image, new_image);
+                        *raster_width = width;
+                        cx.defer(move |cx| cx.drop_image(old, None));
+                        cx.notify();
+                    }
+                    Ok(Err(e)) => {
+                        warn!(error = %e, width, "PDF re-raster failed; keeping the current page")
+                    }
+                    Err(e) => {
+                        warn!(error = %e, width, "PDF re-raster failed; keeping the current page")
+                    }
+                }
+            })
             .ok();
         })
         .detach();
@@ -1421,12 +1558,44 @@ fn headings_to_tree_items(headings: &[ArtifactHeading]) -> Vec<TreeItem> {
 /// `elements/img.rs`) — BGRA, straight alpha, no premultiply/divide, that's
 /// only needed for the SVG path.
 fn render_image_from_rgba(frame: &ScreencastFrame) -> Arc<RenderImage> {
-    let mut buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec())
+    let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec())
         .expect("screencast frame dimensions match its own buffer length");
+    render_image_from_rgba_buffer(buffer)
+}
+
+fn render_image_from_rgba_buffer(mut buffer: image::RgbaImage) -> Arc<RenderImage> {
     for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+/// Render one PDF page at `width` device pixels and decode it for the
+/// canvas (AGE-472). Blocking — pdfium plus a PNG round trip through the
+/// preview cache — so callers run it under `spawn_blocking`. Returns the
+/// document's page count alongside, which the pager needs on first load.
+fn load_pdf_page_image(
+    path: &Path,
+    page: u32,
+    width: u32,
+) -> Result<(u32, Arc<RenderImage>), PdfThumbnailError> {
+    let total = pdf_page_count(path)?;
+    let png = render_pdf_page(path, page, width)?;
+    let decoded = image::open(&png)
+        .map_err(|e| PdfThumbnailError::Image(e.to_string()))?
+        .into_rgba8();
+    Ok((total, render_image_from_rgba_buffer(decoded)))
+}
+
+/// Device-pixel width to raster a page at for a panel `panel_width` logical
+/// pixels wide on a `scale_factor` display (AGE-472). Rounded up to the next
+/// `PDF_RASTER_STEP` so the raster is never narrower than the pixels it
+/// covers, never below the `PREVIEW_WIDTH` first render, and capped at
+/// `PDF_RASTER_MAX_WIDTH`.
+fn pdf_raster_width_for(panel_width: f32, scale_factor: f32) -> u32 {
+    let device = (panel_width * scale_factor).max(0.0).ceil() as u32;
+    let bucketed = device.div_ceil(PDF_RASTER_STEP) * PDF_RASTER_STEP;
+    bucketed.clamp(PREVIEW_WIDTH, PDF_RASTER_MAX_WIDTH)
 }
 
 /// What the frame on screen is: its raster size and the CSS viewport it
@@ -1896,7 +2065,12 @@ fn image_rendered_body(path: &Path, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -> AnyElement {
+fn pdf_rendered_body(
+    pdf: &PdfPreview,
+    panel_width: Rc<RefCell<Pixels>>,
+    entity: Entity<ArtifactView>,
+    cx: &App,
+) -> AnyElement {
     match pdf {
         PdfPreview::Idle | PdfPreview::Loading { .. } => div()
             .text_xs()
@@ -1915,6 +2089,45 @@ fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -
             let total = *total;
             let can_prev = page > 0;
             let can_next = page + 1 < total;
+            // Fit to width (AGE-472): the page is as wide as the scroll
+            // container and as tall as its aspect ratio says, and the
+            // container's width comes from the previous frame's prepaint.
+            // The first frame after a size change therefore lays the page
+            // out at the old width; `Contain` keeps that frame unstretched
+            // and the prepaint asks for another frame, which lands on the
+            // new width. Zero width (nothing painted yet) means a 1 px
+            // strip whose only job is to run that prepaint.
+            let width = *panel_width.borrow();
+            let raster = image.size(0);
+            let page_height = if raster.width.0 > 0 {
+                f32::from(width) * raster.height.0 as f32 / raster.width.0 as f32
+            } else {
+                f32::from(width)
+            };
+            let width_for_prepaint = panel_width.clone();
+            let page_image = image.clone();
+            let corner_radius = cx.theme().radius;
+            let page_canvas = canvas(
+                move |bounds, window, _cx| {
+                    let mut known = width_for_prepaint.borrow_mut();
+                    if (*known - bounds.size.width).abs() >= px(1.0) {
+                        *known = bounds.size.width;
+                        window.request_animation_frame();
+                    }
+                },
+                move |bounds, _, window, _| {
+                    let fitted = ObjectFit::Contain.get_bounds(bounds, page_image.size(0));
+                    let corners =
+                        Corners::all(corner_radius).clamp_radii_for_quad_size(fitted.size);
+                    if let Err(e) =
+                        window.paint_image(fitted, corners, page_image.clone(), 0, false)
+                    {
+                        warn!(error = %e, "pdf: painting the page failed");
+                    }
+                },
+            )
+            .w_full()
+            .h(px(page_height.max(1.0)));
             div()
                 .flex()
                 .flex_col()
@@ -1970,12 +2183,7 @@ fn pdf_rendered_body(pdf: &PdfPreview, entity: Entity<ArtifactView>, cx: &App) -
                         .min_h_0()
                         .w_full()
                         .overflow_y_scroll()
-                        .child(
-                            img(image.clone())
-                                .w(px(PDF_PAGE_DISPLAY_WIDTH))
-                                .object_fit(ObjectFit::Fill)
-                                .rounded_md(),
-                        ),
+                        .child(page_canvas),
                 )
                 .into_any_element()
         }
@@ -2247,6 +2455,7 @@ impl Render for ArtifactView {
             self.sync_outline(cx);
             self.sync_browser_address(window, cx);
             self.sync_browser_viewport_size(cx);
+            self.sync_pdf_raster_width(window, cx);
         }
 
         let tab = self.tab;
@@ -2272,6 +2481,7 @@ impl Render for ArtifactView {
         let browser = self.browser.clone();
         let browser_control = self.browser_control;
         let browser_frame_bounds = self.browser_frame_bounds.clone();
+        let pdf_panel_width = self.pdf_panel_width.clone();
         let browser_geometry = self.browser_frame_geometry;
         let browser_focus = self.browser_focus.clone();
         let browser_address = self.browser_address.clone();
@@ -2340,7 +2550,7 @@ impl Render for ArtifactView {
                 .min_h_0()
                 .w_full()
                 .p_2()
-                .child(pdf_rendered_body(&pdf, entity.clone(), cx))
+                .child(pdf_rendered_body(&pdf, pdf_panel_width, entity.clone(), cx))
                 .into_any_element()
         } else if let Some(spec) = chart {
             div()
@@ -3010,5 +3220,39 @@ mod browser_viewport_position_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod pdf_raster_width_tests {
+    use super::{PDF_RASTER_MAX_WIDTH, PDF_RASTER_STEP, pdf_raster_width_for};
+    use chatty_core::services::pdf_thumbnail::PREVIEW_WIDTH;
+
+    #[test]
+    fn narrow_panels_keep_the_preview_raster() {
+        // The docked default (~350 px at 1x) never needs more than the
+        // 720 px preview, so a page turn there is a cache hit.
+        assert_eq!(pdf_raster_width_for(348.0, 1.0), PREVIEW_WIDTH);
+        assert_eq!(pdf_raster_width_for(0.0, 1.0), PREVIEW_WIDTH);
+    }
+
+    #[test]
+    fn rasters_cover_the_device_pixels_in_steps() {
+        // 900 logical px at 1x → next multiple of 256 above 900.
+        assert_eq!(pdf_raster_width_for(900.0, 1.0), 1024);
+        // A HiDPI panel counts device pixels: 700 × 2 = 1400 → 1536.
+        assert_eq!(pdf_raster_width_for(700.0, 2.0), 1536);
+        // Never narrower than the pixels covered, so 1024.5 needs a bigger bucket.
+        assert_eq!(pdf_raster_width_for(1024.5, 1.0), 1024 + PDF_RASTER_STEP);
+        // Nudging a split by a few pixels lands in the same bucket.
+        assert_eq!(
+            pdf_raster_width_for(901.0, 1.0),
+            pdf_raster_width_for(1020.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn full_window_on_a_5k_display_is_capped() {
+        assert_eq!(pdf_raster_width_for(2560.0, 2.0), PDF_RASTER_MAX_WIDTH);
     }
 }
