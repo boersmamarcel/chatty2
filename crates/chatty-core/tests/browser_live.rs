@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use chatty_core::services::browser::{
-    BrowserManager, BrowserSession, InputModifiers, KeyInput, MouseAction, MouseButtonKind,
-    MouseInput, ScreencastUpdate,
+    BrowserManager, BrowserSession, BrowserTab, InputModifiers, KeyInput, MouseAction,
+    MouseButtonKind, MouseInput, ScreencastUpdate,
 };
 use chatty_core::tools::browser_tools::{NavigateArgs, NoArgs, ResizeArgs, build_browser_tools};
 use rig_agent::tool::{Tool, ToolContext};
@@ -104,12 +104,16 @@ fn popup_workspace() -> tempfile::TempDir {
 /// and no network to be genuinely out of bounds — three ways:
 ///
 /// - `#direct` opens it straight away, so the check at promotion decides;
-/// - `#late` opens an allowed popup, waits for it to be promoted, and only
-///   then sets its `location` — the case a promotion-time check cannot catch;
-/// - `#self` navigates the session's own page there.
+/// - `#late` opens an allowed popup, waits for it to be shown, and only
+///   then sets its `location` — the case a tracking-time check cannot catch;
+/// - `#self` navigates the session's own page there;
+/// - `#later` opens an allowed popup and keeps its handle as
+///   `window.laterPopup` with no timer (AGE-473): the test decides when the
+///   opener moves it, so the popup is provably a *background* tab by then.
 ///
 /// The refused page is solid blue and carries a marker string, so a frame or
-/// a snapshot that ever shows it is unmistakable.
+/// a snapshot that ever shows it is unmistakable; it also logs a marker to
+/// the console, so output it produced is unmistakable too.
 fn refused_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
     let outside = tempfile::tempdir().expect("tempdir");
     std::fs::write(
@@ -120,16 +124,14 @@ fn refused_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
     <title>Outside</title>
     <style>html, body { margin: 0; height: 100%; background: #0000ff; }</style>
   </head>
-  <body><h1>OUTSIDE-MARKER</h1></body>
+  <body>
+    <h1>OUTSIDE-MARKER</h1>
+    <script>console.error("OUTSIDE-CONSOLE");</script>
+  </body>
 </html>"#,
     )
     .expect("write outside fixture");
-    let outside_url = format!(
-        "file://{}",
-        std::fs::canonicalize(outside.path().join("outside.html"))
-            .expect("canonicalize")
-            .display()
-    );
+    let outside_url = outside_url(&outside);
 
     let dir = tempfile::tempdir().expect("tempdir");
     write_popup_page(&dir);
@@ -148,12 +150,14 @@ fn refused_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
       #direct {{ top: 10px; }}
       #late {{ top: 80px; }}
       #self {{ top: 150px; }}
+      #later {{ top: 220px; }}
     </style>
   </head>
   <body>
     <button id="direct" onclick="window.open('{outside_url}')">straight out</button>
     <button id="late" onclick="lateOpen()">out after promotion</button>
     <button id="self" onclick="location.href = '{outside_url}'">take this page out</button>
+    <button id="later" onclick="window.laterPopup = window.open('popup.html')">out when told</button>
     <script>
       function lateOpen() {{
         var w = window.open("popup.html");
@@ -166,6 +170,16 @@ fn refused_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
     )
     .expect("write opener fixture");
     (dir, outside)
+}
+
+/// The refused page's URL, as the opener fixture reaches for it.
+fn outside_url(outside: &tempfile::TempDir) -> String {
+    format!(
+        "file://{}",
+        std::fs::canonicalize(outside.path().join("outside.html"))
+            .expect("canonicalize")
+            .display()
+    )
 }
 
 /// A click as the artifact panel forwards one: move, press, release.
@@ -264,6 +278,26 @@ async fn wait_for_promotion(session: &BrowserSession, previous: &str, what: &str
             return active;
         }
         assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until the session's tab list (AGE-473) satisfies `ready`.
+async fn wait_for_tabs(
+    session: &BrowserSession,
+    ready: impl Fn(&[BrowserTab]) -> bool,
+    what: &str,
+) -> Vec<BrowserTab> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let tabs = session.tabs();
+        if ready(&tabs) {
+            return tabs;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}; tabs were {tabs:#?}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -580,15 +614,19 @@ async fn a_target_blank_tab_is_screencast_driven_and_handed_back_when_it_closes(
 /// refused when it opened, or opened somewhere allowed and *then* sent
 /// somewhere refused by the page that opened it.
 ///
-/// The second half is the one a promotion-time check cannot make: an opener
-/// can open a blank or allowed window, wait for it to be promoted, and only
-/// then set its `location`.
+/// The second half is the one a tracking-time check cannot make: an opener
+/// can open a blank or allowed window, wait for it to be shown, and only
+/// then set its `location`. Since AGE-473 a refused tab is not dropped but
+/// kept in the strip, blocked: it stays invisible and unreadable until it
+/// comes back somewhere allowed — and what it logged while blocked is not
+/// readable even then — and the user can switch away from it.
 #[tokio::test]
 #[ignore = "launches a real browser; may download ~190MB on first run"]
 async fn a_popup_outside_the_policy_is_never_shown_or_readable() {
     let (dir, _outside) = refused_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, snapshot, _screenshot, console, ..) =
+        build_browser_tools(manager.clone(), artifacts());
     let cx = &mut ToolContext::new();
 
     navigate
@@ -617,12 +655,29 @@ async fn a_popup_outside_the_policy_is_never_shown_or_readable() {
     wait_for_frame_colour(&mut frames, "white", "before anything opens").await;
     session.take_control();
 
-    // 1. Opened straight onto a refused URL: never promoted at all.
+    // 1. Opened straight onto a refused URL: tracked, blocked, never shown.
     click_at(&session, 85.0, 30.0).await;
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 2,
+        "the refused popup never appeared in the strip",
+    )
+    .await;
+    assert!(
+        tabs[1]
+            .blocked
+            .as_deref()
+            .is_some_and(|url| url.contains("outside.html")),
+        "the refused popup must be blocked at the URL it opened on, got {tabs:#?}"
+    );
+    assert!(
+        !tabs[1].active,
+        "a popup outside the policy must not become the page we drive"
+    );
     assert_frame_colour_never(
         &mut frames,
         "blue",
-        Duration::from_secs(8),
+        Duration::from_secs(5),
         "a popup outside the policy was screencast into the panel",
     )
     .await;
@@ -641,8 +696,19 @@ async fn a_popup_outside_the_policy_is_never_shown_or_readable() {
         "a refused popup must not be readable by the agent; tree was:\n{}",
         snap.tree
     );
+    let direct_popup = tabs[1].id.clone();
+    session
+        .close_tab(&direct_popup)
+        .await
+        .expect("a blocked tab can be closed from the strip");
+    wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 1,
+        "closing the blocked popup did not remove it",
+    )
+    .await;
 
-    // 2. Opened on an allowed page, promoted, and only then sent outside the
+    // 2. Opened on an allowed page, shown, and only then sent outside the
     //    policy by its opener.
     click_at(&session, 85.0, 100.0).await;
     let popup_target = wait_for_promotion(
@@ -651,23 +717,108 @@ async fn a_popup_outside_the_policy_is_never_shown_or_readable() {
         "the allowed popup was never surfaced",
     )
     .await;
+    let popup_page = session.page().expect("the popup while it is allowed");
     wait_for_frame_colour(&mut frames, "red", "while the popup is still allowed").await;
 
     // Its opener now sends it somewhere the policy refuses: the session must
-    // drop it rather than go on showing and driving it.
-    let back = wait_for_promotion(
-        &session,
-        &popup_target,
-        "a followed tab that navigated outside the policy was never dropped",
-    )
-    .await;
-    assert_eq!(back, opener_target, "control returns to the opener");
-    wait_for_frame_colour(&mut frames, "white", "after the tab was dropped").await;
+    // block it rather than go on showing and driving it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let refusal = loop {
+        match session.page() {
+            Err(e) => break e.to_string(),
+            Ok(_) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the shown popup navigated outside the policy and was still readable"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+    assert!(refusal.contains("does not allow"), "got {refusal}");
     assert_frame_colour_never(
         &mut frames,
         "blue",
         Duration::from_secs(5),
-        "the refused page was screencast after the tab was dropped",
+        "the refused page was screencast after the tab was blocked",
+    )
+    .await;
+    assert!(
+        matches!(&*frames.borrow(), ScreencastUpdate::Error(message) if message.contains("does not allow")),
+        "the panel must be told why the picture stopped"
+    );
+    let tabs = session.tabs();
+    assert_eq!(
+        tabs.len(),
+        2,
+        "the blocked tab stays in the strip: {tabs:#?}"
+    );
+    assert!(
+        tabs[1].id == popup_target && tabs[1].active && tabs[1].blocked.is_some(),
+        "the popup is the active tab, blocked: {tabs:#?}"
+    );
+    let err = snapshot
+        .call(cx, NoArgs {})
+        .await
+        .expect_err("the blocked tab must not be readable");
+    assert!(err.to_string().contains("does not allow"), "got {err}");
+    let err = console
+        .call(cx, NoArgs {})
+        .await
+        .expect_err("console is refused on the blocked tab");
+    assert!(err.to_string().contains("does not allow"), "got {err}");
+
+    // The page comes back somewhere allowed on its own: the block lifts,
+    // but what the refused page logged while it was blocked in place — its
+    // pumps were running when the block went up — is not readable now.
+    let popup_url = format!(
+        "file://{}",
+        std::fs::canonicalize(dir.path().join("popup.html"))
+            .expect("canonicalize")
+            .display()
+    );
+    let _ = popup_page
+        .evaluate(format!("location.href = '{popup_url}'"))
+        .await;
+    wait_for_tabs(
+        &session,
+        |tabs| {
+            tabs.iter()
+                .any(|tab| tab.id == popup_target && tab.active && tab.blocked.is_none())
+        },
+        "coming back somewhere allowed did not lift the block",
+    )
+    .await;
+    wait_for_frame_colour(&mut frames, "red", "the popup is shown again").await;
+    let logs = console
+        .call(cx, NoArgs {})
+        .await
+        .expect("console works again on the unblocked tab");
+    assert!(
+        !logs.problems.iter().any(|p| p.contains("OUTSIDE-CONSOLE")),
+        "output the refused page produced while blocked must not become readable: {logs:?}"
+    );
+
+    // The user switches back to the opener, which is untouched.
+    session
+        .select_tab(&opener_target)
+        .await
+        .expect("switch back to the opener");
+    assert_eq!(
+        session
+            .page()
+            .expect("the opener is readable")
+            .target_id()
+            .inner(),
+        &opener_target,
+        "control returns to the opener"
+    );
+    wait_for_frame_colour(&mut frames, "white", "after switching back to the opener").await;
+    assert_frame_colour_never(
+        &mut frames,
+        "blue",
+        Duration::from_secs(5),
+        "the refused page was screencast after switching away from it",
     )
     .await;
     assert!(
@@ -677,10 +828,10 @@ async fn a_popup_outside_the_policy_is_never_shown_or_readable() {
     let snap = snapshot
         .call(cx, NoArgs {})
         .await
-        .expect("snapshot works after the tab is dropped");
+        .expect("snapshot works on the opener");
     assert!(
         !snap.tree.contains("OUTSIDE-MARKER"),
-        "the dropped tab must not be readable; tree was:\n{}",
+        "the blocked tab must not be readable; tree was:\n{}",
         snap.tree
     );
 
@@ -853,6 +1004,447 @@ async fn a_window_open_popup_is_promoted_and_takes_input() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    manager.shutdown().await;
+}
+
+/// AGE-473: two popups from the same page — a `target="_blank"` link and a
+/// `window.open()` — become two more entries in the tab strip beside the
+/// opener, not a silent takeover; clicking a tab moves the live screencast
+/// and forwarded input to it while the others keep running; and closing a
+/// tab — from the strip or by the page itself — never leaves the panel on a
+/// dead reference, down to the last tab, which a blank page stands in for.
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn popups_become_tabs_the_user_can_switch_between_and_close() {
+    let dir = popup_workspace();
+    let manager = manager(&dir);
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let cx = &mut ToolContext::new();
+
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("the opener loads");
+
+    let session = manager.session().await.expect("a live session");
+    let opener = session.page().expect("the opener page");
+    let opener_id = opener.target_id().inner().clone();
+    let mut tab_list = session.watch_tabs();
+    assert_eq!(
+        tab_list.borrow_and_update().len(),
+        1,
+        "one tab before anything opens"
+    );
+    let mut address_bar = session.watch_url();
+    let mut frames = session
+        .start_screencast(400, 300)
+        .await
+        .expect("screencast starts");
+    wait_for_frame_colour(&mut frames, "white", "before anything opens").await;
+
+    // 1. A target="_blank" link, then — back on the opener — a window.open().
+    session.take_control();
+    click_at(&session, 110.0, 30.0).await;
+    let first_popup = wait_for_promotion(
+        &session,
+        &opener_id,
+        "the link's tab was never surfaced in the session",
+    )
+    .await;
+    session
+        .select_tab(&opener_id)
+        .await
+        .expect("switch back to the opener");
+    wait_for_frame_colour(&mut frames, "white", "after switching back to the opener").await;
+    click_at(&session, 110.0, 100.0).await;
+    let second_popup = wait_for_promotion(
+        &session,
+        &opener_id,
+        "the window.open() tab was never surfaced in the session",
+    )
+    .await;
+    assert_ne!(second_popup, first_popup, "a second popup is a second tab");
+    let second = session.page().expect("the second popup");
+
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 3,
+        "the strip does not show the opener and both popups",
+    )
+    .await;
+    assert_eq!(
+        tabs.iter().map(|tab| tab.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            opener_id.as_str(),
+            first_popup.as_str(),
+            second_popup.as_str()
+        ],
+        "tabs are listed in the order they opened"
+    );
+    assert!(
+        !tabs[0].active && !tabs[1].active && tabs[2].active,
+        "the newest tab is the active one: {tabs:#?}"
+    );
+    assert!(
+        tabs.iter().all(|tab| tab.blocked.is_none()),
+        "nothing here is refused: {tabs:#?}"
+    );
+    assert!(
+        tabs[1].url.contains("popup.html") && tabs[2].url.contains("popup.html"),
+        "the strip carries each tab's URL: {tabs:#?}"
+    );
+    assert_eq!(
+        tab_list.borrow_and_update().len(),
+        3,
+        "the tab list is broadcast to whoever watches it"
+    );
+
+    // 2. Clicking a tab switches the cast and forwarded input to it; the
+    //    other tabs are left alone.
+    session
+        .select_tab(&first_popup)
+        .await
+        .expect("select the first popup");
+    let first = session.page().expect("the first popup");
+    assert_eq!(first.target_id().inner(), &first_popup);
+    assert!(
+        address_bar.borrow_and_update().contains("popup.html"),
+        "the address bar follows the selected tab"
+    );
+    wait_for_frame_colour(&mut frames, "red", "after selecting the first popup").await;
+    click_at(&session, 200.0, 150.0).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while title_of(&first).await != "clicked" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the forwarded click never reached the selected tab"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        title_of(&second).await,
+        "Popup",
+        "the click must not also land on the other popup"
+    );
+    assert_eq!(
+        title_of(&opener).await,
+        "Opener",
+        "the click must not also land on the opener"
+    );
+    // Titles reach the strip too, for every tab, not only the active one.
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| {
+            tabs.iter()
+                .any(|tab| tab.id == opener_id && tab.title == "Opener")
+                && tabs
+                    .iter()
+                    .any(|tab| tab.id == second_popup && tab.title == "Popup")
+        },
+        "the strip never picked up the tabs' titles",
+    )
+    .await;
+    assert!(
+        tabs.iter().all(|tab| !tab.title.is_empty()),
+        "every loaded tab has a title: {tabs:#?}"
+    );
+
+    // 4a. Closing a background tab from the strip removes it and leaves the
+    //     active one where it is.
+    session
+        .close_tab(&second_popup)
+        .await
+        .expect("close the second popup from the strip");
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 2,
+        "closing a tab from the strip did not remove it",
+    )
+    .await;
+    assert!(
+        tabs.iter().all(|tab| tab.id != second_popup),
+        "the closed tab is gone: {tabs:#?}"
+    );
+    assert_eq!(
+        session.page().expect("live").target_id().inner(),
+        &first_popup,
+        "closing a background tab must not move the active one"
+    );
+    wait_for_frame_colour(&mut frames, "red", "still on the first popup").await;
+
+    // 4b. The page closes the active tab itself: back to a neighbour.
+    let _ = first.evaluate("window.close()").await;
+    let back = wait_for_promotion(
+        &session,
+        &first_popup,
+        "closing the active tab left the session pointed at a page that is gone",
+    )
+    .await;
+    assert_eq!(back, opener_id, "the neighbour takes over");
+    wait_for_frame_colour(&mut frames, "white", "back on the opener").await;
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 1,
+        "the tab the page closed is still in the strip",
+    )
+    .await;
+    assert!(tabs[0].active && tabs[0].id == opener_id, "{tabs:#?}");
+
+    // 4c. Closing the last tab leaves the session on a blank page, never a
+    //     dead one, and it stays usable.
+    session
+        .close_tab(&opener_id)
+        .await
+        .expect("close the last tab");
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 1 && tabs[0].id != opener_id,
+        "no blank page stood in for the last tab",
+    )
+    .await;
+    assert_eq!(tabs[0].url, "about:blank");
+    assert!(tabs[0].active, "{tabs:#?}");
+    assert_eq!(
+        session.page().expect("live").target_id().inner(),
+        &tabs[0].id,
+        "the stand-in is the page every consumer drives"
+    );
+    session.release_control();
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("navigation works on the stand-in tab");
+    let snap = snapshot
+        .call(cx, NoArgs {})
+        .await
+        .expect("snapshot works on the stand-in tab");
+    assert!(snap.tree.contains("open a tab"), "tree was:\n{}", snap.tree);
+    wait_for_frame_colour(&mut frames, "white", "the stand-in tab is screencast").await;
+
+    manager.shutdown().await;
+}
+
+/// AGE-473: the policy guard runs on every tracked tab for its whole life,
+/// not only on the active one. A popup that is shown, switched away from,
+/// and *then* sent outside the policy by its opener is blocked the moment it
+/// moves — while it is a background tab — and blocking it touches nothing
+/// on the tab the user is looking at. Nothing the refused page produced
+/// while blocked is readable once it comes back somewhere allowed either.
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn a_background_tab_that_navigates_itself_outside_the_policy_is_blocked_at_once() {
+    let (dir, outside) = refused_workspace();
+    let manager = manager(&dir);
+    let (navigate, snapshot, _screenshot, console, ..) =
+        build_browser_tools(manager.clone(), artifacts());
+    let cx = &mut ToolContext::new();
+
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("the opener loads");
+
+    let session = manager.session().await.expect("a live session");
+    let opener_id = session
+        .page()
+        .expect("the opener page")
+        .target_id()
+        .inner()
+        .clone();
+    let mut frames = session
+        .start_screencast(400, 300)
+        .await
+        .expect("screencast starts");
+    wait_for_frame_colour(&mut frames, "white", "before anything opens").await;
+    session.take_control();
+
+    // An allowed popup, whose handle the opener keeps.
+    click_at(&session, 85.0, 240.0).await;
+    let popup_id =
+        wait_for_promotion(&session, &opener_id, "the allowed popup was never surfaced").await;
+    let popup_page = session.page().expect("the popup while it is allowed");
+    wait_for_frame_colour(&mut frames, "red", "while the popup is shown").await;
+    session
+        .select_tab(&opener_id)
+        .await
+        .expect("switch back to the opener");
+    wait_for_frame_colour(&mut frames, "white", "back on the opener").await;
+    let tabs = session.tabs();
+    assert!(
+        tabs.iter()
+            .any(|tab| tab.id == popup_id && !tab.active && tab.blocked.is_none()),
+        "the popup is a background tab, still allowed: {tabs:#?}"
+    );
+
+    // Only now does the opener move it — so it is a background tab when it
+    // lands outside the policy, and it is blocked while nobody is looking.
+    session
+        .page()
+        .expect("the opener")
+        .evaluate(format!("laterPopup.location = '{}'", outside_url(&outside)))
+        .await
+        .expect("the opener moves its popup");
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| {
+            tabs.iter()
+                .any(|tab| tab.id == popup_id && tab.blocked.is_some())
+        },
+        "the background tab navigated outside the policy and was not blocked",
+    )
+    .await;
+    let popup = tabs
+        .iter()
+        .find(|tab| tab.id == popup_id)
+        .expect("the popup is still listed");
+    assert!(
+        popup
+            .blocked
+            .as_deref()
+            .is_some_and(|url| url.contains("outside.html")),
+        "blocked at the URL it went to: {popup:#?}"
+    );
+    assert!(
+        !popup.active,
+        "blocking a background tab must not switch to it: {tabs:#?}"
+    );
+
+    // The tab on screen is untouched: readable, drivable, shown.
+    assert_eq!(
+        session
+            .page()
+            .expect("the opener is still readable")
+            .target_id()
+            .inner(),
+        &opener_id
+    );
+    let snap = snapshot
+        .call(cx, NoArgs {})
+        .await
+        .expect("snapshot works on the opener");
+    assert!(
+        snap.tree.contains("straight out") && !snap.tree.contains("OUTSIDE-MARKER"),
+        "tree was:\n{}",
+        snap.tree
+    );
+    assert_frame_colour_never(
+        &mut frames,
+        "blue",
+        Duration::from_secs(3),
+        "the blocked background tab was screencast",
+    )
+    .await;
+    assert_eq!(
+        frame_colour(&frames.borrow_and_update().clone()),
+        "white",
+        "the opener stays on screen"
+    );
+
+    // Switching to the blocked tab shows the refusal, never the page.
+    session
+        .select_tab(&popup_id)
+        .await
+        .expect("select the blocked tab");
+    let err = session.page().expect_err("the blocked tab is not readable");
+    assert!(err.to_string().contains("does not allow"), "got {err}");
+    let err = snapshot
+        .call(cx, NoArgs {})
+        .await
+        .expect_err("snapshot is refused on the blocked tab");
+    assert!(err.to_string().contains("does not allow"), "got {err}");
+    assert!(
+        matches!(&*frames.borrow_and_update(), ScreencastUpdate::Error(message) if message.contains("does not allow")),
+        "the panel is told why there is no picture"
+    );
+    assert_frame_colour_never(
+        &mut frames,
+        "blue",
+        Duration::from_secs(3),
+        "the blocked tab was screencast once selected",
+    )
+    .await;
+    let err = console
+        .call(cx, NoArgs {})
+        .await
+        .expect_err("console is refused on the blocked tab");
+    assert!(err.to_string().contains("does not allow"), "got {err}");
+
+    // The page comes back somewhere allowed on its own: the block lifts,
+    // but what the refused page logged while blocked is not readable now.
+    let popup_url = format!(
+        "file://{}",
+        std::fs::canonicalize(dir.path().join("popup.html"))
+            .expect("canonicalize")
+            .display()
+    );
+    let _ = popup_page
+        .evaluate(format!("location.href = '{popup_url}'"))
+        .await;
+    wait_for_tabs(
+        &session,
+        |tabs| {
+            tabs.iter()
+                .any(|tab| tab.id == popup_id && tab.active && tab.blocked.is_none())
+        },
+        "coming back somewhere allowed did not lift the block",
+    )
+    .await;
+    wait_for_frame_colour(&mut frames, "red", "the popup is shown again").await;
+    let logs = console
+        .call(cx, NoArgs {})
+        .await
+        .expect("console works again on the unblocked tab");
+    assert!(
+        !logs.problems.iter().any(|p| p.contains("OUTSIDE-CONSOLE")),
+        "output the refused page produced while blocked must not become readable: {logs:?}"
+    );
+    let snap = snapshot
+        .call(cx, NoArgs {})
+        .await
+        .expect("snapshot works again on the unblocked tab");
+    assert!(
+        !snap.tree.contains("OUTSIDE-MARKER"),
+        "tree was:\n{}",
+        snap.tree
+    );
+
+    // Back on the opener everything works again, and the popup can be
+    // closed from the strip.
+    session
+        .select_tab(&opener_id)
+        .await
+        .expect("back to the opener");
+    wait_for_frame_colour(&mut frames, "white", "the opener is shown again").await;
+    snapshot
+        .call(cx, NoArgs {})
+        .await
+        .expect("snapshot works again");
+    session
+        .close_tab(&popup_id)
+        .await
+        .expect("close the blocked tab");
+    wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 1 && tabs[0].id == opener_id,
+        "the closed tab is still listed",
+    )
+    .await;
 
     manager.shutdown().await;
 }

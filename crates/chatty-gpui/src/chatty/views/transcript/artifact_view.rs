@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::assets::CustomIcon;
 use chatty_core::services::browser::{
-    BrowserManager, BrowserSession, ControlHolder, InputModifiers, KeyInput, MouseAction,
-    MouseButtonKind, MouseInput, ScreencastFrame, ScreencastUpdate,
+    BrowserManager, BrowserSession, BrowserTab, ControlHolder, InputModifiers, KeyInput,
+    MouseAction, MouseButtonKind, MouseInput, ScreencastFrame, ScreencastUpdate,
 };
 use chatty_core::services::pdf_thumbnail::{
     PREVIEW_WIDTH, PdfThumbnailError, pdf_page_count, render_pdf_page,
@@ -218,6 +218,11 @@ pub struct ArtifactView {
     /// not from the background task that learns about it.
     browser_current_url: String,
     browser_address_dirty: bool,
+    /// The session's open tabs (AGE-473), mirrored from
+    /// `BrowserSession::watch_tabs` by a task started in `open_browser`,
+    /// the same way the address bar follows `watch_url`. The strip above
+    /// the address bar renders this; the session is the source of truth.
+    browser_tabs: Vec<BrowserTab>,
     /// CDP viewport size (AGE-156) — kept matched to the panel's actual
     /// rendered size by `sync_browser_viewport_size` rather than staying
     /// fixed at `BROWSER_VIEWPORT_WIDTH`/`HEIGHT` for the session's whole
@@ -322,6 +327,7 @@ impl ArtifactView {
             browser_address,
             browser_current_url: String::new(),
             browser_address_dirty: false,
+            browser_tabs: Vec::new(),
             browser_requested_size: (0, 0),
             browser_frame_geometry: None,
             browser_resize_task: None,
@@ -598,6 +604,42 @@ impl ArtifactView {
                 .detach();
             }
 
+            // AGE-473: the tab strip follows the session's tab list the
+            // same way — seeded now, then live as tabs open, close, switch,
+            // load a title or get blocked.
+            {
+                let mut tabs_rx = session.watch_tabs();
+                let initial_tabs = tabs_rx.borrow_and_update().clone();
+                this.update(cx, |this, cx| {
+                    if this.load_gen == load_id {
+                        this.browser_tabs = initial_tabs;
+                        cx.notify();
+                    }
+                })
+                .ok();
+                let this = this.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        if tabs_rx.changed().await.is_err() {
+                            return;
+                        }
+                        let tabs = tabs_rx.borrow_and_update().clone();
+                        let alive = this
+                            .update(cx, |this, cx| {
+                                if this.load_gen == load_id {
+                                    this.browser_tabs = tabs;
+                                    cx.notify();
+                                }
+                            })
+                            .is_ok();
+                        if !alive {
+                            return;
+                        }
+                    }
+                })
+                .detach();
+            }
+
             let mut frames = match session
                 .start_screencast(BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT)
                 .await
@@ -680,6 +722,7 @@ impl ArtifactView {
         self.browser_control = ControlHolder::Agent;
         self.browser_current_url.clear();
         self.browser_address_dirty = true;
+        self.browser_tabs.clear();
         self.browser_requested_size = (0, 0);
         self.browser_frame_geometry = None;
         self.browser_resize_task = None;
@@ -786,6 +829,37 @@ impl ArtifactView {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// The user picks a tab in the strip (AGE-473) — takes control first,
+    /// like the address bar does: the agent's tools now address that tab.
+    /// A no-op if the browser artifact isn't open.
+    fn select_browser_tab(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        self.take_browser_control(cx);
+        cx.background_spawn(async move {
+            if let Err(e) = session.select_tab(&id).await {
+                warn!(error = %e, tab = %id, "browser: switching tabs failed");
+            }
+        })
+        .detach();
+    }
+
+    /// The user closes a tab from the strip (AGE-473): the CDP target is
+    /// closed, not just hidden. The session picks what to show next.
+    fn close_browser_tab(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        self.take_browser_control(cx);
+        cx.background_spawn(async move {
+            if let Err(e) = session.close_tab(&id).await {
+                warn!(error = %e, tab = %id, "browser: closing the tab failed");
+            }
         })
         .detach();
     }
@@ -1711,9 +1785,83 @@ fn normalize_address_bar_url(input: &str) -> String {
     format!("https://{trimmed}")
 }
 
+/// What the tab strip calls a tab (AGE-473): its title, else its URL, else
+/// "New tab" for a page that has neither yet — cut to fit a strip entry.
+fn browser_tab_label(tab: &BrowserTab) -> String {
+    const MAX_CHARS: usize = 24;
+    let name = if !tab.title.trim().is_empty() {
+        tab.title.trim()
+    } else if !tab.url.is_empty() && tab.url != "about:blank" {
+        &tab.url
+    } else {
+        "New tab"
+    };
+    let mut chars = name.chars();
+    let short: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// The tab strip (AGE-473): one entry per open tab, the active one
+/// selected, a blocked one marked, each with its own close button. Only
+/// worth the space once there is something to switch between.
+fn browser_tab_strip(tabs: &[BrowserTab], entity: Entity<ArtifactView>) -> Option<TabBar> {
+    if tabs.len() < 2 {
+        return None;
+    }
+    let selected = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let ids: Vec<String> = tabs.iter().map(|tab| tab.id.clone()).collect();
+    Some(
+        TabBar::new("artifact-browser-tabs")
+            .small()
+            .selected_index(selected)
+            .on_click({
+                let entity = entity.clone();
+                move |ix, _, cx| {
+                    let Some(id) = ids.get(*ix).cloned() else {
+                        return;
+                    };
+                    entity.update(cx, |this, cx| this.select_browser_tab(id, cx));
+                }
+            })
+            .children(tabs.iter().map(|tab| {
+                let id = tab.id.clone();
+                Tab::new()
+                    .label(browser_tab_label(tab))
+                    .when(tab.blocked.is_some(), |this| {
+                        this.prefix(Icon::new(IconName::CircleX).size_3())
+                    })
+                    .suffix(
+                        Button::new(SharedString::from(format!(
+                            "artifact-browser-tab-close-{id}"
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Close).size_3())
+                        .tooltip("Close tab")
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                // The click must not bubble on to the tab
+                                // underneath, or closing a tab would also
+                                // select it first.
+                                cx.stop_propagation();
+                                let id = id.clone();
+                                entity.update(cx, |this, cx| this.close_browser_tab(id, cx));
+                            }
+                        }),
+                    )
+            })),
+    )
+}
+
 #[allow(clippy::too_many_arguments)] // Rendering function threading per-frame view state
 fn browser_rendered_body(
     browser: &BrowserPreview,
+    tabs: &[BrowserTab],
     control: ControlHolder,
     frame_bounds: Rc<RefCell<Bounds<Pixels>>>,
     geometry: Option<FrameGeometry>,
@@ -2017,6 +2165,7 @@ fn browser_rendered_body(
         .flex_1()
         .min_h_0()
         .gap_1()
+        .children(browser_tab_strip(tabs, entity))
         .child(address_bar)
         .child(control_bar)
         .child(frame)
@@ -2485,6 +2634,7 @@ impl Render for ArtifactView {
         let browser_geometry = self.browser_frame_geometry;
         let browser_focus = self.browser_focus.clone();
         let browser_address = self.browser_address.clone();
+        let browser_tabs = self.browser_tabs.clone();
         let has_diff = !old.is_empty() && old != source;
         // The header only offers choices that exist for this artifact and that
         // do different things (AGE-181).
@@ -2533,6 +2683,7 @@ impl Render for ArtifactView {
                 .p_2()
                 .child(browser_rendered_body(
                     &browser,
+                    &browser_tabs,
                     browser_control,
                     browser_frame_bounds,
                     browser_geometry,
@@ -3097,6 +3248,55 @@ mod address_bar_tests {
         );
         assert_eq!(normalize_address_bar_url("   "), "");
         assert_eq!(normalize_address_bar_url(""), "");
+    }
+}
+
+/// AGE-473: what each strip entry is called. The strip itself is a
+/// `TabBar` and needs a window; the label rule is the part with cases.
+#[cfg(test)]
+mod browser_tab_strip_tests {
+    use super::{BrowserTab, browser_tab_label};
+
+    fn tab(title: &str, url: &str) -> BrowserTab {
+        BrowserTab {
+            id: format!("target-{title}-{url}"),
+            title: title.to_string(),
+            url: url.to_string(),
+            active: false,
+            blocked: None,
+        }
+    }
+
+    #[test]
+    fn a_titled_tab_is_named_by_its_title() {
+        assert_eq!(
+            browser_tab_label(&tab("Opener", "file:///tmp/index.html")),
+            "Opener"
+        );
+        assert_eq!(
+            browser_tab_label(&tab("  Padded  ", "about:blank")),
+            "Padded"
+        );
+    }
+
+    #[test]
+    fn a_tab_without_a_title_falls_back_to_its_url_then_to_new_tab() {
+        assert_eq!(
+            browser_tab_label(&tab("", "http://localhost:3000/")),
+            "http://localhost:3000/"
+        );
+        assert_eq!(browser_tab_label(&tab("", "about:blank")), "New tab");
+        assert_eq!(browser_tab_label(&tab("", "")), "New tab");
+    }
+
+    #[test]
+    fn a_long_name_is_cut_with_an_ellipsis() {
+        let label = browser_tab_label(&tab(
+            "A very long document title that would flood the strip",
+            "",
+        ));
+        assert_eq!(label, "A very long document tit…");
+        assert_eq!(label.chars().count(), 25);
     }
 }
 

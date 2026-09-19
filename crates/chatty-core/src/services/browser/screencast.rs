@@ -7,8 +7,9 @@
 //! the moment it is decoded regardless of whether anyone is watching.
 //!
 //! The channel belongs to whoever is watching; the cast underneath belongs to
-//! a page and moves (a followed tab, AGE-458), pauses (a page the policy
-//! refuses to show) and restarts without the viewer's receiver ever closing.
+//! a page and moves (the tab the user or the page switched to, AGE-458 and
+//! AGE-473), pauses (a page the policy refuses to show) and restarts without
+//! the viewer's receiver ever closing.
 //! Only [`Screencast::stop`] ends the channel, and only the consumer asks for
 //! that.
 
@@ -328,6 +329,38 @@ pub(super) async fn start(
         None => {
             let (screencast, rx) = Screencast::start(page, width, height).await?;
             *slot = Some(screencast);
+            Ok(rx)
+        }
+    }
+}
+
+/// Give the consumer a channel while the tab on screen is one the policy
+/// refuses (AGE-473): the cast is created — or left — suspended, carrying
+/// `reason`, at the size the panel asked for. Nothing is encoded, but the
+/// channel exists, so switching to a tab that may be shown revives it
+/// through the session's usual move instead of finding nothing to move.
+pub(super) async fn hold(
+    slot: &mut Option<Screencast>,
+    width: u32,
+    height: u32,
+    reason: &str,
+) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
+    validate_dimensions(width, height)?;
+    match slot.as_mut() {
+        Some(screencast) => {
+            screencast.width = width;
+            screencast.height = height;
+            screencast.hold(reason).await;
+            Ok(screencast.subscribe())
+        }
+        None => {
+            let (tx, rx) = watch::channel(ScreencastUpdate::Error(reason.to_string()));
+            *slot = Some(Screencast {
+                tx,
+                width,
+                height,
+                running: None,
+            });
             Ok(rx)
         }
     }
