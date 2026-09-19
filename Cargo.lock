@@ -7990,8 +7990,7 @@ dependencies = [
 [[package]]
 name = "oxml-chart"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "986e2ed5f2bec497ffcc065a5b3b32648d778ab6ac47e47ef9f09202d9bfa53d"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -8003,8 +8002,7 @@ dependencies = [
 [[package]]
 name = "oxml-core"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ac24101bf8afc5e0a93372269e5791e0f4d8eb82fad6529f5e2ab8e86b26787"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "quick-xml 0.41.0",
  "thiserror 2.0.20",
@@ -8013,8 +8011,7 @@ dependencies = [
 [[package]]
 name = "oxml-drawing"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "098c9beeae3e7a5d64f29ff30f65670a443c214b7ea678cf7837fcf4e5bf6af1"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "oxml-core",
  "quick-xml 0.41.0",
@@ -8023,8 +8020,7 @@ dependencies = [
 [[package]]
 name = "oxml-layout"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6955a1dfb5ad0ca6b238dd903496119c24c25f9d45c7d1317d56cdf87b189060"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "fontdb 0.23.0",
  "harfrust",
@@ -8039,14 +8035,12 @@ dependencies = [
 [[package]]
 name = "oxml-media"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d920d2bbe7040ace55148ddf1c4bbb15efda0ecd7079135a60b64569fb0b3106"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 
 [[package]]
 name = "oxml-opc"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15d43b253651801f360efa1d5e560102d58b96b6ccc6e772a87b87e4ed3518f7"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "quick-xml 0.41.0",
  "thiserror 2.0.20",
@@ -8056,8 +8050,7 @@ dependencies = [
 [[package]]
 name = "oxml-pdf"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "235e6968952a83021b5842fde270772f8f4d24d0996c7a63c54de48e876da670"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "jpeg-encoder",
  "miniz_oxide 0.9.1",
@@ -8074,8 +8067,7 @@ dependencies = [
 [[package]]
 name = "oxml-sml"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5c5a5fc38155e7ec9aebbde5fa74b3e8e2b61b92326b05242c8a62856bac9e0"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "oxml-opc",
  "quick-xml 0.41.0",
@@ -9726,8 +9718,7 @@ dependencies = [
 [[package]]
 name = "rpptx"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1285aaa1a9097a09a226731ded9e2f3a4a9ed5c67c5cc14e9dd38b8817fd7e1d"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "gif",
  "jpeg-encoder",
@@ -9754,8 +9745,7 @@ dependencies = [
 [[package]]
 name = "rpptx-layout"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc719e29359ca4d49323dc287c0625e583616e25d641408ed4d3992d5918c302"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
@@ -9766,8 +9756,7 @@ dependencies = [
 [[package]]
 name = "rpptx-oxml"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba28a4cd0f319a6f97fa5e893b64a11700526e65d3f62c7f070388d2370e30ea"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -9778,8 +9767,7 @@ dependencies = [
 [[package]]
 name = "rpptx-render"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e795dda2da68dbb1b2ce7d7fa19fcc6ebb3accae3264fe338bbbb4c63f2436c3"
+source = "git+https://github.com/boersmamarcel/rdocx?rev=596b3675be4ce8a852faffefffa3b94a298f07e0#596b3675be4ce8a852faffefffa3b94a298f07e0"
 dependencies = [
  "oxml-drawing",
  "oxml-layout",

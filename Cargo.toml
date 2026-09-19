@@ -180,3 +180,11 @@ debug = "line-tables-only"
 # DuckDB internals from Chatty, so drop it entirely.
 [profile.dev.package.libduckdb-sys]
 debug = false
+
+# rdocx fixes that are not released yet (AGE-474): the fork carries four
+# patches, one branch each, sent upstream as pull requests. Drop this block
+# and bump the rpptx pin once a crates.io release includes them.
+[patch.crates-io]
+oxml-layout = { git = "https://github.com/boersmamarcel/rdocx", rev = "596b3675be4ce8a852faffefffa3b94a298f07e0" }
+oxml-pdf = { git = "https://github.com/boersmamarcel/rdocx", rev = "596b3675be4ce8a852faffefffa3b94a298f07e0" }
+rpptx = { git = "https://github.com/boersmamarcel/rdocx", rev = "596b3675be4ce8a852faffefffa3b94a298f07e0" }
