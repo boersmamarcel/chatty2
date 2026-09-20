@@ -64,6 +64,7 @@ pub enum CustomIcon {
     GitMerge,      // git-merge.svg - PR status bar, merged pull request
     GitPr,         // git-pull-request.svg - PR status bar, open pull request
     MessageSquare, // message-square.svg - Sidebar Chats/Files mode toggle (AGE-480)
+    FolderTree,    // folder-tree.svg - Sidebar Chats/Files mode toggle, Files icon (AGE-480)
 }
 
 impl IconNamed for CustomIcon {
@@ -95,6 +96,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::GitMerge => "icons/git-merge.svg",
             CustomIcon::GitPr => "icons/git-pull-request.svg",
             CustomIcon::MessageSquare => "icons/message-square.svg",
+            CustomIcon::FolderTree => "icons/folder-tree.svg",
         }
         .into()
     }
