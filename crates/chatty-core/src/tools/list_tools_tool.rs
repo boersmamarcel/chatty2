@@ -46,17 +46,17 @@ impl ListToolsTool {
         native_tools.extend(vec![
             ToolInfo {
                 name: "write_todos".to_string(),
-                description: "Create the single ordered todo plan for a multi-step task before doing any work.".to_string(),
+                description: "Write the ordered todo plan for a task that needs 3 or more distinct tool calls; skip it for anything smaller.".to_string(),
                 source: "native".to_string(),
             },
             ToolInfo {
                 name: "update_todo".to_string(),
-                description: "Update one todo status before and after working on it; use blocked with a reason and reflection when a step fails.".to_string(),
+                description: "Change the status of one todo in the plan written by write_todos: in_progress before work, done after, blocked with a reason and reflection when a step fails.".to_string(),
                 source: "native".to_string(),
             },
             ToolInfo {
                 name: "verify_completion".to_string(),
-                description: "Verify all todos with concrete evidence before writing the final reply; failed verification reopens work.".to_string(),
+                description: "Check a written plan against concrete evidence before the final reply; failed verification reopens work.".to_string(),
                 source: "native".to_string(),
             },
         ]);
