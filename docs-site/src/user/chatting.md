@@ -56,11 +56,13 @@ When browser tools are on, a live view of the page the agent is driving docks in
 
 ## File explorer
 
-The artifact panel doubles as a light IDE over your working directory. Open it from the panel's own toggle button, or from the caret next to the artifact button in the titlebar (or the floating button on macOS) — pick **Files**. It shows a tree rooted at your workspace directory (or the current folder if none is set), folders first, and picks up files the agent adds or removes within a couple of seconds without needing a refresh.
+The sidebar doubles as a light IDE over your working directory. A **Chats | Files** toggle sits in the sidebar footer next to Settings; switching to Files replaces the conversation list with a tree rooted at your workspace directory (or the current folder if none is set), folders first, and picks up files the agent adds or removes within a couple of seconds without needing a refresh. Switching conversations re-roots the tree to that conversation's own working directory. You can also reach it from the caret next to the artifact button in the titlebar (or the floating button on macOS) — pick **Files**, which expands the sidebar if it's collapsed and switches it to Files mode.
 
-Click a file to open it in the same viewers used for agent-produced artifacts (Markdown, code, PDF, PowerPoint, images, tables). Right-click a row for **New file…**, **New folder…**, **Rename…**, **Delete…**, **Reveal in file manager** and **Copy path** — the header also has buttons for creating a file or folder. Deleting asks for confirmation first and cannot be undone.
+Click a file to open it in the artifact panel, using the same viewers as agent-produced artifacts (Markdown, code, PDF, PowerPoint, images, tables). Right-click a row, the header, or an empty folder for **New file…**, **New folder…**, **Rename…**, **Delete…**, **Reveal in file manager** and **Copy path**. Deleting asks for confirmation first and cannot be undone.
 
 Ctrl/⌘-click a row to add it to a selection, or Shift-click to select a range; the right-click menu then reads **Delete N items…** and **Copy paths** for the whole selection. Drag a selected row onto a folder (or onto the empty area to move it to the workspace root) to move it there — an open file's tab follows it to the new path.
+
+Press **Ctrl/Cmd+P** from anywhere to open **Go to File**, a fuzzy quick-open over every file in the workspace — handy when the sidebar is collapsed or you just want to jump straight to a file. Type to filter, then click or press Enter on a match to open it in the artifact panel.
 
 The Source tab is editable: press **Ctrl/Cmd+S** or click **Save** to write your changes back to disk. An unsaved file shows a dot on its tab; switching tabs keeps your edits, and closing a tab with unsaved changes asks before discarding them.
 
