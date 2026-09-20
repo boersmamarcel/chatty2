@@ -1522,7 +1522,6 @@ async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime()
     let popup_id =
         wait_for_promotion(&session, &opener_id, "the link's tab was never surfaced").await;
     wait_for_frame_colour(&mut frames, "red", "the popup is shown").await;
-    let probe_popup_page = session.page().expect("popup"); // REVIEW PROBE
 
     /// Run `f` on a plain OS thread with no Tokio context at all.
     fn off_runtime<T: Send + 'static>(
@@ -1540,54 +1539,6 @@ async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime()
     result
         .expect("select_tab must not panic off the Tokio runtime")
         .expect("select_tab succeeds");
-    // REVIEW PROBE
-    {
-        fn variant(u: &ScreencastUpdate) -> String {
-            match u {
-                ScreencastUpdate::Frame(_) => "Frame".to_string(),
-                ScreencastUpdate::Starting => "Starting".to_string(),
-                ScreencastUpdate::Error(e) => format!("Error({e})"),
-            }
-        }
-        async fn vis(p: &chromiumoxide::page::Page) -> String {
-            p.evaluate("document.visibilityState")
-                .await
-                .ok()
-                .and_then(|v| v.into_value::<String>().ok())
-                .unwrap_or_else(|| "?".into())
-        }
-        let opener_page = session.page().expect("opener");
-        eprintln!(
-            "REVIEW PROBE right after select_tab: {} / colour {} / opener vis={} popup vis={}",
-            variant(&frames.borrow()),
-            frame_colour(&frames.borrow().clone()),
-            vis(&opener_page).await,
-            vis(&probe_popup_page).await,
-        );
-        let t0 = std::time::Instant::now();
-        while t0.elapsed() < Duration::from_secs(12) {
-            let r = tokio::time::timeout(Duration::from_secs(1), frames.changed()).await;
-            let v = frames.borrow_and_update().clone();
-            if r.is_ok() {
-                eprintln!(
-                    "REVIEW PROBE t={:>5}ms update: {} colour={}",
-                    t0.elapsed().as_millis(),
-                    variant(&v),
-                    frame_colour(&v)
-                );
-            }
-        }
-        eprintln!(
-            "REVIEW PROBE after 12 s: opener vis={} popup vis={} tabs={:?}",
-            vis(&opener_page).await,
-            vis(&probe_popup_page).await,
-            session
-                .tabs()
-                .iter()
-                .map(|t| (t.id.clone(), t.active, t.url.clone()))
-                .collect::<Vec<_>>()
-        );
-    }
     assert_eq!(
         session.page().expect("live").target_id().inner(),
         &opener_id
