@@ -60,6 +60,8 @@ The artifact panel doubles as a light IDE over your working directory. Open it f
 
 Click a file to open it in the same viewers used for agent-produced artifacts (Markdown, code, PDF, PowerPoint, images, tables). Right-click a row for **New file…**, **New folder…**, **Rename…**, **Delete…**, **Reveal in file manager** and **Copy path** — the header also has buttons for creating a file or folder. Deleting asks for confirmation first and cannot be undone.
 
+Ctrl/⌘-click a row to add it to a selection, or Shift-click to select a range; the right-click menu then reads **Delete N items…** and **Copy paths** for the whole selection. Drag a selected row onto a folder (or onto the empty area to move it to the workspace root) to move it there — an open file's tab follows it to the new path.
+
 The Source tab is editable: press **Ctrl/Cmd+S** or click **Save** to write your changes back to disk. An unsaved file shows a dot on its tab; switching tabs keeps your edits, and closing a tab with unsaved changes asks before discarding them.
 
 ## Tool-call traces
