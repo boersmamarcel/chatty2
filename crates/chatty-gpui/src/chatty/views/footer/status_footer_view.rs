@@ -9,7 +9,7 @@ use crate::settings::models::general_model::SidebarMode;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_component::{
-    Icon, IconName, Selectable, Sizable,
+    Icon, Selectable, Sizable,
     button::{Button, ButtonVariants},
 };
 
@@ -67,7 +67,7 @@ impl RenderOnce for StatusFooterView {
                             .ghost()
                             .xsmall()
                             .selected(files_mode)
-                            .icon(Icon::new(IconName::FolderClosed))
+                            .icon(Icon::new(CustomIcon::FolderTree))
                             .tooltip("Files")
                             .on_click({
                                 let sidebar = sidebar.clone();
