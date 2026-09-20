@@ -177,6 +177,7 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
                 "browser_console",
                 "browser_network",
                 "browser_resize",
+                "browser_click",
             ]
             .into_iter()
             .map(String::from),
@@ -429,6 +430,7 @@ mod tests {
             "browser_console",
             "browser_network",
             "browser_resize",
+            "browser_click",
         ] {
             assert!(names.contains(tool), "{tool} missing for browser");
         }

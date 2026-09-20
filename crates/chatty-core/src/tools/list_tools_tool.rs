@@ -404,6 +404,10 @@ impl ListToolsTool {
                     "browser_resize",
                     "Resize the viewport to check responsive behaviour.",
                 ),
+                (
+                    "browser_click",
+                    "Left-click an element by its snapshot ref; asks the user first off localhost.",
+                ),
             ] {
                 native_tools.push(ToolInfo {
                     name: name.to_string(),

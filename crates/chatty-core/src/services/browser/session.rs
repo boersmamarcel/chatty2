@@ -44,12 +44,14 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use super::click::{self, ClickPoint};
 use super::control::{ControlHolder, ControlLock};
 use super::error::BrowserError;
 use super::events::EventBuffers;
 use super::input::{self, KeyInput, MouseInput};
 use super::profile::{BrowserProfile, NavigationPolicy};
 use super::screencast::{self, Screencast, ScreencastUpdate};
+use super::snapshot::SnapshotNode;
 use super::targets;
 
 /// Default deadline for a CDP round trip.
@@ -61,6 +63,10 @@ const NEW_TAB_TIMEOUT_SECS: u64 = 10;
 /// How long a new tab gets to land on its real URL before the policy decides
 /// whether to show it. `window.open` reports `about:blank` until then.
 const NEW_TAB_SETTLE_SECS: u64 = 2;
+/// How long a click gets to start a navigation before the result reports
+/// whether it did. Long enough for a same-process handler to call
+/// `location.assign`; not a page-load wait.
+const CLICK_SETTLE_MS: u64 = 300;
 
 /// The URL a newly opened tab settles on.
 ///
@@ -108,6 +114,19 @@ pub struct BrowserTab {
     /// Set while the tab sits somewhere the navigation policy refuses — the
     /// URL it is blocked at. A blocked tab is never shown, read or driven.
     pub blocked: Option<String>,
+}
+
+/// What a [`BrowserSession::click`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClickResult {
+    /// Where the pointer went, in viewport CSS pixels.
+    pub point: ClickPoint,
+    /// The active tab's URL once the click settled.
+    pub url: String,
+    /// Whether the click moved the page — if so every element ref is dead.
+    pub navigated: bool,
+    /// The generation refs must belong to from now on.
+    pub snapshot_generation: u64,
 }
 
 /// A tracked page target: the handle, what the strip shows for it, and the
@@ -1099,6 +1118,46 @@ impl BrowserSession {
             self.invalidate_snapshot();
         }
         previous
+    }
+
+    /// Click an element the agent saw in its latest snapshot (AGE-489).
+    ///
+    /// Refused while the user holds control, like every other mutating
+    /// action, and on a blocked tab, like everything else. The checks that
+    /// make the click itself safe — same element as the snapshot showed, on
+    /// screen, nothing covering it — live in [`super::click`]. A navigation
+    /// the click starts is vetted by the per-tab guard exactly like one the
+    /// page started on its own (AGE-458); `navigated` tells the caller its
+    /// refs are gone.
+    pub async fn click(&self, node: &SnapshotNode) -> Result<ClickResult, BrowserError> {
+        self.ensure_alive()?;
+        self.control.ensure_agent()?;
+        let page = self.page()?;
+        let generation_before = self.snapshot_generation();
+        let point = with_deadline(
+            DEFAULT_TIMEOUT_SECS,
+            &format!("clicking {}", node.r#ref),
+            click::click(&page, node),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(CLICK_SETTLE_MS)).await;
+        let snapshot_generation = self.snapshot_generation();
+        // Read live rather than from `current_url`: the click may have
+        // activated a new tab (AGE-458), and the tool's answer must say
+        // where the agent is now.
+        let url = self
+            .active_page()
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        Ok(ClickResult {
+            point,
+            url,
+            navigated: snapshot_generation != generation_before,
+            snapshot_generation,
+        })
     }
 
     /// Forward a mouse event. A no-op — not an error — when the agent

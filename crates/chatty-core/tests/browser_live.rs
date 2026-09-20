@@ -19,7 +19,9 @@ use chatty_core::services::browser::{
     BrowserManager, BrowserSession, BrowserTab, InputModifiers, KeyInput, MouseAction,
     MouseButtonKind, MouseInput, ScreencastUpdate,
 };
-use chatty_core::tools::browser_tools::{NavigateArgs, NoArgs, ResizeArgs, build_browser_tools};
+use chatty_core::tools::browser_tools::{
+    ClickArgs, NavigateArgs, NoArgs, ResizeArgs, build_browser_tools,
+};
 use rig_agent::tool::{Tool, ToolContext};
 use tokio::sync::watch;
 
@@ -356,8 +358,8 @@ async fn lane_a_round_trip() {
     let dir = fixture_workspace();
     let manager = manager(&dir);
     let artifacts = artifacts();
-    let (navigate, snapshot, screenshot, console, network, resize) =
-        build_browser_tools(manager.clone(), artifacts.clone());
+    let (navigate, snapshot, screenshot, console, network, resize, _) =
+        build_browser_tools(manager.clone(), artifacts.clone(), None);
     let cx = &mut ToolContext::new();
 
     // Navigate.
@@ -426,7 +428,7 @@ async fn lane_a_round_trip() {
 async fn navigation_refuses_the_open_web_and_leaves_the_session_usable() {
     let dir = fixture_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -471,7 +473,7 @@ async fn navigating_invalidates_element_refs() {
     .expect("write second page");
 
     let manager = manager(&dir);
-    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -528,7 +530,7 @@ async fn navigating_invalidates_element_refs() {
 async fn a_target_blank_tab_is_screencast_driven_and_handed_back_when_it_closes() {
     let dir = popup_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -650,7 +652,7 @@ async fn a_popup_outside_the_policy_is_never_shown_or_readable() {
     let (dir, _outside) = refused_workspace();
     let manager = manager(&dir);
     let (navigate, snapshot, _screenshot, console, ..) =
-        build_browser_tools(manager.clone(), artifacts());
+        build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -872,7 +874,7 @@ async fn a_page_that_navigates_itself_outside_the_policy_is_refused_until_it_com
     let (dir, _outside) = refused_workspace();
     let manager = manager(&dir);
     let (navigate, snapshot, _screenshot, console, ..) =
-        build_browser_tools(manager.clone(), artifacts());
+        build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -974,7 +976,7 @@ async fn a_page_that_navigates_itself_outside_the_policy_is_refused_until_it_com
 async fn a_window_open_popup_is_promoted_and_takes_input() {
     let dir = popup_workspace();
     let manager = manager(&dir);
-    let (navigate, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, ..) = build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -1043,7 +1045,7 @@ async fn a_window_open_popup_is_promoted_and_takes_input() {
 async fn popups_become_tabs_the_user_can_switch_between_and_close() {
     let dir = popup_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -1280,7 +1282,7 @@ async fn a_background_tab_that_navigates_itself_outside_the_policy_is_blocked_at
     let (dir, outside) = refused_workspace();
     let manager = manager(&dir);
     let (navigate, snapshot, _screenshot, console, ..) =
-        build_browser_tools(manager.clone(), artifacts());
+        build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -1496,7 +1498,7 @@ async fn a_background_tab_that_navigates_itself_outside_the_policy_is_blocked_at
 async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime() {
     let dir = popup_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -1614,6 +1616,171 @@ async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime()
     let snap = snapshot.call(cx, NoArgs {}).await.expect("snapshot works");
     assert!(snap.tree.contains("open a tab"), "tree was:\n{}", snap.tree);
     wait_for_frame_colour(&mut frames, "white", "the stand-in tab is screencast").await;
+
+    manager.shutdown().await;
+}
+
+/// AGE-489. A page with everything `browser_click` must get right: a button
+/// that relabels itself when clicked, a button under an overlay, and a link
+/// to a second page.
+fn click_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("other.html"),
+        "<!doctype html><title>Other</title><h1>Other</h1>",
+    )
+    .expect("write second page");
+    std::fs::write(
+        dir.path().join("index.html"),
+        r#"<!doctype html>
+<html>
+  <head><title>Click fixture</title></head>
+  <body>
+    <button id="save" onclick="this.textContent = 'Saved'">Save</button>
+    <div style="position: relative; width: 200px; height: 60px;">
+      <button id="under" style="position: absolute; inset: 0;">Under</button>
+      <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.5);"></div>
+    </div>
+    <a href="other.html">Elsewhere</a>
+  </body>
+</html>"#,
+    )
+    .expect("write fixture");
+    dir
+}
+
+/// The ref of the first snapshot line reading `role "name"`.
+fn ref_of(tree: &str, role: &str, name: &str) -> String {
+    let needle = format!("] {role} \"{name}\"");
+    tree.lines()
+        .find(|line| line.contains(&needle))
+        .and_then(|line| {
+            let start = line.find('[')? + 1;
+            let end = line.find(']')?;
+            Some(line[start..end].to_string())
+        })
+        .unwrap_or_else(|| panic!("no {role} \"{name}\" in tree:\n{tree}"))
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn click_lands_on_what_the_snapshot_showed_and_nothing_else() {
+    let dir = click_workspace();
+    let manager = manager(&dir);
+    let (navigate, snapshot, .., click) = build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("page loads");
+    let first = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    let save = ref_of(&first.tree, "button", "Save");
+    let under = ref_of(&first.tree, "button", "Under");
+    let link = ref_of(&first.tree, "link", "Elsewhere");
+
+    // A covered element is refused, and the click never reaches it.
+    let err = click
+        .call(cx, ClickArgs { r#ref: under })
+        .await
+        .expect_err("a covered button must not be clicked");
+    assert!(err.to_string().contains("covered"), "unexpected: {err}");
+
+    // A plain click lands: the button relabels itself.
+    let clicked = click
+        .call(
+            cx,
+            ClickArgs {
+                r#ref: save.clone(),
+            },
+        )
+        .await
+        .expect("click succeeds");
+    assert!(!clicked.navigated, "{clicked:?}");
+    assert_eq!(clicked.clicked, "button \"Save\"");
+    let second = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    assert!(
+        second.tree.contains("button \"Saved\""),
+        "tree was:\n{}",
+        second.tree
+    );
+    assert_eq!(second.snapshot_generation, first.snapshot_generation);
+
+    // The old snapshot still resolves the ref (same generation, same node),
+    // but the element is no longer what that snapshot showed: refused.
+    let stale = chatty_core::services::browser::Snapshot {
+        generation: first.snapshot_generation,
+        nodes: manager
+            .snapshot()
+            .await
+            .expect("snapshot")
+            .nodes
+            .iter()
+            .map(|n| chatty_core::services::browser::SnapshotNode {
+                name: if n.r#ref == save {
+                    "Save".to_string()
+                } else {
+                    n.name.clone()
+                },
+                ..n.clone()
+            })
+            .collect(),
+    };
+    manager.set_snapshot(stale).await;
+    let err = click
+        .call(
+            cx,
+            ClickArgs {
+                r#ref: save.clone(),
+            },
+        )
+        .await
+        .expect_err("a relabelled element must not be clicked on the old label");
+    assert!(
+        err.to_string().contains("take a new snapshot"),
+        "unexpected: {err}"
+    );
+
+    // While the user drives, the agent's click is refused outright.
+    let session = manager.session().await.expect("session");
+    session.take_control();
+    let err = click
+        .call(
+            cx,
+            ClickArgs {
+                r#ref: link.clone(),
+            },
+        )
+        .await
+        .expect_err("refused while the user holds control");
+    assert!(
+        err.to_string().contains("user is currently driving"),
+        "unexpected: {err}"
+    );
+    session.release_control();
+
+    // Handback invalidated every ref; a fresh snapshot, then the link.
+    let third = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    assert!(third.snapshot_generation > second.snapshot_generation);
+    let link = ref_of(&third.tree, "link", "Elsewhere");
+    let clicked = click
+        .call(cx, ClickArgs { r#ref: link })
+        .await
+        .expect("link click succeeds");
+    assert!(clicked.navigated, "{clicked:?}");
+    assert!(clicked.url.ends_with("other.html"), "{clicked:?}");
+    assert!(clicked.snapshot_generation > third.snapshot_generation);
+    let fourth = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    assert!(
+        fourth.tree.contains("heading \"Other\""),
+        "tree was:\n{}",
+        fourth.tree
+    );
 
     manager.shutdown().await;
 }
