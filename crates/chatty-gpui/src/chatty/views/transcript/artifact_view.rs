@@ -51,7 +51,7 @@ use super::artifact_kind::{
 };
 use super::diff::DiffHunkList;
 use super::file_explorer::render_file_explorer;
-use super::file_tree::{FileOp, FileTree, PendingEdit};
+use super::file_tree::{FileOp, FileTree, PendingEdit, SelectGesture, rebase_path};
 use super::run_pin::{RunPin, RunPinKind};
 use super::session_review_panel::{ReviewFileSection, SessionReviewPanel};
 use super::table::render_table_preview_view;
@@ -1103,8 +1103,47 @@ impl ArtifactView {
         )
     }
 
-    /// A click on a tree row: folders toggle, files open in the panel the
-    /// way a tool-card click does.
+    /// A click on a tree row. A plain click selects that row alone and
+    /// activates it (folders toggle, files open); Ctrl/⌘ and Shift only
+    /// change the selection (AGE-476 multi-select).
+    pub(super) fn explorer_click(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        gesture: SelectGesture,
+        cx: &mut Context<Self>,
+    ) {
+        match gesture {
+            SelectGesture::Single => self.explorer_activate(path, is_dir, cx),
+            SelectGesture::Toggle | SelectGesture::Range => {
+                if let Some(tree) = self.explorer.as_mut() {
+                    tree.click_select(path, gesture);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Drop of dragged entries onto `dest` (AGE-476 drag-to-move): the
+    /// tree moves what can move and the panel's tabs follow.
+    pub(super) fn explorer_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        dest: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tree) = self.explorer.as_mut() else {
+            return;
+        };
+        let ops = tree.move_entries(&paths, &dest);
+        for op in ops {
+            self.apply_file_op(op, cx);
+        }
+        cx.notify();
+    }
+
+    /// A plain click on a tree row: folders toggle, files open in the panel
+    /// the way a tool-card click does.
     pub(super) fn explorer_activate(
         &mut self,
         path: PathBuf,
@@ -1194,25 +1233,21 @@ impl ArtifactView {
         true
     }
 
+    /// Ask before deleting one entry or a multi-selection.
     pub(super) fn explorer_confirm_delete(
         &mut self,
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string());
-        let what = if path.is_dir() {
-            format!("Delete the folder '{name}' and everything in it?")
-        } else {
-            format!("Delete '{name}'?")
-        };
+        if paths.is_empty() {
+            return;
+        }
+        let what = delete_prompt(&paths);
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _, _| {
             let entity = entity.clone();
-            let path = path.clone();
+            let paths = paths.clone();
             dialog
                 .confirm()
                 .title("Delete")
@@ -1223,21 +1258,22 @@ impl ArtifactView {
                         .ok_variant(gpui_component::button::ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _, cx| {
-                    let path = path.clone();
-                    entity.update(cx, |this, cx| this.explorer_delete(path, cx));
+                    let paths = paths.clone();
+                    entity.update(cx, |this, cx| this.explorer_delete(paths, cx));
                     true
                 })
         });
     }
 
-    fn explorer_delete(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn explorer_delete(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let Some(tree) = self.explorer.as_mut() else {
             return;
         };
-        match tree.delete(&path) {
-            Some(op) => self.apply_file_op(op, cx),
-            None => cx.notify(),
+        let ops = tree.delete_many(&paths);
+        for op in ops {
+            self.apply_file_op(op, cx);
         }
+        cx.notify();
     }
 
     pub(super) fn explorer_refresh(&mut self, cx: &mut Context<Self>) {
@@ -1269,9 +1305,7 @@ impl ArtifactView {
                 }
             }
             FileOp::Renamed { from, to } => {
-                let renamed = |path: &Path| -> Option<PathBuf> {
-                    path.strip_prefix(&from).ok().map(|rest| to.join(rest))
-                };
+                let renamed = |path: &Path| rebase_path(path, &from, &to);
                 for (path, _, _) in self.files.iter_mut() {
                     if let Some(next) = renamed(path) {
                         *path = next;
@@ -3195,6 +3229,32 @@ fn artifact_primary_body(
             artifact_rendered_markdown(rendered, full, window, cx)
         }
         _ => artifact_source_input(editor),
+    }
+}
+
+/// The confirm text for deleting `paths`: names the one entry, or counts
+/// several and lists the first few.
+fn delete_prompt(paths: &[PathBuf]) -> String {
+    let name = |path: &PathBuf| {
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string())
+    };
+    match paths {
+        [one] if one.is_dir() => format!("Delete the folder '{}' and everything in it?", name(one)),
+        [one] => format!("Delete '{}'?", name(one)),
+        many => {
+            const SHOWN: usize = 5;
+            let mut listed: Vec<String> = many.iter().take(SHOWN).map(name).collect();
+            if many.len() > SHOWN {
+                listed.push(format!("… and {} more", many.len() - SHOWN));
+            }
+            format!(
+                "Delete {} items? Folders go with everything in them. {}",
+                many.len(),
+                listed.join(", ")
+            )
+        }
     }
 }
 

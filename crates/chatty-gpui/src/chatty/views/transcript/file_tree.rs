@@ -99,11 +99,25 @@ pub enum FileOp {
     Deleted(PathBuf),
 }
 
+/// Which selection gesture a click is (AGE-476 multi-select): a plain click
+/// selects one entry, Ctrl/⌘ toggles the entry in the set, Shift extends
+/// from the anchor over the visible rows in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectGesture {
+    Single,
+    Toggle,
+    Range,
+}
+
 pub struct FileTree {
     root: PathBuf,
     dirs: HashMap<PathBuf, DirListing>,
     expanded: HashSet<PathBuf>,
-    selected: Option<PathBuf>,
+    /// The selected entries in the order they were selected; the last one
+    /// is the primary (what `selected()` reports and new entries go next to).
+    selection: Vec<PathBuf>,
+    /// Where a Shift-range starts: the last plainly clicked or toggled row.
+    anchor: Option<PathBuf>,
     pending: Option<PendingEdit>,
     last_sync: Option<Instant>,
     /// The last operation that failed, shown under the tree until the next
@@ -119,7 +133,8 @@ impl FileTree {
             root: root.clone(),
             dirs: HashMap::new(),
             expanded: HashSet::new(),
-            selected: None,
+            selection: Vec::new(),
+            anchor: None,
             pending: None,
             last_sync: None,
             error: None,
@@ -133,8 +148,18 @@ impl FileTree {
         &self.root
     }
 
+    /// The primary selected entry (the most recently selected one).
     pub fn selected(&self) -> Option<&Path> {
-        self.selected.as_deref()
+        self.selection.last().map(PathBuf::as_path)
+    }
+
+    /// Every selected entry, oldest first.
+    pub fn selection(&self) -> &[PathBuf] {
+        &self.selection
+    }
+
+    pub fn is_selected(&self, path: &Path) -> bool {
+        self.selection.iter().any(|p| p == path)
     }
 
     pub fn pending(&self) -> Option<&PendingEdit> {
@@ -155,8 +180,57 @@ impl FileTree {
         self.expanded.contains(dir)
     }
 
+    /// Make `path` the only selected entry (or clear the selection).
     pub fn select(&mut self, path: Option<PathBuf>) {
-        self.selected = path;
+        self.selection.clear();
+        if let Some(path) = path {
+            self.anchor = Some(path.clone());
+            self.selection.push(path);
+        }
+    }
+
+    /// Apply a click on `path` with the given gesture.
+    pub fn click_select(&mut self, path: PathBuf, gesture: SelectGesture) {
+        match gesture {
+            SelectGesture::Single => self.select(Some(path)),
+            SelectGesture::Toggle => {
+                if let Some(ix) = self.selection.iter().position(|p| p == &path) {
+                    self.selection.remove(ix);
+                } else {
+                    self.selection.push(path.clone());
+                }
+                self.anchor = Some(path);
+            }
+            SelectGesture::Range => {
+                let rows = self.rows();
+                let anchor_ix = self
+                    .anchor
+                    .as_ref()
+                    .and_then(|anchor| rows.iter().position(|row| &row.path == anchor));
+                let target_ix = rows.iter().position(|row| row.path == path);
+                match (anchor_ix, target_ix) {
+                    (Some(a), Some(b)) => {
+                        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                        // Keep what was selected outside the range, add the
+                        // range in visible order; the anchor stays put so a
+                        // second Shift-click re-extends from the same place.
+                        let range: Vec<PathBuf> = rows[lo..=hi]
+                            .iter()
+                            .filter(|row| matches!(row.kind, RowKind::Entry { .. }))
+                            .map(|row| row.path.clone())
+                            .collect();
+                        self.selection.retain(|p| !range.contains(p));
+                        self.selection.extend(range);
+                        // The clicked end is primary.
+                        if let Some(ix) = self.selection.iter().position(|p| p == &path) {
+                            let clicked = self.selection.remove(ix);
+                            self.selection.push(clicked);
+                        }
+                    }
+                    _ => self.select(Some(path)),
+                }
+            }
+        }
     }
 
     /// Expand a directory (listing it on first sight) or collapse it.
@@ -192,7 +266,7 @@ impl FileTree {
                 self.expand(&dir);
             }
         }
-        self.selected = Some(path.to_path_buf());
+        self.select(Some(path.to_path_buf()));
     }
 
     /// Re-list any expanded directory whose mtime moved since it was read.
@@ -290,7 +364,7 @@ impl FileTree {
     /// The directory a "new entry" from the current selection lands in: the
     /// selected directory, the selected file's parent, or the root.
     pub fn target_dir(&self) -> PathBuf {
-        match &self.selected {
+        match self.selection.last() {
             Some(path) if path.is_dir() => path.clone(),
             Some(path) => path
                 .parent()
@@ -357,22 +431,90 @@ impl FileTree {
         }
     }
 
+    /// Delete several entries (the multi-selection). Each failure is
+    /// reported once at the end; what could be deleted is.
+    pub fn delete_many(&mut self, paths: &[PathBuf]) -> Vec<FileOp> {
+        let mut ops = Vec::new();
+        let mut failures = Vec::new();
+        // Skip anything inside another entry being deleted: it goes with
+        // its parent, and deleting it first would just fail the parent's
+        // listing refresh for nothing.
+        for path in paths {
+            if paths
+                .iter()
+                .any(|other| other != path && path.starts_with(other))
+            {
+                continue;
+            }
+            match delete_entry(path) {
+                Ok(()) => {
+                    let op = FileOp::Deleted(path.clone());
+                    self.after_change(&op);
+                    ops.push(op);
+                }
+                Err(message) => failures.push(message),
+            }
+        }
+        self.error = (!failures.is_empty()).then(|| failures.join(" "));
+        ops
+    }
+
+    /// Move entries into `dest` (drag-and-drop). An entry already in
+    /// `dest`, or a folder dropped into itself or one of its descendants,
+    /// is left alone; a name clash refuses that entry. Returns one
+    /// `Renamed` per entry that moved.
+    pub fn move_entries(&mut self, paths: &[PathBuf], dest: &Path) -> Vec<FileOp> {
+        let mut ops = Vec::new();
+        let mut failures = Vec::new();
+        for path in paths {
+            if path.parent() == Some(dest) || dest.starts_with(path) {
+                continue;
+            }
+            match move_entry(path, dest) {
+                Ok(to) => {
+                    let op = FileOp::Renamed {
+                        from: path.clone(),
+                        to,
+                    };
+                    self.after_change(&op);
+                    ops.push(op);
+                }
+                Err(message) => failures.push(message),
+            }
+        }
+        if !ops.is_empty() {
+            self.expand(dest);
+            // The moved entries are the selection now, in their new place.
+            self.selection = ops
+                .iter()
+                .filter_map(|op| match op {
+                    FileOp::Renamed { to, .. } => Some(to.clone()),
+                    _ => None,
+                })
+                .collect();
+            self.anchor = self.selection.last().cloned();
+        }
+        self.error = (!failures.is_empty()).then(|| failures.join(" "));
+        ops
+    }
+
     fn after_change(&mut self, op: &FileOp) {
         match op {
-            FileOp::Created(path) => self.selected = Some(path.clone()),
+            FileOp::Created(path) => self.select(Some(path.clone())),
             FileOp::Renamed { from, to } => {
                 // A renamed directory takes its expanded state with it.
                 if self.expanded.remove(from) {
                     self.expanded.insert(to.clone());
                 }
                 self.dirs.remove(from);
-                self.selected = Some(to.clone());
+                self.select(Some(to.clone()));
             }
             FileOp::Deleted(path) => {
                 self.expanded.retain(|dir| !dir.starts_with(path));
                 self.dirs.retain(|dir, _| !dir.starts_with(path));
-                if self.selected.as_ref().is_some_and(|s| s.starts_with(path)) {
-                    self.selected = None;
+                self.selection.retain(|s| !s.starts_with(path));
+                if self.anchor.as_ref().is_some_and(|a| a.starts_with(path)) {
+                    self.anchor = None;
                 }
             }
         }
@@ -429,6 +571,19 @@ fn dir_mtime(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).ok()?.modified().ok()
 }
 
+/// Where `path` is after `from` moved to `to`: `to` itself for `from`, the
+/// same relative tail under `to` for anything inside it, `None` otherwise.
+/// (`to.join("")` would leave a trailing separator, which is a different
+/// path to `std::fs`.)
+pub fn rebase_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(from).ok()?;
+    Some(if rest.as_os_str().is_empty() {
+        to.to_path_buf()
+    } else {
+        to.join(rest)
+    })
+}
+
 /// A single path component the user typed: not empty, not `.`/`..`, and
 /// not a path — the tree creates entries in one directory at a time.
 pub fn validate_name(name: &str) -> Result<&str, String> {
@@ -473,6 +628,25 @@ fn rename_entry(path: &Path, name: &str) -> Result<PathBuf, String> {
         return Err(format!("'{name}' already exists."));
     }
     std::fs::rename(path, &target).map_err(|e| format!("Could not rename: {e}"))?;
+    Ok(target)
+}
+
+fn move_entry(path: &Path, dest: &Path) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| "Cannot move the root.".to_string())?;
+    let target = dest.join(name);
+    if target.exists() {
+        return Err(format!(
+            "'{}' already exists in '{}'.",
+            name.to_string_lossy(),
+            dest.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| dest.display().to_string())
+        ));
+    }
+    std::fs::rename(path, &target)
+        .map_err(|e| format!("Could not move '{}': {e}", name.to_string_lossy()))?;
     Ok(target)
 }
 
@@ -758,6 +932,192 @@ mod tests {
         let mut tree = FileTree::new(tmp.path().to_path_buf());
         assert_eq!(tree.delete(&tmp.path().join("nope")), None);
         assert!(tree.error().unwrap().starts_with("Could not delete"));
+    }
+
+    #[test]
+    fn toggle_builds_a_set_and_the_last_one_is_primary() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut tree = FileTree::new(root.clone());
+        tree.click_select(root.join("Cargo.toml"), SelectGesture::Single);
+        tree.click_select(root.join("README.md"), SelectGesture::Toggle);
+        assert_eq!(
+            tree.selection(),
+            &[root.join("Cargo.toml"), root.join("README.md")]
+        );
+        assert_eq!(tree.selected(), Some(root.join("README.md").as_path()));
+        // Toggling again removes it.
+        tree.click_select(root.join("README.md"), SelectGesture::Toggle);
+        assert_eq!(tree.selection(), &[root.join("Cargo.toml")]);
+        // A plain click collapses the set to one.
+        tree.click_select(root.join(".env"), SelectGesture::Single);
+        assert_eq!(tree.selection(), &[root.join(".env")]);
+    }
+
+    #[test]
+    fn shift_selects_the_visible_range_from_the_anchor() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut tree = FileTree::new(root.clone());
+        tree.expand(&root.join("src"));
+        // Rows: docs, src, nested, main.rs, .env, Cargo.toml, README.md
+        tree.click_select(root.join("src"), SelectGesture::Single);
+        tree.click_select(root.join(".env"), SelectGesture::Range);
+        assert_eq!(
+            tree.selection(),
+            &[
+                root.join("src"),
+                root.join("src/nested"),
+                root.join("src/main.rs"),
+                root.join(".env"),
+            ]
+        );
+        assert!(tree.is_selected(&root.join("src/main.rs")));
+        // Re-extending from the same anchor upwards replaces the range.
+        tree.click_select(root.join("docs"), SelectGesture::Range);
+        assert!(tree.is_selected(&root.join("docs")));
+        assert!(tree.is_selected(&root.join("src")));
+        assert!(
+            tree.is_selected(&root.join(".env")),
+            "earlier range is kept"
+        );
+    }
+
+    #[test]
+    fn shift_without_an_anchor_is_a_plain_click() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut tree = FileTree::new(root.clone());
+        tree.click_select(root.join("README.md"), SelectGesture::Range);
+        assert_eq!(tree.selection(), &[root.join("README.md")]);
+    }
+
+    #[test]
+    fn delete_many_skips_children_of_a_deleted_folder_and_reports_failures() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut tree = FileTree::new(root.clone());
+        let ops = tree.delete_many(&[
+            root.join("src/main.rs"),
+            root.join("src"),
+            root.join("Cargo.toml"),
+            root.join("missing"),
+        ]);
+        assert_eq!(
+            ops,
+            vec![
+                FileOp::Deleted(root.join("src")),
+                FileOp::Deleted(root.join("Cargo.toml")),
+            ]
+        );
+        assert!(!root.join("src").exists());
+        assert!(!root.join("Cargo.toml").exists());
+        assert!(tree.error().unwrap().contains("Could not delete"));
+        assert!(tree.selection().is_empty());
+    }
+
+    #[test]
+    fn move_entries_moves_into_the_folder_and_selects_them_there() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut tree = FileTree::new(root.clone());
+        let ops = tree.move_entries(
+            &[root.join("Cargo.toml"), root.join("README.md")],
+            &root.join("docs"),
+        );
+        assert_eq!(
+            ops,
+            vec![
+                FileOp::Renamed {
+                    from: root.join("Cargo.toml"),
+                    to: root.join("docs/Cargo.toml"),
+                },
+                FileOp::Renamed {
+                    from: root.join("README.md"),
+                    to: root.join("docs/README.md"),
+                },
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("docs/README.md")).unwrap(),
+            "# hi\n"
+        );
+        assert!(!root.join("README.md").exists());
+        assert!(tree.is_expanded(&root.join("docs")));
+        assert_eq!(
+            tree.selection(),
+            &[root.join("docs/Cargo.toml"), root.join("docs/README.md")]
+        );
+        assert!(tree.error().is_none());
+    }
+
+    #[test]
+    fn move_entries_refuses_a_folder_into_itself_and_a_name_clash() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        fs::write(root.join("docs/README.md"), "other").unwrap();
+        let mut tree = FileTree::new(root.clone());
+        // Into itself / a descendant: silently left alone.
+        assert!(
+            tree.move_entries(&[root.join("src")], &root.join("src/nested"))
+                .is_empty()
+        );
+        assert!(root.join("src/nested/deep.rs").exists());
+        // Already there: left alone, no error.
+        assert!(
+            tree.move_entries(&[root.join("Cargo.toml")], &root)
+                .is_empty()
+        );
+        assert!(tree.error().is_none());
+        // Name clash: refused with a reason, the file stays.
+        assert!(
+            tree.move_entries(&[root.join("README.md")], &root.join("docs"))
+                .is_empty()
+        );
+        assert!(tree.error().unwrap().contains("already exists"));
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).unwrap(),
+            "# hi\n"
+        );
+    }
+
+    #[test]
+    fn moving_an_expanded_folder_keeps_it_expanded_at_its_new_place() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut tree = FileTree::new(root.clone());
+        tree.expand(&root.join("src"));
+        tree.move_entries(&[root.join("src")], &root.join("docs"));
+        assert!(tree.is_expanded(&root.join("docs/src")));
+        assert!(
+            tree.rows()
+                .iter()
+                .any(|row| row.path == root.join("docs/src/main.rs"))
+        );
+    }
+
+    #[test]
+    fn rebase_path_maps_the_entry_itself_and_its_descendants_only() {
+        let from = Path::new("/ws/docs");
+        let to = Path::new("/ws/notes");
+        assert_eq!(
+            rebase_path(Path::new("/ws/docs"), from, to),
+            Some(PathBuf::from("/ws/notes"))
+        );
+        assert_eq!(
+            rebase_path(Path::new("/ws/docs/a/b.md"), from, to),
+            Some(PathBuf::from("/ws/notes/a/b.md"))
+        );
+        assert_eq!(rebase_path(Path::new("/ws/docs2/x"), from, to), None);
+        assert_eq!(rebase_path(Path::new("/ws/README.md"), from, to), None);
+        // A renamed file: exactly `to`, no trailing separator.
+        let got = rebase_path(
+            Path::new("/ws/a.txt"),
+            Path::new("/ws/a.txt"),
+            Path::new("/ws/b.txt"),
+        )
+        .unwrap();
+        assert_eq!(got.as_os_str(), "/ws/b.txt");
     }
 
     #[test]
