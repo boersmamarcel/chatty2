@@ -93,8 +93,9 @@ impl Render for ChattyApp {
                         // open, its header occupies this same corner (maximize,
                         // close) and the button would sit on top of those. The
                         // caret opens a small picker for manually starting an
-                        // artifact — "Browser" for now — so the panel is reachable
-                        // even when the agent never opened one.
+                        // artifact — the file explorer (AGE-476) or a browser —
+                        // so the panel is reachable even when the agent never
+                        // opened one.
                         this.child(
                             div().absolute().top(px(8.)).right(px(8.)).child(
                                 DropdownButton::new("toggle-artifact-floating")
@@ -118,14 +119,24 @@ impl Render for ChattyApp {
                                     .dropdown_menu({
                                         let chat_view = chat_view.clone();
                                         move |menu, _window, _cx| {
-                                            menu.item(PopupMenuItem::new("Browser").on_click({
+                                            menu.item(PopupMenuItem::new("Files").on_click({
                                                 let chat_view = chat_view.clone();
                                                 move |_event, _window, cx| {
                                                     chat_view.update(cx, |view, cx| {
-                                                        view.open_manual_browser(cx);
+                                                        view.open_file_explorer(cx);
                                                     });
                                                 }
                                             }))
+                                            .item(
+                                                PopupMenuItem::new("Browser").on_click({
+                                                    let chat_view = chat_view.clone();
+                                                    move |_event, _window, cx| {
+                                                        chat_view.update(cx, |view, cx| {
+                                                            view.open_manual_browser(cx);
+                                                        });
+                                                    }
+                                                }),
+                                            )
                                         }
                                     }),
                             ),
