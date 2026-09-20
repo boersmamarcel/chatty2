@@ -209,7 +209,7 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
     }
     if allows("write_todos") {
         tool_sections.push(
-            "- **write_todos / update_todo / verify_completion** (required lifecycle for multi-step tasks: plan once, mark one todo in progress before work, mark it done/blocked after, then verify evidence before the final reply)"
+            "- **write_todos / update_todo / verify_completion** (see the write_todos description for when to use them)"
                 .to_string(),
         );
     }
@@ -439,12 +439,6 @@ an extra tool call is always higher than the cost of a direct answer.\n\
 \n\
 **Failure budget**: After 3 failed or unhelpful tool calls on the same sub-problem, stop trying \
 that approach. Switch strategy or make a best-guess decision. Infinite retries never converge.\n\
-\n\
-**Multi-step todo protocol**: For multi-step tasks, call `write_todos` once before doing work. \
-Then handle one todo at a time: call `update_todo` with `status=\"in_progress\"`, do that todo's \
-work, and call `update_todo` with `status=\"done\"` or `status=\"blocked\"` before moving on. \
-When blocking a todo, include both `blocked_reason` and `reflection`, then retry with a different \
-approach. Call `verify_completion` with concrete evidence before writing your final reply.\n\
 \n\
 **Code iteration limit**: After 3 rounds of code that give contradictory, confusing, or oscillating \
 output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \
@@ -1090,6 +1084,40 @@ mod tests {
         );
         assert!(!args().contains("## Your Role"));
         assert_eq!(args(), with_blank);
+    }
+
+    /// AGE-479: the prompt no longer instructs a todo protocol. The tool
+    /// summary points at the `write_todos` description once, and a worker
+    /// profile without the tools gets no pointer at all.
+    #[test]
+    fn the_todo_tools_get_one_pointer_and_no_protocol() {
+        let build = |profile| {
+            build_preamble(
+                "Base prompt.",
+                &ProviderType::Ollama,
+                &ToolAvailability::default(),
+                &None,
+                &McpTools::none(),
+                &[],
+                &[],
+                &AgentRole {
+                    preamble: None,
+                    profile,
+                },
+            )
+        };
+
+        let main_agent = build(None);
+        assert_eq!(main_agent.matches("write_todos").count(), 2);
+        assert!(main_agent.contains(
+            "- **write_todos / update_todo / verify_completion** (see the write_todos description for when to use them)"
+        ));
+        assert!(!main_agent.contains("todo protocol"));
+        assert!(!main_agent.contains("For multi-step tasks, call"));
+
+        let coder = build(super::super::tool_profile::tool_profile("coder"));
+        assert!(!coder.contains("write_todos"), "{coder}");
+        assert!(!coder.contains("verify_completion"), "{coder}");
     }
 
     /// A profile that keeps only part of a tool family leaves the family's

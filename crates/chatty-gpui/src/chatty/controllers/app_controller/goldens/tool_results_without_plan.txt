@@ -6,4 +6,4 @@ ToolCallResult(id="call-2", "3 matches")
 TextChunk("Still investigating.")
 StreamEnded(status=Completed, usage=None)
 => loop returned Ok
-=> follow-up queued: write_todos
+=> no follow-up

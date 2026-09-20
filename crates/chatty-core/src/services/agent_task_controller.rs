@@ -93,7 +93,6 @@ struct AgentTaskState {
     verification_reason: Option<String>,
     evidence: Vec<String>,
     blocked_counts: HashMap<String, usize>,
-    non_todo_tool_results_without_plan: usize,
     follow_up_count: usize,
     verification_skipped: bool,
 }
@@ -165,7 +164,6 @@ impl AgentTaskController {
         state.verification_reason = None;
         state.evidence.clear();
         state.blocked_counts.clear();
-        state.non_todo_tool_results_without_plan = 0;
         state.verification_skipped = false;
 
         Ok(response(
@@ -304,40 +302,12 @@ impl AgentTaskController {
         snapshot(&self.state.lock())
     }
 
-    pub fn observe_tool_result(&self, tool_name: &str) -> Option<String> {
-        if matches!(
-            tool_name,
-            "write_todos" | "update_todo" | "verify_completion"
-        ) {
-            return None;
-        }
-
-        let mut state = self.state.lock();
-        if state.write_todos_called {
-            return None;
-        }
-
-        state.non_todo_tool_results_without_plan += 1;
-        if state.non_todo_tool_results_without_plan >= 2
-            && state.follow_up_count < MAX_PROTOCOL_FOLLOW_UPS
-        {
-            state.follow_up_count += 1;
-            tracing::warn!(
-                tool_name = %tool_name,
-                tool_results = state.non_todo_tool_results_without_plan,
-                "Agent todo protocol violation: multiple non-todo tool results before write_todos"
-            );
-            Some(
-                "This has become a multi-step task. Call write_todos now with a concrete ordered plan before continuing with more work."
-                    .to_string(),
-            )
-        } else {
-            None
-        }
-    }
-
     /// The nudge to inject after a stream ends, or `None` when the agent is
     /// done or the follow-up budget is spent.
+    ///
+    /// A turn that never wrote a plan gets nothing: whether a task needs one
+    /// is the model's call, made from the `write_todos` description
+    /// (AGE-479). The protocol only steers a plan that exists.
     ///
     /// The in-progress check comes first on purpose: an in-progress todo makes
     /// `verify_completion` fail with `TodosNotDone`, so asking for verification
@@ -382,8 +352,7 @@ impl AgentTaskController {
 /// LLM but must not appear as a user/system bubble in the transcript.
 pub fn is_protocol_follow_up_text(text: &str) -> bool {
     let t = text.trim();
-    t.starts_with("This has become a multi-step task. Call write_todos")
-        || t.starts_with("Before writing the final reply, call verify_completion")
+    t.starts_with("Before writing the final reply, call verify_completion")
         || t.starts_with("A todo is still in progress. Call update_todo")
         || t.starts_with("LOOP DETECTED:")
         || t.starts_with("DEADLINE:")
@@ -539,22 +508,22 @@ mod tests {
         assert_eq!(response.snapshot.todos[0].status, AgentTodoStatus::Pending);
     }
 
+    /// No plan, no protocol: a turn that only ever called ordinary tools is
+    /// never asked to write todos, verify, or anything else (AGE-479).
     #[test]
-    fn observe_tool_result_prompts_after_repeated_work_without_plan() {
+    fn no_follow_up_without_a_plan() {
         let controller = controller();
 
-        assert!(controller.observe_tool_result("read_file").is_none());
-        let prompt = controller.observe_tool_result("search_code");
-
-        assert!(prompt.is_some());
-        assert!(prompt.unwrap().contains("write_todos"));
+        assert!(controller.stream_end_follow_up().is_none());
+        assert!(controller.stream_end_follow_up().is_none());
+        assert!(!controller.snapshot().verification_skipped);
     }
 
     #[test]
     fn protocol_follow_up_text_is_recognized() {
         let controller = controller();
-        let _ = controller.observe_tool_result("read_file");
-        let prompt = controller.observe_tool_result("search_code").unwrap();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        let prompt = controller.stream_end_follow_up().unwrap();
         assert!(is_protocol_follow_up_text(&prompt));
         assert!(is_protocol_follow_up_text(
             "LOOP DETECTED: You just called `read_file` with the same arguments twice"
@@ -604,20 +573,6 @@ mod tests {
 
         assert!(controller.stream_end_follow_up().is_none());
         assert!(controller.snapshot().verification_skipped);
-    }
-
-    #[test]
-    fn observe_tool_result_shares_the_follow_up_budget() {
-        let controller = controller();
-
-        // The first tool result only primes the counter; every later one nudges
-        // until the shared follow-up budget runs out.
-        assert!(controller.observe_tool_result("read_file").is_none());
-        for _ in 0..MAX_PROTOCOL_FOLLOW_UPS {
-            assert!(controller.observe_tool_result("read_file").is_some());
-        }
-
-        assert!(controller.observe_tool_result("read_file").is_none());
     }
 
     #[test]

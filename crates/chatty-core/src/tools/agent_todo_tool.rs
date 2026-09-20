@@ -35,7 +35,11 @@ impl Tool for WriteTodosTool {
     type Output = AgentTaskResponse;
 
     fn description(&self) -> String {
-        "Create the single ordered todo plan for a multi-step task before doing any work. Call this once per agent invocation with a goal and up to 12 concrete todos.".to_string()
+        "Write the ordered todo plan for a task that needs 3 or more distinct tool calls across several files or steps, before starting the work. \
+         Skip this tool when the task needs fewer than 3 distinct tool calls or can be answered in one response. \
+         Never call it for: reading or listing one file, a single edit or rename, or answering a question from information already in the conversation. \
+         At most one call per invocation, with a goal and up to 12 concrete todos; revise individual todos with update_todo."
+            .to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -123,7 +127,10 @@ impl Tool for UpdateTodoTool {
     type Output = AgentTaskResponse;
 
     fn description(&self) -> String {
-        "Update exactly one todo before and after working on it. Mark it in_progress before work, then done or blocked with reason and reflection.".to_string()
+        "Change the status of one todo in the plan written by write_todos. \
+         Mark a todo in_progress before working on it and done when finished; mark it blocked, with blocked_reason and reflection, when it cannot be completed, then retry it with a different approach. \
+         Only one todo may be in progress at a time. Nothing to do when no plan was written."
+            .to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -196,7 +203,9 @@ impl Tool for VerifyCompletionTool {
     type Output = AgentTaskResponse;
 
     fn description(&self) -> String {
-        "Verify every todo has real evidence before writing the final reply. If goal_achieved is false, completed todos are reopened so work can continue.".to_string()
+        "Check a plan written by write_todos against evidence before writing the final reply: one concrete evidence line per todo. \
+         If goal_achieved is false, done todos are reopened so work continues. Only for tasks with a plan; skip it otherwise."
+            .to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -244,5 +253,38 @@ impl Tool for VerifyCompletionTool {
                 args.reflection,
             )
             .map_err(|error| ToolError::OperationFailed(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AGE-479: the description is the gate. It names the threshold and the
+    /// cases that must not get a plan, so a model that follows descriptions
+    /// loosely still sees them next to the tool itself.
+    #[test]
+    fn write_todos_description_names_the_negative_cases() {
+        let description = WriteTodosTool::new(AgentTaskController::new()).description();
+        assert!(description.contains("fewer than 3 distinct tool calls"));
+        assert!(description.contains("answered in one response"));
+        assert!(description.contains("reading or listing one file"));
+        assert!(description.contains("a single edit or rename"));
+        assert!(description.contains("information already in the conversation"));
+    }
+
+    /// The lifecycle rules live in the descriptions now, not in the preamble:
+    /// nothing in them implies a plan is mandatory.
+    #[test]
+    fn lifecycle_rules_live_in_the_descriptions() {
+        let controller = AgentTaskController::new();
+        let update = UpdateTodoTool::new(controller.clone()).description();
+        assert!(update.contains("in_progress before working on it"));
+        assert!(update.contains("blocked_reason and reflection"));
+        assert!(update.contains("Nothing to do when no plan was written"));
+
+        let verify = VerifyCompletionTool::new(controller).description();
+        assert!(verify.contains("before writing the final reply"));
+        assert!(verify.contains("skip it otherwise"));
     }
 }

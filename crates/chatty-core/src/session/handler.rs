@@ -19,9 +19,8 @@ use anyhow::Result;
 use crate::models::token_usage::{ApiCallUsage, TokenUsage};
 use crate::services::llm_service::StreamChunk;
 use crate::services::{
-    AgentLoopGuard, AgentTaskController, ChunkAction, FollowUpReason, RecoveryAction,
-    StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
-    follow_up_requires_cancel,
+    AgentLoopGuard, AgentTaskController, ChunkAction, RecoveryAction, StreamChunkHandler,
+    StreamError, StreamErrorKind, StreamSurface, decide_recovery,
 };
 use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
@@ -171,44 +170,21 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
         self.emit
     }
 
-    /// Queue `prompt` unless one is already queued this turn (AGE-242 / D3:
-    /// the first follow-up wins, a later one is logged and dropped).
-    fn queue_follow_up(&mut self, prompt: String) {
-        if self.pending_follow_up.is_none() {
-            self.pending_follow_up = Some(prompt);
-        } else {
-            tracing::warn!(
-                dropped_prompt = %prompt,
-                "Dropping a later follow-up; an earlier one is already queued"
-            );
-        }
-    }
-
-    /// The protocol's reaction to a finished tool call, success or error.
+    /// The loop guard's reaction to a finished tool call, success or error.
     ///
-    /// The todo nudge never cancels the in-flight turn (shared policy,
-    /// AGE-151): it waits for the turn to end naturally. A loop-guard pivot
-    /// does cancel, since letting the turn run on is the thing it prevents.
+    /// A loop-guard pivot cancels the in-flight turn: it fires precisely
+    /// because the agent is going in circles, so letting the turn run on is
+    /// the thing being prevented. (The todo protocol never cancels; its only
+    /// follow-up is queued once the stream ends, AGE-151.)
     fn on_tool_completed(&mut self, id: &str) {
         let tool_name = self.pending_tool_names.remove(id).unwrap_or_default();
         let tool_args = self.pending_tool_args.remove(id).unwrap_or_default();
 
-        if let Some(prompt) = self.task_controller.observe_tool_result(&tool_name) {
-            tracing::debug!(
-                "Agent todo protocol: multiple tool results observed before write_todos"
-            );
-            if follow_up_requires_cancel(FollowUpReason::TodoProtocol) {
-                self.cancel_flag.store(true, Ordering::Relaxed);
-            }
-            self.queue_follow_up(prompt);
-        }
         if let Some(guard) = self.loop_guard.as_mut()
             && let Some(pivot) = guard.on_tool_completed(&tool_name, &tool_args)
         {
             tracing::debug!(pivot = %pivot, "AgentLoopGuard loop detected; cancelling the turn");
-            if follow_up_requires_cancel(FollowUpReason::LoopGuard) {
-                self.cancel_flag.store(true, Ordering::Relaxed);
-            }
+            self.cancel_flag.store(true, Ordering::Relaxed);
             self.pending_follow_up = Some(pivot);
         }
     }
