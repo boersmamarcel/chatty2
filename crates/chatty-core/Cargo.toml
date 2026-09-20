@@ -64,14 +64,14 @@ umya-spreadsheet = { workspace = true, optional = true }
 docx-rs = { workspace = true, optional = true }
 
 # PPTX (optional — enable with "pptx" feature)
-zip = { workspace = true, optional = true }
-roxmltree = { workspace = true, optional = true }
+rpptx = { workspace = true, optional = true }
 pptx_writer = { workspace = true, optional = true }
 
 # DuckDB (optional — enable with "duckdb" feature)
 duckdb = { workspace = true, optional = true }
 
 # Browser control (optional — enable with "browser" feature)
+zip = { workspace = true, optional = true }
 chromiumoxide = { workspace = true, optional = true }
 which = { workspace = true, optional = true }
 
@@ -132,7 +132,9 @@ gpui-globals = ["dep:gpui"]
 excel = ["dep:calamine", "dep:rust_xlsxwriter", "dep:umya-spreadsheet"]
 docx = ["dep:docx-rs"]
 pdf = ["dep:pdfium-render", "dep:image"]
-pptx = ["dep:zip", "dep:roxmltree", "dep:pptx_writer"]
+# Slide rasterisation renders the deck to a PDF and pages it with pdfium,
+# so "pptx" pulls in "pdf" rather than silently degrading without it.
+pptx = ["dep:rpptx", "dep:pptx_writer", "pdf"]
 math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:typst-layout", "dep:mitex", "dep:typst-assets", "dep:comemo"]
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]

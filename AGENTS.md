@@ -273,6 +273,14 @@ examples.
    need before loading sibling files. The largest single files are
    `message_ops.rs` (~1260 lines) and `main.rs` (~1225 lines).
 
+9. **`rpptx` is pinned to a fork.** The root `Cargo.toml` patches `rpptx`,
+   `oxml-layout` and `oxml-pdf` to `boersmamarcel/rdocx` via
+   `[patch.crates-io]` (AGE-343/AGE-474) — the published `rpptx = "0.12.1"`
+   doesn't compile alongside `usvg` and mishandles real decks. `cargo
+   update` will not move it off the fork; don't "fix" the patch block
+   without checking whether upstream has actually shipped a release with
+   those fixes. See CLAUDE.md.
+
 ## Deeper reading
 
 | Topic | File |
