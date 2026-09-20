@@ -10,6 +10,10 @@
 - **Add attachments** attaches images and PDFs. The buttons only appear for models that accept them.
 - The folder icon sets a per-chat working directory: [Agents & tools](./agents-and-tools.md).
 
+## Sending while a reply streams
+
+**Send** (or **Enter**) doesn't wait for the current reply to finish — a message sent mid-stream is queued and appears as its own bubble below the reply in progress, with **×** in front to take it back and **↑** to send it now instead, which cancels the current reply and runs that message next. Up to 5 messages can queue at once; a sixth is refused with a notice under the queue. **Stop** cancels the reply but leaves anything queued in place — nothing runs until you send again, and that send runs the queued messages first, in order.
+
 ## Rich rendering
 
 Responses render as Markdown with:
