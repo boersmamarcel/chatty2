@@ -39,6 +39,7 @@
 mod event;
 mod handler;
 mod hosted;
+pub mod mailbox;
 mod move_conversation;
 /// Dispatching a turn to wherever its conversation runs (AGE-298).
 pub mod transport;
@@ -83,6 +84,7 @@ pub use handler::{
     is_agent_todo_tool,
 };
 pub use hosted::HostedSession;
+pub use mailbox::{Arrival, Decision, Mailbox, Queued, QueuedId, Refusal, TurnEnd};
 pub use move_conversation::{
     BRING_BACK_SUMMARY, HOSTED_DISABLED, MoveSummary, RemoteConversation, TAKE_ONLINE_SUMMARY,
     fetch_hosted, refuse_reason, take_online,

@@ -568,9 +568,15 @@ fn handle_key_event(
                 // Commands see the paste expanded, so a pasted argument still
                 // reaches the command that was asked for it.
                 let text = engine.expand_pastes(&input_state.peek_input());
-                // /quit and /exit work even while streaming
-                if let Some(Command::Quit) = engine.try_handle_command(&text) {
-                    return KeyAction::Quit;
+                // /quit and /exit work even while streaming, and so do the
+                // two commands that address the running turn (AGE-482).
+                match engine.try_handle_command(&text) {
+                    Some(Command::Quit) => return KeyAction::Quit,
+                    Some(cmd @ (Command::Now(_) | Command::Unqueue)) => {
+                        input_state.take_input();
+                        return map_command_to_action(cmd, engine).unwrap_or(KeyAction::None);
+                    }
+                    _ => {}
                 }
                 if !engine.is_streaming {
                     // Check for slash commands
@@ -580,6 +586,12 @@ fn handle_key_event(
                             return action;
                         }
                     }
+                    let text = input_state.take_input();
+                    engine.send_message(text);
+                } else if engine.try_handle_command(&text).is_none() {
+                    // A message typed mid-turn waits in the mailbox and runs
+                    // once the turn ends (AGE-482). Other slash commands
+                    // stay in the input until then, as before.
                     let text = input_state.take_input();
                     engine.send_message(text);
                 }
@@ -686,6 +698,18 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         }
         Command::Paste(arg) => {
             show_paste(engine, arg.as_deref());
+            None
+        }
+        Command::Now(Some(message)) => {
+            engine.interrupt(message);
+            None
+        }
+        Command::Now(None) => {
+            engine.add_system_message("Usage: /now <message>".to_string());
+            None
+        }
+        Command::Unqueue => {
+            engine.unqueue();
             None
         }
         Command::Quit => Some(KeyAction::Quit),
