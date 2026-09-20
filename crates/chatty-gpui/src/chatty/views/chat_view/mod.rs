@@ -1312,7 +1312,7 @@ impl ChatView {
         let Some((path, source)) = self.last_pdf_artifact(cx) else {
             return;
         };
-        self.show_artifact(path, source, None, cx);
+        self.show_artifact(path, source, None, false, cx);
     }
 
     fn last_chart_spec(
@@ -1447,7 +1447,7 @@ impl ChatView {
             return;
         }
         self.last_auto_opened_chart_id = Some(tool_id.to_string());
-        self.show_artifact(path, String::new(), None, cx);
+        self.show_artifact(path, String::new(), None, false, cx);
     }
 
     fn show_chart(
@@ -1517,19 +1517,38 @@ impl ChatView {
         self.show_table(preview, cx);
     }
 
+    /// Open a tool-produced document artifact (PDF, chart, table, …).
+    ///
+    /// `user_initiated` is true only for an explicit click on the artifact
+    /// card / "Open in split" (`on_open` below) — never for the two
+    /// auto-open paths (`maybe_open_pdf_artifact`,
+    /// `try_auto_open_image_artifact`), which must keep leaving an
+    /// already-`Full` panel alone when the same artifact reappears on its
+    /// own. Only a user-initiated reopen of the artifact already shown
+    /// `Full` docks the panel, so "Open in split" is never a no-op (AGE-487).
     fn show_artifact(
         &mut self,
         path: PathBuf,
         source: String,
         old: Option<String>,
+        user_initiated: bool,
         cx: &mut Context<Self>,
     ) {
         self.ensure_artifact_close_wired(cx);
         self.artifact_dismissed = false;
-        let workspace = cx
+        // The workspace a tool actually wrote into is the per-conversation
+        // working-dir override (set via the folder picker / `/dir`), not the
+        // single app-wide execution-settings workspace — that setting can be
+        // unset, or point at a different conversation's directory, while the
+        // artifact's path is still relative to where the tool call ran
+        // (AGE-487). Falls back to the global setting the same way
+        // `render.rs`'s `effective_working_dir` and `sync_pr_status` do.
+        let per_chat_working_dir = self.chat_input_state.read(cx).working_dir().cloned();
+        let global_workspace_dir = cx
             .try_global::<ExecutionSettingsModel>()
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
+        let workspace = effective_artifact_workspace(per_chat_working_dir, global_workspace_dir);
         let resolved = super::transcript::resolve_artifact_path(&path, workspace.as_deref());
         // `resolve_artifact_path` hands back the original path when it finds
         // the file nowhere, and the PDF viewer then asks pdfium to open it
@@ -1552,15 +1571,17 @@ impl ChatView {
                 from_disk
             }
         };
+        let workspace_root = workspace.map(|w| w.to_string_lossy().into_owned());
         self.artifact_view.update(cx, |view, cx| {
-            view.open(
-                resolved,
-                source,
-                old,
-                cx.try_global::<ExecutionSettingsModel>()
-                    .and_then(|s| s.workspace_dir.clone()),
-                cx,
+            let reopening_full = should_dock_on_reopen(
+                user_initiated,
+                view.mode == ArtifactMode::Full,
+                view.path.as_ref() == Some(&resolved),
             );
+            view.open(resolved, source, old, workspace_root, cx);
+            if reopening_full {
+                view.set_mode(ArtifactMode::Docked, cx);
+            }
         });
         cx.notify();
     }
@@ -2322,7 +2343,7 @@ impl ChatView {
             let entity = entity.clone();
             Rc::new(move |open: ArtifactOpen, cx| {
                 entity.update(cx, |view, cx| {
-                    view.show_artifact(open.path, open.source, open.old, cx);
+                    view.show_artifact(open.path, open.source, open.old, true, cx);
                 });
             })
         };
@@ -2825,6 +2846,271 @@ impl Render for ChatView {
         } else {
             root.child(column).into_any_element()
         }
+    }
+}
+
+/// The workspace directory a tool-produced artifact's relative path
+/// resolves against: the conversation's own working-dir override wins,
+/// falling back to the single app-wide execution-settings workspace only
+/// when no per-conversation override is set (AGE-487). The app-wide setting
+/// is not tied to the conversation whose tool call actually wrote the file,
+/// so preferring it unconditionally silently resolves against the wrong
+/// directory — or, when unset, against none at all.
+fn effective_artifact_workspace(
+    per_chat_working_dir: Option<PathBuf>,
+    global_workspace_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    per_chat_working_dir.or(global_workspace_dir)
+}
+
+/// Whether reopening an artifact should dock a full-window panel back down.
+///
+/// Only a user-initiated reopen (an explicit click on the artifact card or
+/// "Open in split") of the exact document already on screen does this — an
+/// automatic reopen (the auto-open-on-stream-update paths) must leave a
+/// full-window panel alone, or a stream update would silently drop the user
+/// out of full-window mode. Without this, an explicit "Open in split" click
+/// on an artifact already shown `Full` was a no-op (AGE-487): `open()`'s own
+/// `presentation_on_open` leaves `Full` alone when the path being opened is
+/// already on screen, since most callers of `open()` restore whatever mode
+/// they had before the call, but this call site does not.
+fn should_dock_on_reopen(user_initiated: bool, currently_full: bool, same_path: bool) -> bool {
+    user_initiated && currently_full && same_path
+}
+
+#[cfg(test)]
+mod artifact_reopen_tests {
+    use super::{effective_artifact_workspace, should_dock_on_reopen};
+    use std::path::PathBuf;
+
+    #[test]
+    fn per_chat_working_dir_wins_over_global() {
+        let per_chat = Some(PathBuf::from("/conversation/workdir"));
+        let global = Some(PathBuf::from("/global/workspace"));
+        assert_eq!(
+            effective_artifact_workspace(per_chat.clone(), global.clone()),
+            per_chat
+        );
+    }
+
+    #[test]
+    fn falls_back_to_global_when_no_per_chat_override() {
+        let global = Some(PathBuf::from("/global/workspace"));
+        assert_eq!(effective_artifact_workspace(None, global.clone()), global);
+    }
+
+    #[test]
+    fn none_when_neither_is_set() {
+        assert_eq!(effective_artifact_workspace(None, None), None);
+    }
+
+    #[test]
+    fn explicit_reopen_of_the_same_full_document_docks() {
+        assert!(should_dock_on_reopen(true, true, true));
+    }
+
+    #[test]
+    fn auto_open_never_docks_a_full_panel() {
+        assert!(!should_dock_on_reopen(false, true, true));
+    }
+
+    #[test]
+    fn reopen_of_a_different_document_does_not_need_the_override() {
+        // `presentation_on_open` already docks a different path; this
+        // override only needs to fire for the same-path no-op case.
+        assert!(!should_dock_on_reopen(true, true, false));
+    }
+
+    #[test]
+    fn reopen_while_not_full_does_nothing() {
+        assert!(!should_dock_on_reopen(true, false, true));
+    }
+}
+
+/// Resolving a tool-produced artifact's relative path against the
+/// conversation's own working directory, not the (possibly unset, possibly
+/// stale) app-wide execution-settings workspace (AGE-487).
+#[cfg(test)]
+mod artifact_workspace_resolution_tests {
+    use super::effective_artifact_workspace;
+    use crate::chatty::views::transcript::resolve_artifact_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn relative_tool_path_resolves_against_the_conversations_working_dir_with_no_global_workspace()
+    {
+        let dir = std::env::temp_dir().join("age487_conversation_workdir");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("THESIS_TOPICS.pdf");
+        std::fs::write(&file, b"%PDF-fake").expect("write fixture file");
+
+        // No global `ExecutionSettingsModel.workspace_dir` — only the
+        // conversation's own working-dir override is available.
+        let workspace = effective_artifact_workspace(Some(dir.clone()), None);
+        let resolved =
+            resolve_artifact_path(&PathBuf::from("THESIS_TOPICS.pdf"), workspace.as_deref());
+
+        assert_eq!(resolved, file);
+        assert!(resolved.exists(), "the resolved path must be on disk");
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+}
+
+/// `show_artifact` itself, not just the two pure helpers above. The helper
+/// tests prove `effective_artifact_workspace`/`should_dock_on_reopen`'s own
+/// truth tables, but nothing before this module proved `show_artifact`
+/// actually *calls* them the right way — both bugs could come back at the
+/// call site and every test above would still pass.
+///
+/// The harness is `message_ops_internals.rs`'s `sink_harness` trimmed of its
+/// `AgentSession`/`Conversation` setup: `show_artifact` never touches
+/// `ConversationsStore`, only `self.chat_input_state` and the
+/// `ExecutionSettingsModel` global, so no session needs to be loaded.
+#[cfg(test)]
+mod show_artifact_integration_tests {
+    // Named imports, not a glob: `use gpui::*` in the parent shadows the
+    // built-in `#[test]` with `gpui::test`, and the attribute then expands
+    // into itself (see `fingerprint_tests` below).
+    use super::{ArtifactMode, ChatView, ExecutionSettingsModel};
+    use gpui::{AppContext as _, Entity};
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    /// Every global `ChatView`'s first frame hard-reads (CLAUDE.md "Desktop
+    /// boot order"), plus a real window — everything `sink_harness` sets up
+    /// except the `AgentSession`/loaded-conversation part, which
+    /// `show_artifact` has no path through.
+    fn chat_view_harness(cx: &mut gpui::TestAppContext) -> Entity<ChatView> {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::models::general_model::GeneralSettingsModel::default());
+            cx.set_global(ExecutionSettingsModel::default());
+            cx.set_global(crate::settings::models::ExtensionsModel::default());
+            cx.set_global(chatty_core::models::ErrorStore::new(100));
+            cx.set_global(crate::auto_updater::AutoUpdater::new("0.0.0"));
+            cx.set_global(chatty_core::models::ConversationsStore::new());
+        });
+
+        let chat_view_slot: Rc<RefCell<Option<Entity<ChatView>>>> = Rc::default();
+        let slot_for_window = chat_view_slot.clone();
+        cx.add_window(move |window, cx| {
+            let view = cx.new(|cx| ChatView::new(window, cx));
+            *slot_for_window.borrow_mut() = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        chat_view_slot
+            .borrow_mut()
+            .take()
+            .expect("ChatView entity should have been captured while opening the window")
+    }
+
+    /// Fix 1: a tool-produced relative path resolves against the
+    /// conversation's own working-dir override even when
+    /// `ExecutionSettingsModel.workspace_dir` is unset. Reverting Fix 1 (go
+    /// back to reading only the global workspace) fails this: the panel
+    /// never resolves the path, so `artifact_view.path` stays `None`.
+    ///
+    /// Uses a `.md` fixture rather than the `.pdf` from the original bug
+    /// report: a PDF's `open()` branch spawns a `tokio::task::spawn_blocking`
+    /// pdfium render (`ArtifactView::start_pdf_load`), which needs a live
+    /// Tokio runtime this bare `#[gpui::test]` doesn't have. Path resolution
+    /// itself doesn't care about file type — the `.pdf` case is exercised
+    /// by `artifact_workspace_resolution_tests` above (pure function, no
+    /// GPUI/Tokio needed).
+    #[gpui::test]
+    fn show_artifact_resolves_against_the_conversations_working_dir(cx: &mut gpui::TestAppContext) {
+        let chat_view = chat_view_harness(cx);
+
+        let dir = std::env::temp_dir().join("age487_show_artifact_workdir");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("THESIS_TOPICS.md");
+        std::fs::write(&file, "# Thesis topics").expect("write fixture file");
+
+        cx.update(|cx| {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state.update(cx, |state, _cx| {
+                    state.set_working_dir_silent(Some(dir.clone()));
+                });
+                // `ExecutionSettingsModel.workspace_dir` stays at its `None`
+                // default (set by `chat_view_harness` above) — the bug was
+                // exactly this: nowhere else tells `show_artifact` where the
+                // tool actually wrote the file.
+                view.show_artifact(
+                    PathBuf::from("THESIS_TOPICS.md"),
+                    String::new(),
+                    None,
+                    true,
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            let resolved = chat_view.read(cx).artifact_view.read(cx).path.clone();
+            assert_eq!(
+                resolved,
+                Some(file.clone()),
+                "the relative tool path must resolve against the per-conversation \
+                 working dir, not the unset global workspace"
+            );
+        });
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Fix 2: an explicit reopen ("Open in split", or the card itself) of
+    /// the artifact already shown `Full` docks the panel instead of
+    /// no-opping. Reverting Fix 2 (drop the `user_initiated` override) fails
+    /// this: `ArtifactView::open`'s own `presentation_on_open` leaves `Full`
+    /// alone when the path being reopened is already on screen.
+    #[gpui::test]
+    fn user_initiated_reopen_of_a_full_artifact_docks(cx: &mut gpui::TestAppContext) {
+        let chat_view = chat_view_harness(cx);
+
+        let dir = std::env::temp_dir().join("age487_show_artifact_dock");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("report.md");
+        std::fs::write(&file, "# report").expect("write fixture file");
+
+        cx.update(|cx| {
+            chat_view.update(cx, |view, cx| {
+                view.chat_input_state.update(cx, |state, _cx| {
+                    state.set_working_dir_silent(Some(dir.clone()));
+                });
+                // First open (Closed -> Docked), then force Full the way
+                // the user's own "expand" control would.
+                view.show_artifact(PathBuf::from("report.md"), String::new(), None, true, cx);
+                view.artifact_view.update(cx, |artifact, cx| {
+                    artifact.set_mode(ArtifactMode::Full, cx);
+                });
+            });
+            assert_eq!(
+                chat_view.read(cx).artifact_view.read(cx).mode,
+                ArtifactMode::Full,
+                "setup: the panel should be Full before the reopen under test"
+            );
+
+            // The reopen under test: same path, explicit user click.
+            chat_view.update(cx, |view, cx| {
+                view.show_artifact(PathBuf::from("report.md"), String::new(), None, true, cx);
+            });
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                chat_view.read(cx).artifact_view.read(cx).mode,
+                ArtifactMode::Docked,
+                "an explicit reopen of the same artifact already shown Full must dock \
+                 the panel, or \"Open in split\" is a no-op"
+            );
+        });
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
 
