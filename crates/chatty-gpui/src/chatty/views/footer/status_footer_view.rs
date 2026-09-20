@@ -1,22 +1,33 @@
+use crate::assets::CustomIcon;
 use crate::auto_updater::{AutoUpdateStatus, AutoUpdater};
+use crate::chatty::views::SidebarView;
 use crate::chatty::views::footer::{
     AgentIndicatorView, AutoUpdateView, ErrorIndicatorView, FetchIndicatorView, McpIndicatorView,
     NetworkIndicatorView, TokenContextBarView, ToolsIndicatorView,
 };
+use crate::settings::models::general_model::SidebarMode;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
+use gpui_component::{
+    Icon, Selectable, Sizable,
+    button::{Button, ButtonVariants},
+};
 
 #[derive(IntoElement)]
-pub struct StatusFooterView;
+pub struct StatusFooterView {
+    sidebar: Entity<SidebarView>,
+}
 
 impl StatusFooterView {
-    pub fn new() -> Self {
-        Self
+    pub fn new(sidebar: Entity<SidebarView>) -> Self {
+        Self { sidebar }
     }
 }
 
 impl RenderOnce for StatusFooterView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let files_mode = self.sidebar.read(cx).is_files_mode();
+        let sidebar = self.sidebar.clone();
         div()
             .h(px(24.0))
             .w_full()
@@ -28,13 +39,45 @@ impl RenderOnce for StatusFooterView {
             .bg(cx.theme().background)
             .border_t_1()
             .border_color(cx.theme().border)
-            // Left side: errors/warnings + auto-updater
+            // Left side: Chats/Files toggle (AGE-480) + errors/warnings + auto-updater
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_1()
+                    .child(
+                        Button::new("sidebar-mode-chats")
+                            .ghost()
+                            .xsmall()
+                            .selected(!files_mode)
+                            .icon(Icon::new(CustomIcon::MessageSquare))
+                            .tooltip("Chats")
+                            .on_click({
+                                let sidebar = sidebar.clone();
+                                move |_event, _window, cx| {
+                                    sidebar.update(cx, |sidebar, cx| {
+                                        sidebar.set_mode(SidebarMode::Chats, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("sidebar-mode-files")
+                            .ghost()
+                            .xsmall()
+                            .selected(files_mode)
+                            .icon(Icon::new(CustomIcon::FolderTree))
+                            .tooltip("Files")
+                            .on_click({
+                                let sidebar = sidebar.clone();
+                                move |_event, _window, cx| {
+                                    sidebar.update(cx, |sidebar, cx| {
+                                        sidebar.set_mode(SidebarMode::Files, cx);
+                                    });
+                                }
+                            }),
+                    )
                     .child(ErrorIndicatorView::new().on_click(move |window, cx| {
                         // Open error log dialog as inline overlay
                         crate::chatty::views::ErrorLogDialog::open(window, cx);
