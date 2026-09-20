@@ -70,6 +70,13 @@ const PDF_RASTER_MAX_WIDTH: u32 = 2560;
 const PDF_RERASTER_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const DOCUMENT_MEASURE_PX: f32 = 680.0;
 const OUTLINE_WIDTH: f32 = 220.0;
+/// AGE-486: how wide one outline entry may draw. `tree()` renders into a
+/// `uniform_list` with `ListSizingBehavior::Auto`, so a row is as wide as its
+/// own content and as tall as the *first* row — `w_full` never constrains it,
+/// and a heading long enough to wrap paints its second line over the entry
+/// below. Pinning the label to the rail's usable width (minus the rail's own
+/// `p_1` and the `ListItem`'s `px_3`) keeps every entry on one ellipsized line.
+const OUTLINE_LABEL_WIDTH: f32 = OUTLINE_WIDTH - 2.0 * 4.0 - 2.0 * 12.0;
 
 /// Fixed CDP viewport the browser artifact screencasts at. Matches how the
 /// PDF/image previews already work in this file: fetch one canonical
@@ -3230,11 +3237,16 @@ impl Render for ArtifactView {
                                     .border_color(cx.theme().border)
                                     .p_1()
                                     .child(tree(&outline, |_ix, entry, _selected, _, cx| {
+                                        // AGE-486: one ellipsized line per entry, so a
+                                        // wrapped heading can't paint over the row below
+                                        // it (see `OUTLINE_LABEL_WIDTH`).
                                         ListItem::new(entry.item().id.clone()).child(
                                             div()
+                                                .w(px(OUTLINE_LABEL_WIDTH))
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .pl(px(8.) * entry.depth() as f32)
+                                                .truncate()
                                                 .child(entry.item().label.clone()),
                                         )
                                     })),
