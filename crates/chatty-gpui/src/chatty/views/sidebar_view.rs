@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Collapsible, Icon, IconName, Selectable, Sizable, WindowExt,
+    ActiveTheme, Collapsible, Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     h_flex,
     input::{InputEvent, InputState},
@@ -13,7 +13,6 @@ use gpui_component::{
 use super::conversation_item::ConversationItem;
 use super::sidebar_file_tree::render_sidebar_file_tree;
 use super::transcript::file_tree::{FileOp, FileTree, PendingEdit, SelectGesture};
-use crate::assets::CustomIcon;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::general_model::SidebarMode;
 
@@ -668,51 +667,16 @@ impl Render for SidebarView {
             })
             .when(!self.is_collapsed, |this| {
                 this.child(
-                    // Footer: mode toggle + Settings button
+                    // Footer: Settings button. The Chats | Files toggle
+                    // (AGE-480) lives in StatusFooterView instead, alongside
+                    // the warning/error indicators, rather than its own row
+                    // here — see app_view.rs.
                     h_flex()
                         .id("footer")
                         .pb_3()
                         .px_3()
                         .gap_2()
                         .when(self.is_collapsed, |this| this.pt_2().px_2())
-                        .child(
-                            // Chats | Files toggle (AGE-480): two icon buttons
-                            // so the whole control collapses with the sidebar.
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Button::new("sidebar-mode-chats")
-                                        .ghost()
-                                        .small()
-                                        .selected(!files_mode)
-                                        .icon(Icon::new(CustomIcon::MessageSquare))
-                                        .tooltip("Chats")
-                                        .on_click({
-                                            let entity = sidebar_entity.clone();
-                                            move |_event, _window, cx| {
-                                                entity.update(cx, |sidebar, cx| {
-                                                    sidebar.set_mode(SidebarMode::Chats, cx);
-                                                });
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    Button::new("sidebar-mode-files")
-                                        .ghost()
-                                        .small()
-                                        .selected(files_mode)
-                                        .icon(Icon::new(IconName::FolderClosed))
-                                        .tooltip("Files")
-                                        .on_click({
-                                            let entity = sidebar_entity.clone();
-                                            move |_event, _window, cx| {
-                                                entity.update(cx, |sidebar, cx| {
-                                                    sidebar.set_mode(SidebarMode::Files, cx);
-                                                });
-                                            }
-                                        }),
-                                ),
-                        )
                         .child(
                             Button::new("settings")
                                 .icon(Icon::new(IconName::Settings))

@@ -59,7 +59,7 @@ impl Render for ChattyApp {
             )
             .child(
                 // Footer bar
-                StatusFooterView::new(),
+                StatusFooterView::new(self.sidebar_view.clone()),
             )
             // Floating toggle button for macOS (rendered last = on top)
             .when(cfg!(target_os = "macos"), |this| {
