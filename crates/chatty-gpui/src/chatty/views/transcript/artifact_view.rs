@@ -447,15 +447,14 @@ impl ArtifactView {
     /// Open the live browser viewport (AGE-155): the browser is another
     /// artifact the agent produced, opened the same way as a diff or a
     /// generated file — just backed by a screencast instead of a path.
-    /// Open the live browser viewport (AGE-155): the browser is another
-    /// artifact the agent produced, opened the same way as a diff or a
-    /// generated file — just backed by a screencast instead of a path.
     ///
     /// Called for the first tool call (a fresh manager), and again to bring
     /// the browser back to the screen after a file was shown in front of it
     /// (AGE-473): the same manager, its session and tab list still alive,
     /// only the screencast having been paused. The latter case restarts the
-    /// stream on the cached session rather than launching anything.
+    /// stream on the cached session rather than launching anything — unless
+    /// the pause landed while the session was still being resolved, in which
+    /// case the resolve is issued again (see [`browser_reopen`]).
     pub fn open_browser(&mut self, manager: Arc<BrowserManager>, cx: &mut Context<Self>) {
         self.session_review = false;
         self.review_sections.clear();
@@ -477,24 +476,44 @@ impl ArtifactView {
         self.headings.clear();
         cx.emit(ArtifactViewEvent::PresentationChanged);
 
-        if already_open {
-            // Same manager: either the browser is already on screen (nothing
-            // to do but re-present) or it was paused behind a file (AGE-473)
-            // and its cast has to be restarted on the still-live session.
-            if !self.browser_shown {
+        match browser_reopen(
+            already_open,
+            self.browser_shown,
+            self.browser_session.is_some(),
+        ) {
+            // Same manager, already on screen: nothing to do but re-present.
+            BrowserReopen::Present => {}
+            // Paused behind a file (AGE-473): restart the cast on the
+            // still-live session.
+            BrowserReopen::ResumeStream => {
                 self.browser_shown = true;
                 if let Some(session) = self.browser_session.clone() {
                     self.start_browser_stream(session, cx);
                 }
             }
-            cx.notify();
-            return;
+            // Paused before the session ever resolved — the resolve was
+            // dropped at its `load_gen` guard, so issue it again; doing
+            // nothing would leave the panel on "Starting…" for good.
+            BrowserReopen::ResolveSession => {
+                self.browser_shown = true;
+                self.start_browser_session(manager, cx);
+            }
+            // A different manager: tear the previous browser down for good.
+            BrowserReopen::Fresh => {
+                self.drop_browser(cx);
+                self.browser_manager = Some(manager.clone());
+                self.browser_shown = true;
+                self.start_browser_session(manager, cx);
+            }
         }
+        cx.notify();
+    }
 
-        // A different manager: tear the previous browser down for good.
-        self.drop_browser(cx);
-        self.browser_manager = Some(manager.clone());
-        self.browser_shown = true;
+    /// Resolve the manager's session (launching Chrome on the first call)
+    /// and, once it is there, start the tab watcher and the stream. Keyed on
+    /// `load_gen`: a pause or a different browser while the resolve is in
+    /// flight drops the result, and the next `open_browser` resolves again.
+    fn start_browser_session(&mut self, manager: Arc<BrowserManager>, cx: &mut Context<Self>) {
         self.browser = BrowserPreview::Starting;
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
@@ -526,7 +545,6 @@ impl ArtifactView {
             .ok();
         })
         .detach();
-        cx.notify();
     }
 
     /// Follow the session's tab list into `browser_tabs` (AGE-473). Keyed on
@@ -1891,6 +1909,32 @@ fn browser_tab_label(tab: &BrowserTab) -> String {
         format!("{short}…")
     } else {
         short
+    }
+}
+
+/// What `open_browser` has to do for a manager (AGE-473), decided from
+/// whether it is the manager already open, whether the browser is on
+/// screen, and whether its session has resolved yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserReopen {
+    /// A different manager: drop the old browser, resolve the new session.
+    Fresh,
+    /// The same manager, already on screen: nothing to start.
+    Present,
+    /// The same manager, paused behind a file with a live session: restart
+    /// the screencast on it.
+    ResumeStream,
+    /// The same manager, paused before its session resolved: the resolve
+    /// was dropped, so it has to be issued again.
+    ResolveSession,
+}
+
+fn browser_reopen(already_open: bool, browser_shown: bool, has_session: bool) -> BrowserReopen {
+    match (already_open, browser_shown, has_session) {
+        (false, _, _) => BrowserReopen::Fresh,
+        (true, true, _) => BrowserReopen::Present,
+        (true, false, true) => BrowserReopen::ResumeStream,
+        (true, false, false) => BrowserReopen::ResolveSession,
     }
 }
 
@@ -3479,6 +3523,35 @@ mod artifact_tab_bar_tests {
         let (entries, _) =
             artifact_tab_model(&[], &[active(tab("Opener", "file:///x"))], None, true);
         assert_eq!(entries.len(), 1);
+    }
+
+    /// The pause-before-resolve case: a file shown while Chrome was still
+    /// launching drops the resolve at its `load_gen` guard, so bringing the
+    /// browser back must resolve again rather than wait for a stream that
+    /// will never start.
+    #[test]
+    fn reopening_a_paused_browser_resolves_again_when_its_session_never_arrived() {
+        use super::{BrowserReopen, browser_reopen};
+        assert_eq!(
+            browser_reopen(true, false, false),
+            BrowserReopen::ResolveSession
+        );
+        assert_eq!(
+            browser_reopen(true, false, true),
+            BrowserReopen::ResumeStream
+        );
+        assert_eq!(browser_reopen(true, true, true), BrowserReopen::Present);
+        assert_eq!(
+            browser_reopen(true, true, false),
+            BrowserReopen::Present,
+            "on screen with the resolve still in flight: let it land"
+        );
+        assert_eq!(browser_reopen(false, false, false), BrowserReopen::Fresh);
+        assert_eq!(
+            browser_reopen(false, true, true),
+            BrowserReopen::Fresh,
+            "a different manager always replaces the open one"
+        );
     }
 
     #[test]
