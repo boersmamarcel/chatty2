@@ -650,16 +650,15 @@ impl ChattyApp {
                 .map(|m| (m.supports_images, m.supports_pdf))
                 .unwrap_or((false, false));
 
-            // The composer shows this conversation's mailbox (AGE-482).
+            // The transcript shows this conversation's mailbox (AGE-482).
             let queued = self.queued_items(&conv_id);
             chat_view.update(cx, |view, cx| {
                 view.set_conversation_id(conv_id.clone(), cx);
+                view.set_queued_messages(queued, None, cx);
 
                 // Clear attachments from previous conversation
-                view.chat_input_state().update(cx, |state, cx| {
+                view.chat_input_state().update(cx, |state, _cx| {
                     state.clear_attachments();
-                    state.set_queued(queued, cx);
-                    state.set_notice(None, cx);
                 });
 
                 // Load conversation history

@@ -58,48 +58,6 @@ fn provider_icon(provider_type: &ProviderType) -> CustomIcon {
     }
 }
 
-/// One queued message: a preview of its text and a × that takes it back.
-fn render_queued_chip(
-    id: chatty_core::session::QueuedId,
-    text: &str,
-    state: &Entity<ChatInputState>,
-    bg: Hsla,
-    fg: Hsla,
-    remove_fg: Hsla,
-) -> impl IntoElement {
-    let state = state.clone();
-    let mut preview: String = text.chars().take(80).collect();
-    if text.chars().count() > 80 {
-        preview.push('…');
-    }
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .bg(bg)
-        .text_sm()
-        .text_color(fg)
-        .child(div().truncate().child(format!("Queued: {preview}")))
-        .child(
-            div()
-                .ml_auto()
-                .flex_shrink_0()
-                .px_1()
-                .cursor_pointer()
-                .hover(move |style| style.text_color(remove_fg))
-                .child("×")
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    state.update(cx, |state, cx| {
-                        state.withdraw(id, cx);
-                    });
-                }),
-        )
-}
-
 fn render_file_chip(
     path: &Path,
     index: usize,
@@ -188,7 +146,7 @@ fn render_file_chip(
 impl RenderOnce for ChatInput {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state_for_send = self.state.clone();
-        let state_for_send_now = self.state.clone();
+        let state_for_queue = self.state.clone();
         let state_for_stop = self.state.clone();
         let state_for_model = self.state.clone();
         let state_for_image = self.state.clone();
@@ -203,8 +161,6 @@ impl RenderOnce for ChatInput {
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
         let is_streaming = self.state.read(cx).is_streaming();
-        let queued = self.state.read(cx).queued().to_vec();
-        let notice = self.state.read(cx).notice().map(str::to_string);
 
         // Read thumbnail cache (for PDF previews)
         let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
@@ -673,11 +629,13 @@ impl RenderOnce for ChatInput {
                                             .child(model_popover),
                                     )
                                     .when(is_streaming, |row| {
-                                        // "Send now" while streaming: cancel the
-                                        // turn and run the composer's text next
-                                        // (AGE-482). Plain Enter queues instead.
+                                        // Send stays while a reply streams: the
+                                        // message waits in the conversation's
+                                        // mailbox and runs when the reply ends
+                                        // (AGE-482). Enter does the same.
                                         row.child(
                                             div()
+                                                .id("send-queued")
                                                 .flex_shrink_0()
                                                 .px_3()
                                                 .py_1()
@@ -686,12 +644,18 @@ impl RenderOnce for ChatInput {
                                                 .cursor_pointer()
                                                 .bg(cx.theme().primary)
                                                 .hover(|style| style.bg(cx.theme().primary_hover))
-                                                .child("Send now")
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new(
+                                                        "Sent after the current reply finishes",
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .child("Send")
                                                 .on_mouse_down(
                                                     MouseButton::Left,
                                                     move |_event, _window, cx| {
-                                                        state_for_send_now.update(cx, |state, cx| {
-                                                            state.send_now(cx);
+                                                        state_for_queue.update(cx, |state, cx| {
+                                                            state.send_message(cx);
                                                         });
                                                     },
                                                 ),
@@ -765,36 +729,6 @@ impl RenderOnce for ChatInput {
                                                 )
                                             },
                                         )),
-                                )
-                            })
-                            .when(!queued.is_empty(), |d| {
-                                // Messages waiting for the streaming turn to
-                                // end, front first, each with a × (AGE-482).
-                                let chip_bg = cx.theme().secondary;
-                                let chip_fg = cx.theme().muted_foreground;
-                                let remove_fg = cx.theme().danger;
-                                d.child(
-                                    div().flex().flex_col().gap_1().mt_2().children(
-                                        queued.iter().map(|(id, text)| {
-                                            render_queued_chip(
-                                                *id,
-                                                text,
-                                                &self.state,
-                                                chip_bg,
-                                                chip_fg,
-                                                remove_fg,
-                                            )
-                                        }),
-                                    ),
-                                )
-                            })
-                            .when_some(notice, |d, notice| {
-                                d.child(
-                                    div()
-                                        .mt_1()
-                                        .text_sm()
-                                        .text_color(cx.theme().danger)
-                                        .child(notice),
                                 )
                             }),
                     ),

@@ -64,13 +64,6 @@ pub enum ChatInputEvent {
         message: String,
         attachments: Vec<PathBuf>,
     },
-    /// Send instead of the streaming turn: cancel it, run this next (AGE-482).
-    SendNow {
-        message: String,
-        attachments: Vec<PathBuf>,
-    },
-    /// Take a queued message back.
-    Withdraw(chatty_core::session::QueuedId),
     ModelChanged(String),
     Stop,
     /// A slash command that should be executed immediately (no args required).
@@ -144,10 +137,6 @@ pub struct ChatInputState {
     /// (`TurnOutcome::DroppedAndRolledBack`) so the user doesn't lose what
     /// they typed (AGE-243).
     pending_restore_text: Option<String>,
-    /// The active conversation's queued messages, front first (AGE-482).
-    queued: Vec<(chatty_core::session::QueuedId, String)>,
-    /// One line under the composer: why the last send was refused.
-    notice: Option<String>,
 }
 
 impl ChatInputState {
@@ -174,51 +163,7 @@ impl ChatInputState {
             last_at_query: None,
             pending_at_insert: None,
             pending_restore_text: None,
-            queued: Vec::new(),
-            notice: None,
         }
-    }
-
-    pub fn set_queued(
-        &mut self,
-        queued: Vec<(chatty_core::session::QueuedId, String)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.queued = queued;
-        cx.notify();
-    }
-
-    pub fn queued(&self) -> &[(chatty_core::session::QueuedId, String)] {
-        &self.queued
-    }
-
-    pub fn set_notice(&mut self, notice: Option<String>, cx: &mut Context<Self>) {
-        self.notice = notice;
-        cx.notify();
-    }
-
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
-    }
-
-    /// Send the current message ahead of the streaming turn (AGE-482).
-    pub fn send_now(&mut self, cx: &mut Context<Self>) {
-        let message = self.input.read(cx).text().to_string();
-        if message.trim().is_empty() && self.attachments.is_empty() {
-            warn!("Message is empty and no attachments, not sending");
-            return;
-        }
-        cx.emit(ChatInputEvent::SendNow {
-            message,
-            attachments: self.attachments.clone(),
-        });
-        self.should_clear = true;
-        self.clear_attachments();
-    }
-
-    /// Take a queued message back (the × on its chip).
-    pub fn withdraw(&mut self, id: chatty_core::session::QueuedId, cx: &mut Context<Self>) {
-        cx.emit(ChatInputEvent::Withdraw(id));
     }
 
     /// Replace the cached list of filesystem skills and notify GPUI to re-render.

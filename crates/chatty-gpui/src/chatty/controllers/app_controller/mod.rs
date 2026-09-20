@@ -607,17 +607,6 @@ impl ChattyApp {
                     });
                     app.change_conversation_model(model_id.clone(), cx);
                 }
-                ChatInputEvent::SendNow {
-                    message,
-                    attachments,
-                } => {
-                    debug!(message = %message, "ChatInputEvent::SendNow received");
-                    app.interrupt(message.clone(), attachments.clone(), cx);
-                }
-                ChatInputEvent::Withdraw(id) => {
-                    debug!(?id, "ChatInputEvent::Withdraw received");
-                    app.withdraw(*id, cx);
-                }
                 ChatInputEvent::Stop => {
                     debug!("ChatInputEvent::Stop received");
                     app.stop_stream(cx);
@@ -690,6 +679,14 @@ impl ChattyApp {
                     feedback,
                 } => {
                     app.handle_feedback_changed(*history_index, feedback.clone(), cx);
+                }
+                ChatViewEvent::SendQueuedNow(id) => {
+                    debug!(?id, "ChatViewEvent::SendQueuedNow received");
+                    app.send_queued_now(*id, cx);
+                }
+                ChatViewEvent::WithdrawQueued(id) => {
+                    debug!(?id, "ChatViewEvent::WithdrawQueued received");
+                    app.withdraw(*id, cx);
                 }
                 ChatViewEvent::RegenerateMessage { history_index } => {
                     app.handle_regeneration(*history_index, cx);

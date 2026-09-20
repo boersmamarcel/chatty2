@@ -79,26 +79,26 @@ impl ChattyApp {
         self.route(&conv_id, arrival, cx);
     }
 
-    /// Run `message` *instead of* the streaming turn: cancel it, and send
-    /// this next, ahead of anything queued (the composer's "Send now").
-    pub(super) fn interrupt(
-        &mut self,
-        message: String,
-        attachments: Vec<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
+    /// "Send now" on a queued message: take it out of the queue and run it
+    /// instead of the streaming turn, ahead of anything still queued.
+    pub(super) fn send_queued_now(&mut self, id: QueuedId, cx: &mut Context<Self>) {
         let Some(conv_id) = self.active_conversation_id(cx) else {
-            self.send_message_inner(message, attachments, true, cx);
             return;
         };
-        let arrival = Arrival::Interrupt(QueuedSend {
-            message,
-            attachments,
+        let message = self.mailboxes.get(&conv_id).and_then(|mailbox| {
+            mailbox
+                .pending()
+                .find(|q| q.id == id)
+                .map(|q| q.message.clone())
         });
-        self.route(&conv_id, arrival, cx);
+        let Some(message) = message else {
+            return;
+        };
+        self.route(&conv_id, Arrival::Withdraw(id), cx);
+        self.route(&conv_id, Arrival::Interrupt(message), cx);
     }
 
-    /// Take a queued message back (the × on its chip).
+    /// "Remove" on a queued message.
     pub(super) fn withdraw(&mut self, id: QueuedId, cx: &mut Context<Self>) {
         if let Some(conv_id) = self.active_conversation_id(cx) {
             self.route(&conv_id, Arrival::Withdraw(id), cx);
@@ -158,10 +158,10 @@ impl ChattyApp {
             }
             Decision::Queued { .. } | Decision::Withdrawn(_) | Decision::Nothing => {}
         }
-        self.refresh_composer_queue(conv_id, notice, cx);
+        self.refresh_queue_view(conv_id, notice, cx);
     }
 
-    /// The composer shows the active conversation's queue.
+    /// The transcript shows the active conversation's queue.
     pub(super) fn queued_items(&self, conv_id: &str) -> Vec<(QueuedId, String)> {
         self.mailboxes
             .get(conv_id)
@@ -175,7 +175,7 @@ impl ChattyApp {
             .unwrap_or_default()
     }
 
-    fn refresh_composer_queue(
+    fn refresh_queue_view(
         &mut self,
         conv_id: &str,
         notice: Option<String>,
@@ -191,10 +191,7 @@ impl ChattyApp {
         }
         let queued = self.queued_items(conv_id);
         self.chat_view.update(cx, |view, cx| {
-            view.chat_input_state().update(cx, |state, cx| {
-                state.set_queued(queued, cx);
-                state.set_notice(notice, cx);
-            });
+            view.set_queued_messages(queued, notice, cx);
         });
     }
 
@@ -839,7 +836,7 @@ impl ChattyApp {
                 cx,
             );
         }
-        self.refresh_composer_queue(conv_id, None, cx);
+        self.refresh_queue_view(conv_id, None, cx);
     }
 
     /// Stop the currently active stream for the current conversation.
