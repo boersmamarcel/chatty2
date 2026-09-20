@@ -98,6 +98,7 @@ pub use mermaid_renderer_service::MermaidRendererService;
 pub use message_helpers::{
     exchange_count, extract_user_text, extract_user_text_lines, gather_mcp_tools,
     is_persisted_tool_round_trip, is_tool_call_message, is_tool_message, is_tool_result_message,
+    repair_dangling_tool_calls,
 };
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;

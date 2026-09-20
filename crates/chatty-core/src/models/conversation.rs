@@ -15,8 +15,8 @@ use crate::models::message_types::{SystemTrace, ToolSource, TraceItem};
 use crate::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::services::AgentTaskSnapshot;
-use crate::services::is_tool_result_message;
 use crate::services::shell_service::ShellSession;
+use crate::services::{is_tool_result_message, repair_dangling_tool_calls};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::PendingArtifacts;
@@ -1127,7 +1127,14 @@ fn finalize_response_state(
     trace: Option<serde_json::Value>,
     timestamp: i64,
 ) {
-    let tool_messages = turn_messages.map(turn_tool_messages).unwrap_or_default();
+    // AGE-485: a turn a loop-guard pivot or a user cancel ended mid-batch can
+    // hand back a slice whose assistant `tool_calls` entry outran its
+    // sibling results; repair it before it is ever persisted, since every
+    // OpenAI-compatible provider rejects the mismatch on the *next* request.
+    let tool_messages = turn_messages
+        .map(turn_tool_messages)
+        .map(repair_dangling_tool_calls)
+        .unwrap_or_default();
     entries.extend(tool_messages.into_iter().map(|message| MessageEntry {
         message,
         system_trace: None,
