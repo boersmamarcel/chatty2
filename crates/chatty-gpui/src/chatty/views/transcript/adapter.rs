@@ -273,7 +273,51 @@ fn consolidate_receipt_artifacts(blocks: &mut Vec<Block>, namespace: u64) {
         }
     }
     flush_batch(&mut pending, &mut out);
+    dedup_standalone_artifacts(&mut out);
     *blocks = out;
+}
+
+/// Keep only the last occurrence of a standalone artifact path (PDF, image,
+/// pptx, tabular).
+///
+/// These are pushed one `Block::Artifact` per tool call with no dedup by
+/// path (AGE-488): a retry of the same tool call, or a later tool call that
+/// overwrites the same output, otherwise draws two full cards for one file.
+/// Last write wins because it reflects the file's current on-disk state, and
+/// the surviving card is left at *its own* trace position — earlier
+/// duplicates are dropped in place rather than the survivor being moved to
+/// where the first occurrence was.
+///
+/// The dedup key is the path exactly as the tool reported it (`Block::Artifact.path`,
+/// via `artifact_path`/`tool_file_path`), not the path resolved against the
+/// conversation's workspace — that resolution (`resolve_artifact_path`,
+/// AGE-487) happens later, at render time. So two tool calls that name the
+/// same underlying file with different spellings (an absolute `saved_path`
+/// from one call, the relative name the model used in a later call) are
+/// *not* folded together here: this pass has no workspace handle to resolve
+/// against, and `resolve_artifact_path` does `exists()` filesystem checks
+/// that have no business running during block consolidation. That residual
+/// duplicate is a known gap, not something this pass claims to close.
+fn dedup_standalone_artifacts(out: &mut Vec<Block>) {
+    let mut last_index: HashMap<PathBuf, usize> = HashMap::new();
+    for (idx, block) in out.iter().enumerate() {
+        if let Block::Artifact { path, .. } = block
+            && is_standalone_artifact_path(path)
+        {
+            last_index.insert(path.clone(), idx);
+        }
+    }
+    let mut idx = 0;
+    out.retain(|block| {
+        let keep = match block {
+            Block::Artifact { path, .. } if is_standalone_artifact_path(path) => {
+                last_index.get(path) == Some(&idx)
+            }
+            _ => true,
+        };
+        idx += 1;
+        keep
+    });
 }
 
 pub(crate) fn is_agent_todo_tool(name: &str) -> bool {
@@ -382,6 +426,150 @@ mod duplicate_render_tests {
         let mut blocks = vec![artifact("/ws/a.png")];
         drop_artifact_cards_shown_inline(&mut blocks, &[]);
         assert_eq!(blocks.len(), 1);
+    }
+}
+
+/// Regression tests for AGE-488: two receipts for the same standalone
+/// artifact path (PDF, image, pptx, tabular) must consolidate to one card.
+#[cfg(test)]
+mod consolidate_dedup_tests {
+    use super::*;
+
+    fn artifact_with_content(path: &str, old_content: Option<&str>) -> Block {
+        Block::Artifact {
+            id: BlockId::from_parts(1, path),
+            path: PathBuf::from(path),
+            old_content: old_content.map(str::to_string),
+        }
+    }
+
+    fn artifact(path: &str) -> Block {
+        artifact_with_content(path, None)
+    }
+
+    fn artifact_paths(blocks: &[Block]) -> Vec<&std::path::Path> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Artifact { path, .. } => Some(path.as_path()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_pdf_path_written_twice_yields_one_card() {
+        // e.g. a retried tool call, or a regenerate that overwrites the same
+        // output.
+        let mut blocks = vec![
+            artifact_with_content("/ws/report.pdf", Some("first")),
+            artifact_with_content("/ws/report.pdf", Some("second")),
+        ];
+        consolidate_receipt_artifacts(&mut blocks, 1);
+        assert_eq!(
+            artifact_paths(&blocks),
+            vec![std::path::Path::new("/ws/report.pdf")],
+            "duplicate writes to the same path must collapse to one card"
+        );
+    }
+
+    #[test]
+    fn last_write_wins_and_keeps_its_own_trace_position() {
+        // Two unrelated artifacts (other.png, x.png) bracket the duplicate
+        // report.pdf occurrences, so the test can tell "the survivor stayed
+        // at its own (second) trace slot" apart from "the survivor's content
+        // was copied back into the first slot" — both would pass a bare
+        // content check, but only the former is the position the fix
+        // direction asks for.
+        let mut blocks = vec![
+            artifact("/ws/other.png"),
+            artifact_with_content("/ws/report.pdf", Some("first")),
+            artifact("/ws/x.png"),
+            artifact_with_content("/ws/report.pdf", Some("second")),
+        ];
+        consolidate_receipt_artifacts(&mut blocks, 1);
+        assert_eq!(
+            artifact_paths(&blocks),
+            vec![
+                std::path::Path::new("/ws/other.png"),
+                std::path::Path::new("/ws/x.png"),
+                std::path::Path::new("/ws/report.pdf"),
+            ],
+            "the surviving card must sit at the last occurrence's own trace \
+             position (after x.png), not be moved to the first occurrence's \
+             slot (before x.png)"
+        );
+        let Some(Block::Artifact { old_content, .. }) = blocks.last() else {
+            panic!("expected the surviving report.pdf card last, got {blocks:?}");
+        };
+        assert_eq!(
+            old_content.as_deref(),
+            Some("second"),
+            "last write wins: the surviving card must carry the later occurrence's data"
+        );
+    }
+
+    #[test]
+    fn distinct_standalone_paths_are_unaffected() {
+        let mut blocks = vec![artifact("/ws/report.pdf"), artifact("/ws/chart.png")];
+        consolidate_receipt_artifacts(&mut blocks, 1);
+        assert_eq!(
+            artifact_paths(&blocks),
+            vec![
+                std::path::Path::new("/ws/report.pdf"),
+                std::path::Path::new("/ws/chart.png"),
+            ],
+            "distinct paths must each keep their own card"
+        );
+    }
+
+    #[test]
+    fn non_standalone_duplicate_paths_are_out_of_scope_and_unchanged() {
+        // Markdown receipts batch when consecutive but AGE-488's dedup pass
+        // targets only standalone artifact kinds (PDF/image/pptx/tabular);
+        // non-consecutive duplicate markdown receipts are pre-existing,
+        // unrelated behavior this fix must not touch.
+        let mut blocks = vec![
+            artifact("/ws/notes.md"),
+            artifact("/ws/other.png"),
+            artifact("/ws/notes.md"),
+        ];
+        consolidate_receipt_artifacts(&mut blocks, 1);
+        assert_eq!(
+            artifact_paths(&blocks),
+            vec![
+                std::path::Path::new("/ws/notes.md"),
+                std::path::Path::new("/ws/other.png"),
+                std::path::Path::new("/ws/notes.md"),
+            ],
+            "non-standalone (batchable) artifact kinds are out of this fix's scope"
+        );
+    }
+
+    #[test]
+    fn different_spellings_of_the_same_file_do_not_collapse() {
+        // A known residual gap (not this fix's job to close, see the doc
+        // comment on `dedup_standalone_artifacts`): the dedup key is the
+        // path exactly as the tool reported it, not the path resolved
+        // against the workspace. One tool call reporting an absolute
+        // `saved_path` and a later call referencing the same underlying
+        // file via the relative name the model originally used are two
+        // different `PathBuf`s here, so they are *not* folded — that would
+        // require workspace-aware resolution (`resolve_artifact_path`,
+        // AGE-487), which this consolidation pass deliberately does not do
+        // (no workspace handle, and no `exists()` filesystem calls belong
+        // in this pass).
+        let mut blocks = vec![artifact("/tmp/ws/mixed.pdf"), artifact("mixed.pdf")];
+        consolidate_receipt_artifacts(&mut blocks, 1);
+        assert_eq!(
+            artifact_paths(&blocks),
+            vec![
+                std::path::Path::new("/tmp/ws/mixed.pdf"),
+                std::path::Path::new("mixed.pdf"),
+            ],
+            "two different spellings of the same file are distinct raw paths \
+             and are not deduped by this pass"
+        );
     }
 }
 
