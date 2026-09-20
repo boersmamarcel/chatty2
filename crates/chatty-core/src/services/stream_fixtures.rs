@@ -287,14 +287,12 @@ pub fn scenarios() -> Vec<Scenario> {
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],
         },
-        // 10. A todo-protocol nudge fires mid-turn, on the second non-todo
-        //     tool result. It must not cancel the turn (AGE-242 / D3,
-        //     `follow_up_requires_cancel(TodoProtocol) == false`): both tool
-        //     results are still delivered and the stream runs on to `Done`,
-        //     with the follow-up appearing only once the turn completes
-        //     naturally rather than tearing down the in-flight turn.
+        // 10. Two ordinary tool results with no plan written. Whether a task
+        //     needs a plan is the model's call from the `write_todos`
+        //     description (AGE-479): the turn runs on to `Done` and no
+        //     follow-up is queued.
         Scenario {
-            name: "todo_nudge_mid_stream",
+            name: "tool_results_without_plan",
             progress: Vec::new(),
             items: vec![
                 ScriptedItem::Chunk(StreamChunk::ToolCallStarted {

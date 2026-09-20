@@ -473,23 +473,17 @@ async fn two_sessions_share_nothing() {
     );
 }
 
+/// Ordinary tool calls without a plan are not a protocol violation: the
+/// turn ends with no follow-up (AGE-479).
 #[tokio::test]
-async fn a_todo_nudge_follows_the_turn_it_belongs_to() {
-    let events = replay_scenario(scenario("todo_nudge_mid_stream"), policy()).await;
-    let ended = events
-        .iter()
-        .position(|e| matches!(e, SessionEvent::TurnEnded))
-        .expect("the turn ended");
-    let follow_up = events
-        .iter()
-        .position(|e| matches!(e, SessionEvent::FollowUp(p) if p.contains("write_todos")))
-        .expect("the todo protocol asked for a plan");
-    assert!(follow_up > ended, "the follow-up comes after TurnEnded");
+async fn tool_results_without_a_plan_queue_no_follow_up() {
+    let events = replay_scenario(scenario("tool_results_without_plan"), policy()).await;
+    assert!(matches!(events.last(), Some(SessionEvent::TurnEnded)));
     assert!(
-        events
+        !events
             .iter()
-            .any(|e| matches!(e, SessionEvent::ToolCallResult { id, .. } if id == "call-2")),
-        "the result that triggered the nudge is still delivered"
+            .any(|e| matches!(e, SessionEvent::FollowUp(_))),
+        "no plan, no nudge"
     );
 }
 

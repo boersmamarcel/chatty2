@@ -16,8 +16,8 @@ use super::tool_registry::ToolAvailability;
 
 /// The read-only set every profile starts from: look at the tree, read files,
 /// search, read the git history (`git_diff` takes a `base..head` range, so a
-/// reviewer reads a worker's branch without a shell; AGE-404), run the todo
-/// protocol, and ask the leader.
+/// reviewer reads a worker's branch without a shell; AGE-404), and ask the
+/// leader.
 const READ_SET: &[&str] = &[
     "read_file",
     "list_directory",
@@ -27,13 +27,15 @@ const READ_SET: &[&str] = &[
     "git_log",
     "git_diff",
     "read_skill",
-    "write_todos",
-    "update_todo",
-    "verify_completion",
     // Every profile keeps it: dropping it would cut the input-required chain
     // that parks a worker's question on its leader (AGE-306).
     "ask_user",
 ];
+
+/// The todo plan: for the roles that run open-ended multi-step work — the
+/// unprofiled main agent and a leader. A worker gets one bounded task from
+/// its leader and does not plan it again (AGE-479).
+const TODO_PLAN: &[&str] = &["write_todos", "update_todo", "verify_completion"];
 
 /// Delegation: what a leader needs and nothing else.
 const AGENT_TOOLS: &[&str] = &["list_agents", "invoke_agent"];
@@ -193,7 +195,7 @@ fn narrow_availability(tools: &ToolAvailability, allow: impl Fn(&str) -> bool) -
 /// hands back. It edits nothing itself.
 pub static COORDINATOR: ToolProfile = ToolProfile {
     name: "coordinator",
-    groups: &[READ_SET, AGENT_TOOLS, GIT_MERGE],
+    groups: &[READ_SET, TODO_PLAN, AGENT_TOOLS, GIT_MERGE],
 };
 
 /// A worker that writes code: the read set plus everything needed to change
@@ -286,10 +288,22 @@ mod tests {
     /// prevent.
     #[test]
     fn each_profile_allows_its_own_tools_and_nothing_else() {
-        for tool in ["read_file", "search_code", "git_log", "write_todos"] {
+        for tool in ["read_file", "search_code", "git_log", "ask_user"] {
             for profile in TOOL_PROFILES {
                 assert!(profile.allows(tool), "{} lost {tool}", profile.name());
             }
+        }
+
+        for tool in ["write_todos", "update_todo", "verify_completion"] {
+            assert!(
+                COORDINATOR.allows(tool),
+                "a leader plans open-ended work with {tool}"
+            );
+            assert!(
+                !CODER.allows(tool),
+                "a worker gets one bounded task and does not plan it again (AGE-479)"
+            );
+            assert!(!REVIEWER.allows(tool));
         }
 
         assert!(COORDINATOR.allows("invoke_agent"));

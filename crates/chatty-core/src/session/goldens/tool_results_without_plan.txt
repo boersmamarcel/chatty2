@@ -5,4 +5,3 @@ ToolCallStarted(id="call-2", "search_code")
 ToolCallResult(id="call-2", "3 matches")
 Text("Still investigating.")
 TurnEnded
-FollowUp(write_todos)
