@@ -112,6 +112,12 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// id → name and id → arguments for the tool calls in flight.
     pending_tool_names: HashMap<String, String>,
     pending_tool_args: HashMap<String, String>,
+    /// A loop-guard pivot detected while siblings from the same parallel
+    /// tool-call batch are still in flight (AGE-485): held here instead of
+    /// acted on immediately, so the turn cancels only once every call in the
+    /// batch has its result chunk consumed — never with some of them still
+    /// dangling in the persisted history.
+    loop_guard_pivot: Option<String>,
     /// One record per completed provider request; folded into the turn's
     /// `TokenUsage` when the aggregate arrives.
     calls: Vec<ApiCallUsage>,
@@ -148,6 +154,7 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             think_disabled: policy.think_disabled,
             pending_tool_names: HashMap::new(),
             pending_tool_args: HashMap::new(),
+            loop_guard_pivot: None,
             calls: Vec::new(),
             pending_follow_up: None,
             text_overflow: false,
@@ -176,12 +183,30 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
     /// because the agent is going in circles, so letting the turn run on is
     /// the thing being prevented. (The todo protocol never cancels; its only
     /// follow-up is queued once the stream ends, AGE-151.)
+    ///
+    /// The pivot is only ever *acted on* once `pending_tool_names` is empty
+    /// (AGE-485): the guard is evaluated per individual tool call, but when
+    /// the model makes several in parallel, cancelling as soon as the first
+    /// or second sibling completes left `run_stream_loop_with` breaking out
+    /// before the remaining siblings' `ToolCallResult`/`ToolCallError`
+    /// chunks were ever consumed — persisting an assistant `tool_calls`
+    /// message with some ids never answered, which every OpenAI-compatible
+    /// provider rejects on the next request. Deferring to the end of the
+    /// batch still stops the repeating loop; it just does so without
+    /// truncating the in-flight batch.
     fn on_tool_completed(&mut self, id: &str) {
         let tool_name = self.pending_tool_names.remove(id).unwrap_or_default();
         let tool_args = self.pending_tool_args.remove(id).unwrap_or_default();
 
         if let Some(guard) = self.loop_guard.as_mut()
             && let Some(pivot) = guard.on_tool_completed(&tool_name, &tool_args)
+        {
+            tracing::debug!(pivot = %pivot, "AgentLoopGuard loop detected; deferring cancellation to the end of the batch");
+            self.loop_guard_pivot.get_or_insert(pivot);
+        }
+
+        if self.pending_tool_names.is_empty()
+            && let Some(pivot) = self.loop_guard_pivot.take()
         {
             tracing::debug!(pivot = %pivot, "AgentLoopGuard loop detected; cancelling the turn");
             self.cancel_flag.store(true, Ordering::Relaxed);
@@ -391,5 +416,118 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
         if let Some(prompt) = self.pending_follow_up.take() {
             (self.emit)(SessionEvent::FollowUp(prompt));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::llm_service::StreamChunk;
+    use crate::services::{ChunkAction, StreamChunkHandler};
+
+    fn test_policy() -> TurnPolicy {
+        TurnPolicy {
+            surface: StreamSurface::Headless,
+            max_agent_turns: 20,
+            loop_guard: true,
+            already_asked_to_retry: false,
+            think_disabled: false,
+        }
+    }
+
+    fn started(id: &str, name: &str) -> StreamChunk {
+        StreamChunk::ToolCallStarted {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn result(id: &str) -> StreamChunk {
+        StreamChunk::ToolCallResult {
+            id: id.to_string(),
+            result: "ok".to_string(),
+        }
+    }
+
+    /// AGE-485: three parallel tool calls, the first two identical (name and
+    /// arguments), which is exactly what trips `AgentLoopGuard`'s repeat-call
+    /// pivot on the second one's completion. The turn must not cancel until
+    /// the third (unrelated) sibling's result has also been consumed —
+    /// cancelling the moment the pivot is detected would leave call 3's
+    /// `ToolCallResult` chunk unread and its id unanswered in the persisted
+    /// history.
+    #[test]
+    fn loop_guard_pivot_waits_for_the_whole_batch() {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut handler = SessionStreamHandler::new(
+            |_event| {},
+            AgentTaskController::new(),
+            cancel_flag.clone(),
+            test_policy(),
+        );
+
+        for (id, name) in [("1", "read_file"), ("2", "read_file"), ("3", "list_dir")] {
+            handler.on_chunk(Ok(started(id, name))).unwrap();
+            handler
+                .on_chunk(Ok(StreamChunk::ToolCallInput {
+                    id: id.to_string(),
+                    arguments: "{\"path\":\"/tmp\"}".to_string(),
+                }))
+                .unwrap();
+        }
+
+        assert!(matches!(
+            handler.on_chunk(Ok(result("1"))).unwrap(),
+            ChunkAction::Continue
+        ));
+        assert!(
+            !cancel_flag.load(Ordering::Relaxed),
+            "no pivot yet: only one call has completed"
+        );
+
+        assert!(matches!(
+            handler.on_chunk(Ok(result("2"))).unwrap(),
+            ChunkAction::Continue
+        ));
+        assert!(
+            !cancel_flag.load(Ordering::Relaxed),
+            "pivot detected on call 2, but call 3 is still in flight — must not cancel yet"
+        );
+
+        assert!(matches!(
+            handler.on_chunk(Ok(result("3"))).unwrap(),
+            ChunkAction::Continue
+        ));
+        assert!(
+            cancel_flag.load(Ordering::Relaxed),
+            "the batch is done and the pivot fired during it — now it must cancel"
+        );
+    }
+
+    /// A pivot that never fires (all three calls distinct) leaves the turn
+    /// running: the deferred-cancel change must not turn every batch into a
+    /// cancellation.
+    #[test]
+    fn no_pivot_no_cancel() {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut handler = SessionStreamHandler::new(
+            |_event| {},
+            AgentTaskController::new(),
+            cancel_flag.clone(),
+            test_policy(),
+        );
+
+        for (id, name) in [("1", "read_file"), ("2", "list_dir"), ("3", "grep")] {
+            handler.on_chunk(Ok(started(id, name))).unwrap();
+            handler
+                .on_chunk(Ok(StreamChunk::ToolCallInput {
+                    id: id.to_string(),
+                    arguments: "{}".to_string(),
+                }))
+                .unwrap();
+            handler.on_chunk(Ok(result(id))).unwrap();
+        }
+
+        assert!(!cancel_flag.load(Ordering::Relaxed));
     }
 }

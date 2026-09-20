@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use rig_core::completion::Message;
-use rig_core::completion::message::AssistantContent;
+use rig_core::completion::message::{AssistantContent, ToolCallId, ToolResultContent};
 use rig_core::message::UserContent;
 use tracing::info;
 
@@ -92,6 +94,62 @@ pub fn exchange_count<'a>(messages: impl IntoIterator<Item = &'a Message>) -> us
     exchanges
 }
 
+/// Make every assistant `tool_calls` entry in a persisted turn answered,
+/// synthesizing a placeholder result for any call a mid-batch cancellation
+/// left dangling (AGE-485): a loop-guard pivot, or a user cancel while a
+/// parallel tool-call batch is still in flight, can end the turn before
+/// every sibling call's result chunk is consumed. Every OpenAI-compatible
+/// provider rejects a history where an assistant message's `tool_calls`
+/// isn't answered call-for-call, so an unrepaired dangling call fails the
+/// *next* turn's request rather than this one — this is the last line of
+/// defence, independent of what left the call unanswered.
+pub fn repair_dangling_tool_calls(mut messages: Vec<Message>) -> Vec<Message> {
+    let answered: HashSet<&ToolCallId> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::User { content } => Some(content.iter().filter_map(|c| match c {
+                UserContent::ToolResult(r) => Some(&r.call),
+                _ => None,
+            })),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    let placeholders: Vec<Message> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Assistant { content, .. } => Some(content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|c| match c {
+            AssistantContent::ToolCall(call) if !answered.contains(&call.id) => Some(call),
+            _ => None,
+        })
+        .map(|call| {
+            tracing::warn!(
+                tool_call_id = %call.id,
+                tool_name = %call.function.name,
+                "Turn ended with a tool call left unanswered; synthesizing a placeholder result"
+            );
+            Message::User {
+                content: vec![UserContent::tool_result_for(
+                    call.id.clone(),
+                    call.provider.clone(),
+                    call.function.name.clone(),
+                    vec![ToolResultContent::text(
+                        "Cancelled: the turn ended before this tool call's result arrived.",
+                    )],
+                )],
+            }
+        })
+        .collect();
+
+    messages.extend(placeholders);
+    messages
+}
+
 /// Gather MCP tools from the service, returning `None` when no tools are available.
 ///
 /// This wraps the common pattern used by both frontends:
@@ -143,6 +201,24 @@ mod tests {
                 AssistantContent::text("Let me look."),
                 AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
             ],
+        }
+    }
+
+    /// One assistant message with `n` parallel tool calls, `call-1`..`call-n`
+    /// — the shape a provider that supports parallel tool calls sends back
+    /// in one turn, and the shape AGE-485's malformed-history bug is about.
+    fn parallel_tool_calls(n: usize) -> Message {
+        Message::Assistant {
+            id: None,
+            content: (1..=n)
+                .map(|i| {
+                    AssistantContent::tool_call(
+                        format!("call-{i}"),
+                        "read_file",
+                        serde_json::json!({ "path": format!("/tmp/{i}") }),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -210,5 +286,49 @@ mod tests {
             ]),
             2
         );
+    }
+
+    /// AGE-485: a batch cut short mid-way (loop-guard pivot, or a user
+    /// cancel) leaves later calls in the same assistant message unanswered.
+    /// The repair must synthesize a placeholder for every missing id and
+    /// leave the answered ones untouched.
+    #[test]
+    fn repair_dangling_tool_calls_synthesizes_missing_results() {
+        let messages = vec![
+            Message::user("read three files"),
+            parallel_tool_calls(3),
+            Message::tool_result("call-1", "read_file", "a"),
+            // call-2 and call-3 never got a result before the turn ended.
+        ];
+
+        let repaired = repair_dangling_tool_calls(messages);
+
+        assert_eq!(repaired.len(), 5);
+        let answered: Vec<&str> = repaired
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { content } => content.iter().find_map(|c| match c {
+                    UserContent::ToolResult(r) => Some(r.call.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answered, vec!["call-1", "call-2", "call-3"]);
+    }
+
+    /// A fully-answered batch is left exactly as it was — no placeholders,
+    /// same message count.
+    #[test]
+    fn repair_dangling_tool_calls_is_a_no_op_when_nothing_is_missing() {
+        let messages = vec![
+            Message::user("read it"),
+            tool_call(),
+            Message::tool_result("call-1", "read_file", "a"),
+            Message::assistant("done"),
+        ];
+
+        let repaired = repair_dangling_tool_calls(messages.clone());
+        assert_eq!(repaired.len(), messages.len());
     }
 }
