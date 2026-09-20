@@ -252,11 +252,22 @@ impl Screencast {
     /// Stop the current page casting, if any. Quiet on failure: the usual
     /// reason a cast moves off a page is that the page closed, and Chrome has
     /// nothing left to stop.
+    ///
+    /// Awaits the aborted pump before returning (AGE-475): a task mid-poll
+    /// when `abort()` is called can still complete one `tx.send` after
+    /// `tear_down`'s caller has already published the next state on the same
+    /// channel — a frame of the old page landing after the panel was told to
+    /// show `Starting`/`Error` for the new one. `JoinHandle::await` on an
+    /// aborted task resolves (as `Err(JoinError::cancelled())`) as soon as
+    /// the runtime drops the task, which is cheap and cannot deadlock: the
+    /// pump only touches `tx` and `page`, never the session's screencast
+    /// lock that every caller of `tear_down` already holds.
     async fn tear_down(&mut self) {
         let Some(running) = self.running.take() else {
             return;
         };
         running.handle.abort();
+        let _ = running.handle.await;
         if let Err(e) = running.page.stop_screencast().await {
             debug!(error = %e, "browser: stopScreencast on the page we left failed");
         }
@@ -784,6 +795,83 @@ mod tests {
             .tx
             .send(ScreencastUpdate::Starting)
             .expect("the frame channel outlived the suspension");
+    }
+
+    /// AGE-475: `tear_down` must not return while the aborted pump can still
+    /// land a frame. A pump whose current poll is mid-decode when
+    /// `abort()` fires completes that decode (synchronous, no `.await`
+    /// inside it, matching the real pump's JPEG decode in `spawn_cast`) and
+    /// sends before honouring cancellation at its next await point — so
+    /// without awaiting the handle, that send can land after the caller has
+    /// already published the next state on the same channel: a stale frame
+    /// after `Starting` on a tab switch, or — the policy-relevant half —
+    /// after the `Error` that suspends the cast on `hold`. The fake pump
+    /// below mimics a page that keeps repainting (`sleep` standing in for a
+    /// synchronous decode, then a send, with the loop's only cancellation
+    /// point after it), so the race is reachable without a real browser.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn hold_never_lets_the_old_pump_land_a_frame_after_the_error() {
+        const OLD_COLOR: u8 = 111;
+        fn marker_frame(color: u8) -> ScreencastFrame {
+            ScreencastFrame {
+                width: 1,
+                height: 1,
+                css_width: 1.0,
+                css_height: 1.0,
+                rgba: Arc::from(vec![color, color, color, 255]),
+            }
+        }
+
+        let (tx, mut rx) = watch::channel(ScreencastUpdate::Starting);
+        let pump_tx = tx.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                // Synchronous "decode" with no await inside it: an abort()
+                // landing here cannot interrupt it, only the yield_now below.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let _ = pump_tx.send(ScreencastUpdate::Frame(marker_frame(OLD_COLOR)));
+                tokio::task::yield_now().await;
+            }
+        });
+        // Let the pump get into its decode/send cycle before tearing it down.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let mut screencast = Screencast {
+            runtime: tokio::runtime::Handle::current(),
+            tx,
+            width: 800,
+            height: 600,
+            running: Some(Running {
+                handle,
+                page: Arc::new(FakePage(target(CAST_TARGET))),
+            }),
+        };
+
+        screencast.hold("the page went somewhere refused").await;
+
+        // Watch for well over the decode cycle's length: any further send
+        // from the old pump would show up here if it were still alive.
+        let mut saw_error = false;
+        let mut stale_frame_after_error = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), rx.changed()).await {
+                Err(_) => break,
+                Ok(Err(_)) => break,
+                Ok(Ok(())) => match &*rx.borrow_and_update() {
+                    ScreencastUpdate::Error(_) => saw_error = true,
+                    ScreencastUpdate::Frame(f) if saw_error && f.rgba[0] == OLD_COLOR => {
+                        stale_frame_after_error = true;
+                    }
+                    _ => {}
+                },
+            }
+        }
+
+        assert!(saw_error, "test setup: hold() never published its Error");
+        assert!(
+            !stale_frame_after_error,
+            "a frame from the torn-down pump arrived after hold()'s Error (AGE-475)"
+        );
     }
 
     #[test]
