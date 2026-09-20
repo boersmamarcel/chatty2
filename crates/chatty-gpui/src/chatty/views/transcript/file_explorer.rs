@@ -5,7 +5,7 @@
 //! Every action routes back into [`ArtifactView`], which owns the tree; this
 //! file only draws it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
@@ -17,12 +17,81 @@ use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::{Icon, IconName, Sizable, h_flex, v_flex};
 
 use super::artifact_view::ArtifactView;
-use super::file_tree::{FileTree, PendingEdit, RowKind, TreeRow};
+use super::file_tree::{FileTree, PendingEdit, RowKind, SelectGesture, TreeRow};
 use crate::assets::CustomIcon;
 
 pub const EXPLORER_WIDTH: f32 = 220.0;
 const ROW_HEIGHT: f32 = 24.0;
 const INDENT: f32 = 12.0;
+
+/// What a tree drag carries (AGE-476 drag-to-move): the whole selection
+/// when a selected row is picked up, else just that row. Dropping on a
+/// folder row moves into it, on a file row into that file's folder, on the
+/// empty part of the list into the root.
+#[derive(Clone, Debug)]
+pub struct DraggedEntries {
+    pub paths: Vec<PathBuf>,
+}
+
+/// The label that follows the pointer during a drag.
+struct DragPreview {
+    label: SharedString,
+    folder: bool,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .shadow_md()
+            .text_xs()
+            .child(
+                Icon::new(if self.folder {
+                    IconName::FolderClosed
+                } else {
+                    IconName::File
+                })
+                .size_3()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(self.label.clone())
+    }
+}
+
+fn drag_preview(paths: &[PathBuf]) -> DragPreview {
+    match paths {
+        [one] => DragPreview {
+            label: one
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| one.display().to_string())
+                .into(),
+            folder: one.is_dir(),
+        },
+        many => DragPreview {
+            label: format!("{} items", many.len()).into(),
+            folder: false,
+        },
+    }
+}
+
+/// Which selection gesture the click's modifiers ask for.
+fn gesture_for(modifiers: &Modifiers) -> SelectGesture {
+    if modifiers.shift {
+        SelectGesture::Range
+    } else if modifiers.secondary() {
+        SelectGesture::Toggle
+    } else {
+        SelectGesture::Single
+    }
+}
 
 pub fn render_file_explorer(
     tree: &FileTree,
@@ -32,7 +101,8 @@ pub fn render_file_explorer(
     cx: &App,
 ) -> AnyElement {
     let rows: Rc<Vec<TreeRow>> = Rc::new(tree.rows());
-    let selected = tree.selected().map(|p| p.to_path_buf());
+    let selection: Rc<Vec<PathBuf>> = Rc::new(tree.selection().to_vec());
+    let root = tree.root().to_path_buf();
     let root_name = tree
         .root()
         .file_name()
@@ -109,7 +179,7 @@ pub fn render_file_explorer(
         let entity = entity.clone();
         move |range, _window, cx| {
             range
-                .map(|ix| render_row(ix, &rows[ix], selected.as_ref(), &name_input, &entity, cx))
+                .map(|ix| render_row(ix, &rows[ix], &selection, &name_input, &entity, cx))
                 .collect()
         }
     })
@@ -133,6 +203,16 @@ pub fn render_file_explorer(
                 .min_h_0()
                 .w_full()
                 .py_1()
+                // A drop past the last row lands in the root; a drop on a
+                // row is taken by the row first and does not reach here.
+                .on_drop::<DraggedEntries>({
+                    let entity = entity.clone();
+                    move |dragged, _, cx| {
+                        let paths = dragged.paths.clone();
+                        let dest = root.clone();
+                        entity.update(cx, |this, cx| this.explorer_drop(paths, dest, cx));
+                    }
+                })
                 .when(rows.is_empty(), |this| {
                     this.child(
                         div()
@@ -163,7 +243,7 @@ pub fn render_file_explorer(
 fn render_row(
     ix: usize,
     row: &TreeRow,
-    selected: Option<&PathBuf>,
+    selection: &Rc<Vec<PathBuf>>,
     name_input: &Entity<InputState>,
     entity: &Entity<ArtifactView>,
     cx: &App,
@@ -210,7 +290,22 @@ fn render_row(
         RowKind::Entry { is_dir, expanded } => {
             let path = row.path.clone();
             let is_dir = *is_dir;
-            let is_selected = selected == Some(&row.path);
+            let is_selected = selection.contains(&row.path);
+            let multi = is_selected && selection.len() > 1;
+            // Picking up a selected row drags the whole selection.
+            let drag_paths: Vec<PathBuf> = if multi {
+                selection.as_ref().clone()
+            } else {
+                vec![path.clone()]
+            };
+            // A drop on a folder goes into it; on a file, next to it.
+            let drop_dir: PathBuf = if is_dir {
+                path.clone()
+            } else {
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.clone())
+            };
             let name = row.name.clone();
             let chevron = if !is_dir {
                 None
@@ -249,9 +344,42 @@ fn render_row(
                 .on_click({
                     let entity = entity.clone();
                     let path = path.clone();
-                    move |_, _, cx| {
+                    move |event: &ClickEvent, _, cx| {
                         let path = path.clone();
-                        entity.update(cx, |this, cx| this.explorer_activate(path, is_dir, cx));
+                        let gesture = gesture_for(&event.modifiers());
+                        entity.update(cx, |this, cx| {
+                            this.explorer_click(path, is_dir, gesture, cx)
+                        });
+                    }
+                })
+                .on_drag(
+                    DraggedEntries { paths: drag_paths },
+                    |dragged: &DraggedEntries, _, _, cx| {
+                        let preview = drag_preview(&dragged.paths);
+                        cx.new(|_| preview)
+                    },
+                )
+                .drag_over::<DraggedEntries>({
+                    let drop_dir = drop_dir.clone();
+                    move |style, dragged, _, cx| {
+                        // No highlight where the drop would do nothing.
+                        let pointless = dragged.paths.iter().all(|p| {
+                            p.parent() == Some(drop_dir.as_path()) || drop_dir.starts_with(p)
+                        });
+                        if pointless {
+                            style
+                        } else {
+                            style.bg(cx.theme().drop_target)
+                        }
+                    }
+                })
+                .on_drop::<DraggedEntries>({
+                    let entity = entity.clone();
+                    let drop_dir = drop_dir.clone();
+                    move |dragged, _, cx| {
+                        let paths = dragged.paths.clone();
+                        let dest = drop_dir.clone();
+                        entity.update(cx, |this, cx| this.explorer_drop(paths, dest, cx));
                     }
                 })
                 .child(
@@ -285,8 +413,21 @@ fn render_row(
                 )
                 .context_menu({
                     let entity = entity.clone();
+                    let selection = selection.clone();
                     move |menu, _, _| {
                         let mut menu = menu;
+                        // Delete and Copy path act on the whole selection
+                        // when this row is part of one; Rename never does.
+                        let targets: Vec<PathBuf> = if multi {
+                            selection.as_ref().clone()
+                        } else {
+                            vec![path.clone()]
+                        };
+                        let delete_label = if multi {
+                            format!("Delete {} items…", targets.len())
+                        } else {
+                            "Delete…".to_string()
+                        };
                         if is_dir {
                             menu = menu
                                 .item(PopupMenuItem::new("New file…").on_click({
@@ -330,27 +471,29 @@ fn render_row(
                                 }
                             }));
                         }
-                        menu.item(PopupMenuItem::new("Rename…").on_click({
-                            let entity = entity.clone();
-                            let path = path.clone();
-                            move |_, window, cx| {
+                        if !multi {
+                            menu = menu.item(PopupMenuItem::new("Rename…").on_click({
+                                let entity = entity.clone();
                                 let path = path.clone();
-                                entity.update(cx, |this, cx| {
-                                    this.explorer_begin_edit(
-                                        PendingEdit::Rename { path },
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }))
-                        .item(PopupMenuItem::new("Delete…").on_click({
+                                move |_, window, cx| {
+                                    let path = path.clone();
+                                    entity.update(cx, |this, cx| {
+                                        this.explorer_begin_edit(
+                                            PendingEdit::Rename { path },
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }));
+                        }
+                        menu.item(PopupMenuItem::new(delete_label).on_click({
                             let entity = entity.clone();
-                            let path = path.clone();
+                            let targets = targets.clone();
                             move |_, window, cx| {
-                                let path = path.clone();
+                                let targets = targets.clone();
                                 entity.update(cx, |this, cx| {
-                                    this.explorer_confirm_delete(path, window, cx)
+                                    this.explorer_confirm_delete(targets, window, cx)
                                 });
                             }
                         }))
@@ -361,14 +504,20 @@ fn render_row(
                                 super::artifact_card::reveal_path_in_os(&path, cx);
                             }
                         }))
-                        .item(PopupMenuItem::new("Copy path").on_click({
-                            let path = path.clone();
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    path.display().to_string(),
-                                ));
-                            }
-                        }))
+                        .item(
+                            PopupMenuItem::new(if multi { "Copy paths" } else { "Copy path" })
+                                .on_click({
+                                    let targets = targets.clone();
+                                    move |_, _, cx| {
+                                        let text = targets
+                                            .iter()
+                                            .map(|p| p.display().to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
+                                }),
+                        )
                     }
                 })
                 .into_any_element()
