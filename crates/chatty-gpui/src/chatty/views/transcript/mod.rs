@@ -41,6 +41,8 @@ mod block_render;
 mod clarification;
 mod diff;
 mod diff_parse;
+mod file_explorer;
+mod file_tree;
 mod plan;
 mod run_pin;
 mod session_changes;

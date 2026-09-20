@@ -26,6 +26,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Disableable;
+use gpui_component::Selectable;
+use gpui_component::WindowExt;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants, DropdownButton};
 use gpui_component::input::{Input, InputEvent, InputState, Position};
@@ -48,6 +50,8 @@ use super::artifact_kind::{
     is_tabular_path, markdown_headings, read_artifact_source, source_line_from_anchor,
 };
 use super::diff::DiffHunkList;
+use super::file_explorer::render_file_explorer;
+use super::file_tree::{FileOp, FileTree, PendingEdit};
 use super::run_pin::{RunPin, RunPinKind};
 use super::session_review_panel::{ReviewFileSection, SessionReviewPanel};
 use super::table::render_table_preview_view;
@@ -275,6 +279,26 @@ pub struct ArtifactView {
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
+    /// The workspace explorer column (AGE-476), `Some` while it is shown.
+    /// It outlives the document: closing the last file tab leaves the tree
+    /// up with an empty body, and the panel closing keeps it for next time.
+    explorer: Option<FileTree>,
+    /// The inline name input the tree shows for a create/rename; one
+    /// entity reused for every edit, like `browser_address`.
+    explorer_input: Entity<InputState>,
+    explorer_scroll: UniformListScrollHandle,
+    /// Focus `explorer_input` on the next render: an edit begun from a
+    /// context-menu item is focused after the menu's own dismissal has
+    /// restored focus, or the menu wins.
+    explorer_focus_pending: bool,
+    /// The editor's text differs from `source` for the file on screen
+    /// (AGE-476). Kept from the editor's own change events, so the Save
+    /// button and the tab's dot follow every keystroke.
+    dirty: bool,
+    /// Edited-but-unsaved buffers of files that are not on screen, keyed by
+    /// path: switching tabs stashes the current buffer here and `sync_editor`
+    /// loads it back over the disk text when that file returns.
+    unsaved: HashMap<PathBuf, String>,
     outline: Entity<TreeState>,
     headings: Vec<ArtifactHeading>,
     loaded_version: Option<ArtifactVersion>,
@@ -322,6 +346,42 @@ impl ArtifactView {
             },
         )
         .detach();
+        // Dirty tracking (AGE-476): the editor tells us about every change,
+        // including our own `set_value` in `sync_editor`, so "dirty" is
+        // simply "differs from the text loaded from disk" — a programmatic
+        // sync compares equal and clears it, a restored unsaved buffer
+        // compares different and sets it.
+        cx.subscribe(&editor, |this: &mut Self, input, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.note_editor_change(&input, cx);
+            }
+        })
+        .detach();
+        let explorer_input = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
+        cx.subscribe(
+            &explorer_input,
+            |this: &mut Self, input, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let name = input.read(cx).value().to_string();
+                    let _ = this.explorer_commit_edit(name, cx);
+                }
+                // Clicking away commits a typed name and drops an empty or
+                // rejected one, the way an IDE's inline rename behaves. A
+                // blur from before the render that focuses the input (the
+                // context menu closing) is not the user leaving.
+                InputEvent::Blur => {
+                    if this.explorer_focus_pending {
+                        return;
+                    }
+                    let name = input.read(cx).value().to_string();
+                    if name.trim().is_empty() || !this.explorer_commit_edit(name, cx) {
+                        this.explorer_cancel_edit(cx);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
         Self {
             mode: ArtifactMode::Closed,
             path: None,
@@ -357,6 +417,12 @@ impl ArtifactView {
             workspace_root: None,
             load_gen: 0,
             editor,
+            explorer: None,
+            explorer_input,
+            explorer_scroll: UniformListScrollHandle::default(),
+            explorer_focus_pending: false,
+            dirty: false,
+            unsaved: HashMap::new(),
             outline,
             headings: Vec::new(),
             loaded_version: None,
@@ -408,6 +474,7 @@ impl ArtifactView {
     }
 
     pub fn open_table(&mut self, preview: TablePreview, cx: &mut Context<Self>) {
+        self.leave_current_file(cx);
         self.session_review = false;
         self.review_sections.clear();
         self.pause_browser(cx);
@@ -431,6 +498,7 @@ impl ArtifactView {
     }
 
     pub fn open_chart(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
+        self.leave_current_file(cx);
         self.session_review = false;
         self.review_sections.clear();
         self.pause_browser(cx);
@@ -463,6 +531,7 @@ impl ArtifactView {
     /// the pause landed while the session was still being resolved, in which
     /// case the resolve is issued again (see [`browser_reopen`]).
     pub fn open_browser(&mut self, manager: Arc<BrowserManager>, cx: &mut Context<Self>) {
+        self.leave_current_file(cx);
         self.session_review = false;
         self.review_sections.clear();
         let already_open = self
@@ -958,7 +1027,12 @@ impl ArtifactView {
                     return;
                 }
                 let workspace = self.workspace_root.clone();
+                // Switching tabs is the user moving between open files, not
+                // a new artifact arriving: keep full-window if that is where
+                // they are (`presentation_on_open` docks for the latter).
+                let keep_mode = self.mode;
                 self.open(path, source, old, workspace, cx);
+                self.mode = keep_mode;
             }
             ArtifactTabTarget::Browser(id) => {
                 if !self.browser_shown {
@@ -977,6 +1051,427 @@ impl ArtifactView {
                 }
             }
         }
+    }
+
+    // ----- Workspace explorer and editing (AGE-476) -----
+
+    /// Show the explorer column rooted at `root`, opening the panel docked
+    /// if it was closed. A tree already up on the same root is kept as is
+    /// (its expanded folders and selection survive); another root replaces
+    /// it.
+    pub fn show_explorer(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if self
+            .explorer
+            .as_ref()
+            .is_none_or(|tree| tree.root() != root)
+        {
+            let mut tree = FileTree::new(root);
+            if let Some(path) = self.path.as_ref() {
+                tree.reveal(path);
+            }
+            self.explorer = Some(tree);
+        }
+        if self.mode == ArtifactMode::Closed {
+            self.set_mode(ArtifactMode::Docked, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn explorer_shown(&self) -> bool {
+        self.explorer.is_some()
+    }
+
+    /// The header button: hide the tree, or bring it up on the workspace.
+    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
+        if self.explorer.is_some() {
+            self.explorer = None;
+            cx.notify();
+        } else {
+            let root = self.explorer_root(cx);
+            self.show_explorer(root, cx);
+        }
+    }
+
+    /// Where the tree is rooted: the workspace the open artifact came from,
+    /// else the configured working directory, else the process cwd (which
+    /// is what `workspace_dir = None` means for the tools too).
+    fn explorer_root(&self, cx: &App) -> PathBuf {
+        explorer_root_for(
+            self.workspace_root.as_deref(),
+            cx.try_global::<crate::settings::models::execution_settings::ExecutionSettingsModel>()
+                .and_then(|settings| settings.workspace_dir.as_deref()),
+        )
+    }
+
+    /// A click on a tree row: folders toggle, files open in the panel the
+    /// way a tool-card click does.
+    pub(super) fn explorer_activate(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tree) = self.explorer.as_mut() else {
+            return;
+        };
+        tree.select(Some(path.clone()));
+        if is_dir {
+            tree.toggle(&path);
+            cx.notify();
+            return;
+        }
+        let source = read_artifact_source(&path);
+        let workspace = Some(self.explorer_root(cx).display().to_string());
+        let keep_mode = self.mode;
+        self.open(path, source, None, workspace, cx);
+        // Opening from the tree is browsing, not a new artifact arriving:
+        // stay full-window if that is where the user is.
+        self.mode = keep_mode;
+        cx.notify();
+    }
+
+    /// The header's "new file"/"new folder" buttons: create next to the
+    /// selection (inside it, if it is a folder).
+    pub(super) fn explorer_begin_new(
+        &mut self,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tree) = self.explorer.as_ref() else {
+            return;
+        };
+        let dir = tree.target_dir();
+        let edit = if folder {
+            PendingEdit::NewFolder { dir }
+        } else {
+            PendingEdit::NewFile { dir }
+        };
+        self.explorer_begin_edit(edit, window, cx);
+    }
+
+    pub(super) fn explorer_begin_edit(
+        &mut self,
+        edit: PendingEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tree) = self.explorer.as_mut() else {
+            return;
+        };
+        let text = edit.initial_text();
+        tree.begin_edit(edit);
+        self.explorer_input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        // Focused from the next render, once the row exists.
+        self.explorer_focus_pending = true;
+        cx.notify();
+    }
+
+    pub(super) fn explorer_cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(tree) = self.explorer.as_mut()
+            && tree.pending().is_some()
+        {
+            tree.cancel_edit();
+            cx.notify();
+        }
+    }
+
+    /// `false` when the name was refused; the tree then carries the reason.
+    fn explorer_commit_edit(&mut self, name: String, cx: &mut Context<Self>) -> bool {
+        let Some(tree) = self.explorer.as_mut() else {
+            return true;
+        };
+        if tree.pending().is_none() {
+            return true;
+        }
+        let Some(op) = tree.commit_edit(&name) else {
+            // The edit stays open with the tree's error under it.
+            cx.notify();
+            return false;
+        };
+        self.apply_file_op(op, cx);
+        true
+    }
+
+    pub(super) fn explorer_confirm_delete(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let what = if path.is_dir() {
+            format!("Delete the folder '{name}' and everything in it?")
+        } else {
+            format!("Delete '{name}'?")
+        };
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let entity = entity.clone();
+            let path = path.clone();
+            dialog
+                .confirm()
+                .title("Delete")
+                .child(div().px_4().py_2().text_sm().child(what.clone()))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
+                .on_ok(move |_, _, cx| {
+                    let path = path.clone();
+                    entity.update(cx, |this, cx| this.explorer_delete(path, cx));
+                    true
+                })
+        });
+    }
+
+    fn explorer_delete(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(tree) = self.explorer.as_mut() else {
+            return;
+        };
+        match tree.delete(&path) {
+            Some(op) => self.apply_file_op(op, cx),
+            None => cx.notify(),
+        }
+    }
+
+    pub(super) fn explorer_refresh(&mut self, cx: &mut Context<Self>) {
+        if let Some(tree) = self.explorer.as_mut() {
+            tree.sync(true);
+            cx.notify();
+        }
+    }
+
+    /// Keep the panel's own state in step with what the tree just did to
+    /// the disk: a new file opens for editing, a renamed file's tabs and
+    /// buffers follow it, a deleted file's tabs close.
+    fn apply_file_op(&mut self, op: FileOp, cx: &mut Context<Self>) {
+        match op {
+            FileOp::Created(path) => {
+                if path.is_file() {
+                    self.explorer_activate(path, false, cx);
+                    // A fresh file has nothing to render; go straight to
+                    // the editor.
+                    self.tab = if self
+                        .path
+                        .as_ref()
+                        .is_some_and(|p| is_markdown_artifact_path(p))
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                }
+            }
+            FileOp::Renamed { from, to } => {
+                let renamed = |path: &Path| -> Option<PathBuf> {
+                    path.strip_prefix(&from).ok().map(|rest| to.join(rest))
+                };
+                for (path, _, _) in self.files.iter_mut() {
+                    if let Some(next) = renamed(path) {
+                        *path = next;
+                    }
+                }
+                let moved: Vec<(PathBuf, String)> = self
+                    .unsaved
+                    .iter()
+                    .filter_map(|(path, text)| renamed(path).map(|next| (next, text.clone())))
+                    .collect();
+                self.unsaved.retain(|path, _| renamed(path).is_none());
+                self.unsaved.extend(moved);
+                if let Some(next) = self.path.as_ref().and_then(|p| renamed(p)) {
+                    self.path = Some(next.clone());
+                    self.loaded_version = artifact_version(&next);
+                    // The editor keeps its text; only the name changed.
+                }
+            }
+            FileOp::Deleted(path) => {
+                let closing: Vec<usize> = self
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (p, _, _))| p.starts_with(&path))
+                    .map(|(ix, _)| ix)
+                    .collect();
+                for ix in closing.into_iter().rev() {
+                    self.remove_file_tab(ix, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Editor change event: dirty is "differs from the disk text".
+    fn note_editor_change(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
+        if !is_text_artifact_path(path) {
+            return;
+        }
+        let dirty = input.read(cx).value().as_ref() != self.source.as_str();
+        if dirty != self.dirty {
+            self.dirty = dirty;
+            cx.notify();
+        }
+    }
+
+    /// Before the panel shows something else: keep the current file's
+    /// unsaved buffer so coming back to its tab restores it.
+    fn leave_current_file(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.path.clone() {
+            if self.dirty {
+                let text = self.editor.read(cx).value().to_string();
+                self.unsaved.insert(path, text);
+            } else {
+                self.unsaved.remove(&path);
+            }
+        }
+        self.dirty = false;
+    }
+
+    /// Write the editor's buffer to the file on screen (Save button,
+    /// Ctrl/Cmd+S). The rendered view and the outline follow the new text;
+    /// the editor is left alone so the cursor stays put.
+    fn save_current(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if !self.dirty || !is_text_artifact_path(&path) {
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        if let Err(e) = std::fs::write(&path, &text) {
+            warn!(path = %path.display(), error = %e, "Saving the artifact failed");
+            if let Some(tree) = self.explorer.as_mut() {
+                tree.set_error(format!("Could not save '{}': {e}", path.display()));
+            }
+            cx.notify();
+            return;
+        }
+        self.source = text.clone();
+        self.rendered = text.clone();
+        self.headings = markdown_headings(&text);
+        // Re-sync the outline without re-syncing the editor.
+        self.outline_synced_gen = u64::MAX;
+        if let Some((_, source, _)) = self.files.iter_mut().find(|(p, _, _)| p == &path) {
+            *source = text;
+        }
+        self.loaded_version = artifact_version(&path);
+        self.stale = false;
+        self.unsaved.remove(&path);
+        self.dirty = false;
+        if is_tabular_path(&path) {
+            let workspace = self.workspace_root.clone();
+            self.start_tabular_load(path, workspace, cx);
+        }
+        if let Some(tree) = self.explorer.as_mut() {
+            tree.sync(true);
+        }
+        cx.notify();
+    }
+
+    /// Whether the file tab at `ix` carries edits that are not on disk.
+    fn file_tab_dirty(&self, ix: usize) -> bool {
+        let Some((path, _, _)) = self.files.get(ix) else {
+            return false;
+        };
+        (self.dirty && self.path.as_ref() == Some(path)) || self.unsaved.contains_key(path)
+    }
+
+    /// The × on a file tab: a dirty tab asks first.
+    fn close_file_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.file_tab_dirty(ix) {
+            self.remove_file_tab(ix, cx);
+            return;
+        }
+        let Some((path, _, _)) = self.files.get(ix) else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let entity = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let entity = entity.clone();
+            dialog
+                .confirm()
+                .title("Unsaved changes")
+                .child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .text_sm()
+                        .child(format!("Discard unsaved changes to '{name}'?")),
+                )
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text("Discard")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.remove_file_tab(ix, cx));
+                    true
+                })
+        });
+    }
+
+    /// Drop a file tab; if it was on screen, show its neighbour, or an empty
+    /// panel (kept open for the explorer) when it was the last one.
+    fn remove_file_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.files.len() {
+            return;
+        }
+        let (path, _, _) = self.files.remove(ix);
+        self.unsaved.remove(&path);
+        if self.path.as_ref() != Some(&path) || self.browser_shown {
+            cx.notify();
+            return;
+        }
+        self.dirty = false;
+        let neighbour = self
+            .files
+            .get(ix.min(self.files.len().saturating_sub(1)))
+            .cloned();
+        match neighbour {
+            Some((next, source, old)) if !self.files.is_empty() => {
+                let workspace = self.workspace_root.clone();
+                let keep_mode = self.mode;
+                self.open(next, source, old, workspace, cx);
+                self.mode = keep_mode;
+            }
+            _ => self.clear_document(cx),
+        }
+    }
+
+    /// Nothing on screen: the state `new` starts in, minus the explorer.
+    fn clear_document(&mut self, cx: &mut Context<Self>) {
+        self.path = None;
+        self.source.clear();
+        self.rendered.clear();
+        self.old.clear();
+        self.set_pdf(PdfPreview::Idle, cx);
+        self.pptx = PptxPreview::Idle;
+        self.tabular = TabularPreview::Idle;
+        self.chart = None;
+        self.headings.clear();
+        self.tab = 0;
+        self.stale = false;
+        self.dirty = false;
+        self.load_gen = self.load_gen.wrapping_add(1);
+        if let Some(tree) = self.explorer.as_mut() {
+            tree.select(None);
+        }
+        if self.explorer.is_none() && self.browser_manager.is_none() {
+            self.set_mode(ArtifactMode::Closed, cx);
+        }
+        cx.notify();
     }
 
     /// Queue a mouse event for the input-forwarding drain (AGE-156). A
@@ -1003,6 +1498,7 @@ impl ArtifactView {
         workspace_root: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.leave_current_file(cx);
         self.session_review = false;
         self.review_sections.clear();
         self.pause_browser(cx);
@@ -1014,6 +1510,9 @@ impl ArtifactView {
                 .push((path.clone(), source.clone(), old_snapshot.clone()));
         }
         self.path = Some(path.clone());
+        if let Some(tree) = self.explorer.as_mut() {
+            tree.reveal(&path);
+        }
         self.workspace_root = workspace_root.clone();
         self.loaded_version = artifact_version(&path);
         self.stale = false;
@@ -1096,6 +1595,7 @@ impl ArtifactView {
         if files.is_empty() {
             return;
         }
+        self.leave_current_file(cx);
         self.drop_browser(cx);
         self.session_review = true;
         self.files = files;
@@ -1310,6 +1810,9 @@ impl ArtifactView {
         let Some(path) = self.path.clone() else {
             return;
         };
+        // Reload means "give me the disk version": drop the edits.
+        self.unsaved.remove(&path);
+        self.dirty = false;
         let workspace = self.workspace_root.clone();
         let old = if self.old.is_empty() {
             None
@@ -1634,10 +2137,16 @@ impl ArtifactView {
             .as_ref()
             .and_then(|p| artifact_language_for_path(p))
             .unwrap_or_else(|| "markdown".to_string());
-        let source = self.source.clone();
+        // An unsaved buffer stashed by `leave_current_file` wins over the
+        // disk text (AGE-476); `note_editor_change` then marks it dirty again.
+        let text = self
+            .path
+            .as_ref()
+            .and_then(|path| self.unsaved.get(path).cloned())
+            .unwrap_or_else(|| self.source.clone());
         self.editor.update(cx, |editor, cx| {
             editor.set_highlighter(language, cx);
-            editor.set_value(source, window, cx);
+            editor.set_value(text, window, cx);
         });
         self.editor_synced_gen = self.load_gen;
         self.apply_pending_jump(window, cx);
@@ -2689,6 +3198,34 @@ fn artifact_primary_body(
     }
 }
 
+/// Ctrl+S, or ⌘S on macOS.
+fn is_save_keystroke(keystroke: &Keystroke) -> bool {
+    let modifier = if cfg!(target_os = "macos") {
+        keystroke.modifiers.platform
+    } else {
+        keystroke.modifiers.control
+    };
+    modifier && !keystroke.modifiers.shift && !keystroke.modifiers.alt && keystroke.key == "s"
+}
+
+/// Anything the Source editor can hold and Save can write back: not a
+/// binary the panel renders from disk.
+fn is_text_artifact_path(path: &Path) -> bool {
+    !is_pdf_path(path) && !is_pptx_path(path) && !is_image_path(path)
+}
+
+/// Where the explorer roots (AGE-476): the artifact's own workspace, the
+/// configured working directory, or the process cwd — the same fallback
+/// order the tools use for a relative path.
+fn explorer_root_for(workspace_root: Option<&str>, setting: Option<&str>) -> PathBuf {
+    workspace_root
+        .or(setting)
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 fn artifact_source_input(editor: &Entity<InputState>) -> AnyElement {
     // Match gpui-component inspector: v_flex().flex_1() parent + Input::h_full().
     // The panel body slot must also be flex-col (see render) or flex_1 never resolves.
@@ -2717,6 +3254,18 @@ impl Render for ArtifactView {
                 self.sync_browser_viewport_size(cx);
             }
             self.sync_pdf_raster_width(window, cx);
+        }
+        // The explorer follows the disk on a timer (AGE-476); a `true`
+        // means a listing changed, which this render already reflects.
+        if let Some(tree) = self.explorer.as_mut() {
+            tree.sync(false);
+            if self.explorer_focus_pending {
+                self.explorer_focus_pending = false;
+                if tree.pending().is_some() {
+                    self.explorer_input
+                        .update(cx, |input, cx| input.focus(window, cx));
+                }
+            }
         }
 
         let tab = self.tab;
@@ -2774,7 +3323,36 @@ impl Render for ArtifactView {
             RunPinKind::JumpToLatest
         };
 
-        let body = if session_review {
+        // Nothing on screen (AGE-476): the explorer is up with no file
+        // chosen yet, or the last tab was closed.
+        let nothing_open = !session_review
+            && !is_browser
+            && path_ref.is_none()
+            && chart.is_none()
+            && !matches!(tabular, TabularPreview::Ready(_));
+        let dirty = self.dirty;
+        let explorer_shown = self.explorer.is_some();
+
+        let body = if nothing_open {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::File).size_6())
+                .child(if explorer_shown {
+                    "Select a file to open it here."
+                } else {
+                    "Nothing open."
+                })
+                .into_any_element()
+        } else if session_review {
             SessionReviewPanel::new(
                 self.files.len(),
                 self.review_total_added,
@@ -2957,7 +3535,9 @@ impl Render for ArtifactView {
                 .into_any_element()
         };
 
-        let title = if session_review {
+        let title = if nothing_open {
+            "Explorer".to_string()
+        } else if session_review {
             format!("Review · {} files", self.files.len())
         } else if is_browser {
             "Browser".to_string()
@@ -2999,7 +3579,11 @@ impl Render for ArtifactView {
             selected_file,
             self.browser_shown,
         );
-        let file_tab_bar = (!session_review && tab_entries.len() > 1).then(|| {
+        // With the explorer up the bar shows for a single file too, so its
+        // dot and × are there (AGE-476); without it, one file needs no bar.
+        let show_file_tabs = !session_review
+            && (tab_entries.len() > 1 || (explorer_shown && !tab_entries.is_empty()));
+        let file_tab_bar = show_file_tabs.then(|| {
             let targets: Vec<ArtifactTabTarget> = tab_entries
                 .iter()
                 .map(|entry| entry.target.clone())
@@ -3020,6 +3604,46 @@ impl Render for ArtifactView {
                 })
                 .children(tab_entries.iter().map(|entry| {
                     let mut tab = Tab::new().label(entry.label.clone());
+                    if let ArtifactTabTarget::File(ix) = entry.target {
+                        // A file tab gets a dot while it carries unsaved
+                        // edits and its own × (AGE-476), laid out like the
+                        // browser tab's close button below.
+                        let is_dirty = self.file_tab_dirty(ix);
+                        tab = tab.suffix(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .when(is_dirty, |this| {
+                                    this.child(
+                                        div()
+                                            .w(px(6.))
+                                            .h(px(6.))
+                                            .rounded_full()
+                                            .bg(cx.theme().foreground),
+                                    )
+                                })
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "artifact-file-tab-close-{ix}"
+                                    )))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Close).size_3())
+                                    .tooltip("Close")
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            entity.update(cx, |this, cx| {
+                                                this.close_file_tab(ix, window, cx)
+                                            });
+                                        }
+                                    }),
+                                ),
+                        );
+                    }
                     if let Some(blocked) = entry.browser_blocked {
                         let icon = if blocked {
                             IconName::CircleX
@@ -3103,7 +3727,9 @@ impl Render for ArtifactView {
                     // source and rendered genuinely differ, nothing at all for
                     // an artifact with no text (AGE-181).
                     .when(
-                        !session_review && matches!(copy_control, ArtifactCopy::Source),
+                        !session_review
+                            && !nothing_open
+                            && matches!(copy_control, ArtifactCopy::Source),
                         |this| {
                             this.child(
                                 Button::new("artifact-copy-main")
@@ -3123,7 +3749,9 @@ impl Render for ArtifactView {
                         },
                     )
                     .when(
-                        !session_review && matches!(copy_control, ArtifactCopy::Menu),
+                        !session_review
+                            && !nothing_open
+                            && matches!(copy_control, ArtifactCopy::Menu),
                         |this| {
                             let rendered_label = if is_tabular {
                                 "Copy table"
@@ -3184,6 +3812,39 @@ impl Render for ArtifactView {
                             )
                         },
                     )
+                    .when(!session_review && dirty, |this| {
+                        this.child(
+                            Button::new("artifact-save")
+                                .primary()
+                                .small()
+                                .label("Save")
+                                .tooltip(if cfg!(target_os = "macos") {
+                                    "Save (⌘S)"
+                                } else {
+                                    "Save (Ctrl+S)"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.save_current(cx);
+                                })),
+                        )
+                    })
+                    .when(!session_review, |this| {
+                        this.child(
+                            Button::new("artifact-explorer-toggle")
+                                .small()
+                                .icon(Icon::new(IconName::PanelLeft).size_3())
+                                .tooltip(if explorer_shown {
+                                    "Hide the file explorer"
+                                } else {
+                                    "Show the file explorer"
+                                })
+                                .when(explorer_shown, |b| b.selected(true))
+                                .when(!explorer_shown, |b| b.ghost())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_explorer(cx);
+                                })),
+                        )
+                    })
                     .when(!session_review, |this| {
                         this.when_some(self.path.clone(), |this, path| {
                             this.child(
@@ -3244,6 +3905,43 @@ impl Render for ArtifactView {
                 )
         });
 
+        // The explorer column sits left of whatever the body is, under the
+        // shared header; review mode has no per-file body to sit next to.
+        let explorer_column = self
+            .explorer
+            .as_ref()
+            .filter(|_| !session_review)
+            .map(|tree| {
+                render_file_explorer(
+                    tree,
+                    &self.explorer_input,
+                    self.explorer_scroll.clone(),
+                    entity.clone(),
+                    cx,
+                )
+            });
+        let body = match explorer_column {
+            Some(column) => div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h_0()
+                .size_full()
+                .child(column)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .h_full()
+                        .child(body),
+                )
+                .into_any_element(),
+            None => body,
+        };
+
         let panel = div()
             .id("artifact-view")
             .flex()
@@ -3259,6 +3957,9 @@ impl Render for ArtifactView {
                 move |event: &KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         entity.update(cx, |this, cx| this.close_panel(cx));
+                        cx.stop_propagation();
+                    } else if is_save_keystroke(&event.keystroke) {
+                        entity.update(cx, |this, cx| this.save_current(cx));
                         cx.stop_propagation();
                     }
                 }

@@ -87,7 +87,8 @@ impl RenderOnce for AppTitleBar {
             )
             .child(
                 // Unfold/fold the artifact panel; the caret opens a small
-                // picker for manually starting one — "Browser" for now.
+                // picker for manually starting one — the workspace file
+                // explorer (AGE-476) or a browser.
                 DropdownButton::new("toggle-artifact")
                     .small()
                     .button(
@@ -113,14 +114,24 @@ impl RenderOnce for AppTitleBar {
                     .dropdown_menu({
                         let chat_view = chat_view.clone();
                         move |menu, _window, _cx| {
-                            menu.item(PopupMenuItem::new("Browser").on_click({
+                            menu.item(PopupMenuItem::new("Files").on_click({
                                 let chat_view = chat_view.clone();
                                 move |_event, _window, cx| {
                                     chat_view.update(cx, |view, cx| {
-                                        view.open_manual_browser(cx);
+                                        view.open_file_explorer(cx);
                                     });
                                 }
                             }))
+                            .item(
+                                PopupMenuItem::new("Browser").on_click({
+                                    let chat_view = chat_view.clone();
+                                    move |_event, _window, cx| {
+                                        chat_view.update(cx, |view, cx| {
+                                            view.open_manual_browser(cx);
+                                        });
+                                    }
+                                }),
+                            )
                         }
                     }),
             )
