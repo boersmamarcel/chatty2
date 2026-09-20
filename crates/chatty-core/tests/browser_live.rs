@@ -1448,3 +1448,135 @@ async fn a_background_tab_that_navigates_itself_outside_the_policy_is_blocked_at
 
     manager.shutdown().await;
 }
+
+/// AGE-473: the artifact panel calls into the session from gpui threads that
+/// have no Tokio runtime entered. Switching and closing tabs from such a
+/// thread must still move the cast and attach the pumps — the session spawns
+/// on its own runtime handle, never on the caller's ambient context. Before
+/// that, the call panicked ("there is no reactor running") and the panel kept
+/// showing the previous tab's frame.
+// A multi-thread runtime, like the desktop app's: a current-thread runtime
+// would starve while the test blocks a thread on `join()` below, since the
+// session's CDP handler and pumps run on the same runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime() {
+    let dir = popup_workspace();
+    let manager = manager(&dir);
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts());
+    let cx = &mut ToolContext::new();
+
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("the opener loads");
+
+    let session = manager.session().await.expect("a live session");
+    let opener_id = session
+        .page()
+        .expect("the opener page")
+        .target_id()
+        .inner()
+        .clone();
+    let mut frames = session
+        .start_screencast(400, 300)
+        .await
+        .expect("screencast starts");
+    wait_for_frame_colour(&mut frames, "white", "before anything opens").await;
+    session.take_control();
+    click_at(&session, 110.0, 30.0).await;
+    let popup_id =
+        wait_for_promotion(&session, &opener_id, "the link's tab was never surfaced").await;
+    wait_for_frame_colour(&mut frames, "red", "the popup is shown").await;
+
+    /// Run `f` on a plain OS thread with no Tokio context at all.
+    fn off_runtime<T: Send + 'static>(
+        f: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> std::thread::Result<T> {
+        std::thread::spawn(move || futures::executor::block_on(f)).join()
+    }
+
+    // Switch back to the opener from a thread without a runtime.
+    let result = off_runtime({
+        let session = session.clone();
+        let id = opener_id.clone();
+        async move { session.select_tab(&id).await }
+    });
+    result
+        .expect("select_tab must not panic off the Tokio runtime")
+        .expect("select_tab succeeds");
+    assert_eq!(
+        session.page().expect("live").target_id().inner(),
+        &opener_id
+    );
+    // The cast moved, so frames come from the opener again — a tab that was
+    // opened over (the link's `target="_blank"` page) and is now behind it.
+    wait_for_frame_colour(&mut frames, "white", "after switching back off-runtime").await;
+    // And forwarded input reaches the re-selected tab: the window.open()
+    // button opens a second popup.
+    click_at(&session, 110.0, 100.0).await;
+    let second_popup = wait_for_promotion(
+        &session,
+        &opener_id,
+        "input did not reach the re-selected tab",
+    )
+    .await;
+    assert_ne!(second_popup, popup_id);
+    wait_for_frame_colour(&mut frames, "red", "the second popup is shown").await;
+
+    // Close the active tab from a thread without a runtime: falls back to a
+    // neighbour, with its cast.
+    off_runtime({
+        let session = session.clone();
+        let id = second_popup.clone();
+        async move { session.close_tab(&id).await }
+    })
+    .expect("close_tab must not panic off the Tokio runtime")
+    .expect("close_tab succeeds");
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 2 && tabs.iter().all(|tab| tab.id != second_popup),
+        "the closed tab is still listed",
+    )
+    .await;
+    assert!(tabs.iter().any(|tab| tab.active), "{tabs:#?}");
+    wait_for_frame_colour(&mut frames, "red", "back on the first popup").await;
+
+    // Close every remaining tab off-runtime, down to the blank stand-in,
+    // which is the path that arms a timer (`reopen_blank_page`).
+    for id in [popup_id, opener_id.clone()] {
+        off_runtime({
+            let session = session.clone();
+            async move { session.close_tab(&id).await }
+        })
+        .expect("close_tab must not panic off the Tokio runtime")
+        .expect("close_tab succeeds");
+    }
+    let tabs = wait_for_tabs(
+        &session,
+        |tabs| tabs.len() == 1 && tabs[0].id != opener_id && tabs[0].url == "about:blank",
+        "no blank page stood in for the last tab",
+    )
+    .await;
+    assert!(tabs[0].active, "{tabs:#?}");
+    session.release_control();
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("navigation works on the stand-in tab");
+    let snap = snapshot.call(cx, NoArgs {}).await.expect("snapshot works");
+    assert!(snap.tree.contains("open a tab"), "tree was:\n{}", snap.tree);
+    wait_for_frame_colour(&mut frames, "white", "the stand-in tab is screencast").await;
+
+    manager.shutdown().await;
+}

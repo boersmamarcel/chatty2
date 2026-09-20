@@ -909,7 +909,9 @@ impl ArtifactView {
             return;
         };
         self.take_browser_control(cx);
-        cx.background_spawn(async move {
+        // Foreground, like `reload_browser`: the main thread has the Tokio
+        // runtime entered, gpui's worker threads do not.
+        cx.spawn(async move |_, _| {
             if let Err(e) = session.select_tab(&id).await {
                 warn!(error = %e, tab = %id, "browser: switching tabs failed");
             }
@@ -924,7 +926,7 @@ impl ArtifactView {
             return;
         };
         self.take_browser_control(cx);
-        cx.background_spawn(async move {
+        cx.spawn(async move |_, _| {
             if let Err(e) = session.close_tab(&id).await {
                 warn!(error = %e, tab = %id, "browser: closing the tab failed");
             }

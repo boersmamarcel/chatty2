@@ -81,8 +81,9 @@ pub(super) fn spawn_watcher(
     created: EventStream<EventTargetCreated>,
     destroyed: EventStream<EventTargetDestroyed>,
 ) -> JoinHandle<()> {
+    let runtime = session.runtime().clone();
     let session = Arc::downgrade(session);
-    tokio::spawn(watch(session, created, destroyed))
+    runtime.spawn(watch(session, created, destroyed))
 }
 
 /// Re-check the policy on every navigation `page` makes, for as long as the
@@ -108,13 +109,9 @@ pub(super) async fn spawn_navigation_guard(
         .event_listener::<EventLoadEventFired>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot watch page load: {e}")))?;
+    let runtime = session.runtime().clone();
     let session = Arc::downgrade(session);
-    Ok(tokio::spawn(guard(
-        session,
-        page.clone(),
-        navigated,
-        loaded,
-    )))
+    Ok(runtime.spawn(guard(session, page.clone(), navigated, loaded)))
 }
 
 async fn guard(

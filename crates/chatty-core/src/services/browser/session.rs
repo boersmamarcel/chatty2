@@ -178,6 +178,12 @@ fn refusal_reason(url: &str) -> String {
 
 /// A live browser session: one process, one active page among the open tabs.
 pub struct BrowserSession {
+    /// The Tokio runtime the session was launched on. Every task the session
+    /// spawns and every timer it arms goes through this rather than the
+    /// caller's ambient context: the artifact panel calls `select_tab`,
+    /// `close_tab` and `start_screencast` from gpui threads that have no
+    /// Tokio runtime entered, and a `tokio::spawn` there panics (AGE-473).
+    runtime: tokio::runtime::Handle,
     /// `tokio::sync::Mutex` because the target watcher resolves new tabs
     /// through the browser handle, which is a CDP round trip.
     browser: tokio::sync::Mutex<Option<Browser>>,
@@ -225,6 +231,12 @@ impl BrowserSession {
         profile: BrowserProfile,
         policy: NavigationPolicy,
     ) -> Result<Arc<Self>, BrowserError> {
+        // Launching is always under Tokio (chromiumoxide needs it to drive
+        // the process); what is captured here is what later calls from
+        // Tokio-less threads borrow.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            BrowserError::Launch("the browser must be launched from a Tokio runtime".into())
+        })?;
         let mut builder = BrowserConfig::builder().chrome_executable(&chrome);
 
         // Lane A is headless. The viewport work (AGE-155) reads frames over CDP
@@ -265,7 +277,7 @@ impl BrowserSession {
         // The handler stream must be driven or every command hangs forever.
         // Its ending is how we learn the browser died.
         let dead = Arc::new(AtomicBool::new(false));
-        let handler = tokio::spawn({
+        let handler = runtime.spawn({
             let dead = dead.clone();
             async move {
                 while handler_stream.next().await.is_some() {}
@@ -283,7 +295,7 @@ impl BrowserSession {
         .map_err(|e| BrowserError::Launch(format!("cannot open page: {e}")))?;
 
         let events = Arc::new(EventBuffers::default());
-        let listeners = super::events::spawn_listeners(&page, events.clone()).await?;
+        let listeners = super::events::spawn_listeners(&runtime, &page, events.clone()).await?;
 
         // Subscribe *after* opening our own page, so its creation is not
         // reported as a new tab (tracking is keyed by target id anyway).
@@ -312,6 +324,7 @@ impl BrowserSession {
             active: page.clone(),
         };
         let session = Arc::new(Self {
+            runtime,
             browser: tokio::sync::Mutex::new(Some(browser)),
             tab_list: watch::channel(tabs.snapshot()).0,
             tabs: Mutex::new(tabs),
@@ -342,6 +355,11 @@ impl BrowserSession {
         }
 
         Ok(session)
+    }
+
+    /// The Tokio runtime every task of this session runs on.
+    pub(super) fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
     }
 
     /// True once the browser process is gone.
@@ -573,13 +591,20 @@ impl BrowserSession {
         // while input and tools drive the new one (AGE-458).
         let (page, blocked) = self.active_view();
         if let Some(url) = blocked {
-            return screencast::hold(&mut guard, width, height, &refusal_reason(&url)).await;
+            return screencast::hold(
+                &self.runtime,
+                &mut guard,
+                width,
+                height,
+                &refusal_reason(&url),
+            )
+            .await;
         }
         // The state is handed over by mutable borrow, never taken out: a
         // failed retarget leaves the previous screencast — which Chrome is
         // still encoding — in place, so a later call retargets or stops it
         // instead of asking Chrome to start a second one (AGE-457).
-        screencast::start(&page, &mut guard, width, height).await
+        screencast::start(&self.runtime, &page, &mut guard, width, height).await
     }
 
     /// Stop the screencast. Idle handling (AGE-155) calls this when the
@@ -624,7 +649,7 @@ impl BrowserSession {
         if screencast.is_casting(&page, width, height) {
             return;
         }
-        if let Err(e) = screencast::start(&page, &mut guard, width, height).await {
+        if let Err(e) = screencast::start(&self.runtime, &page, &mut guard, width, height).await {
             warn!(error = %e, "browser: cannot move the screencast to the active tab");
         }
     }
@@ -886,27 +911,33 @@ impl BrowserSession {
     /// track it like any other, so it is the tab every consumer drives.
     async fn reopen_blank_page(self: &Arc<Self>) {
         info!("browser: the last tab closed; opening a blank page");
-        let page = {
-            let guard = self.browser.lock().await;
-            let Some(browser) = guard.as_ref() else {
-                return;
-            };
-            match tokio::time::timeout(
-                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                browser.new_page("about:blank"),
-            )
-            .await
-            {
-                Ok(Ok(page)) => page,
-                Ok(Err(e)) => {
-                    warn!(error = %e, "browser: cannot open a blank page after the last tab closed");
-                    return;
-                }
-                Err(_) => {
-                    warn!("browser: opening a blank page after the last tab closed timed out");
-                    return;
+        // On the session's runtime: `close_tab` may be called from a thread
+        // with no Tokio context, and the deadline here is a Tokio timer.
+        let opened = self.runtime.spawn({
+            let this = self.clone();
+            async move {
+                let guard = this.browser.lock().await;
+                let browser = guard.as_ref()?;
+                match tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    browser.new_page("about:blank"),
+                )
+                .await
+                {
+                    Ok(Ok(page)) => Some(page),
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "browser: cannot open a blank page after the last tab closed");
+                        None
+                    }
+                    Err(_) => {
+                        warn!("browser: opening a blank page after the last tab closed timed out");
+                        None
+                    }
                 }
             }
+        });
+        let Ok(Some(page)) = opened.await else {
+            return;
         };
         // The watcher sees this target too; `track` dedupes under the lock.
         self.track(&page, "about:blank".to_string()).await;
@@ -1016,7 +1047,7 @@ impl BrowserSession {
     /// The pumps are the tab's own: they are aborted when it stops being
     /// the active one, so nothing it does afterwards reaches the tools.
     async fn attach_listeners(&self, page: &Page) {
-        match super::events::spawn_listeners(page, self.events.clone()).await {
+        match super::events::spawn_listeners(&self.runtime, page, self.events.clone()).await {
             Ok(handles) => {
                 let mut tabs = self.tabs.lock();
                 let still_active = tabs.active.target_id() == page.target_id();

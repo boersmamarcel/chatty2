@@ -117,6 +117,10 @@ struct Running {
 /// failure while moving the cast dropped the sender and the panel reported
 /// "browser session ended" for a session that was perfectly healthy.
 pub(super) struct Screencast {
+    /// Where the frame pump runs: the session's Tokio handle, since the
+    /// consumer may move the cast from a thread with no Tokio context
+    /// (AGE-473).
+    runtime: tokio::runtime::Handle,
     tx: watch::Sender<ScreencastUpdate>,
     width: u32,
     height: u32,
@@ -128,6 +132,7 @@ pub(super) struct Screencast {
 impl Screencast {
     /// Start casting `page` on a fresh channel.
     async fn start(
+        runtime: &tokio::runtime::Handle,
         page: &Page,
         width: u32,
         height: u32,
@@ -135,6 +140,7 @@ impl Screencast {
         validate_dimensions(width, height)?;
         let (tx, rx) = watch::channel(ScreencastUpdate::Starting);
         let mut screencast = Self {
+            runtime: runtime.clone(),
             tx,
             width,
             height,
@@ -211,7 +217,7 @@ impl Screencast {
         // Whatever the old page last showed is not this page.
         let _ = self.tx.send(ScreencastUpdate::Starting);
 
-        match spawn_cast(page, self.tx.clone(), width, height).await {
+        match spawn_cast(&self.runtime, page, self.tx.clone(), width, height).await {
             Ok(running) => {
                 self.running = Some(running);
                 Ok(())
@@ -287,6 +293,7 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), BrowserError> {
 /// `Page.startScreencast` against that target is refused with
 /// `-32000: Screencast is already active`.
 pub(super) async fn start(
+    runtime: &tokio::runtime::Handle,
     page: &Page,
     slot: &mut Option<Screencast>,
     width: u32,
@@ -327,7 +334,7 @@ pub(super) async fn start(
             Ok(screencast.subscribe())
         }
         None => {
-            let (screencast, rx) = Screencast::start(page, width, height).await?;
+            let (screencast, rx) = Screencast::start(runtime, page, width, height).await?;
             *slot = Some(screencast);
             Ok(rx)
         }
@@ -340,6 +347,7 @@ pub(super) async fn start(
 /// channel exists, so switching to a tab that may be shown revives it
 /// through the session's usual move instead of finding nothing to move.
 pub(super) async fn hold(
+    runtime: &tokio::runtime::Handle,
     slot: &mut Option<Screencast>,
     width: u32,
     height: u32,
@@ -356,6 +364,7 @@ pub(super) async fn hold(
         None => {
             let (tx, rx) = watch::channel(ScreencastUpdate::Error(reason.to_string()));
             *slot = Some(Screencast {
+                runtime: runtime.clone(),
                 tx,
                 width,
                 height,
@@ -392,8 +401,10 @@ async fn retarget(
     Ok(Some(screencast.subscribe()))
 }
 
-/// Ask Chrome to encode `page` and pump the frames onto `tx`.
+/// Ask Chrome to encode `page` and pump the frames onto `tx`. The pump runs
+/// on `runtime`, whatever thread this is called from (AGE-473).
 async fn spawn_cast(
+    runtime: &tokio::runtime::Handle,
     page: &Page,
     tx: watch::Sender<ScreencastUpdate>,
     width: u32,
@@ -417,7 +428,7 @@ async fn spawn_cast(
         .await
         .map_err(|e| BrowserError::Protocol(format!("startScreencast failed: {e}")))?;
 
-    let handle = tokio::spawn({
+    let handle = runtime.spawn({
         let page = page.clone();
         let tx = tx.clone();
         async move {
@@ -604,6 +615,7 @@ mod tests {
         let handle = tokio::spawn(std::future::pending::<()>());
         (
             Some(Screencast {
+                runtime: tokio::runtime::Handle::current(),
                 tx,
                 width,
                 height,

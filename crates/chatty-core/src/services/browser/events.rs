@@ -110,7 +110,12 @@ impl EventBuffers {
 }
 
 /// Subscribe to the CDP events we buffer, returning the pump tasks.
+///
+/// The pumps are spawned on `runtime` — the session's Tokio handle — not on
+/// whatever runtime the caller happens to be on: the artifact panel calls
+/// into the session from gpui threads that have no Tokio context (AGE-473).
 pub(super) async fn spawn_listeners(
+    runtime: &tokio::runtime::Handle,
     page: &Page,
     buffers: Arc<EventBuffers>,
 ) -> Result<Vec<JoinHandle<()>>, BrowserError> {
@@ -132,7 +137,7 @@ pub(super) async fn spawn_listeners(
         .event_listener::<EventConsoleApiCalled>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for console events: {e}")))?;
-    handles.push(tokio::spawn({
+    handles.push(runtime.spawn({
         let buffers = buffers.clone();
         async move {
             while let Some(event) = console.next().await {
@@ -153,7 +158,7 @@ pub(super) async fn spawn_listeners(
         .event_listener::<EventExceptionThrown>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for exceptions: {e}")))?;
-    handles.push(tokio::spawn({
+    handles.push(runtime.spawn({
         let buffers = buffers.clone();
         async move {
             while let Some(event) = exceptions.next().await {
@@ -175,7 +180,7 @@ pub(super) async fn spawn_listeners(
         .event_listener::<EventEntryAdded>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for log entries: {e}")))?;
-    handles.push(tokio::spawn({
+    handles.push(runtime.spawn({
         let buffers = buffers.clone();
         async move {
             while let Some(event) = log.next().await {
@@ -191,7 +196,7 @@ pub(super) async fn spawn_listeners(
         .event_listener::<EventResponseReceived>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for responses: {e}")))?;
-    handles.push(tokio::spawn({
+    handles.push(runtime.spawn({
         let buffers = buffers.clone();
         async move {
             while let Some(event) = responses.next().await {
@@ -208,7 +213,7 @@ pub(super) async fn spawn_listeners(
         .event_listener::<EventLoadingFailed>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for failed requests: {e}")))?;
-    handles.push(tokio::spawn({
+    handles.push(runtime.spawn({
         let buffers = buffers.clone();
         async move {
             while let Some(event) = failures.next().await {
