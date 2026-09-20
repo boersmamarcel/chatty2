@@ -64,6 +64,10 @@ pub enum Command {
     Verbose,
     /// /paste [n] — print the full text of an elided paste
     Paste(Option<String>),
+    /// /now <message> — cancel the running turn and send this next (AGE-482)
+    Now(Option<String>),
+    /// /unqueue — take back the message queued last (AGE-482)
+    Unqueue,
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -99,6 +103,8 @@ impl ChatEngine {
             "/online" => Some(Command::Online(arg)),
             "/verbose" => Some(Command::Verbose),
             "/paste" => Some(Command::Paste(arg)),
+            "/now" => Some(Command::Now(arg)),
+            "/unqueue" => Some(Command::Unqueue),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }

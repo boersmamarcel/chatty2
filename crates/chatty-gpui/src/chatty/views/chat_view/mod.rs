@@ -57,6 +57,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -206,6 +207,11 @@ pub struct ChatView {
     stream_started_at: Option<Instant>,
     /// Hide the session "N files changed" bar after Keep all.
     session_review_dismissed: bool,
+    /// The conversation's mailbox, front first: messages sent while a reply
+    /// was streaming, shown as the next turns below the transcript (AGE-482).
+    queued_messages: Vec<(chatty_core::session::QueuedId, String)>,
+    /// Why the last send was refused (the queue is full), shown under them.
+    queue_notice: Option<String>,
     /// Session files-changed bar is unfolded to the per-file list.
     session_bar_expanded: bool,
     elapsed_tick_started: bool,
@@ -247,6 +253,10 @@ pub enum ChatViewEvent {
         taken: bool,
         url: String,
     },
+    /// "Send now" on a queued message: run it instead of the streaming turn.
+    SendQueuedNow(chatty_core::session::QueuedId),
+    /// "Remove" on a queued message.
+    WithdrawQueued(chatty_core::session::QueuedId),
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
@@ -551,6 +561,8 @@ impl ChatView {
             adapt_stats: AdaptStats::default(),
             stream_started_at: None,
             session_review_dismissed: false,
+            queued_messages: Vec::new(),
+            queue_notice: None,
             session_bar_expanded: false,
             elapsed_tick_started: false,
             pr_status: cx.new(|_cx| PrStatusBarView::new()),
@@ -1956,6 +1968,7 @@ impl ChatView {
         let entity = cx.entity();
         let session_entity = entity.clone();
         let session_bar_expanded = self.session_bar_expanded;
+        let queued_strip = self.render_queued_strip(cx);
         let session_changes = if self.session_review_dismissed {
             Vec::new()
         } else {
@@ -2154,6 +2167,101 @@ impl ChatView {
                 )
             })
             .when(thinking_visible, |this| this.child(thinking_indicator))
+            // After the reply in progress: these are the turns that follow it.
+            .children(queued_strip)
+    }
+
+    /// What the controller knows about this conversation's mailbox (AGE-482).
+    pub fn set_queued_messages(
+        &mut self,
+        queued: Vec<(chatty_core::session::QueuedId, String)>,
+        notice: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queued_messages = queued;
+        self.queue_notice = notice;
+        cx.notify();
+    }
+
+    /// The messages waiting for the streaming reply to finish, drawn as the
+    /// next user turns under the transcript: the same bubble as a sent
+    /// message, with × (take it back) and ↑ (send it now) in front
+    /// (AGE-482). Not part of the measured list — they are not turns yet.
+    fn render_queued_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.queued_messages.is_empty() && self.queue_notice.is_none() {
+            return None;
+        }
+        let entity = cx.entity();
+        let bubble_bg = cx.theme().secondary;
+        let caption = cx.theme().muted_foreground;
+        let action = cx.theme().primary;
+        let danger = cx.theme().danger;
+        let strip = div()
+            .w_full()
+            .px_4()
+            .pb(TURN_GAP)
+            .flex()
+            .flex_col()
+            .gap(TURN_GAP)
+            .children(
+                self.queued_messages
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, (id, text))| {
+                        let id = *id;
+                        let run = entity.clone();
+                        let remove = entity.clone();
+                        // The same bubble as a sent user message, with its two
+                        // controls in front: × takes it back, ↑ sends it now.
+                        div()
+                            .w_full()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(bubble_bg)
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id(("queued-remove", ix))
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .text_color(caption)
+                                    .hover(move |style| style.text_color(danger))
+                                    .tooltip(|window, cx| Tooltip::new("Remove").build(window, cx))
+                                    .child(Icon::new(IconName::Close).size_4())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        remove.update(cx, |_, cx| {
+                                            cx.emit(ChatViewEvent::WithdrawQueued(id));
+                                        });
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("queued-send-now", ix))
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .text_color(caption)
+                                    .hover(move |style| style.text_color(action))
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Send now, instead of the current reply")
+                                            .build(window, cx)
+                                    })
+                                    .child(Icon::new(IconName::ArrowUp).size_4())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        run.update(cx, |_, cx| {
+                                            cx.emit(ChatViewEvent::SendQueuedNow(id));
+                                        });
+                                    }),
+                            )
+                            .child(div().flex_1().min_w_0().child(text.clone()))
+                    }),
+            )
+            .when_some(self.queue_notice.clone(), |strip, notice| {
+                strip.child(div().text_sm().text_color(danger).child(notice))
+            });
+        Some(strip.into_any_element())
     }
 
     /// Render one transcript turn.

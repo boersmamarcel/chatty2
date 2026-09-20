@@ -146,6 +146,7 @@ fn render_file_chip(
 impl RenderOnce for ChatInput {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state_for_send = self.state.clone();
+        let state_for_queue = self.state.clone();
         let state_for_stop = self.state.clone();
         let state_for_model = self.state.clone();
         let state_for_image = self.state.clone();
@@ -627,6 +628,39 @@ impl RenderOnce for ChatInput {
                                             })
                                             .child(model_popover),
                                     )
+                                    .when(is_streaming, |row| {
+                                        // Send stays while a reply streams: the
+                                        // message waits in the conversation's
+                                        // mailbox and runs when the reply ends
+                                        // (AGE-482). Enter does the same.
+                                        row.child(
+                                            div()
+                                                .id("send-queued")
+                                                .flex_shrink_0()
+                                                .px_3()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_color(cx.theme().primary_foreground)
+                                                .cursor_pointer()
+                                                .bg(cx.theme().primary)
+                                                .hover(|style| style.bg(cx.theme().primary_hover))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new(
+                                                        "Sent after the current reply finishes",
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .child("Send")
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |_event, _window, cx| {
+                                                        state_for_queue.update(cx, |state, cx| {
+                                                            state.send_message(cx);
+                                                        });
+                                                    },
+                                                ),
+                                        )
+                                    })
                                     .child(
                                         // Send/Stop button (conditional based on streaming state).
                                         // Fixed size, never shrinks: it must stay
