@@ -54,6 +54,14 @@ When the agent produces a document, a card appears in the transcript and the fil
 
 When browser tools are on, a live view of the page the agent is driving docks in the same panel: [Agents & tools](./agents-and-tools.md).
 
+## File explorer
+
+The artifact panel doubles as a light IDE over your working directory. Open it from the panel's own toggle button, or from the caret next to the artifact button in the titlebar (or the floating button on macOS) — pick **Files**. It shows a tree rooted at your workspace directory (or the current folder if none is set), folders first, and picks up files the agent adds or removes within a couple of seconds without needing a refresh.
+
+Click a file to open it in the same viewers used for agent-produced artifacts (Markdown, code, PDF, PowerPoint, images, tables). Right-click a row for **New file…**, **New folder…**, **Rename…**, **Delete…**, **Reveal in file manager** and **Copy path** — the header also has buttons for creating a file or folder. Deleting asks for confirmation first and cannot be undone.
+
+The Source tab is editable: press **Ctrl/Cmd+S** or click **Save** to write your changes back to disk. An unsaved file shows a dot on its tab; switching tabs keeps your edits, and closing a tab with unsaved changes asks before discarding them.
+
 ## Tool-call traces
 
 Every tool call is a collapsible block showing the name, arguments, output, duration and status (success, error or cancelled). File edits get a proper diff — additions green, deletions red, unchanged runs collapsed with *Show N more lines* on large patches. Multi-step work also shows a **To-dos** card that updates in place; see [Agents & tools](./agents-and-tools.md).
