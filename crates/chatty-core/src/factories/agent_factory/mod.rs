@@ -710,6 +710,7 @@ impl AgentClient {
                     Some(crate::tools::browser_tools::build_browser_tools(
                         manager,
                         pending_artifacts,
+                        pending_approvals.clone(),
                     ))
                 }
                 (true, None, _) => {
