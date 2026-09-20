@@ -113,12 +113,17 @@ impl RenderOnce for AppTitleBar {
                     )
                     .dropdown_menu({
                         let chat_view = chat_view.clone();
+                        let sidebar = sidebar.clone();
                         move |menu, _window, _cx| {
                             menu.item(PopupMenuItem::new("Files").on_click({
-                                let chat_view = chat_view.clone();
+                                let sidebar = sidebar.clone();
                                 move |_event, _window, cx| {
-                                    chat_view.update(cx, |view, cx| {
-                                        view.open_file_explorer(cx);
+                                    // AGE-480: the tree lives in the sidebar
+                                    // now, not the artifact panel — expand
+                                    // the sidebar (if collapsed) and switch
+                                    // it to Files.
+                                    sidebar.update(cx, |sidebar, cx| {
+                                        sidebar.show_files_mode(cx);
                                     });
                                 }
                             }))

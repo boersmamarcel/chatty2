@@ -1,4 +1,5 @@
 use crate::settings::models::GeneralSettingsModel;
+use crate::settings::models::general_model::SidebarMode;
 use crate::settings::utils::find_theme_variant;
 use gpui::{App, AsyncApp, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeRegistry};
@@ -20,6 +21,20 @@ pub fn update_font_size(cx: &mut App, font_size: f32) {
         let repo = chatty_core::general_settings_repository();
         if let Err(e) = repo.save(settings).await {
             error!(error = ?e, "Failed to save general settings, changes will be lost on restart");
+        }
+    })
+    .detach();
+}
+
+/// Update the sidebar's Chats/Files mode and persist it (AGE-480), the same
+/// optimistic-update-then-save shape as [`update_font_size`].
+pub fn update_sidebar_mode(cx: &mut App, mode: SidebarMode) {
+    cx.global_mut::<GeneralSettingsModel>().sidebar_mode = mode;
+    let settings = cx.global::<GeneralSettingsModel>().clone();
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::general_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save sidebar mode, it will reset on restart");
         }
     })
     .detach();

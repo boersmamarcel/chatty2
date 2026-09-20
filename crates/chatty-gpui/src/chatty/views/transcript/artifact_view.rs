@@ -50,8 +50,7 @@ use super::artifact_kind::{
     is_tabular_path, markdown_headings, read_artifact_source, source_line_from_anchor,
 };
 use super::diff::DiffHunkList;
-use super::file_explorer::render_file_explorer;
-use super::file_tree::{FileOp, FileTree, PendingEdit, SelectGesture, rebase_path};
+use super::file_tree::{FileOp, rebase_path};
 use super::run_pin::{RunPin, RunPinKind};
 use super::session_review_panel::{ReviewFileSection, SessionReviewPanel};
 use super::table::render_table_preview_view;
@@ -279,18 +278,6 @@ pub struct ArtifactView {
     workspace_root: Option<String>,
     load_gen: u64,
     editor: Entity<InputState>,
-    /// The workspace explorer column (AGE-476), `Some` while it is shown.
-    /// It outlives the document: closing the last file tab leaves the tree
-    /// up with an empty body, and the panel closing keeps it for next time.
-    explorer: Option<FileTree>,
-    /// The inline name input the tree shows for a create/rename; one
-    /// entity reused for every edit, like `browser_address`.
-    explorer_input: Entity<InputState>,
-    explorer_scroll: UniformListScrollHandle,
-    /// Focus `explorer_input` on the next render: an edit begun from a
-    /// context-menu item is focused after the menu's own dismissal has
-    /// restored focus, or the menu wins.
-    explorer_focus_pending: bool,
     /// The editor's text differs from `source` for the file on screen
     /// (AGE-476). Kept from the editor's own change events, so the Save
     /// button and the tab's dot follow every keystroke.
@@ -357,31 +344,6 @@ impl ArtifactView {
             }
         })
         .detach();
-        let explorer_input = cx.new(|cx| InputState::new(window, cx).placeholder("name"));
-        cx.subscribe(
-            &explorer_input,
-            |this: &mut Self, input, event: &InputEvent, cx| match event {
-                InputEvent::PressEnter { .. } => {
-                    let name = input.read(cx).value().to_string();
-                    let _ = this.explorer_commit_edit(name, cx);
-                }
-                // Clicking away commits a typed name and drops an empty or
-                // rejected one, the way an IDE's inline rename behaves. A
-                // blur from before the render that focuses the input (the
-                // context menu closing) is not the user leaving.
-                InputEvent::Blur => {
-                    if this.explorer_focus_pending {
-                        return;
-                    }
-                    let name = input.read(cx).value().to_string();
-                    if name.trim().is_empty() || !this.explorer_commit_edit(name, cx) {
-                        this.explorer_cancel_edit(cx);
-                    }
-                }
-                _ => {}
-            },
-        )
-        .detach();
         Self {
             mode: ArtifactMode::Closed,
             path: None,
@@ -417,10 +379,6 @@ impl ArtifactView {
             workspace_root: None,
             load_gen: 0,
             editor,
-            explorer: None,
-            explorer_input,
-            explorer_scroll: UniformListScrollHandle::default(),
-            explorer_focus_pending: false,
             dirty: false,
             unsaved: HashMap::new(),
             outline,
@@ -1053,244 +1011,54 @@ impl ArtifactView {
         }
     }
 
-    // ----- Workspace explorer and editing (AGE-476) -----
+    // ----- Sidebar Files-mode interop (AGE-480) -----
+    //
+    // The workspace tree used to be a column inside this panel (AGE-476);
+    // it now lives in the left sidebar (`sidebar_view.rs` /
+    // `sidebar_file_tree.rs`), which owns the `FileTree` and all of the
+    // create/rename/delete/drag logic. This panel is back to being a pure
+    // viewer: it only needs to (1) open a path the sidebar activated, and
+    // (2) keep its own open tabs and unsaved buffers in step with what the
+    // tree just did to the disk.
 
-    /// Show the explorer column rooted at `root`, opening the panel docked
-    /// if it was closed. A tree already up on the same root is kept as is
-    /// (its expanded folders and selection survive); another root replaces
-    /// it.
-    pub fn show_explorer(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        if self
-            .explorer
-            .as_ref()
-            .is_none_or(|tree| tree.root() != root)
-        {
-            let mut tree = FileTree::new(root);
-            if let Some(path) = self.path.as_ref() {
-                tree.reveal(path);
-            }
-            self.explorer = Some(tree);
-        }
-        if self.mode == ArtifactMode::Closed {
-            self.set_mode(ArtifactMode::Docked, cx);
-        }
-        cx.notify();
-    }
-
-    pub fn explorer_shown(&self) -> bool {
-        self.explorer.is_some()
-    }
-
-    /// The header button: hide the tree, or bring it up on the workspace.
-    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
-        if self.explorer.is_some() {
-            self.explorer = None;
-            cx.notify();
-        } else {
-            let root = self.explorer_root(cx);
-            self.show_explorer(root, cx);
-        }
-    }
-
-    /// Where the tree is rooted: the workspace the open artifact came from,
-    /// else the configured working directory, else the process cwd (which
-    /// is what `workspace_dir = None` means for the tools too).
-    fn explorer_root(&self, cx: &App) -> PathBuf {
-        explorer_root_for(
-            self.workspace_root.as_deref(),
-            cx.try_global::<crate::settings::models::execution_settings::ExecutionSettingsModel>()
-                .and_then(|settings| settings.workspace_dir.as_deref()),
-        )
-    }
-
-    /// A click on a tree row. A plain click selects that row alone and
-    /// activates it (folders toggle, files open); Ctrl/⌘ and Shift only
-    /// change the selection (AGE-476 multi-select).
-    pub(super) fn explorer_click(
+    /// Open a path the sidebar's tree (or the Cmd+P quick-open picker)
+    /// activated, the way a tool card's "open" click does. Mirrors the old
+    /// `explorer_activate`'s file branch: opening this way is browsing, not
+    /// a new artifact arriving, so the panel's current mode is kept unless
+    /// it was closed (in which case it docks, the way `show_explorer` used
+    /// to).
+    pub fn open_from_sidebar(
         &mut self,
         path: PathBuf,
-        is_dir: bool,
-        gesture: SelectGesture,
+        source: String,
+        workspace_root: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        match gesture {
-            SelectGesture::Single => self.explorer_activate(path, is_dir, cx),
-            SelectGesture::Toggle | SelectGesture::Range => {
-                if let Some(tree) = self.explorer.as_mut() {
-                    tree.click_select(path, gesture);
-                    cx.notify();
-                }
-            }
-        }
-    }
-
-    /// Drop of dragged entries onto `dest` (AGE-476 drag-to-move): the
-    /// tree moves what can move and the panel's tabs follow.
-    pub(super) fn explorer_drop(
-        &mut self,
-        paths: Vec<PathBuf>,
-        dest: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tree) = self.explorer.as_mut() else {
-            return;
-        };
-        let ops = tree.move_entries(&paths, &dest);
-        for op in ops {
-            self.apply_file_op(op, cx);
-        }
-        cx.notify();
-    }
-
-    /// A plain click on a tree row: folders toggle, files open in the panel
-    /// the way a tool-card click does.
-    pub(super) fn explorer_activate(
-        &mut self,
-        path: PathBuf,
-        is_dir: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tree) = self.explorer.as_mut() else {
-            return;
-        };
-        tree.select(Some(path.clone()));
-        if is_dir {
-            tree.toggle(&path);
-            cx.notify();
-            return;
-        }
-        let source = read_artifact_source(&path);
-        let workspace = Some(self.explorer_root(cx).display().to_string());
+        let was_closed = self.mode == ArtifactMode::Closed;
         let keep_mode = self.mode;
-        self.open(path, source, None, workspace, cx);
-        // Opening from the tree is browsing, not a new artifact arriving:
-        // stay full-window if that is where the user is.
-        self.mode = keep_mode;
-        cx.notify();
-    }
-
-    /// The header's "new file"/"new folder" buttons: create next to the
-    /// selection (inside it, if it is a folder).
-    pub(super) fn explorer_begin_new(
-        &mut self,
-        folder: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tree) = self.explorer.as_ref() else {
-            return;
-        };
-        let dir = tree.target_dir();
-        let edit = if folder {
-            PendingEdit::NewFolder { dir }
+        self.open(path, source, None, workspace_root, cx);
+        self.mode = if was_closed {
+            ArtifactMode::Docked
         } else {
-            PendingEdit::NewFile { dir }
+            keep_mode
         };
-        self.explorer_begin_edit(edit, window, cx);
-    }
-
-    pub(super) fn explorer_begin_edit(
-        &mut self,
-        edit: PendingEdit,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tree) = self.explorer.as_mut() else {
-            return;
-        };
-        let text = edit.initial_text();
-        tree.begin_edit(edit);
-        self.explorer_input
-            .update(cx, |input, cx| input.set_value(text, window, cx));
-        // Focused from the next render, once the row exists.
-        self.explorer_focus_pending = true;
         cx.notify();
     }
 
-    pub(super) fn explorer_cancel_edit(&mut self, cx: &mut Context<Self>) {
-        if let Some(tree) = self.explorer.as_mut()
-            && tree.pending().is_some()
-        {
-            tree.cancel_edit();
-            cx.notify();
-        }
-    }
-
-    /// `false` when the name was refused; the tree then carries the reason.
-    fn explorer_commit_edit(&mut self, name: String, cx: &mut Context<Self>) -> bool {
-        let Some(tree) = self.explorer.as_mut() else {
-            return true;
-        };
-        if tree.pending().is_none() {
-            return true;
-        }
-        let Some(op) = tree.commit_edit(&name) else {
-            // The edit stays open with the tree's error under it.
-            cx.notify();
-            return false;
-        };
-        self.apply_file_op(op, cx);
-        true
-    }
-
-    /// Ask before deleting one entry or a multi-selection.
-    pub(super) fn explorer_confirm_delete(
+    /// Keep this panel's own state in step with what the sidebar's tree
+    /// just did to the disk: a new file opens for editing, a renamed file's
+    /// tabs and buffers follow it, a deleted file's tabs close.
+    pub fn apply_file_op(
         &mut self,
-        paths: Vec<PathBuf>,
-        window: &mut Window,
+        op: FileOp,
+        workspace_root: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if paths.is_empty() {
-            return;
-        }
-        let what = delete_prompt(&paths);
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let entity = entity.clone();
-            let paths = paths.clone();
-            dialog
-                .confirm()
-                .title("Delete")
-                .child(div().px_4().py_2().text_sm().child(what.clone()))
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text("Delete")
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
-                )
-                .on_ok(move |_, _, cx| {
-                    let paths = paths.clone();
-                    entity.update(cx, |this, cx| this.explorer_delete(paths, cx));
-                    true
-                })
-        });
-    }
-
-    fn explorer_delete(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(tree) = self.explorer.as_mut() else {
-            return;
-        };
-        let ops = tree.delete_many(&paths);
-        for op in ops {
-            self.apply_file_op(op, cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn explorer_refresh(&mut self, cx: &mut Context<Self>) {
-        if let Some(tree) = self.explorer.as_mut() {
-            tree.sync(true);
-            cx.notify();
-        }
-    }
-
-    /// Keep the panel's own state in step with what the tree just did to
-    /// the disk: a new file opens for editing, a renamed file's tabs and
-    /// buffers follow it, a deleted file's tabs close.
-    fn apply_file_op(&mut self, op: FileOp, cx: &mut Context<Self>) {
         match op {
             FileOp::Created(path) => {
                 if path.is_file() {
-                    self.explorer_activate(path, false, cx);
+                    let source = read_artifact_source(&path);
+                    self.open_from_sidebar(path, source, workspace_root, cx);
                     // A fresh file has nothing to render; go straight to
                     // the editor.
                     self.tab = if self
@@ -1382,9 +1150,6 @@ impl ArtifactView {
         let text = self.editor.read(cx).value().to_string();
         if let Err(e) = std::fs::write(&path, &text) {
             warn!(path = %path.display(), error = %e, "Saving the artifact failed");
-            if let Some(tree) = self.explorer.as_mut() {
-                tree.set_error(format!("Could not save '{}': {e}", path.display()));
-            }
             cx.notify();
             return;
         }
@@ -1403,9 +1168,6 @@ impl ArtifactView {
         if is_tabular_path(&path) {
             let workspace = self.workspace_root.clone();
             self.start_tabular_load(path, workspace, cx);
-        }
-        if let Some(tree) = self.explorer.as_mut() {
-            tree.sync(true);
         }
         cx.notify();
     }
@@ -1456,8 +1218,8 @@ impl ArtifactView {
         });
     }
 
-    /// Drop a file tab; if it was on screen, show its neighbour, or an empty
-    /// panel (kept open for the explorer) when it was the last one.
+    /// Drop a file tab; if it was on screen, show its neighbour, or close
+    /// the panel (unless a browser is still up) when it was the last one.
     fn remove_file_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.files.len() {
             return;
@@ -1484,7 +1246,7 @@ impl ArtifactView {
         }
     }
 
-    /// Nothing on screen: the state `new` starts in, minus the explorer.
+    /// Nothing on screen: the state `new` starts in.
     fn clear_document(&mut self, cx: &mut Context<Self>) {
         self.path = None;
         self.source.clear();
@@ -1499,10 +1261,7 @@ impl ArtifactView {
         self.stale = false;
         self.dirty = false;
         self.load_gen = self.load_gen.wrapping_add(1);
-        if let Some(tree) = self.explorer.as_mut() {
-            tree.select(None);
-        }
-        if self.explorer.is_none() && self.browser_manager.is_none() {
+        if self.browser_manager.is_none() {
             self.set_mode(ArtifactMode::Closed, cx);
         }
         cx.notify();
@@ -1544,9 +1303,6 @@ impl ArtifactView {
                 .push((path.clone(), source.clone(), old_snapshot.clone()));
         }
         self.path = Some(path.clone());
-        if let Some(tree) = self.explorer.as_mut() {
-            tree.reveal(&path);
-        }
         self.workspace_root = workspace_root.clone();
         self.loaded_version = artifact_version(&path);
         self.stale = false;
@@ -3232,32 +2988,6 @@ fn artifact_primary_body(
     }
 }
 
-/// The confirm text for deleting `paths`: names the one entry, or counts
-/// several and lists the first few.
-fn delete_prompt(paths: &[PathBuf]) -> String {
-    let name = |path: &PathBuf| {
-        path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string())
-    };
-    match paths {
-        [one] if one.is_dir() => format!("Delete the folder '{}' and everything in it?", name(one)),
-        [one] => format!("Delete '{}'?", name(one)),
-        many => {
-            const SHOWN: usize = 5;
-            let mut listed: Vec<String> = many.iter().take(SHOWN).map(name).collect();
-            if many.len() > SHOWN {
-                listed.push(format!("… and {} more", many.len() - SHOWN));
-            }
-            format!(
-                "Delete {} items? Folders go with everything in them. {}",
-                many.len(),
-                listed.join(", ")
-            )
-        }
-    }
-}
-
 /// Ctrl+S, or ⌘S on macOS.
 fn is_save_keystroke(keystroke: &Keystroke) -> bool {
     let modifier = if cfg!(target_os = "macos") {
@@ -3272,18 +3002,6 @@ fn is_save_keystroke(keystroke: &Keystroke) -> bool {
 /// binary the panel renders from disk.
 fn is_text_artifact_path(path: &Path) -> bool {
     !is_pdf_path(path) && !is_pptx_path(path) && !is_image_path(path)
-}
-
-/// Where the explorer roots (AGE-476): the artifact's own workspace, the
-/// configured working directory, or the process cwd — the same fallback
-/// order the tools use for a relative path.
-fn explorer_root_for(workspace_root: Option<&str>, setting: Option<&str>) -> PathBuf {
-    workspace_root
-        .or(setting)
-        .filter(|root| !root.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn artifact_source_input(editor: &Entity<InputState>) -> AnyElement {
@@ -3315,19 +3033,6 @@ impl Render for ArtifactView {
             }
             self.sync_pdf_raster_width(window, cx);
         }
-        // The explorer follows the disk on a timer (AGE-476); a `true`
-        // means a listing changed, which this render already reflects.
-        if let Some(tree) = self.explorer.as_mut() {
-            tree.sync(false);
-            if self.explorer_focus_pending {
-                self.explorer_focus_pending = false;
-                if tree.pending().is_some() {
-                    self.explorer_input
-                        .update(cx, |input, cx| input.focus(window, cx));
-                }
-            }
-        }
-
         let tab = self.tab;
         let source = self.source.clone();
         let rendered = self.rendered.clone();
@@ -3383,15 +3088,14 @@ impl Render for ArtifactView {
             RunPinKind::JumpToLatest
         };
 
-        // Nothing on screen (AGE-476): the explorer is up with no file
-        // chosen yet, or the last tab was closed.
+        // Nothing on screen: no tab is open (AGE-480: opening one is now the
+        // sidebar's job, not this panel's).
         let nothing_open = !session_review
             && !is_browser
             && path_ref.is_none()
             && chart.is_none()
             && !matches!(tabular, TabularPreview::Ready(_));
         let dirty = self.dirty;
-        let explorer_shown = self.explorer.is_some();
 
         let body = if nothing_open {
             div()
@@ -3406,11 +3110,7 @@ impl Render for ArtifactView {
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::File).size_6())
-                .child(if explorer_shown {
-                    "Select a file to open it here."
-                } else {
-                    "Nothing open."
-                })
+                .child("Nothing open.")
                 .into_any_element()
         } else if session_review {
             SessionReviewPanel::new(
@@ -3639,10 +3339,9 @@ impl Render for ArtifactView {
             selected_file,
             self.browser_shown,
         );
-        // With the explorer up the bar shows for a single file too, so its
-        // dot and × are there (AGE-476); without it, one file needs no bar.
-        let show_file_tabs = !session_review
-            && (tab_entries.len() > 1 || (explorer_shown && !tab_entries.is_empty()));
+        // A single open file needs no bar; the bar carries its dot/× once a
+        // second file (or browser tab) is open.
+        let show_file_tabs = !session_review && tab_entries.len() > 1;
         let file_tab_bar = show_file_tabs.then(|| {
             let targets: Vec<ArtifactTabTarget> = tab_entries
                 .iter()
@@ -3889,23 +3588,6 @@ impl Render for ArtifactView {
                         )
                     })
                     .when(!session_review, |this| {
-                        this.child(
-                            Button::new("artifact-explorer-toggle")
-                                .small()
-                                .icon(Icon::new(IconName::PanelLeft).size_3())
-                                .tooltip(if explorer_shown {
-                                    "Hide the file explorer"
-                                } else {
-                                    "Show the file explorer"
-                                })
-                                .when(explorer_shown, |b| b.selected(true))
-                                .when(!explorer_shown, |b| b.ghost())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_explorer(cx);
-                                })),
-                        )
-                    })
-                    .when(!session_review, |this| {
                         this.when_some(self.path.clone(), |this, path| {
                             this.child(
                                 Button::new("artifact-reveal")
@@ -3965,42 +3647,8 @@ impl Render for ArtifactView {
                 )
         });
 
-        // The explorer column sits left of whatever the body is, under the
-        // shared header; review mode has no per-file body to sit next to.
-        let explorer_column = self
-            .explorer
-            .as_ref()
-            .filter(|_| !session_review)
-            .map(|tree| {
-                render_file_explorer(
-                    tree,
-                    &self.explorer_input,
-                    self.explorer_scroll.clone(),
-                    entity.clone(),
-                    cx,
-                )
-            });
-        let body = match explorer_column {
-            Some(column) => div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .min_h_0()
-                .size_full()
-                .child(column)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .h_full()
-                        .child(body),
-                )
-                .into_any_element(),
-            None => body,
-        };
+        // AGE-480: the tree used to sit left of this as a column (AGE-476);
+        // it now lives in the sidebar, so `body` is the whole panel.
 
         let panel = div()
             .id("artifact-view")

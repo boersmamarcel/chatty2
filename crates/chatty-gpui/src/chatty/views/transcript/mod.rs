@@ -41,8 +41,10 @@ mod block_render;
 mod clarification;
 mod diff;
 mod diff_parse;
-mod file_explorer;
-mod file_tree;
+/// `pub(crate)` (AGE-480): the sidebar's Files mode
+/// (`crate::chatty::views::sidebar_file_tree`) owns the tree now and needs
+/// this model from outside the `transcript` module tree.
+pub(crate) mod file_tree;
 mod plan;
 mod run_pin;
 mod session_changes;
@@ -64,7 +66,7 @@ pub use adapter::{
 };
 pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;
-pub use artifact_card::ArtifactCard;
+pub use artifact_card::{ArtifactCard, reveal_path_in_os};
 pub use artifact_header::{
     ArtifactCopy, ArtifactCopyKind, ArtifactHeaderKind, ArtifactTabSpec, artifact_copy_control,
     artifact_header_tabs,

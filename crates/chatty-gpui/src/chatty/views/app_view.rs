@@ -26,6 +26,17 @@ impl Render for ChattyApp {
             .bg(cx.theme().background)
             .text_size(px(cx.global::<GeneralSettingsModel>().font_size))
             .relative() // Enable absolute positioning for floating button
+            // Cmd/Ctrl+P quick-open (AGE-480): an element-level handler
+            // rather than `cx.on_action`, because the latter would need
+            // `cx.active_window()` to get a `Window` for `open_dialog` —
+            // and a window only becomes "active" once the platform tells
+            // gpui so, which headless/no-WM hosts (the screenshot harness)
+            // never do even though keystrokes still reach it. An element on
+            // this always-rendered root gets `Window` directly from the
+            // dispatch tree instead.
+            .on_action(|_: &crate::QuickOpenFiles, window, cx| {
+                crate::chatty::views::QuickOpenDialog::open(window, cx);
+            })
             .child(
                 // Custom titlebar with toggle button
                 AppTitleBar::new(self.sidebar_view.clone(), self.chat_view.clone()),
@@ -118,12 +129,16 @@ impl Render for ChattyApp {
                                     )
                                     .dropdown_menu({
                                         let chat_view = chat_view.clone();
+                                        let sidebar = sidebar.clone();
                                         move |menu, _window, _cx| {
                                             menu.item(PopupMenuItem::new("Files").on_click({
-                                                let chat_view = chat_view.clone();
+                                                let sidebar = sidebar.clone();
                                                 move |_event, _window, cx| {
-                                                    chat_view.update(cx, |view, cx| {
-                                                        view.open_file_explorer(cx);
+                                                    // AGE-480: expand the
+                                                    // sidebar (if collapsed)
+                                                    // and switch it to Files.
+                                                    sidebar.update(cx, |sidebar, cx| {
+                                                        sidebar.show_files_mode(cx);
                                                     });
                                                 }
                                             }))
