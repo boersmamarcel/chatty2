@@ -201,6 +201,11 @@ examples.
 - **GPUI / gpui-component skills** — When changing desktop UI, load
   `.claude/skills/gpui` and `.claude/skills/gpui-component` (vendored from
   `npx skills add longbridge/gpui-component`; lockfile `skills-lock.json`).
+- **Desktop screenshot harness** — A desktop UI change is not done until it
+  has been seen running. `.claude/skills/desktop-screenshot` starts the app
+  under Xvfb on an isolated config, drives it with XTest (`x.py`), and
+  screenshots it; read the PNGs and attach them to the Linear issue. It also
+  lists the gpui traps that only a live run shows.
 - **Transcript blocks** — Typed block/turn types in
   `chatty-gpui/src/chatty/views/transcript/` render the transcript;
   persistence stays untyped (`MessageEntry` + `system_trace` JSON) in
