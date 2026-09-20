@@ -57,6 +57,7 @@ use gpui_component::ActiveTheme;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -2183,9 +2184,9 @@ impl ChatView {
     }
 
     /// The messages waiting for the streaming reply to finish, drawn as the
-    /// next user turns under the transcript: the same bubble, dimmed, with a
-    /// "Queued" caption and two actions (AGE-482). Not part of the measured
-    /// list — they are not turns yet.
+    /// next user turns under the transcript: the same bubble as a sent
+    /// message, with × (take it back) and ↑ (send it now) in front
+    /// (AGE-482). Not part of the measured list — they are not turns yet.
     fn render_queued_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.queued_messages.is_empty() && self.queue_notice.is_none() {
             return None;
@@ -2202,50 +2203,61 @@ impl ChatView {
             .flex()
             .flex_col()
             .gap(TURN_GAP)
-            .children(self.queued_messages.iter().map(|(id, text)| {
-                let id = *id;
-                let run = entity.clone();
-                let remove = entity.clone();
-                div()
-                    .w_full()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(bubble_bg)
-                    .opacity(0.65)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().child(text.clone()))
-                    .child(
+            .children(
+                self.queued_messages
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, (id, text))| {
+                        let id = *id;
+                        let run = entity.clone();
+                        let remove = entity.clone();
+                        // The same bubble as a sent user message, with its two
+                        // controls in front: × takes it back, ↑ sends it now.
                         div()
+                            .w_full()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(bubble_bg)
                             .flex()
                             .flex_row()
-                            .items_center()
-                            .gap_3()
-                            .text_xs()
-                            .text_color(caption)
-                            .child("Queued")
+                            .items_start()
+                            .gap_2()
                             .child(
                                 div()
+                                    .id(("queued-remove", ix))
+                                    .flex_shrink_0()
                                     .cursor_pointer()
-                                    .text_color(action)
-                                    .child("Send now")
+                                    .text_color(caption)
+                                    .hover(move |style| style.text_color(danger))
+                                    .tooltip(|window, cx| Tooltip::new("Remove").build(window, cx))
+                                    .child(Icon::new(IconName::Close).size_4())
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        remove.update(cx, |_, cx| {
+                                            cx.emit(ChatViewEvent::WithdrawQueued(id));
+                                        });
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("queued-send-now", ix))
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .text_color(caption)
+                                    .hover(move |style| style.text_color(action))
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Send now, instead of the current reply")
+                                            .build(window, cx)
+                                    })
+                                    .child(Icon::new(IconName::ArrowUp).size_4())
                                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                         run.update(cx, |_, cx| {
                                             cx.emit(ChatViewEvent::SendQueuedNow(id));
                                         });
                                     }),
                             )
-                            .child(div().cursor_pointer().child("Remove").on_mouse_down(
-                                MouseButton::Left,
-                                move |_, _, cx| {
-                                    remove.update(cx, |_, cx| {
-                                        cx.emit(ChatViewEvent::WithdrawQueued(id));
-                                    });
-                                },
-                            )),
-                    )
-            }))
+                            .child(div().flex_1().min_w_0().child(text.clone()))
+                    }),
+            )
             .when_some(self.queue_notice.clone(), |strip, notice| {
                 strip.child(div().text_sm().text_color(danger).child(notice))
             });
