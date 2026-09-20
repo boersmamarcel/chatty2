@@ -26,7 +26,9 @@ pub fn render_hint_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
         "Ctrl+R expand tools"
     };
     let right_text = if engine.is_streaming {
-        format!("{tool_detail}  ·  Ctrl+C stop  ·  Ctrl+Q quit")
+        format!(
+            "{tool_detail}  ·  Enter queues  ·  /now <text> interrupts  ·  Ctrl+C stop  ·  Ctrl+Q quit"
+        )
     } else {
         format!("{tool_detail}  ·  Ctrl+Q quit")
     };

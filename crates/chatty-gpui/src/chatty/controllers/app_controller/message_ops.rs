@@ -35,6 +35,16 @@ use super::message_ops_internals::{
 };
 use super::*;
 use crate::chatty::views::transcript::inline_chat_attachments;
+use chatty_core::session::{Arrival, Decision, QueuedId, TurnEnd};
+
+/// What the composer sends, as the mailbox holds it while a turn streams
+/// (AGE-482). The `TurnInput` is built at dispatch, where the attachment
+/// filtering and the user bubble already happen.
+#[derive(Debug, Clone)]
+pub(super) struct QueuedSend {
+    pub message: String,
+    pub attachments: Vec<PathBuf>,
+}
 
 impl ChattyApp {
     /// Send a message to the LLM and stream the response.
@@ -48,20 +58,144 @@ impl ChattyApp {
     ///
     /// UI updates, finalization, title generation, token usage, and persistence
     /// are handled by `handle_stream_manager_event()` reacting to StreamManager events.
+    ///
+    /// While the active conversation's turn is streaming the message is
+    /// queued in its mailbox instead and runs once the turn ends (AGE-482).
     pub(super) fn send_message(
         &mut self,
         message: String,
         attachments: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.send_message_inner(message, attachments, true, cx);
+        let Some(conv_id) = self.active_conversation_id(cx) else {
+            // No conversation yet: nothing can be streaming in it.
+            self.send_message_inner(message, attachments, true, cx);
+            return;
+        };
+        let arrival = Arrival::Message(QueuedSend {
+            message,
+            attachments,
+        });
+        self.route(&conv_id, arrival, cx);
+    }
+
+    /// Run `message` *instead of* the streaming turn: cancel it, and send
+    /// this next, ahead of anything queued (the composer's "Send now").
+    pub(super) fn interrupt(
+        &mut self,
+        message: String,
+        attachments: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conv_id) = self.active_conversation_id(cx) else {
+            self.send_message_inner(message, attachments, true, cx);
+            return;
+        };
+        let arrival = Arrival::Interrupt(QueuedSend {
+            message,
+            attachments,
+        });
+        self.route(&conv_id, arrival, cx);
+    }
+
+    /// Take a queued message back (the × on its chip).
+    pub(super) fn withdraw(&mut self, id: QueuedId, cx: &mut Context<Self>) {
+        if let Some(conv_id) = self.active_conversation_id(cx) {
+            self.route(&conv_id, Arrival::Withdraw(id), cx);
+        }
     }
 
     /// Inject an agent-protocol / loop-guard follow-up for the LLM without
     /// showing a user bubble. The plan UI (To-dos card / strip) is the only
-    /// visible signal for todo-protocol nudges.
+    /// visible signal for todo-protocol nudges. Queued behind the streaming
+    /// turn if there is one (AGE-242 / D3; one slot).
     pub(super) fn send_protocol_follow_up(&mut self, message: String, cx: &mut Context<Self>) {
-        self.send_message_inner(message, vec![], false, cx);
+        let Some(conv_id) = self.active_conversation_id(cx) else {
+            self.send_message_inner(message, vec![], false, cx);
+            return;
+        };
+        let arrival = Arrival::FollowUp(QueuedSend {
+            message,
+            attachments: vec![],
+        });
+        self.route(&conv_id, arrival, cx);
+    }
+
+    fn active_conversation_id(&self, cx: &App) -> Option<String> {
+        cx.try_global::<ConversationsStore>()
+            .and_then(|store| store.active_id().cloned())
+    }
+
+    fn turn_is_active(&self, conv_id: &str, cx: &App) -> bool {
+        cx.try_global::<GlobalStreamManager>()
+            .and_then(|g| g.get())
+            .map(|mgr| mgr.read(cx).is_streaming(conv_id))
+            .unwrap_or(false)
+    }
+
+    /// Hand `arrival` to `conv_id`'s mailbox and do what it says.
+    fn route(&mut self, conv_id: &str, arrival: Arrival<QueuedSend>, cx: &mut Context<Self>) {
+        let active = self.turn_is_active(conv_id, cx);
+        let decision = self
+            .mailboxes
+            .entry(conv_id.to_string())
+            .or_default()
+            .arrive(arrival, active);
+        let mut notice = None;
+        match decision {
+            Decision::Dispatch(next) => {
+                self.send_message_inner(
+                    next.message.message,
+                    next.message.attachments,
+                    !next.follow_up,
+                    cx,
+                );
+            }
+            Decision::Cancel => self.cancel_active_stream(cx),
+            Decision::Refused(refusal) => {
+                warn!(conv_id, %refusal, "Message not sent");
+                notice = Some(format!("Not sent: {refusal}."));
+            }
+            Decision::Queued { .. } | Decision::Withdrawn(_) | Decision::Nothing => {}
+        }
+        self.refresh_composer_queue(conv_id, notice, cx);
+    }
+
+    /// The composer shows the active conversation's queue.
+    pub(super) fn queued_items(&self, conv_id: &str) -> Vec<(QueuedId, String)> {
+        self.mailboxes
+            .get(conv_id)
+            .map(|mailbox| {
+                mailbox
+                    .pending()
+                    .filter(|q| !q.follow_up)
+                    .map(|q| (q.id, q.message.message.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn refresh_composer_queue(
+        &mut self,
+        conv_id: &str,
+        notice: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let showing = self
+            .chat_view
+            .read(cx)
+            .conversation_id()
+            .is_some_and(|id| id == conv_id);
+        if !showing {
+            return;
+        }
+        let queued = self.queued_items(conv_id);
+        self.chat_view.update(cx, |view, cx| {
+            view.chat_input_state().update(cx, |state, cx| {
+                state.set_queued(queued, cx);
+                state.set_notice(notice, cx);
+            });
+        });
     }
 
     fn send_message_inner(
@@ -674,13 +808,55 @@ impl ChattyApp {
                         conv.set_streaming_turn_messages(None);
                     }
                 });
+
+                self.drain_mailbox(conversation_id, status, cx);
             }
         }
     }
 
+    /// The turn ended: run the next queued message, if the mailbox says so
+    /// (AGE-482). Only for the conversation on screen — `send_message_inner`
+    /// sends to the active conversation, so a queue left behind by a switch
+    /// waits until the user sends there again.
+    fn drain_mailbox(&mut self, conv_id: &str, status: &StreamStatus, cx: &mut Context<Self>) {
+        if conv_id == "__pending__" || self.active_conversation_id(cx).as_deref() != Some(conv_id) {
+            return;
+        }
+        let end = match status {
+            StreamStatus::Completed => TurnEnd::Completed,
+            StreamStatus::Cancelled => TurnEnd::Cancelled,
+            _ => TurnEnd::Error,
+        };
+        let next = self
+            .mailboxes
+            .get_mut(conv_id)
+            .and_then(|mailbox| mailbox.turn_ended(end));
+        if let Some(next) = next {
+            self.send_message_inner(
+                next.message.message,
+                next.message.attachments,
+                !next.follow_up,
+                cx,
+            );
+        }
+        self.refresh_composer_queue(conv_id, None, cx);
+    }
+
     /// Stop the currently active stream for the current conversation.
-    /// Delegates to StreamManager which sets the cancellation token and emits StreamEnded.
+    /// Queued messages stay queued: Stop means "be quiet", not "run the next
+    /// one" (AGE-482).
     pub fn stop_stream(&mut self, cx: &mut Context<Self>) {
+        if let Some(conv_id) = self.active_conversation_id(cx) {
+            let active = self.turn_is_active(&conv_id, cx);
+            if let Some(mailbox) = self.mailboxes.get_mut(&conv_id) {
+                let _ = mailbox.arrive(Arrival::Stop, active);
+            }
+        }
+        self.cancel_active_stream(cx);
+    }
+
+    /// Delegates to StreamManager which sets the cancellation token and emits StreamEnded.
+    fn cancel_active_stream(&mut self, cx: &mut Context<Self>) {
         let conv_id = cx
             .try_global::<ConversationsStore>()
             .and_then(|store| store.active_id().cloned())

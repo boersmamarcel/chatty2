@@ -20,7 +20,10 @@ use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::services::StreamSurface;
 use chatty_core::services::team::Team;
-use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind};
+use chatty_core::session::{
+    AgentSession, AgentSessionConfig, Arrival, Decision, Mailbox, SessionEvent, TurnEnd, TurnInput,
+    TurnKind,
+};
 use chatty_core::settings::models::ExecutionSettingsModel;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -49,9 +52,9 @@ pub struct HeadlessRunner {
     skill_service: chatty_core::services::SkillService,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_observer: Option<EventObserver>,
-    /// An agent-protocol follow-up that arrived while a turn was already
-    /// streaming; sent once the turn ends (AGE-242 / D3).
-    pending_agent_follow_up: Option<String>,
+    /// Follow-ups that arrived while a turn was already streaming; sent
+    /// once the turn ends (AGE-242 / D3, the mailbox of AGE-482).
+    mailbox: Mailbox<String>,
     /// "read_skill <skill> and follow it", prepended to the first human turn
     /// of a `--team` run and then gone (AGE-407).
     pending_first_turn: Option<String>,
@@ -79,7 +82,7 @@ impl HeadlessRunner {
             skill_service,
             event_tx,
             event_observer: None,
-            pending_agent_follow_up: None,
+            mailbox: Mailbox::new(),
             pending_first_turn,
         }
     }
@@ -338,28 +341,30 @@ impl HeadlessRunner {
             AppEvent::StreamCompleted => {
                 self.transcript.finish_streaming();
                 self.finish_turn();
-                self.send_pending_agent_follow_up();
+                self.drain_mailbox(TurnEnd::Completed);
             }
             AppEvent::StreamError(error) => {
                 self.transcript.mark_error(&error.to_string());
                 self.finish_turn();
+                self.drain_mailbox(TurnEnd::Error);
             }
             AppEvent::StreamCancelled => {
                 self.transcript.mark_cancelled();
                 self.finish_turn();
-                self.send_pending_agent_follow_up();
+                self.drain_mailbox(TurnEnd::Cancelled);
             }
             AppEvent::AgentProtocolFollowUp(prompt) => {
                 self.transcript
                     .add_system(format!("Agent protocol follow-up: {prompt}"));
-                if !self.is_streaming {
-                    self.send_protocol_follow_up(prompt);
-                } else if self.pending_agent_follow_up.is_none() {
-                    self.pending_agent_follow_up = Some(prompt);
-                } else {
-                    warn!(
-                        "Dropping a later agent protocol follow-up; an earlier one is already queued"
-                    );
+                match self
+                    .mailbox
+                    .arrive(Arrival::FollowUp(prompt), self.is_streaming)
+                {
+                    Decision::Dispatch(next) => self.send_protocol_follow_up(next.message),
+                    Decision::Refused(refusal) => {
+                        warn!(%refusal, "Dropping a later agent protocol follow-up");
+                    }
+                    _ => {}
                 }
             }
             // Lifecycle and terminal events are the interactive app's.
@@ -378,9 +383,10 @@ impl HeadlessRunner {
         self.session.clarifications().cancel_all();
     }
 
-    fn send_pending_agent_follow_up(&mut self) {
-        if let Some(prompt) = self.pending_agent_follow_up.take() {
-            self.send_protocol_follow_up(prompt);
+    /// The turn ended; send whatever the mailbox says is next.
+    fn drain_mailbox(&mut self, end: TurnEnd) {
+        if let Some(next) = self.mailbox.turn_ended(end) {
+            self.send_protocol_follow_up(next.message);
         }
     }
 }

@@ -20,6 +20,7 @@ use chatty_core::services::{
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, HostedSession, TurnInput, TurnKind, turn_transport,
 };
+use chatty_core::session::{Arrival, Decision, Mailbox, TurnEnd};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -389,11 +390,10 @@ pub struct ChatEngine {
     /// (`TurnOutcome::DroppedAndRolledBack`); the caller restores this into
     /// the input so the user doesn't lose what they typed (AGE-243).
     pub pending_restore_text: Option<String>,
-    /// An agent-protocol follow-up that arrived while a turn was already
-    /// streaming. Queued rather than dropped (AGE-242 / D3) and sent once the
-    /// in-flight turn ends (`StreamCompleted` / `StreamCancelled`); the first
-    /// one queued wins if another arrives before it is sent.
-    pending_agent_follow_up: Option<String>,
+    /// Messages that arrived while a turn was streaming — the user's, and
+    /// the loop's own follow-ups (AGE-242 / D3) — sent one turn at a time
+    /// once the in-flight turn ends (AGE-482).
+    mailbox: Mailbox<String>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
@@ -510,7 +510,7 @@ impl ChatEngine {
             is_streaming: false,
             pending_approval: None,
             pending_restore_text: None,
-            pending_agent_follow_up: None,
+            mailbox: Mailbox::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
@@ -748,9 +748,69 @@ impl ChatEngine {
         });
     }
 
-    /// Send a message and start streaming the response
+    /// Send a message and start streaming the response — or, while a turn
+    /// is streaming, queue it in the mailbox to run once that turn ends
+    /// (AGE-482).
     pub fn send_message(&mut self, message: String) {
-        self.send_message_inner(message, true);
+        let decision = self
+            .mailbox
+            .arrive(Arrival::Message(message.clone()), self.is_streaming);
+        self.act_on(decision, &message);
+    }
+
+    /// Run `message` *instead of* the turn in flight: the turn is cancelled
+    /// and this message goes next, ahead of anything queued (`/now`).
+    pub fn interrupt(&mut self, message: String) {
+        let decision = self
+            .mailbox
+            .arrive(Arrival::Interrupt(message.clone()), self.is_streaming);
+        self.act_on(decision, &message);
+    }
+
+    /// Take back the message queued last (`/unqueue`).
+    pub fn unqueue(&mut self) {
+        let Some(id) = self.mailbox.last_queued() else {
+            self.add_system_message("Nothing is queued.".to_string());
+            return;
+        };
+        if let Decision::Withdrawn(_) = self
+            .mailbox
+            .arrive(Arrival::Withdraw(id), self.is_streaming)
+        {
+            self.add_system_message(format!(
+                "Took back the last queued message ({} left).",
+                self.mailbox.len()
+            ));
+        }
+    }
+
+    /// How many messages wait for the turn to end.
+    pub fn queued_count(&self) -> usize {
+        self.mailbox.len()
+    }
+
+    fn act_on(&mut self, decision: Decision<String>, text: &str) {
+        match decision {
+            Decision::Dispatch(next) => self.send_message_inner(next.message, !next.follow_up),
+            Decision::Queued { position, .. } => {
+                self.add_system_message(format!("Queued #{position}: {text}"));
+            }
+            Decision::Cancel => {
+                self.add_system_message(format!("Interrupting the turn; next: {text}"));
+                self.cancel_turn();
+            }
+            Decision::Refused(refusal) => {
+                self.add_system_message(format!("Not sent: {refusal}."));
+            }
+            Decision::Withdrawn(_) | Decision::Nothing => {}
+        }
+    }
+
+    /// The turn ended; run whatever the mailbox says is next.
+    fn drain_mailbox(&mut self, end: TurnEnd) {
+        if let Some(next) = self.mailbox.turn_ended(end) {
+            self.send_message_inner(next.message, !next.follow_up);
+        }
     }
 
     /// Inject an agent-protocol / loop-guard follow-up without pushing a user
@@ -935,7 +995,7 @@ impl ChatEngine {
             }
             AppEvent::StreamCompleted => {
                 self.finalize_stream();
-                self.send_pending_agent_follow_up();
+                self.drain_mailbox(TurnEnd::Completed);
                 EngineAction::Redraw
             }
             AppEvent::StreamError(error) => {
@@ -943,20 +1003,22 @@ impl ChatEngine {
                 self.transcript.mark_error(&error.to_string());
                 self.finalize_partial_response();
                 self.reset_stream_state();
+                self.drain_mailbox(TurnEnd::Error);
                 EngineAction::Redraw
             }
             AppEvent::AgentProtocolFollowUp(prompt) => {
                 self.add_system_message(format!("Agent protocol follow-up: {}", prompt));
-                if !self.is_streaming {
-                    self.send_protocol_follow_up(prompt);
-                } else if self.pending_agent_follow_up.is_none() {
-                    // Queue rather than drop it (AGE-242 / D3): sent once the
-                    // in-flight turn ends.
-                    self.pending_agent_follow_up = Some(prompt);
-                } else {
-                    warn!(
-                        "Dropping a later agent protocol follow-up; an earlier one is already queued"
-                    );
+                // Queued rather than dropped while a turn streams (AGE-242 /
+                // D3); the mailbox keeps the loop's one-slot rule.
+                match self
+                    .mailbox
+                    .arrive(Arrival::FollowUp(prompt), self.is_streaming)
+                {
+                    Decision::Dispatch(next) => self.send_protocol_follow_up(next.message),
+                    Decision::Refused(refusal) => {
+                        warn!(%refusal, "Dropping a later agent protocol follow-up");
+                    }
+                    _ => {}
                 }
                 EngineAction::Redraw
             }
@@ -964,7 +1026,7 @@ impl ChatEngine {
                 self.transcript.mark_cancelled();
                 self.finalize_partial_response();
                 self.reset_stream_state();
-                self.send_pending_agent_follow_up();
+                self.drain_mailbox(TurnEnd::Cancelled);
                 EngineAction::Redraw
             }
             AppEvent::TitleGenerated(title) => {
@@ -1058,8 +1120,14 @@ impl ChatEngine {
         }
     }
 
-    /// Stop the active stream
+    /// Stop the active stream. Queued messages stay queued: Stop means "be
+    /// quiet", not "run the next one" (AGE-482).
     pub fn stop_stream(&mut self) {
+        let _ = self.mailbox.arrive(Arrival::Stop, self.is_streaming);
+        self.cancel_turn();
+    }
+
+    fn cancel_turn(&mut self) {
         // A hosted turn is stopped by a POST, so the cancel has to be spawned;
         // the local flag is already set by the time this returns either way.
         tokio::spawn(turn_transport::cancel(&self.session, self.hosted.as_ref()));
@@ -1256,15 +1324,6 @@ impl ChatEngine {
         }
     }
 
-    /// Send a follow-up that arrived while a turn was still streaming
-    /// (AGE-242 / D3), now that the turn has ended. A no-op when none is
-    /// queued.
-    fn send_pending_agent_follow_up(&mut self) {
-        if let Some(prompt) = self.pending_agent_follow_up.take() {
-            self.send_protocol_follow_up(prompt);
-        }
-    }
-
     fn reset_stream_state(&mut self) {
         self.is_streaming = false;
         self.pending_approval = None;
@@ -1456,6 +1515,96 @@ mod tests {
             user_texts,
             ["read_skill coder-reviewer and follow it.\n\nhi", "more"]
         );
+    }
+
+    fn user_texts(engine: &ChatEngine) -> Vec<String> {
+        engine
+            .session
+            .conversation()
+            .unwrap()
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                rig_core::completion::Message::User { content } => Some(
+                    content
+                        .iter()
+                        .filter_map(|c| match c {
+                            UserContent::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// AGE-482: a message sent while a turn streams waits in the mailbox —
+    /// the transcript says so — and is sent as its own turn once that turn
+    /// completes.
+    #[tokio::test]
+    async fn a_message_sent_mid_turn_is_queued_and_runs_after_the_turn() {
+        let (mut engine, mut event_rx) = test_engine().await;
+        let input = engine
+            .prepare_send("first".to_string(), true)
+            .expect("engine is ready and idle");
+        assert!(engine.is_streaming);
+
+        engine.send_message("second".to_string());
+        assert_eq!(engine.queued_count(), 1);
+        assert_eq!(
+            user_texts(&engine),
+            Vec::<String>::new(),
+            "queued, not committed (the first turn commits on start)"
+        );
+        let last = engine.transcript.messages.last().unwrap();
+        assert!(
+            last.text().contains("Queued #1: second"),
+            "{:?}",
+            last.text()
+        );
+
+        let event_tx = engine.event_tx.clone();
+        let turn = engine
+            .session
+            .begin_scripted_turn(input, scenario("text_only"), move |event| {
+                let _ = event_tx.send(AppEvent::from(event));
+            })
+            .expect("turn starts");
+        turn.await;
+        while let Ok(event) = event_rx.try_recv() {
+            engine.handle_event(event);
+        }
+
+        // `StreamCompleted` drained the mailbox: the second message is now a
+        // committed user turn of its own.
+        assert_eq!(engine.queued_count(), 0);
+        assert_eq!(user_texts(&engine), ["first", "second"]);
+        assert!(engine.is_streaming, "the queued message's turn is running");
+    }
+
+    /// AGE-482: Stop keeps the queue; the turn's cancelled end fires nothing.
+    #[tokio::test]
+    async fn stop_holds_the_queue_until_the_user_sends_again() {
+        let (mut engine, mut event_rx) = test_engine().await;
+        let _ = engine.prepare_send("first".to_string(), true).unwrap();
+        engine.send_message("second".to_string());
+        engine.stop_stream();
+        // The cancelled end arrives; nothing runs.
+        engine.handle_event(AppEvent::StreamCancelled);
+        assert_eq!(engine.queued_count(), 1);
+        assert!(!engine.is_streaming);
+        assert_eq!(
+            user_texts(&engine),
+            Vec::<String>::new(),
+            "rolled back on empty"
+        );
+        let _ = event_rx.try_recv();
+
+        // Sending again resumes: the older message goes first.
+        engine.send_message("third".to_string());
+        assert_eq!(user_texts(&engine), ["second"]);
+        assert_eq!(engine.queued_count(), 1);
     }
 
     /// A completed turn is committed to history and the display closes: the

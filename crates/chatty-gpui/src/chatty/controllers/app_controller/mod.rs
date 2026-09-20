@@ -419,6 +419,10 @@ pub struct ChattyApp {
     /// Tool-call IDs whose ToolCallBlocks are visualised via the sub-agent
     /// progress channel (`invoke_agent`) instead of the main trace.
     active_invoke_agent_ids: std::collections::HashSet<String>,
+    /// Per conversation: the messages sent while its turn was streaming,
+    /// run one turn at a time once it ends (AGE-482).
+    mailboxes:
+        std::collections::HashMap<String, chatty_core::session::Mailbox<message_ops::QueuedSend>>,
 }
 
 impl ChattyApp {
@@ -450,6 +454,7 @@ impl ChattyApp {
             active_create_task: None,
             _mcp_notifier: mcp_notifier,
             active_invoke_agent_ids: std::collections::HashSet::new(),
+            mailboxes: std::collections::HashMap::new(),
         };
 
         // Store entity in global state for later access
@@ -601,6 +606,17 @@ impl ChattyApp {
                         });
                     });
                     app.change_conversation_model(model_id.clone(), cx);
+                }
+                ChatInputEvent::SendNow {
+                    message,
+                    attachments,
+                } => {
+                    debug!(message = %message, "ChatInputEvent::SendNow received");
+                    app.interrupt(message.clone(), attachments.clone(), cx);
+                }
+                ChatInputEvent::Withdraw(id) => {
+                    debug!(?id, "ChatInputEvent::Withdraw received");
+                    app.withdraw(*id, cx);
                 }
                 ChatInputEvent::Stop => {
                     debug!("ChatInputEvent::Stop received");

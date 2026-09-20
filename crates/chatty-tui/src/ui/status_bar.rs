@@ -130,6 +130,13 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
         spans.push(Span::styled("● loading services…", theme::accent()));
     } else if engine.is_streaming {
         spans.push(Span::styled("● streaming", theme::warning()));
+        let queued = engine.queued_count();
+        if queued > 0 {
+            spans.push(Span::styled(
+                format!(" · {queued} queued"),
+                theme::warning(),
+            ));
+        }
     } else {
         spans.push(Span::styled("● ready", theme::success()));
     }
