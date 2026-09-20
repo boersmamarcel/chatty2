@@ -209,7 +209,7 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
     }
     if allows("write_todos") {
         tool_sections.push(
-            "- **write_todos / update_todo / verify_completion** (see the write_todos description for when to use them)"
+            "- **write_todos / update_todo / verify_completion** (plan first when a task needs 3 or more distinct tool calls across several files or steps, never for a single read, edit, rename or question; see the write_todos description)"
                 .to_string(),
         );
     }
@@ -1110,7 +1110,7 @@ mod tests {
         let main_agent = build(None);
         assert_eq!(main_agent.matches("write_todos").count(), 2);
         assert!(main_agent.contains(
-            "- **write_todos / update_todo / verify_completion** (see the write_todos description for when to use them)"
+            "- **write_todos / update_todo / verify_completion** (plan first when a task needs 3 or more distinct tool calls across several files or steps, never for a single read, edit, rename or question; see the write_todos description)"
         ));
         assert!(!main_agent.contains("todo protocol"));
         assert!(!main_agent.contains("For multi-step tasks, call"));
