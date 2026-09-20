@@ -435,7 +435,7 @@ impl ChattyApp {
 
         // Create views
         let chat_view = cx.new(|cx| ChatView::new(window, cx));
-        let sidebar_view = cx.new(|_cx| SidebarView::new());
+        let sidebar_view = cx.new(|cx| SidebarView::new(window, cx));
 
         // Create the agent config notifier and keep the strong entity alive in ChattyApp
         // so GlobalAgentConfigNotifier's WeakEntity remains upgradeable for the app's lifetime.
@@ -522,6 +522,29 @@ impl ChattyApp {
                 SidebarEvent::ToggleCollapsed(collapsed) => {
                     // Optional: Could save collapsed state to settings here
                     debug!(collapsed = collapsed, "Sidebar toggled");
+                }
+                SidebarEvent::OpenFile(path, root) => {
+                    // AGE-480: the sidebar's Files-mode tree asked to open a
+                    // file — the artifact panel still owns tabs, buffers and
+                    // presentation, exactly as when AGE-476 opened one from
+                    // the (now removed) in-panel tree.
+                    let source = crate::chatty::views::transcript::read_artifact_source(path);
+                    let workspace = Some(root.display().to_string());
+                    let artifact_view = app.chat_view.read(cx).artifact_view().clone();
+                    artifact_view.update(cx, |view, cx| {
+                        view.open_from_sidebar(path.clone(), source, workspace, cx);
+                    });
+                }
+                SidebarEvent::FileOp(op, root) => {
+                    // Keep the artifact panel's own open tabs/buffers in step
+                    // with what the sidebar tree just did on disk (create,
+                    // rename, delete, drag-move) — same bookkeeping AGE-476
+                    // did when the tree lived in the panel.
+                    let workspace = Some(root.display().to_string());
+                    let artifact_view = app.chat_view.read(cx).artifact_view().clone();
+                    artifact_view.update(cx, |view, cx| {
+                        view.apply_file_op(op.clone(), workspace, cx);
+                    });
                 }
                 SidebarEvent::LoadMore => {
                     let sidebar = app.sidebar_view.clone();

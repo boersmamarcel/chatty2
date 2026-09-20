@@ -85,7 +85,8 @@ actions!(
         DeleteActiveConversation,
         InstallCli,
         ApprovePendingCommand,
-        DenyPendingCommand
+        DenyPendingCommand,
+        QuickOpenFiles
     ]
 );
 
@@ -318,6 +319,16 @@ fn main() {
 
                         // Apply theme from loaded settings
                         apply_theme_from_settings(cx);
+
+                        // Restore the sidebar's Chats/Files mode (AGE-480):
+                        // it was built against the default (`Chats`) before
+                        // this load landed, the same gap the theme restore
+                        // above closes for the theme.
+                        with_chatty_app(cx, |app, cx| {
+                            app.sidebar_view.update(cx, |sidebar, cx| {
+                                sidebar.apply_persisted_mode(cx);
+                            });
+                        });
                     })
                     .map_err(|e| warn!(error = ?e, "Failed to apply theme from loaded settings"))
                     .ok();

@@ -720,6 +720,15 @@ impl ChattyApp {
                     .and_then(|s| s.workspace_dir.as_ref().map(PathBuf::from))
             });
             self.refresh_chat_input_skills(skills_dir.as_deref(), cx);
+
+            // Re-root the sidebar's Files-mode tree for the conversation
+            // that just became active (AGE-480); a no-op while Chats mode
+            // is showing. `skills_dir` is already the same conversation
+            // override → global setting fallback the tree wants, so it is
+            // reused rather than recomputed.
+            self.sidebar_view.update(cx, |sidebar, cx| {
+                sidebar.reroot_for_conversation(skills_dir, cx);
+            });
         }
     }
 }

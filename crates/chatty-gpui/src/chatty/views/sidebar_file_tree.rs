@@ -1,9 +1,13 @@
-//! The artifact panel's explorer column (AGE-476): renders a [`FileTree`]
-//! as an IDE-style tree with a header (new file, new folder, refresh), a
-//! right-click menu per row, and an inline name input for create/rename.
+//! The sidebar's Files mode (AGE-480): renders a [`FileTree`] as an
+//! IDE-style tree with a header (the workspace root's name), a right-click
+//! menu per row, and an inline name input for create/rename.
 //!
-//! Every action routes back into [`ArtifactView`], which owns the tree; this
-//! file only draws it.
+//! This is the AGE-476/478 explorer column moved out of the artifact panel
+//! and into the left sidebar, so the artifact panel goes back to being a
+//! pure viewer. Every action routes back into [`SidebarView`], which owns
+//! the tree; this file only draws it. New file/new folder/refresh buttons
+//! were dropped in the move — the context menu (here, and on directory
+//! rows) is enough for v1.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -11,16 +15,13 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::{Icon, IconName, Sizable, h_flex, v_flex};
 
-use super::artifact_view::ArtifactView;
-use super::file_tree::{FileTree, PendingEdit, RowKind, SelectGesture, TreeRow};
-use crate::assets::CustomIcon;
+use super::sidebar_view::SidebarView;
+use super::transcript::file_tree::{FileTree, PendingEdit, RowKind, SelectGesture, TreeRow};
 
-pub const EXPLORER_WIDTH: f32 = 220.0;
 const ROW_HEIGHT: f32 = 24.0;
 const INDENT: f32 = 12.0;
 
@@ -93,11 +94,42 @@ fn gesture_for(modifiers: &Modifiers) -> SelectGesture {
     }
 }
 
-pub fn render_file_explorer(
+/// Root-level "New file…"/"New folder…" menu, offered from the header and
+/// from the empty-folder placeholder — the only way to create at the
+/// workspace root now that the header buttons are gone (AGE-480).
+fn root_new_menu(
+    menu: gpui_component::menu::PopupMenu,
+    entity: &Entity<SidebarView>,
+    root: &Path,
+) -> gpui_component::menu::PopupMenu {
+    let root = root.to_path_buf();
+    menu.item(PopupMenuItem::new("New file…").on_click({
+        let entity = entity.clone();
+        let dir = root.clone();
+        move |_, window, cx| {
+            let dir = dir.clone();
+            entity.update(cx, |this, cx| {
+                this.explorer_begin_edit(PendingEdit::NewFile { dir }, window, cx);
+            });
+        }
+    }))
+    .item(PopupMenuItem::new("New folder…").on_click({
+        let entity = entity.clone();
+        let dir = root.clone();
+        move |_, window, cx| {
+            let dir = dir.clone();
+            entity.update(cx, |this, cx| {
+                this.explorer_begin_edit(PendingEdit::NewFolder { dir }, window, cx);
+            });
+        }
+    }))
+}
+
+pub fn render_sidebar_file_tree(
     tree: &FileTree,
     name_input: &Entity<InputState>,
     scroll: UniformListScrollHandle,
-    entity: Entity<ArtifactView>,
+    entity: Entity<SidebarView>,
     cx: &App,
 ) -> AnyElement {
     let rows: Rc<Vec<TreeRow>> = Rc::new(tree.rows());
@@ -113,15 +145,16 @@ pub fn render_file_explorer(
     let name_input = name_input.clone();
 
     let header = h_flex()
+        .id("sidebar-explorer-header")
         .items_center()
         .gap_1()
-        .px_2()
+        .px_3()
         .h(px(28.))
         .border_b_1()
         .border_color(cx.theme().border)
         .child(
             div()
-                .id("explorer-root")
+                .id("sidebar-explorer-root")
                 .flex_1()
                 .min_w_0()
                 .text_xs()
@@ -134,47 +167,13 @@ pub fn render_file_explorer(
                 })
                 .child(root_name),
         )
-        .child(
-            Button::new("explorer-new-file")
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(IconName::Plus).size_3())
-                .tooltip("New file")
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.explorer_begin_new(false, window, cx));
-                    }
-                }),
-        )
-        .child(
-            Button::new("explorer-new-folder")
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(IconName::FolderClosed).size_3())
-                .tooltip("New folder")
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.explorer_begin_new(true, window, cx));
-                    }
-                }),
-        )
-        .child(
-            Button::new("explorer-refresh")
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(CustomIcon::Refresh).size_3())
-                .tooltip("Refresh")
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.explorer_refresh(cx));
-                    }
-                }),
-        );
+        .context_menu({
+            let entity = entity.clone();
+            let root = root.clone();
+            move |menu, _, _| root_new_menu(menu, &entity, &root)
+        });
 
-    let list = uniform_list("explorer-rows", rows.len(), {
+    let list = uniform_list("sidebar-explorer-rows", rows.len(), {
         let rows = rows.clone();
         let entity = entity.clone();
         move |range, _window, cx| {
@@ -189,13 +188,9 @@ pub fn render_file_explorer(
     .w_full();
 
     v_flex()
-        .id("artifact-explorer")
-        .w(px(EXPLORER_WIDTH))
-        .h_full()
+        .id("sidebar-explorer")
+        .size_full()
         .min_h_0()
-        .flex_none()
-        .border_r_1()
-        .border_color(cx.theme().border)
         .child(header)
         .child(
             v_flex()
@@ -207,6 +202,7 @@ pub fn render_file_explorer(
                 // row is taken by the row first and does not reach here.
                 .on_drop::<DraggedEntries>({
                     let entity = entity.clone();
+                    let root = root.clone();
                     move |dragged, _, cx| {
                         let paths = dragged.paths.clone();
                         let dest = root.clone();
@@ -216,11 +212,17 @@ pub fn render_file_explorer(
                 .when(rows.is_empty(), |this| {
                     this.child(
                         div()
+                            .id("sidebar-explorer-empty")
                             .px_3()
                             .py_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Empty folder"),
+                            .child("Empty folder")
+                            .context_menu({
+                                let entity = entity.clone();
+                                let root = root.clone();
+                                move |menu, _, _| root_new_menu(menu, &entity, &root)
+                            }),
                     )
                 })
                 .child(list),
@@ -245,7 +247,7 @@ fn render_row(
     row: &TreeRow,
     selection: &Rc<Vec<PathBuf>>,
     name_input: &Entity<InputState>,
-    entity: &Entity<ArtifactView>,
+    entity: &Entity<SidebarView>,
     cx: &App,
 ) -> AnyElement {
     let indent = px(8.0 + INDENT * row.depth as f32);
@@ -254,7 +256,7 @@ fn render_row(
             let is_dir_edit = matches!(edit, PendingEdit::NewFolder { .. })
                 || matches!(edit, PendingEdit::Rename { path } if path.is_dir());
             h_flex()
-                .id(("explorer-edit", ix))
+                .id(("sidebar-explorer-edit", ix))
                 .h(px(ROW_HEIGHT))
                 .w_full()
                 .items_center()
@@ -323,7 +325,7 @@ fn render_row(
             };
             h_flex()
                 .id(SharedString::from(format!(
-                    "explorer-row-{}",
+                    "sidebar-explorer-row-{}",
                     path.display()
                 )))
                 .h(px(ROW_HEIGHT))
@@ -501,7 +503,7 @@ fn render_row(
                         .item(PopupMenuItem::new("Reveal in file manager").on_click({
                             let path = path.clone();
                             move |_, _, cx| {
-                                super::artifact_card::reveal_path_in_os(&path, cx);
+                                super::transcript::reveal_path_in_os(&path, cx);
                             }
                         }))
                         .item(

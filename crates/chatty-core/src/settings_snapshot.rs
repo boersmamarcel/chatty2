@@ -480,6 +480,7 @@ mod tests {
                 font_size: 18.5,
                 theme_name: Some("Solarized".to_string()),
                 dark_mode: Some(true),
+                sidebar_mode: crate::settings::models::general_model::SidebarMode::Files,
             },
             hive_settings: HiveSettingsModel {
                 registry_url: "https://hive.example.com".to_string(),

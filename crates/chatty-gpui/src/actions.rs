@@ -23,6 +23,8 @@ pub(crate) fn register_actions(cx: &mut App) {
         // The chords the approval card and plan strip advertise (AGE-139).
         KeyBinding::new("cmd-y", ApprovePendingCommand, None),
         KeyBinding::new("cmd-shift-n", DenyPendingCommand, None),
+        // Fuzzy quick-open over the workspace (AGE-480).
+        KeyBinding::new("cmd-p", QuickOpenFiles, None),
     ]);
     #[cfg(target_os = "linux")]
     cx.bind_keys([
@@ -46,6 +48,8 @@ pub(crate) fn register_actions(cx: &mut App) {
         KeyBinding::new("ctrl-up", PreviousConversation, None),
         KeyBinding::new("ctrl-down", NextConversation, None),
         KeyBinding::new("ctrl-backspace", DeleteActiveConversation, None),
+        // Fuzzy quick-open over the workspace (AGE-480).
+        KeyBinding::new("ctrl-p", QuickOpenFiles, None),
     ]);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
@@ -142,6 +146,10 @@ pub(crate) fn register_actions(cx: &mut App) {
         debug!("Install CLI action triggered");
         cli_installer::install_cli(cx);
     });
+    // QuickOpenFiles (Cmd/Ctrl+P, AGE-480) has its handler on the app's root
+    // element in `app_view.rs` instead of here — it needs a `Window` to open
+    // the dialog on, and getting one from `cx.active_window()` at this,
+    // App-level, layer is unreliable under a headless/no-WM host.
 }
 
 #[cfg(target_os = "macos")]

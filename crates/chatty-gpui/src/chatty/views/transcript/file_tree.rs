@@ -22,6 +22,34 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(2);
 /// directory whose churn would make every mtime poll re-list.
 const HIDDEN_NAMES: &[&str] = &[".git"];
 
+/// Cap for [`walk_files`] so a huge workspace (or a symlink cycle —
+/// `list_dir` already follows symlinks for `is_dir`) cannot hang the
+/// Cmd+P quick-open picker (AGE-480) walking it.
+pub const MAX_QUICK_OPEN_FILES: usize = 20_000;
+
+/// Every file under `root`, for the Cmd+P quick-open picker (AGE-480):
+/// eagerly walks the whole tree — the picker needs it all up front, unlike
+/// the lazily-expanded [`FileTree`] — applying the same [`HIDDEN_NAMES`]
+/// rule via [`list_dir`]. Order is not guaranteed; the caller ranks and
+/// sorts.
+pub fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        if out.len() >= MAX_QUICK_OPEN_FILES {
+            break;
+        }
+        for node in list_dir(&dir).entries {
+            if node.is_dir {
+                dirs.push(node.path);
+            } else {
+                out.push(node.path);
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
     pub path: PathBuf,
@@ -88,7 +116,7 @@ impl TreeRow {
 }
 
 /// The outcome of a file operation, for the panel to act on.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileOp {
     /// A file now exists at this path (created or renamed) and should be
     /// opened / re-pointed in the panel.
@@ -1118,6 +1146,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got.as_os_str(), "/ws/b.txt");
+    }
+
+    #[test]
+    fn walk_files_recurses_and_hides_git() {
+        let tmp = workspace();
+        let root = tmp.path().to_path_buf();
+        let mut files: Vec<String> = walk_files(&root)
+            .into_iter()
+            .map(|p| p.strip_prefix(&root).unwrap().display().to_string())
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                ".env".to_string(),
+                "Cargo.toml".to_string(),
+                "README.md".to_string(),
+                "src/main.rs".to_string(),
+                "src/nested/deep.rs".to_string(),
+            ]
+        );
     }
 
     #[test]
