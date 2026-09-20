@@ -22,6 +22,7 @@
 //! - [`input`] — forwarded mouse/keyboard input over CDP (AGE-156)
 //! - `targets` — tracking the tabs and windows a page opens (AGE-458, AGE-473)
 
+mod click;
 pub mod control;
 pub mod error;
 pub mod events;
@@ -40,6 +41,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+pub use click::ClickPoint;
 pub use control::ControlHolder;
 pub use error::BrowserError;
 pub use events::{ConsoleEntry, EventBuffers, NetworkEntry};

@@ -5,7 +5,13 @@
 //! access on, navigation also allows public http(s) hosts (still refusing
 //! private/internal network targets via the shared SSRF guard). Either way
 //! the profile is ephemeral — no stored credentials are ever in play, so
-//! none of these tools needs an approval gate.
+//! none of the reading tools needs an approval gate.
+//!
+//! `browser_click` is the one tool that *acts* (AGE-489). On a Lane A page
+//! it is the agent clicking through its own output and runs unattended. On
+//! anything else the user may have logged in under take-control (AGE-156),
+//! so every click is an approval card the user answers — per action, never
+//! generalised, and never auto-approved by the shell's approval mode.
 //!
 //! Two deliberate choices about tokens, made here rather than retrofitted:
 //!
@@ -26,14 +32,16 @@ use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
+use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::add_attachment_tool::PendingArtifacts;
 
 use crate::services::browser::session::{DEFAULT_TIMEOUT_SECS, with_deadline};
 use crate::services::browser::snapshot::{AxNode, flatten_ax_tree};
-use crate::services::browser::{BrowserError, BrowserManager};
+use crate::services::browser::{BrowserError, BrowserManager, NavigationPolicy};
 use crate::tools::ToolError;
 
-/// Bundle of the six Lane A tools, so the agent factory moves one value.
+/// Bundle of the seven browser tools, so the agent factory moves one value.
 pub type BrowserTools = (
     BrowserNavigateTool,
     BrowserSnapshotTool,
@@ -41,12 +49,16 @@ pub type BrowserTools = (
     BrowserConsoleTool,
     BrowserNetworkTool,
     BrowserResizeTool,
+    BrowserClickTool,
 );
 
-/// Build every Lane A tool over one shared manager.
+/// Build every browser tool over one shared manager. `pending_approvals` is
+/// the channel `browser_click` asks the user through when the page is not a
+/// Lane A origin; without one, such clicks are refused rather than assumed.
 pub fn build_browser_tools(
     manager: Arc<BrowserManager>,
     pending_artifacts: PendingArtifacts,
+    pending_approvals: Option<PendingApprovals>,
 ) -> BrowserTools {
     (
         BrowserNavigateTool {
@@ -65,7 +77,13 @@ pub fn build_browser_tools(
         BrowserNetworkTool {
             manager: manager.clone(),
         },
-        BrowserResizeTool { manager },
+        BrowserResizeTool {
+            manager: manager.clone(),
+        },
+        BrowserClickTool {
+            manager,
+            pending_approvals,
+        },
     )
 }
 
@@ -111,22 +129,28 @@ impl Tool for BrowserNavigateTool {
              http(s) URL is allowed, plus localhost URLs (http://localhost:PORT, \
              http://127.0.0.1:PORT), file:// URLs inside the workspace, and private/internal \
              network targets (e.g. 192.168.x.x, 10.x.x.x) on the user's own network — only \
-             link-local/cloud-metadata addresses (169.254.x.x) stay refused. Navigating \
-             invalidates every element ref from a previous browser_snapshot."
+             link-local/cloud-metadata addresses (169.254.x.x) stay refused. Only http(s) \
+             and file:// URLs: to press a button or follow a link, use browser_click with \
+             a ref from browser_snapshot, never a javascript: URL. Navigating invalidates \
+             every element ref from a previous browser_snapshot."
                 .to_string()
         } else if self.manager.allows_open_web() {
             "Open a URL in the built-in browser. Internet access is enabled, so any public \
              http(s) URL is allowed, plus localhost URLs (http://localhost:PORT, \
              http://127.0.0.1:PORT) and file:// URLs inside the workspace — private/internal \
              network targets (RFC-1918, link-local, cloud metadata) stay refused either way. \
+             Only http(s) and file:// URLs: to press a button or follow a link, use \
+             browser_click with a ref from browser_snapshot, never a javascript: URL. \
              Navigating invalidates every element ref from a previous browser_snapshot."
                 .to_string()
         } else {
             "Open a URL in the built-in browser. Only localhost URLs (http://localhost:PORT, \
              http://127.0.0.1:PORT) and file:// URLs inside the workspace are allowed — enable \
              internet access in Settings to browse the open web here too. Until then, use \
-             search_web or fetch for anything on the internet. Navigating invalidates every \
-             element ref from a previous browser_snapshot."
+             search_web or fetch for anything on the internet. To press a button or follow \
+             a link, use browser_click with a ref from browser_snapshot, never a \
+             javascript: URL. Navigating invalidates every element ref from a previous \
+             browser_snapshot."
                 .to_string()
         }
     }
@@ -192,9 +216,10 @@ impl Tool for BrowserSnapshotTool {
 
     fn description(&self) -> String {
         "Read the current page as an accessibility tree: roles, names, and stable [eN] \
-         element refs. This is the structural view — use it to find what is on the page. \
-         For questions about how the page *looks* (spacing, alignment, colour), use \
-         browser_screenshot instead; those are pixel judgements the tree cannot answer."
+         element refs. This is the structural view — use it to find what is on the page, \
+         and to get the ref browser_click needs. For questions about how the page *looks* \
+         (spacing, alignment, colour), use browser_screenshot instead; those are pixel \
+         judgements the tree cannot answer."
             .to_string()
     }
 
@@ -595,6 +620,179 @@ impl Tool for BrowserResizeTool {
     }
 }
 
+// ── click ───────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ClickArgs {
+    /// An element ref from the latest `browser_snapshot`, e.g. `e12`.
+    pub r#ref: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClickOutput {
+    /// What was clicked, as the snapshot described it.
+    pub clicked: String,
+    /// Where the page is after the click settled.
+    pub url: String,
+    /// Whether the click moved the page. If so, every ref is dead.
+    pub navigated: bool,
+    pub snapshot_generation: u64,
+    pub note: String,
+}
+
+/// Left-click one element by snapshot ref (AGE-489).
+///
+/// The ref is the only input, and it is checked three times over before a
+/// pointer event is sent: it must belong to the current snapshot generation,
+/// the element must still be what the snapshot showed, and the click point
+/// must land on it — see `services::browser::click`. Off Lane A origins the
+/// click is also an approval card the user answers first.
+#[derive(Clone)]
+pub struct BrowserClickTool {
+    manager: Arc<BrowserManager>,
+    pending_approvals: Option<PendingApprovals>,
+}
+
+/// Whether a click on a page at `url` needs the user's approval: anything
+/// that is not a Lane A origin (loopback http(s) or workspace `file://`).
+/// Decided by the URL, not the manager's policy — with internet access on,
+/// the same session serves both the agent's own dev server and the open
+/// web, and only the latter can carry a session the user logged into.
+fn click_needs_approval(url: &str, workspace: Option<&std::path::Path>) -> bool {
+    NavigationPolicy::local_only(workspace.map(|w| w.to_path_buf()))
+        .check(url)
+        .is_err()
+}
+
+/// The approval-card text: what would be clicked, where.
+fn click_approval_label(role: &str, name: &str, url: &str) -> String {
+    const MAX_NAME: usize = 80;
+    let name: String = if name.chars().count() > MAX_NAME {
+        format!("{}…", name.chars().take(MAX_NAME).collect::<String>())
+    } else {
+        name.to_string()
+    };
+    format!("[browser] click {role} \"{name}\" on {url}")
+}
+
+impl Tool for BrowserClickTool {
+    const NAME: &'static str = "browser_click";
+    type Error = ToolError;
+    type Args = ClickArgs;
+    type Output = ClickOutput;
+
+    fn description(&self) -> String {
+        "Left-click one element on the current page, by its [eN] ref from the latest \
+         browser_snapshot. Refs die when the page navigates or the user takes control — \
+         take a fresh snapshot after either. The click is refused if the element changed \
+         since the snapshot, is off screen, or is covered by a dialog or overlay. On pages \
+         outside localhost and the workspace, every click first asks the user for \
+         approval, so expect to wait; never try to work around that with a URL."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Element ref from the latest browser_snapshot, e.g. 'e12'."
+                }
+            },
+            "required": ["ref"]
+        })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        // Before touching the session: a missing snapshot is a model mistake
+        // and must not launch a browser to be reported.
+        let snapshot = self.manager.snapshot().await.ok_or_else(|| {
+            ToolError::OperationFailed(
+                "no snapshot to take refs from; call browser_snapshot first".to_string(),
+            )
+        })?;
+        let session = self.manager.session().await?;
+        session.ensure_agent_control()?;
+        let page = session.page()?;
+        let node = snapshot
+            .resolve(&args.r#ref, session.snapshot_generation())?
+            .clone();
+        let clicked = if node.name.is_empty() {
+            node.role.clone()
+        } else {
+            format!("{} \"{}\"", node.role, node.name)
+        };
+
+        let url = page
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| ToolError::OperationFailed("cannot read the page URL".into()))?;
+        if click_needs_approval(&url, self.manager.workspace().ok()) {
+            let Some(pending) = &self.pending_approvals else {
+                return Err(ToolError::OperationFailed(format!(
+                    "clicking on {url} needs the user's approval and no approval channel is \
+                     available in this session"
+                )));
+            };
+            let label = click_approval_label(&node.role, &node.name, &url);
+            // Always asks: the shell's auto-approve modes are about commands
+            // the user chose to trust, not about acting inside their web
+            // sessions (AGE-158: per action, never generalised).
+            let approved =
+                request_execution_approval(pending, &ApprovalMode::AlwaysAsk, &label, false)
+                    .await
+                    .map_err(|e| ToolError::OperationFailed(format!("approval failed: {e}")))?;
+            if !approved {
+                return Err(ToolError::OperationFailed(format!(
+                    "the user declined to click {clicked} on {url}"
+                )));
+            }
+            // The card may have been open for minutes; the page the user
+            // approved must be the page that gets clicked.
+            if session.snapshot_generation() != snapshot.generation {
+                return Err(BrowserError::StaleRef(
+                    args.r#ref.clone(),
+                    snapshot.generation,
+                    session.snapshot_generation(),
+                )
+                .into());
+            }
+        }
+
+        let result = session.click(&node).await?;
+        info!(r#ref = %args.r#ref, clicked = %clicked, url = %result.url, navigated = result.navigated, "browser: clicked");
+        let note = if result.navigated {
+            "The page navigated; every ref is invalid. Call browser_snapshot before clicking \
+             anything else."
+                .to_string()
+        } else {
+            "Take a new browser_snapshot to see what changed; refs to unchanged elements \
+             remain valid."
+                .to_string()
+        };
+        Ok(ClickOutput {
+            clicked,
+            url: result.url,
+            navigated: result.navigated,
+            snapshot_generation: result.snapshot_generation,
+            note,
+        })
+    }
+}
+
 // ── shared helpers ──────────────────────────────────────────────────────────
 
 /// Write the full dump to a file, returning its path. `None` when there is
@@ -653,18 +851,106 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_definition_naming_the_browser() {
-        let (nav, snap, shot, console, net, resize) = build_browser_tools(manager(), artifacts());
+        let (nav, snap, shot, console, net, resize, click) =
+            build_browser_tools(manager(), artifacts(), None);
         assert_eq!(tool_definition(&nav).name, "browser_navigate");
         assert_eq!(tool_definition(&snap).name, "browser_snapshot");
         assert_eq!(tool_definition(&shot).name, "browser_screenshot");
         assert_eq!(tool_definition(&console).name, "browser_console");
         assert_eq!(tool_definition(&net).name, "browser_network");
         assert_eq!(tool_definition(&resize).name, "browser_resize");
+        assert_eq!(tool_definition(&click).name, "browser_click");
+    }
+
+    /// The model reached for `javascript:` URLs because nothing told it how
+    /// to press a button; every navigate variant now points at the click.
+    #[test]
+    fn navigate_descriptions_point_at_browser_click() {
+        for manager in [
+            manager(),
+            Arc::new(BrowserManager::open_web(Some("/ws".into()), false)),
+            Arc::new(BrowserManager::open_web(Some("/ws".into()), true)),
+        ] {
+            let (nav, ..) = build_browser_tools(manager, artifacts(), None);
+            let description = tool_definition(&nav).description;
+            assert!(description.contains("browser_click"), "{description}");
+            assert!(description.contains("javascript:"), "{description}");
+        }
+    }
+
+    #[test]
+    fn click_schema_takes_exactly_one_ref() {
+        let (.., click) = build_browser_tools(manager(), artifacts(), None);
+        let definition = tool_definition(&click);
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["ref"])
+        );
+        assert_eq!(
+            definition.parameters["properties"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// The gate is decided by where the page is, not by which policy the
+    /// session runs under: with internet access on, the agent's own dev
+    /// server is still ungated and the open web is still gated.
+    #[test]
+    fn click_is_gated_exactly_off_lane_a_origins() {
+        let ws = std::path::Path::new("/ws");
+        for url in [
+            "http://localhost:3000/",
+            "http://127.0.0.1:5173/app",
+            "https://app.localhost/",
+            "file:///ws/dist/index.html",
+        ] {
+            assert!(!click_needs_approval(url, Some(ws)), "{url} should be free");
+        }
+        for url in [
+            "https://example.com/",
+            "http://192.168.1.10/admin",
+            "file:///etc/passwd",
+            "about:blank",
+        ] {
+            assert!(click_needs_approval(url, Some(ws)), "{url} should ask");
+        }
+        // No workspace: file:// has nothing to be inside of.
+        assert!(click_needs_approval("file:///ws/index.html", None));
+    }
+
+    #[test]
+    fn click_approval_label_names_the_element_and_the_page() {
+        assert_eq!(
+            click_approval_label("button", "Buy now", "https://shop.example/cart"),
+            "[browser] click button \"Buy now\" on https://shop.example/cart"
+        );
+        let long = "x".repeat(200);
+        let label = click_approval_label("link", &long, "https://e.com/");
+        assert!(label.contains(&format!("{}…", "x".repeat(80))));
+        assert!(!label.contains(&"x".repeat(81)));
+    }
+
+    #[tokio::test]
+    async fn click_without_a_snapshot_says_so_rather_than_launching_a_browser() {
+        // `session()` would provision and launch Chrome; the snapshot check
+        // comes first so a model mistake never costs a browser process.
+        let (.., click) = build_browser_tools(manager(), artifacts(), None);
+        let args = ClickArgs {
+            r#ref: "e1".to_string(),
+        };
+        let err = click.call(&mut ToolContext::new(), args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("browser_snapshot first"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn navigate_description_states_the_lane_a_restriction() {
-        let (nav, ..) = build_browser_tools(manager(), artifacts());
+        let (nav, ..) = build_browser_tools(manager(), artifacts(), None);
         let description = tool_definition(&nav).description;
         assert!(description.contains("localhost"));
         assert!(description.contains("file://"));
@@ -679,7 +965,7 @@ mod tests {
             Some(std::path::PathBuf::from("/ws")),
             false,
         ));
-        let (nav, ..) = build_browser_tools(open_manager, artifacts());
+        let (nav, ..) = build_browser_tools(open_manager, artifacts(), None);
         let description = tool_definition(&nav).description;
         assert!(description.contains("stay refused either way"));
 
@@ -687,7 +973,7 @@ mod tests {
             Some(std::path::PathBuf::from("/ws")),
             true,
         ));
-        let (nav, ..) = build_browser_tools(private_manager, artifacts());
+        let (nav, ..) = build_browser_tools(private_manager, artifacts(), None);
         let description = tool_definition(&nav).description;
         assert!(description.contains("192.168.x.x"));
         assert!(!description.contains("stay refused either way"));
@@ -695,7 +981,7 @@ mod tests {
 
     #[tokio::test]
     async fn resize_rejects_out_of_range_viewports() {
-        let (.., resize) = build_browser_tools(manager(), artifacts());
+        let (_, _, _, _, _, resize, _) = build_browser_tools(manager(), artifacts(), None);
         for (width, height) in [(0, 800), (800, 0), (MAX_VIEWPORT + 1, 800)] {
             let result = resize
                 .call(&mut ToolContext::new(), ResizeArgs { width, height })
@@ -707,7 +993,7 @@ mod tests {
     #[tokio::test]
     async fn tools_needing_a_workspace_say_so_rather_than_launching_a_browser() {
         let manager = Arc::new(BrowserManager::lane_a(None));
-        let (_, _, shot, ..) = build_browser_tools(manager, artifacts());
+        let (_, _, shot, ..) = build_browser_tools(manager, artifacts(), None);
         let err = shot
             .call(&mut ToolContext::new(), NoArgs {})
             .await

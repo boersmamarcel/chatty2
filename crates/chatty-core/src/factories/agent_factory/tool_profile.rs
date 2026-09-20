@@ -182,6 +182,7 @@ fn narrow_availability(tools: &ToolAvailability, allow: impl Fn(&str) -> bool) -
                 "browser_console",
                 "browser_network",
                 "browser_resize",
+                "browser_click",
             ],
         ),
         browser_use: keep(tools.browser_use, &["browser_use"]),
