@@ -424,6 +424,17 @@ async fn spawn_cast(
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for screencast frames: {e}")))?;
 
+    // Chrome does not paint a tab another tab in the same window is covering
+    // — headless included — so a cast started on one delivers at most the
+    // last frame it composited and then nothing (AGE-473). Every cast start
+    // goes through here (a tab switch, the fallback when the active tab
+    // closes, a blocked tab coming back), so this is where the page is made
+    // the one Chrome paints. Best effort: a target that is closing must not
+    // fail the switch, and the cast start below reports what matters.
+    if let Err(e) = page.bring_to_front().await {
+        debug!(error = ?e, "browser: bringing the cast page to the front failed");
+    }
+
     page.execute(start_screencast_params(width, height))
         .await
         .map_err(|e| BrowserError::Protocol(format!("startScreencast failed: {e}")))?;

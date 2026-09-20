@@ -223,11 +223,35 @@ fn frame_colour(update: &ScreencastUpdate) -> &'static str {
         "red"
     } else if b > 200 && r < 80 && g < 80 {
         "blue"
+    } else if g > 200 && r < 80 && b < 80 {
+        "green"
     } else if r > 200 && g > 200 && b > 200 {
         "white"
     } else {
         "other"
     }
+}
+
+/// Prove `page` is being rendered *now*, not replayed from a frame Chrome
+/// had lying around (AGE-473): repaint it a colour it never had, and wait
+/// for that colour to arrive. A tab another tab is covering is not painted
+/// by Chrome at all, so no repaint ever reaches the cast — which is exactly
+/// what switching to it must overcome.
+async fn assert_repaints_live(
+    page: &chromiumoxide::page::Page,
+    frames: &mut watch::Receiver<ScreencastUpdate>,
+    what: &str,
+) {
+    page.evaluate("document.documentElement.style.background = '#00ff00'; document.body.style.background = '#00ff00'")
+        .await
+        .expect("repaint the page");
+    wait_for_frame_colour(frames, "green", what).await;
+    // Put it back so later colour checks on this page still mean the same.
+    page.evaluate(
+        "document.documentElement.style.background = ''; document.body.style.background = ''",
+    )
+    .await
+    .expect("restore the page");
 }
 
 /// Wait until the screencast shows a frame of `expected` colour.
@@ -1062,6 +1086,15 @@ async fn popups_become_tabs_the_user_can_switch_between_and_close() {
         .await
         .expect("switch back to the opener");
     wait_for_frame_colour(&mut frames, "white", "after switching back to the opener").await;
+    // The opener was covered by the tab the link opened; a frame from it now
+    // has to be a fresh paint, not what Chrome last composited for it.
+    assert_repaints_live(
+        &opener,
+        &mut frames,
+        "the re-selected opener is not being painted",
+    )
+    .await;
+    wait_for_frame_colour(&mut frames, "white", "the opener is back to white").await;
     click_at(&session, 110.0, 100.0).await;
     let second_popup = wait_for_promotion(
         &session,
@@ -1477,12 +1510,8 @@ async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime()
         .expect("the opener loads");
 
     let session = manager.session().await.expect("a live session");
-    let opener_id = session
-        .page()
-        .expect("the opener page")
-        .target_id()
-        .inner()
-        .clone();
+    let opener = session.page().expect("the opener page");
+    let opener_id = opener.target_id().inner().clone();
     let mut frames = session
         .start_screencast(400, 300)
         .await
@@ -1493,6 +1522,7 @@ async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime()
     let popup_id =
         wait_for_promotion(&session, &opener_id, "the link's tab was never surfaced").await;
     wait_for_frame_colour(&mut frames, "red", "the popup is shown").await;
+    let probe_popup_page = session.page().expect("popup"); // REVIEW PROBE
 
     /// Run `f` on a plain OS thread with no Tokio context at all.
     fn off_runtime<T: Send + 'static>(
@@ -1510,13 +1540,69 @@ async fn tabs_can_be_switched_and_closed_from_a_thread_without_a_tokio_runtime()
     result
         .expect("select_tab must not panic off the Tokio runtime")
         .expect("select_tab succeeds");
+    // REVIEW PROBE
+    {
+        fn variant(u: &ScreencastUpdate) -> String {
+            match u {
+                ScreencastUpdate::Frame(_) => "Frame".to_string(),
+                ScreencastUpdate::Starting => "Starting".to_string(),
+                ScreencastUpdate::Error(e) => format!("Error({e})"),
+            }
+        }
+        async fn vis(p: &chromiumoxide::page::Page) -> String {
+            p.evaluate("document.visibilityState")
+                .await
+                .ok()
+                .and_then(|v| v.into_value::<String>().ok())
+                .unwrap_or_else(|| "?".into())
+        }
+        let opener_page = session.page().expect("opener");
+        eprintln!(
+            "REVIEW PROBE right after select_tab: {} / colour {} / opener vis={} popup vis={}",
+            variant(&frames.borrow()),
+            frame_colour(&frames.borrow().clone()),
+            vis(&opener_page).await,
+            vis(&probe_popup_page).await,
+        );
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < Duration::from_secs(12) {
+            let r = tokio::time::timeout(Duration::from_secs(1), frames.changed()).await;
+            let v = frames.borrow_and_update().clone();
+            if r.is_ok() {
+                eprintln!(
+                    "REVIEW PROBE t={:>5}ms update: {} colour={}",
+                    t0.elapsed().as_millis(),
+                    variant(&v),
+                    frame_colour(&v)
+                );
+            }
+        }
+        eprintln!(
+            "REVIEW PROBE after 12 s: opener vis={} popup vis={} tabs={:?}",
+            vis(&opener_page).await,
+            vis(&probe_popup_page).await,
+            session
+                .tabs()
+                .iter()
+                .map(|t| (t.id.clone(), t.active, t.url.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
     assert_eq!(
         session.page().expect("live").target_id().inner(),
         &opener_id
     );
     // The cast moved, so frames come from the opener again — a tab that was
-    // opened over (the link's `target="_blank"` page) and is now behind it.
+    // opened over (the link's `target="_blank"` page) and is now behind it —
+    // and they are live paints, not a frame Chrome had lying around.
     wait_for_frame_colour(&mut frames, "white", "after switching back off-runtime").await;
+    assert_repaints_live(
+        &opener,
+        &mut frames,
+        "the re-selected opener is not being painted (off-runtime switch)",
+    )
+    .await;
+    wait_for_frame_colour(&mut frames, "white", "the opener is back to white").await;
     // And forwarded input reaches the re-selected tab: the window.open()
     // button opens a second popup.
     click_at(&session, 110.0, 100.0).await;
