@@ -63,6 +63,7 @@ pub enum CustomIcon {
     Azure,         // azure.svg - Azure provider badge
     GitMerge,      // git-merge.svg - PR status bar, merged pull request
     GitPr,         // git-pull-request.svg - PR status bar, open pull request
+    MessageSquare, // message-square.svg - Sidebar Chats/Files mode toggle (AGE-480)
 }
 
 impl IconNamed for CustomIcon {
@@ -93,6 +94,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::Azure => "icons/azure.svg",
             CustomIcon::GitMerge => "icons/git-merge.svg",
             CustomIcon::GitPr => "icons/git-pull-request.svg",
+            CustomIcon::MessageSquare => "icons/message-square.svg",
         }
         .into()
     }

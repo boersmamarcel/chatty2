@@ -187,10 +187,6 @@ pub struct ChatView {
     last_auto_opened_browser_tool_id: Option<String>,
     /// Persists the right-pane width across dock open/close.
     artifact_split: Entity<ResizableState>,
-    /// Whether `artifact_split` was sized for the explorer column (AGE-476).
-    /// The split keeps whatever width it was last dragged to, so toggling
-    /// the explorer re-creates it with a default that fits the tree.
-    artifact_split_for_explorer: bool,
     /// User expand/collapse for settled activity groups (`BlockId.0` → open).
     activity_expanded: HashMap<u64, bool>,
     /// Index into `messages` of the last assistant turn that is not streaming.
@@ -365,10 +361,8 @@ fn turn_fingerprint(
     hasher.finish()
 }
 
-/// Docked artifact panel width, and the wider default it opens at with
-/// the explorer column up (AGE-476), which alone takes 220 px.
+/// Docked artifact panel width.
 const ARTIFACT_PANEL_WIDTH: f32 = 380.0;
-const ARTIFACT_PANEL_WIDTH_WITH_EXPLORER: f32 = 640.0;
 
 /// How far beyond the viewport the list renders and measures turns.
 ///
@@ -551,7 +545,6 @@ impl ChatView {
             last_auto_opened_chart_id: None,
             last_auto_opened_browser_tool_id: None,
             artifact_split: cx.new(|_| ResizableState::default()),
-            artifact_split_for_explorer: false,
             activity_expanded: HashMap::new(),
             last_settled_assistant_idx: None,
             turns: turn_cache::TurnCache::default(),
@@ -626,26 +619,6 @@ impl ChatView {
         self.artifact_view.update(cx, |view, cx| {
             view.open_browser(manager, cx);
         });
-    }
-
-    /// Show the workspace file explorer in the artifact panel (AGE-476),
-    /// from the unfold button's "Files" menu item. Rooted at the configured
-    /// working directory, or the process cwd when none is set — the same
-    /// place the filesystem tools resolve relative paths against.
-    pub fn open_file_explorer(&mut self, cx: &mut Context<Self>) {
-        let root = cx
-            .try_global::<ExecutionSettingsModel>()
-            .and_then(|s| s.workspace_dir.clone())
-            .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
-        self.artifact_dismissed = false;
-        self.ensure_artifact_close_wired(cx);
-        self.artifact_view.update(cx, |view, cx| {
-            view.show_explorer(root, cx);
-        });
-        cx.notify();
     }
 
     /// Get a reference to all displayed messages (for slash-command handlers, etc.).
@@ -2573,16 +2546,7 @@ impl Render for ChatView {
         self.maybe_open_browser_artifact(cx);
         let docked = self.artifact_view.read(cx).mode == ArtifactMode::Docked;
         let full = self.artifact_view.read(cx).mode == ArtifactMode::Full;
-        let explorer_shown = self.artifact_view.read(cx).explorer_shown();
-        if explorer_shown != self.artifact_split_for_explorer {
-            self.artifact_split_for_explorer = explorer_shown;
-            self.artifact_split = cx.new(|_| ResizableState::default());
-        }
-        let artifact_width = if explorer_shown {
-            ARTIFACT_PANEL_WIDTH_WITH_EXPLORER
-        } else {
-            ARTIFACT_PANEL_WIDTH
-        };
+        let artifact_width = ARTIFACT_PANEL_WIDTH;
         let artifact = self.artifact_view.clone();
         let split = self.artifact_split.clone();
 

@@ -95,6 +95,7 @@ mod schema_docs {
         assert_eq!(general["font_size"], 14.0);
         assert!(general["theme_name"].is_null());
         assert!(general["dark_mode"].is_null());
+        assert_eq!(general["sidebar_mode"], "Chats");
 
         let exec = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
         assert_eq!(exec["enabled"], false);
