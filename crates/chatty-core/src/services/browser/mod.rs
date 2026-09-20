@@ -20,7 +20,7 @@
 //!   session's manager (AGE-155)
 //! - [`control`] — the control lock: who is driving (AGE-156)
 //! - [`input`] — forwarded mouse/keyboard input over CDP (AGE-156)
-//! - `targets` — following a tab or window the page opened (AGE-458)
+//! - `targets` — tracking the tabs and windows a page opens (AGE-458, AGE-473)
 
 pub mod control;
 pub mod error;
@@ -46,7 +46,7 @@ pub use events::{ConsoleEntry, EventBuffers, NetworkEntry};
 pub use input::{InputModifiers, KeyInput, MouseAction, MouseButtonKind, MouseInput};
 pub use profile::{BrowserProfile, NavigationPolicy};
 pub use screencast::{ScreencastFrame, ScreencastUpdate};
-pub use session::BrowserSession;
+pub use session::{BrowserSession, BrowserTab};
 pub use snapshot::{Snapshot, SnapshotNode};
 
 /// The handle the browser tools hold.

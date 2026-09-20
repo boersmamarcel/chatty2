@@ -7,8 +7,9 @@
 //! the moment it is decoded regardless of whether anyone is watching.
 //!
 //! The channel belongs to whoever is watching; the cast underneath belongs to
-//! a page and moves (a followed tab, AGE-458), pauses (a page the policy
-//! refuses to show) and restarts without the viewer's receiver ever closing.
+//! a page and moves (the tab the user or the page switched to, AGE-458 and
+//! AGE-473), pauses (a page the policy refuses to show) and restarts without
+//! the viewer's receiver ever closing.
 //! Only [`Screencast::stop`] ends the channel, and only the consumer asks for
 //! that.
 
@@ -116,6 +117,10 @@ struct Running {
 /// failure while moving the cast dropped the sender and the panel reported
 /// "browser session ended" for a session that was perfectly healthy.
 pub(super) struct Screencast {
+    /// Where the frame pump runs: the session's Tokio handle, since the
+    /// consumer may move the cast from a thread with no Tokio context
+    /// (AGE-473).
+    runtime: tokio::runtime::Handle,
     tx: watch::Sender<ScreencastUpdate>,
     width: u32,
     height: u32,
@@ -127,6 +132,7 @@ pub(super) struct Screencast {
 impl Screencast {
     /// Start casting `page` on a fresh channel.
     async fn start(
+        runtime: &tokio::runtime::Handle,
         page: &Page,
         width: u32,
         height: u32,
@@ -134,6 +140,7 @@ impl Screencast {
         validate_dimensions(width, height)?;
         let (tx, rx) = watch::channel(ScreencastUpdate::Starting);
         let mut screencast = Self {
+            runtime: runtime.clone(),
             tx,
             width,
             height,
@@ -210,7 +217,7 @@ impl Screencast {
         // Whatever the old page last showed is not this page.
         let _ = self.tx.send(ScreencastUpdate::Starting);
 
-        match spawn_cast(page, self.tx.clone(), width, height).await {
+        match spawn_cast(&self.runtime, page, self.tx.clone(), width, height).await {
             Ok(running) => {
                 self.running = Some(running);
                 Ok(())
@@ -286,6 +293,7 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), BrowserError> {
 /// `Page.startScreencast` against that target is refused with
 /// `-32000: Screencast is already active`.
 pub(super) async fn start(
+    runtime: &tokio::runtime::Handle,
     page: &Page,
     slot: &mut Option<Screencast>,
     width: u32,
@@ -326,8 +334,42 @@ pub(super) async fn start(
             Ok(screencast.subscribe())
         }
         None => {
-            let (screencast, rx) = Screencast::start(page, width, height).await?;
+            let (screencast, rx) = Screencast::start(runtime, page, width, height).await?;
             *slot = Some(screencast);
+            Ok(rx)
+        }
+    }
+}
+
+/// Give the consumer a channel while the tab on screen is one the policy
+/// refuses (AGE-473): the cast is created — or left — suspended, carrying
+/// `reason`, at the size the panel asked for. Nothing is encoded, but the
+/// channel exists, so switching to a tab that may be shown revives it
+/// through the session's usual move instead of finding nothing to move.
+pub(super) async fn hold(
+    runtime: &tokio::runtime::Handle,
+    slot: &mut Option<Screencast>,
+    width: u32,
+    height: u32,
+    reason: &str,
+) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
+    validate_dimensions(width, height)?;
+    match slot.as_mut() {
+        Some(screencast) => {
+            screencast.width = width;
+            screencast.height = height;
+            screencast.hold(reason).await;
+            Ok(screencast.subscribe())
+        }
+        None => {
+            let (tx, rx) = watch::channel(ScreencastUpdate::Error(reason.to_string()));
+            *slot = Some(Screencast {
+                runtime: runtime.clone(),
+                tx,
+                width,
+                height,
+                running: None,
+            });
             Ok(rx)
         }
     }
@@ -359,8 +401,10 @@ async fn retarget(
     Ok(Some(screencast.subscribe()))
 }
 
-/// Ask Chrome to encode `page` and pump the frames onto `tx`.
+/// Ask Chrome to encode `page` and pump the frames onto `tx`. The pump runs
+/// on `runtime`, whatever thread this is called from (AGE-473).
 async fn spawn_cast(
+    runtime: &tokio::runtime::Handle,
     page: &Page,
     tx: watch::Sender<ScreencastUpdate>,
     width: u32,
@@ -380,11 +424,22 @@ async fn spawn_cast(
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot listen for screencast frames: {e}")))?;
 
+    // Chrome does not paint a tab another tab in the same window is covering
+    // — headless included — so a cast started on one delivers at most the
+    // last frame it composited and then nothing (AGE-473). Every cast start
+    // goes through here (a tab switch, the fallback when the active tab
+    // closes, a blocked tab coming back), so this is where the page is made
+    // the one Chrome paints. Best effort: a target that is closing must not
+    // fail the switch, and the cast start below reports what matters.
+    if let Err(e) = page.bring_to_front().await {
+        debug!(error = ?e, "browser: bringing the cast page to the front failed");
+    }
+
     page.execute(start_screencast_params(width, height))
         .await
         .map_err(|e| BrowserError::Protocol(format!("startScreencast failed: {e}")))?;
 
-    let handle = tokio::spawn({
+    let handle = runtime.spawn({
         let page = page.clone();
         let tx = tx.clone();
         async move {
@@ -571,6 +626,7 @@ mod tests {
         let handle = tokio::spawn(std::future::pending::<()>());
         (
             Some(Screencast {
+                runtime: tokio::runtime::Handle::current(),
                 tx,
                 width,
                 height,

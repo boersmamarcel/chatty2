@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::assets::CustomIcon;
 use chatty_core::services::browser::{
-    BrowserManager, BrowserSession, ControlHolder, InputModifiers, KeyInput, MouseAction,
-    MouseButtonKind, MouseInput, ScreencastFrame, ScreencastUpdate,
+    BrowserManager, BrowserSession, BrowserTab, ControlHolder, InputModifiers, KeyInput,
+    MouseAction, MouseButtonKind, MouseInput, ScreencastFrame, ScreencastUpdate,
 };
 use chatty_core::services::pdf_thumbnail::{
     PREVIEW_WIDTH, PdfThumbnailError, pdf_page_count, render_pdf_page,
@@ -193,8 +193,9 @@ pub struct ArtifactView {
     tabular: TabularPreview,
     chart: Option<ChartSpec>,
     browser: BrowserPreview,
-    /// Set while a browser artifact is open — also the idle-teardown handle:
-    /// `stop_browser_screencast` takes it and stops the session (AGE-155).
+    /// Set while a browser is open, even paused behind a file (AGE-473):
+    /// `pause_browser` keeps it so the browser can be brought back, and
+    /// `drop_browser` takes it and stops the session (AGE-155).
     browser_manager: Option<Arc<BrowserManager>>,
     /// The live session backing `browser_manager`, cached so input
     /// forwarding and control-lock toggles (AGE-156) don't have to resolve
@@ -225,6 +226,21 @@ pub struct ArtifactView {
     /// not from the background task that learns about it.
     browser_current_url: String,
     browser_address_dirty: bool,
+    /// The session's open tabs (AGE-473), mirrored from
+    /// `BrowserSession::watch_tabs` by the tab watcher, the same way the
+    /// address bar follows `watch_url`. Rendered as entries in the header's
+    /// `artifact-files` tab bar next to the open files; the session is the
+    /// source of truth. Kept alive across a pause so the entries stay while
+    /// a file is shown in front of the browser.
+    browser_tabs: Vec<BrowserTab>,
+    /// Lifecycle of the tab watcher (AGE-473), separate from `load_gen`
+    /// because the watcher outlives a pause while the screencast does not.
+    browser_tabs_gen: u64,
+    /// Whether the browser is the artifact on screen right now (AGE-473).
+    /// `browser_manager`/`browser_session` can be `Some` while a file is
+    /// shown in front of a paused browser, so this — not their presence —
+    /// is what `render` keys "the browser is showing" off.
+    browser_shown: bool,
     /// CDP viewport size (AGE-156) — kept matched to the panel's actual
     /// rendered size by `sync_browser_viewport_size` rather than staying
     /// fixed at `BROWSER_VIEWPORT_WIDTH`/`HEIGHT` for the session's whole
@@ -329,6 +345,9 @@ impl ArtifactView {
             browser_address,
             browser_current_url: String::new(),
             browser_address_dirty: false,
+            browser_tabs: Vec::new(),
+            browser_tabs_gen: 0,
+            browser_shown: false,
             browser_requested_size: (0, 0),
             browser_frame_geometry: None,
             browser_resize_task: None,
@@ -391,7 +410,7 @@ impl ArtifactView {
     pub fn open_table(&mut self, preview: TablePreview, cx: &mut Context<Self>) {
         self.session_review = false;
         self.review_sections.clear();
-        self.stop_browser_screencast(cx);
+        self.pause_browser(cx);
         let next_path = match &preview.source {
             chatty_core::tools::data_query_tool::TableSource::File { path } => {
                 Some(PathBuf::from(path))
@@ -414,7 +433,7 @@ impl ArtifactView {
     pub fn open_chart(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
         self.session_review = false;
         self.review_sections.clear();
-        self.stop_browser_screencast(cx);
+        self.pause_browser(cx);
         let next_path = spec.saved_path.as_ref().map(PathBuf::from);
         self.mode = presentation_on_open(self.mode, next_path.as_ref() == self.path.as_ref());
         self.path = next_path;
@@ -435,6 +454,14 @@ impl ArtifactView {
     /// Open the live browser viewport (AGE-155): the browser is another
     /// artifact the agent produced, opened the same way as a diff or a
     /// generated file — just backed by a screencast instead of a path.
+    ///
+    /// Called for the first tool call (a fresh manager), and again to bring
+    /// the browser back to the screen after a file was shown in front of it
+    /// (AGE-473): the same manager, its session and tab list still alive,
+    /// only the screencast having been paused. The latter case restarts the
+    /// stream on the cached session rather than launching anything — unless
+    /// the pause landed while the session was still being resolved, in which
+    /// case the resolve is issued again (see [`browser_reopen`]).
     pub fn open_browser(&mut self, manager: Arc<BrowserManager>, cx: &mut Context<Self>) {
         self.session_review = false;
         self.review_sections.clear();
@@ -443,9 +470,6 @@ impl ArtifactView {
             .as_ref()
             .is_some_and(|existing| Arc::ptr_eq(existing, &manager));
         self.mode = presentation_on_open(self.mode, already_open);
-        if !already_open {
-            self.stop_browser_screencast(cx);
-        }
         self.path = None;
         self.set_pdf(PdfPreview::Idle, cx);
         self.pptx = PptxPreview::Idle;
@@ -459,12 +483,44 @@ impl ArtifactView {
         self.headings.clear();
         cx.emit(ArtifactViewEvent::PresentationChanged);
 
-        if already_open {
-            cx.notify();
-            return;
+        match browser_reopen(
+            already_open,
+            self.browser_shown,
+            self.browser_session.is_some(),
+        ) {
+            // Same manager, already on screen: nothing to do but re-present.
+            BrowserReopen::Present => {}
+            // Paused behind a file (AGE-473): restart the cast on the
+            // still-live session.
+            BrowserReopen::ResumeStream => {
+                self.browser_shown = true;
+                if let Some(session) = self.browser_session.clone() {
+                    self.start_browser_stream(session, cx);
+                }
+            }
+            // Paused before the session ever resolved — the resolve was
+            // dropped at its `load_gen` guard, so issue it again; doing
+            // nothing would leave the panel on "Starting…" for good.
+            BrowserReopen::ResolveSession => {
+                self.browser_shown = true;
+                self.start_browser_session(manager, cx);
+            }
+            // A different manager: tear the previous browser down for good.
+            BrowserReopen::Fresh => {
+                self.drop_browser(cx);
+                self.browser_manager = Some(manager.clone());
+                self.browser_shown = true;
+                self.start_browser_session(manager, cx);
+            }
         }
+        cx.notify();
+    }
 
-        self.browser_manager = Some(manager.clone());
+    /// Resolve the manager's session (launching Chrome on the first call)
+    /// and, once it is there, start the tab watcher and the stream. Keyed on
+    /// `load_gen`: a pause or a different browser while the resolve is in
+    /// flight drops the result, and the next `open_browser` resolves again.
+    fn start_browser_session(&mut self, manager: Arc<BrowserManager>, cx: &mut Context<Self>) {
         self.browser = BrowserPreview::Starting;
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
@@ -482,129 +538,167 @@ impl ArtifactView {
                     return;
                 }
             };
-
-            // AGE-156: cache the session and stand up ordered input-forwarding
-            // drains before the first frame arrives, so the control button
-            // works from the "Starting…" placeholder onward. One consumer
-            // task per stream, not one spawned task per event — mouse moves
-            // are too frequent for that, and independent tasks racing the
-            // CDP connection could deliver events out of order.
-            let (mouse_tx, mut mouse_rx) = mpsc::unbounded_channel::<MouseInput>();
-            let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyInput>();
-            {
-                let session = session.clone();
-                cx.background_spawn(async move {
-                    // Coalesce a backlog of trailing same-kind Move/Wheel
-                    // events before dispatching: each dispatch is a real
-                    // CDP round trip, slower than a trackpad or fast mouse
-                    // move can fire, so draining one event per await here
-                    // (as this loop used to) builds a growing lag between
-                    // the input and what the page does. Wheel deltas are
-                    // summed so the total scroll distance stays correct;
-                    // Move keeps only the latest position. Down/Up are
-                    // never merged or dropped — hitting one stops the
-                    // coalescing run, and it carries over to the next
-                    // outer iteration via `pending` rather than being lost.
-                    let mut pending: Option<MouseInput> = None;
-                    loop {
-                        let mut input = match pending.take() {
-                            Some(input) => input,
-                            None => match mouse_rx.recv().await {
-                                Some(input) => input,
-                                None => break,
-                            },
-                        };
-                        while let Ok(next) = mouse_rx.try_recv() {
-                            match (&mut input.action, next.action) {
-                                (MouseAction::Move, MouseAction::Move) => {
-                                    input.x = next.x;
-                                    input.y = next.y;
-                                    input.modifiers = next.modifiers;
-                                }
-                                (
-                                    MouseAction::Wheel { delta_x, delta_y },
-                                    MouseAction::Wheel {
-                                        delta_x: next_dx,
-                                        delta_y: next_dy,
-                                    },
-                                ) => {
-                                    *delta_x += next_dx;
-                                    *delta_y += next_dy;
-                                    input.x = next.x;
-                                    input.y = next.y;
-                                    input.modifiers = next.modifiers;
-                                }
-                                _ => {
-                                    pending = Some(next);
-                                    break;
-                                }
-                            }
-                        }
-                        let _ = session.dispatch_mouse(input).await;
-                    }
-                })
-                .detach();
-            }
-            {
-                let session = session.clone();
-                cx.background_spawn(async move {
-                    while let Some(input) = key_rx.recv().await {
-                        let _ = session.dispatch_key(input).await;
-                    }
-                })
-                .detach();
-            }
-            let control_holder = session.control_holder();
             this.update(cx, |this, cx| {
-                if this.load_gen == load_id {
-                    this.browser_session = Some(session.clone());
-                    this.browser_control = control_holder;
-                    this.browser_mouse_tx = Some(mouse_tx);
-                    this.browser_key_tx = Some(key_tx);
-                    this.browser_requested_size = (BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT);
-                    cx.notify();
+                // A pause or a different browser may have superseded us while
+                // the session was being resolved.
+                if this.load_gen != load_id {
+                    return;
                 }
+                this.browser_session = Some(session.clone());
+                // The tab list outlives a pause; the screencast does not.
+                this.start_tab_watcher(session.clone(), cx);
+                this.start_browser_stream(session, cx);
             })
             .ok();
+        })
+        .detach();
+    }
 
-            // AGE-156: seed the address bar with the current URL, then keep
-            // it live as either side navigates — the agent's browser_navigate
-            // tool or the user typing a new one.
-            {
-                let mut url_rx = session.watch_url();
-                let initial_url = url_rx.borrow_and_update().clone();
-                this.update(cx, |this, cx| {
-                    if this.load_gen == load_id {
-                        this.browser_current_url = initial_url;
-                        this.browser_address_dirty = true;
-                        cx.notify();
-                    }
-                })
-                .ok();
-                let this = this.clone();
-                cx.spawn(async move |cx| {
-                    loop {
-                        if url_rx.changed().await.is_err() {
-                            return;
+    /// Follow the session's tab list into `browser_tabs` (AGE-473). Keyed on
+    /// its own generation, not `load_gen`: it must survive a pause (a file
+    /// shown in front of the browser) so the tab entries stay live, and is
+    /// torn down only by [`Self::drop_browser`].
+    fn start_tab_watcher(&mut self, session: Arc<BrowserSession>, cx: &mut Context<Self>) {
+        self.browser_tabs_gen = self.browser_tabs_gen.wrapping_add(1);
+        let tabs_gen = self.browser_tabs_gen;
+        let mut tabs_rx = session.watch_tabs();
+        self.browser_tabs = tabs_rx.borrow_and_update().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                if tabs_rx.changed().await.is_err() {
+                    return;
+                }
+                let tabs = tabs_rx.borrow_and_update().clone();
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.browser_tabs_gen == tabs_gen {
+                            this.browser_tabs = tabs;
+                            cx.notify();
                         }
-                        let url = url_rx.borrow_and_update().clone();
-                        let alive = this
-                            .update(cx, |this, cx| {
-                                if this.load_gen == load_id {
-                                    this.browser_current_url = url;
-                                    this.browser_address_dirty = true;
-                                    cx.notify();
-                                }
-                            })
-                            .is_ok();
-                        if !alive {
-                            return;
-                        }
-                    }
-                })
-                .detach();
+                    })
+                    .is_ok();
+                if !alive {
+                    return;
+                }
             }
+        })
+        .detach();
+        cx.notify();
+    }
 
+    /// Stand up the screencast and the input/address forwarding for a live
+    /// session (AGE-156). Used both for a fresh browser and to resume one
+    /// that was paused behind a file (AGE-473); the tab watcher is started
+    /// separately because it outlives a pause.
+    fn start_browser_stream(&mut self, session: Arc<BrowserSession>, cx: &mut Context<Self>) {
+        self.load_gen = self.load_gen.wrapping_add(1);
+        let load_id = self.load_gen;
+        self.browser = BrowserPreview::Starting;
+        self.browser_control = session.control_holder();
+        self.browser_requested_size = (BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT);
+
+        // AGE-156: ordered input-forwarding drains, one consumer task per
+        // stream rather than one spawned task per event — mouse moves are
+        // too frequent for that, and independent tasks racing the CDP
+        // connection could deliver events out of order.
+        let (mouse_tx, mut mouse_rx) = mpsc::unbounded_channel::<MouseInput>();
+        let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyInput>();
+        {
+            let session = session.clone();
+            cx.background_spawn(async move {
+                // Coalesce a backlog of trailing same-kind Move/Wheel
+                // events before dispatching: each dispatch is a real
+                // CDP round trip, slower than a trackpad or fast mouse
+                // move can fire, so draining one event per await here
+                // (as this loop used to) builds a growing lag between
+                // the input and what the page does. Wheel deltas are
+                // summed so the total scroll distance stays correct;
+                // Move keeps only the latest position. Down/Up are
+                // never merged or dropped — hitting one stops the
+                // coalescing run, and it carries over to the next
+                // outer iteration via `pending` rather than being lost.
+                let mut pending: Option<MouseInput> = None;
+                loop {
+                    let mut input = match pending.take() {
+                        Some(input) => input,
+                        None => match mouse_rx.recv().await {
+                            Some(input) => input,
+                            None => break,
+                        },
+                    };
+                    while let Ok(next) = mouse_rx.try_recv() {
+                        match (&mut input.action, next.action) {
+                            (MouseAction::Move, MouseAction::Move) => {
+                                input.x = next.x;
+                                input.y = next.y;
+                                input.modifiers = next.modifiers;
+                            }
+                            (
+                                MouseAction::Wheel { delta_x, delta_y },
+                                MouseAction::Wheel {
+                                    delta_x: next_dx,
+                                    delta_y: next_dy,
+                                },
+                            ) => {
+                                *delta_x += next_dx;
+                                *delta_y += next_dy;
+                                input.x = next.x;
+                                input.y = next.y;
+                                input.modifiers = next.modifiers;
+                            }
+                            _ => {
+                                pending = Some(next);
+                                break;
+                            }
+                        }
+                    }
+                    let _ = session.dispatch_mouse(input).await;
+                }
+            })
+            .detach();
+        }
+        {
+            let session = session.clone();
+            cx.background_spawn(async move {
+                while let Some(input) = key_rx.recv().await {
+                    let _ = session.dispatch_key(input).await;
+                }
+            })
+            .detach();
+        }
+        self.browser_mouse_tx = Some(mouse_tx);
+        self.browser_key_tx = Some(key_tx);
+
+        // AGE-156: seed the address bar with the current URL, then keep it
+        // live as either side navigates.
+        {
+            let mut url_rx = session.watch_url();
+            self.browser_current_url = url_rx.borrow_and_update().clone();
+            self.browser_address_dirty = true;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    if url_rx.changed().await.is_err() {
+                        return;
+                    }
+                    let url = url_rx.borrow_and_update().clone();
+                    let alive = this
+                        .update(cx, |this, cx| {
+                            if this.load_gen == load_id {
+                                this.browser_current_url = url;
+                                this.browser_address_dirty = true;
+                                cx.notify();
+                            }
+                        })
+                        .is_ok();
+                    if !alive {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
+
+        cx.spawn(async move |this, cx| {
             let mut frames = match session
                 .start_screencast(BROWSER_VIEWPORT_WIDTH, BROWSER_VIEWPORT_HEIGHT)
                 .await
@@ -623,10 +717,10 @@ impl ArtifactView {
             };
             loop {
                 if frames.changed().await.is_err() {
-                    // The sender dropped — either `stop_screencast` tore it
-                    // down (`load_gen` will already have moved on, so the
-                    // stale check below is what actually silences this) or
-                    // the browser crashed out from under a still-active view.
+                    // The sender dropped — either the cast was torn down
+                    // (`load_gen` will already have moved on, so the stale
+                    // check below is what silences this) or the browser
+                    // crashed out from under a still-active view.
                     this.update(cx, |this, cx| {
                         if this.load_gen == load_id {
                             this.browser =
@@ -674,27 +768,32 @@ impl ArtifactView {
         cx.notify();
     }
 
-    /// Stop the screencast this view started, if any — called whenever the
-    /// browser stops being the active artifact (AGE-155's idle handling): a
-    /// screencast nobody is watching is pure CPU.
-    fn stop_browser_screencast(&mut self, cx: &mut Context<Self>) {
+    /// The browser leaves the screen but stays open (AGE-473): a file, table
+    /// or chart is shown in front of it. Stop the screencast (AGE-155 — a
+    /// cast nobody watches is pure CPU) and drop the on-screen state, but
+    /// keep the manager, the session and the tab list alive so the browser's
+    /// tab entries stay in the header bar and stay live, and bringing it back
+    /// only has to restart the cast.
+    fn pause_browser(&mut self, cx: &mut Context<Self>) {
+        if !self.browser_shown && self.browser_mouse_tx.is_none() {
+            return;
+        }
+        self.browser_shown = false;
         self.browser = BrowserPreview::Idle;
-        // Bump so the pump loop above notices it's stale even if the
+        // Bump so the frame/URL loops notice they are stale even if their
         // channel never fires `changed()` again (a static page sends no
-        // further frames, so the loop would otherwise block forever).
+        // further frames, so a loop would otherwise block forever).
         self.load_gen = self.load_gen.wrapping_add(1);
-        self.browser_session = None;
         self.browser_control = ControlHolder::Agent;
         self.browser_current_url.clear();
         self.browser_address_dirty = true;
         self.browser_requested_size = (0, 0);
         self.browser_frame_geometry = None;
         self.browser_resize_task = None;
-        // Dropping the senders ends the drain loops (AGE-156) — their
-        // `.recv()` returns `None` once every sender is gone.
+        // Dropping the senders ends the drain loops (AGE-156).
         self.browser_mouse_tx = None;
         self.browser_key_tx = None;
-        if let Some(manager) = self.browser_manager.take() {
+        if let Some(manager) = self.browser_manager.clone() {
             cx.background_spawn(async move {
                 manager.stop_screencast().await;
             })
@@ -702,7 +801,19 @@ impl ArtifactView {
         }
     }
 
-    /// The user takes control (AGE-156) — never requested, granted
+    /// Tear the browser down for good: everything [`Self::pause_browser`]
+    /// does, plus dropping the manager, the session and the tab list and
+    /// ending the tab watcher. Used when the panel closes or a different
+    /// artifact (a new browser, session review) takes over.
+    fn drop_browser(&mut self, cx: &mut Context<Self>) {
+        self.pause_browser(cx);
+        self.browser_session = None;
+        self.browser_tabs.clear();
+        // Ends the tab watcher, which pause deliberately leaves running.
+        self.browser_tabs_gen = self.browser_tabs_gen.wrapping_add(1);
+        self.browser_manager = None;
+    }
+
     /// immediately. A no-op if the browser artifact isn't open.
     pub fn take_browser_control(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.browser_session.as_ref() else {
@@ -797,6 +908,77 @@ impl ArtifactView {
         .detach();
     }
 
+    /// The user picks a tab in the strip (AGE-473) — takes control first,
+    /// like the address bar does: the agent's tools now address that tab.
+    /// A no-op if the browser artifact isn't open.
+    fn select_browser_tab(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        self.take_browser_control(cx);
+        // Foreground, like `reload_browser`: the main thread has the Tokio
+        // runtime entered, gpui's worker threads do not.
+        cx.spawn(async move |_, _| {
+            if let Err(e) = session.select_tab(&id).await {
+                warn!(error = %e, tab = %id, "browser: switching tabs failed");
+            }
+        })
+        .detach();
+    }
+
+    /// The user closes a tab from the strip (AGE-473): the CDP target is
+    /// closed, not just hidden. The session picks what to show next.
+    fn close_browser_tab(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.browser_session.clone() else {
+            return;
+        };
+        self.take_browser_control(cx);
+        cx.spawn(async move |_, _| {
+            if let Err(e) = session.close_tab(&id).await {
+                warn!(error = %e, tab = %id, "browser: closing the tab failed");
+            }
+        })
+        .detach();
+    }
+
+    /// Route a click on a header tab-bar entry (AGE-473): a file entry opens
+    /// (or re-presents) that file — which pauses the browser if it was
+    /// showing — and a browser entry brings the browser back to the screen
+    /// (if a file was in front of it) and switches to that tab unless it is
+    /// already the active one.
+    fn select_artifact_tab(&mut self, target: ArtifactTabTarget, cx: &mut Context<Self>) {
+        match target {
+            ArtifactTabTarget::File(ix) => {
+                let Some((path, source, old)) = self.files.get(ix).cloned() else {
+                    return;
+                };
+                // Already the file on screen and no browser in front of it:
+                // nothing to do.
+                if !self.browser_shown && self.path.as_ref() == Some(&path) {
+                    return;
+                }
+                let workspace = self.workspace_root.clone();
+                self.open(path, source, old, workspace, cx);
+            }
+            ArtifactTabTarget::Browser(id) => {
+                if !self.browser_shown {
+                    let Some(manager) = self.browser_manager.clone() else {
+                        return;
+                    };
+                    // Resumes the paused browser onto its active tab.
+                    self.open_browser(manager, cx);
+                }
+                let is_active = self
+                    .browser_tabs
+                    .iter()
+                    .any(|tab| tab.id == id && tab.active);
+                if !is_active {
+                    self.select_browser_tab(id, cx);
+                }
+            }
+        }
+    }
+
     /// Queue a mouse event for the input-forwarding drain (AGE-156). A
     /// cheap, synchronous, non-blocking send — the actual CDP call happens
     /// on the background task started in `open_browser`.
@@ -823,7 +1005,7 @@ impl ArtifactView {
     ) {
         self.session_review = false;
         self.review_sections.clear();
-        self.stop_browser_screencast(cx);
+        self.pause_browser(cx);
         let same_path = self.path.as_ref() == Some(&path);
         self.mode = presentation_on_open(self.mode, same_path);
         let old_snapshot = old.clone();
@@ -914,7 +1096,7 @@ impl ArtifactView {
         if files.is_empty() {
             return;
         }
-        self.stop_browser_screencast(cx);
+        self.drop_browser(cx);
         self.session_review = true;
         self.files = files;
         self.workspace_root = workspace_root;
@@ -1018,7 +1200,7 @@ impl ArtifactView {
             // `close_panel`, and a screencast nobody is watching (AGE-155)
             // must not keep running regardless of which path closed it.
             if mode == ArtifactMode::Closed {
-                self.stop_browser_screencast(cx);
+                self.drop_browser(cx);
             }
             cx.emit(if mode == ArtifactMode::Closed {
                 ArtifactViewEvent::Closed
@@ -1738,6 +1920,114 @@ fn normalize_address_bar_url(input: &str) -> String {
     format!("https://{trimmed}")
 }
 
+/// What a browser tab is called in the header tab bar (AGE-473): its title,
+/// else its URL, else "New tab" for a page that has neither yet — cut to fit
+/// a tab entry.
+fn browser_tab_label(tab: &BrowserTab) -> String {
+    const MAX_CHARS: usize = 24;
+    let name = if !tab.title.trim().is_empty() {
+        tab.title.trim()
+    } else if !tab.url.is_empty() && tab.url != "about:blank" {
+        &tab.url
+    } else {
+        "New tab"
+    };
+    let mut chars = name.chars();
+    let short: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// What `open_browser` has to do for a manager (AGE-473), decided from
+/// whether it is the manager already open, whether the browser is on
+/// screen, and whether its session has resolved yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserReopen {
+    /// A different manager: drop the old browser, resolve the new session.
+    Fresh,
+    /// The same manager, already on screen: nothing to start.
+    Present,
+    /// The same manager, paused behind a file with a live session: restart
+    /// the screencast on it.
+    ResumeStream,
+    /// The same manager, paused before its session resolved: the resolve
+    /// was dropped, so it has to be issued again.
+    ResolveSession,
+}
+
+fn browser_reopen(already_open: bool, browser_shown: bool, has_session: bool) -> BrowserReopen {
+    match (already_open, browser_shown, has_session) {
+        (false, _, _) => BrowserReopen::Fresh,
+        (true, true, _) => BrowserReopen::Present,
+        (true, false, true) => BrowserReopen::ResumeStream,
+        (true, false, false) => BrowserReopen::ResolveSession,
+    }
+}
+
+/// What one entry in the artifact panel's header tab bar points at
+/// (AGE-473): an open file, by its index into `files`, or an open browser
+/// tab, by its CDP target id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArtifactTabTarget {
+    File(usize),
+    Browser(String),
+}
+
+/// One entry in the header tab bar: a file or a browser tab, laid out in one
+/// bar (AGE-473). `browser_blocked` is `None` for a file and `Some(blocked)`
+/// for a browser tab, so the renderer can give a page a globe (or a blocked
+/// marker) and a close button that a file does not get.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtifactTabEntry {
+    label: String,
+    browser_blocked: Option<bool>,
+    target: ArtifactTabTarget,
+}
+
+/// The header tab bar's entries and its selected index (AGE-473): the open
+/// files followed by the open browser tabs, in one bar. `selected_file` is
+/// the index of the file on screen (when a file/table/chart is showing);
+/// while the browser is showing the active browser tab is selected instead.
+/// `selected` is `None` when nothing in the bar is on screen.
+fn artifact_tab_model(
+    files: &[(PathBuf, String, Option<String>)],
+    browser_tabs: &[BrowserTab],
+    selected_file: Option<usize>,
+    browser_shown: bool,
+) -> (Vec<ArtifactTabEntry>, Option<usize>) {
+    let mut entries: Vec<ArtifactTabEntry> = files
+        .iter()
+        .enumerate()
+        .map(|(ix, (path, _, _))| ArtifactTabEntry {
+            label: path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string()),
+            browser_blocked: None,
+            target: ArtifactTabTarget::File(ix),
+        })
+        .collect();
+    let file_count = entries.len();
+    entries.extend(browser_tabs.iter().map(|tab| ArtifactTabEntry {
+        label: browser_tab_label(tab),
+        browser_blocked: Some(tab.blocked.is_some()),
+        target: ArtifactTabTarget::Browser(tab.id.clone()),
+    }));
+
+    let selected = if browser_shown {
+        browser_tabs
+            .iter()
+            .position(|tab| tab.active)
+            .map(|ix| file_count + ix)
+    } else {
+        selected_file
+    };
+    (entries, selected)
+}
+
 #[allow(clippy::too_many_arguments)] // Rendering function threading per-frame view state
 fn browser_rendered_body(
     browser: &BrowserPreview,
@@ -2422,8 +2712,10 @@ impl Render for ArtifactView {
             self.refresh_staleness();
             self.sync_editor(window, cx);
             self.sync_outline(cx);
-            self.sync_browser_address(window, cx);
-            self.sync_browser_viewport_size(cx);
+            if self.browser_shown {
+                self.sync_browser_address(window, cx);
+                self.sync_browser_viewport_size(cx);
+            }
             self.sync_pdf_raster_width(window, cx);
         }
 
@@ -2433,7 +2725,7 @@ impl Render for ArtifactView {
         let old = self.old.clone();
         let full = self.mode == ArtifactMode::Full;
         let entity = cx.entity();
-        let is_browser = self.browser_manager.is_some();
+        let is_browser = self.browser_shown;
         let is_pdf = !is_browser && self.path.as_ref().is_some_and(|path| is_pdf_path(path));
         // Unlike a PDF, a deck is not opaque: it keeps the tab bar, because
         // the extracted text under Source is a real second view of it.
@@ -2694,38 +2986,73 @@ impl Render for ArtifactView {
             .as_ref()
             .map(|p| artifact_format_token(p))
             .unwrap_or_default();
-        let selected_file_index = self
+        // AGE-473: one header tab bar carries the open files and the open
+        // browser tabs together — a file/table/chart entry, then a page
+        // entry per browser tab (globe, blocked marker, its own × ).
+        let selected_file = self
             .path
             .as_ref()
-            .and_then(|active| self.files.iter().position(|(path, _, _)| path == active))
-            .unwrap_or(0);
-        let file_tab_bar = (!session_review && self.files.len() > 1).then(|| {
-            let files = self.files.clone();
+            .and_then(|active| self.files.iter().position(|(path, _, _)| path == active));
+        let (tab_entries, selected_tab) = artifact_tab_model(
+            &self.files,
+            &self.browser_tabs,
+            selected_file,
+            self.browser_shown,
+        );
+        let file_tab_bar = (!session_review && tab_entries.len() > 1).then(|| {
+            let targets: Vec<ArtifactTabTarget> = tab_entries
+                .iter()
+                .map(|entry| entry.target.clone())
+                .collect();
             TabBar::new("artifact-files")
                 .small()
                 .menu(true)
-                .selected_index(selected_file_index)
+                .when_some(selected_tab, |this, ix| this.selected_index(ix))
                 .on_click({
                     let entity = entity.clone();
+                    let targets = targets.clone();
                     move |ix, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            let Some((path, source, old)) = this.files.get(*ix).cloned() else {
-                                return;
-                            };
-                            if this.path.as_ref() == Some(&path) {
-                                return;
-                            }
-                            let workspace = this.workspace_root.clone();
-                            this.open(path, source, old, workspace, cx);
-                        });
+                        let Some(target) = targets.get(*ix).cloned() else {
+                            return;
+                        };
+                        entity.update(cx, |this, cx| this.select_artifact_tab(target, cx));
                     }
                 })
-                .children(files.iter().map(|(path, _, _)| {
-                    let label = path
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.display().to_string());
-                    Tab::new().label(label)
+                .children(tab_entries.iter().map(|entry| {
+                    let mut tab = Tab::new().label(entry.label.clone());
+                    if let Some(blocked) = entry.browser_blocked {
+                        let icon = if blocked {
+                            IconName::CircleX
+                        } else {
+                            IconName::Globe
+                        };
+                        tab = tab.prefix(Icon::new(icon).size_3());
+                        if let ArtifactTabTarget::Browser(id) = &entry.target {
+                            let id = id.clone();
+                            tab = tab.suffix(
+                                Button::new(SharedString::from(format!(
+                                    "artifact-browser-tab-close-{id}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Close).size_3())
+                                .tooltip("Close tab")
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_, _, cx| {
+                                        // The click must not bubble on to the
+                                        // tab underneath, or closing a tab
+                                        // would also select it first.
+                                        cx.stop_propagation();
+                                        let id = id.clone();
+                                        entity
+                                            .update(cx, |this, cx| this.close_browser_tab(id, cx));
+                                    }
+                                }),
+                            );
+                        }
+                    }
+                    tab
                 }))
         });
 
@@ -3066,6 +3393,182 @@ mod address_bar_tests {
         );
         assert_eq!(normalize_address_bar_url("   "), "");
         assert_eq!(normalize_address_bar_url(""), "");
+    }
+}
+
+/// AGE-473: the header tab bar's entry list, selected index and per-entry
+/// label. The bar itself is a `TabBar` and needs a window; this is the part
+/// with cases.
+#[cfg(test)]
+mod artifact_tab_bar_tests {
+    use std::path::PathBuf;
+
+    use super::{ArtifactTabTarget, BrowserTab, artifact_tab_model, browser_tab_label};
+
+    fn tab(title: &str, url: &str) -> BrowserTab {
+        BrowserTab {
+            id: format!("target-{title}-{url}"),
+            title: title.to_string(),
+            url: url.to_string(),
+            active: false,
+            blocked: None,
+        }
+    }
+
+    fn active(mut t: BrowserTab) -> BrowserTab {
+        t.active = true;
+        t
+    }
+
+    fn blocked(mut t: BrowserTab) -> BrowserTab {
+        t.blocked = Some("https://blocked.example/".to_string());
+        t
+    }
+
+    fn files(names: &[&str]) -> Vec<(PathBuf, String, Option<String>)> {
+        names
+            .iter()
+            .map(|n| (PathBuf::from(n), String::new(), None))
+            .collect()
+    }
+
+    #[test]
+    fn files_come_first_then_browser_tabs() {
+        let fs = files(&["a.rs", "b.rs"]);
+        let tabs = vec![tab("Opener", "file:///x"), tab("Popup", "file:///y")];
+        let (entries, _) = artifact_tab_model(&fs, &tabs, Some(0), false);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(
+            entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs", "b.rs", "Opener", "Popup"]
+        );
+        assert_eq!(entries[0].target, ArtifactTabTarget::File(0));
+        assert_eq!(entries[1].target, ArtifactTabTarget::File(1));
+        assert_eq!(
+            entries[2].target,
+            ArtifactTabTarget::Browser(tabs[0].id.clone())
+        );
+        assert_eq!(entries[0].browser_blocked, None, "a file is not a page");
+        assert_eq!(
+            entries[2].browser_blocked,
+            Some(false),
+            "an allowed page is a page but not blocked"
+        );
+    }
+
+    #[test]
+    fn a_file_is_selected_while_a_file_is_showing() {
+        let fs = files(&["a.rs", "b.rs"]);
+        let tabs = vec![active(tab("Opener", "file:///x"))];
+        // File index 1 is on screen; the browser is not.
+        let (_, selected) = artifact_tab_model(&fs, &tabs, Some(1), false);
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn the_active_browser_tab_is_selected_while_the_browser_is_showing() {
+        let fs = files(&["a.rs"]);
+        let tabs = vec![
+            tab("Opener", "file:///x"),
+            active(tab("Popup", "file:///y")),
+        ];
+        // files.len() (1) + active-tab index (1) = 2.
+        let (_, selected) = artifact_tab_model(&fs, &tabs, None, true);
+        assert_eq!(selected, Some(2));
+    }
+
+    #[test]
+    fn a_blocked_browser_tab_is_marked() {
+        let fs = files(&["a.rs"]);
+        let tabs = vec![active(blocked(tab("Popup", "https://blocked.example/")))];
+        let (entries, _) = artifact_tab_model(&fs, &tabs, None, true);
+        assert_eq!(entries[1].browser_blocked, Some(true));
+    }
+
+    #[test]
+    fn one_entry_is_a_hidden_bar() {
+        // A single file, no browser: the caller hides the bar at len < 2.
+        let (entries, _) = artifact_tab_model(&files(&["only.rs"]), &[], Some(0), false);
+        assert_eq!(entries.len(), 1);
+        // A single browser tab, no file: still one entry.
+        let (entries, _) =
+            artifact_tab_model(&[], &[active(tab("Opener", "file:///x"))], None, true);
+        assert_eq!(entries.len(), 1);
+    }
+
+    /// The pause-before-resolve case: a file shown while Chrome was still
+    /// launching drops the resolve at its `load_gen` guard, so bringing the
+    /// browser back must resolve again rather than wait for a stream that
+    /// will never start.
+    #[test]
+    fn reopening_a_paused_browser_resolves_again_when_its_session_never_arrived() {
+        use super::{BrowserReopen, browser_reopen};
+        assert_eq!(
+            browser_reopen(true, false, false),
+            BrowserReopen::ResolveSession
+        );
+        assert_eq!(
+            browser_reopen(true, false, true),
+            BrowserReopen::ResumeStream
+        );
+        assert_eq!(browser_reopen(true, true, true), BrowserReopen::Present);
+        assert_eq!(
+            browser_reopen(true, true, false),
+            BrowserReopen::Present,
+            "on screen with the resolve still in flight: let it land"
+        );
+        assert_eq!(browser_reopen(false, false, false), BrowserReopen::Fresh);
+        assert_eq!(
+            browser_reopen(false, true, true),
+            BrowserReopen::Fresh,
+            "a different manager always replaces the open one"
+        );
+    }
+
+    #[test]
+    fn index_routes_to_file_or_browser_tab() {
+        let fs = files(&["a.rs"]);
+        let popup = tab("Popup", "file:///y");
+        let tabs = vec![active(tab("Opener", "file:///x")), popup.clone()];
+        let (entries, _) = artifact_tab_model(&fs, &tabs, None, true);
+        // Index 0 → the file; index 2 → the second browser tab.
+        assert_eq!(entries[0].target, ArtifactTabTarget::File(0));
+        assert_eq!(
+            entries[2].target,
+            ArtifactTabTarget::Browser(popup.id.clone())
+        );
+    }
+
+    #[test]
+    fn a_titled_tab_is_named_by_its_title() {
+        assert_eq!(
+            browser_tab_label(&tab("Opener", "file:///tmp/index.html")),
+            "Opener"
+        );
+        assert_eq!(
+            browser_tab_label(&tab("  Padded  ", "about:blank")),
+            "Padded"
+        );
+    }
+
+    #[test]
+    fn a_tab_without_a_title_falls_back_to_its_url_then_to_new_tab() {
+        assert_eq!(
+            browser_tab_label(&tab("", "http://localhost:3000/")),
+            "http://localhost:3000/"
+        );
+        assert_eq!(browser_tab_label(&tab("", "about:blank")), "New tab");
+        assert_eq!(browser_tab_label(&tab("", "")), "New tab");
+    }
+
+    #[test]
+    fn a_long_name_is_cut_with_an_ellipsis() {
+        let label = browser_tab_label(&tab(
+            "A very long document title that would flood the strip",
+            "",
+        ));
+        assert_eq!(label, "A very long document tit…");
+        assert_eq!(label.chars().count(), 25);
     }
 }
 

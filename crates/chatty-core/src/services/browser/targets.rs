@@ -1,4 +1,4 @@
-//! Following a page that opens a new tab or window (AGE-458).
+//! Tracking the tabs and windows a page opens (AGE-458, AGE-473).
 //!
 //! A link with `target="_blank"`, a `window.open` call, an OAuth sign-in
 //! popup — each creates a second CDP target. The session used to drive
@@ -7,32 +7,34 @@
 //! panel nothing happened at all, and a flow that depends on the popup (most
 //! third-party OAuth) could not be completed from either side.
 //!
-//! The rule here is deliberately smaller than a tab switcher: **the newest
-//! page target the navigation policy allows becomes the active one**, and
-//! when it closes the session falls back to the page it was launched with.
-//! Exactly one page is active at a time, and screencast, forwarded input and
-//! the agent's tools all follow it — there is no second viewport to present,
-//! so the artifact panel needs no new UI.
+//! The rule: **every page target is tracked as a tab, and the newest one the
+//! navigation policy allows becomes the active one.** Exactly one tab is
+//! active at a time — screencast, forwarded input and the agent's tools all
+//! follow it — and the artifact panel's tab strip lets the human switch to
+//! any other open tab or close one ([`BrowserSession::select_tab`],
+//! [`BrowserSession::close_tab`]). When the active tab closes, a neighbour
+//! takes over; when the last one does, a blank page stands in.
 //!
 //! The policy is checked twice, because once is not enough: when a tab is
-//! promoted, and again on **every navigation the page makes on its own**
+//! tracked, and again on **every navigation the tab makes on its own**
 //! ([`spawn_navigation_guard`]). Without the second check an opener could
-//! open a blank window — nothing to refuse — wait for it to be promoted, and
+//! open a blank window — nothing to refuse — wait for it to be shown, and
 //! then set its `location` to anything it liked, which would put that page's
-//! pixels in the artifact panel and its DOM in `browser_snapshot`. The guard
-//! watches the page the session is driving, whichever page that is, so it
-//! also covers the session's own page navigating itself.
+//! pixels in the artifact panel and its DOM in `browser_snapshot`. Every
+//! tracked tab has its own guard for its whole lifetime, not only while it is
+//! the active one, so a background tab that navigates itself somewhere
+//! refused is blocked the moment it does — not once someone switches to it.
 //!
 //! Chrome does the attaching for us: chromiumoxide's handler turns on
 //! `Target.setDiscoverTargets` at connect and attaches to every target it
-//! discovers, so this module only has to decide *which* target to follow and
-//! tell the session about it.
+//! discovers, so this module only has to decide *which* targets are tabs and
+//! tell the session about them.
 
 use std::sync::{Arc, Weak};
 
-use chromiumoxide::cdp::browser_protocol::page::EventFrameNavigated;
+use chromiumoxide::cdp::browser_protocol::page::{EventFrameNavigated, EventLoadEventFired};
 use chromiumoxide::cdp::browser_protocol::target::{
-    EventTargetCreated, EventTargetDestroyed, TargetId, TargetInfo,
+    EventTargetCreated, EventTargetDestroyed, TargetInfo,
 };
 use chromiumoxide::listeners::EventStream;
 use chromiumoxide::page::Page;
@@ -52,19 +54,18 @@ pub(super) fn is_exempt_url(url: &str) -> bool {
     url.is_empty() || url.starts_with("about:blank") || url.starts_with("chrome-error://")
 }
 
-/// Whether a freshly created target is one the session should follow.
+/// Whether a freshly created target is a tab the session should track.
 ///
 /// Only real pages: an iframe, a worker or Chrome's own background page is
-/// not something a user can be handed control of. The session's own page is
-/// excluded too — it is the fallback, not a popup.
-pub(super) fn is_followable_target(info: &TargetInfo, primary: &TargetId) -> bool {
-    info.r#type == "page" && &info.target_id != primary
+/// not something a user can be handed control of.
+pub(super) fn is_page_target(info: &TargetInfo) -> bool {
+    info.r#type == "page"
 }
 
 /// Whether the session may show and drive a page sitting at `url`.
 ///
 /// Showing a page widens what the agent can see, so it is gated on the same
-/// navigation policy `browser_navigate` is. Asked both when a tab is promoted
+/// navigation policy `browser_navigate` is. Asked both when a tab is tracked
 /// and on every navigation afterwards, so the answer cannot go stale.
 pub(super) fn may_drive_url(policy: &NavigationPolicy, url: &str) -> bool {
     is_exempt_url(url) || policy.check(url).is_ok()
@@ -80,12 +81,16 @@ pub(super) fn spawn_watcher(
     created: EventStream<EventTargetCreated>,
     destroyed: EventStream<EventTargetDestroyed>,
 ) -> JoinHandle<()> {
+    let runtime = session.runtime().clone();
     let session = Arc::downgrade(session);
-    tokio::spawn(watch(session, created, destroyed))
+    runtime.spawn(watch(session, created, destroyed))
 }
 
 /// Re-check the policy on every navigation `page` makes, for as long as the
-/// session is driving it.
+/// tab exists — active or not (AGE-473). The task ends on its own with the
+/// tab: its event streams close when the target is destroyed. The same task
+/// reads the tab's title for the strip once each document has loaded, since
+/// that is the first moment `document.title` is worth reading.
 ///
 /// This is the check `browser_navigate` cannot make: it vets the URL it is
 /// given and the redirect chain it lands through, but a page that moves
@@ -100,28 +105,46 @@ pub(super) async fn spawn_navigation_guard(
         .event_listener::<EventFrameNavigated>()
         .await
         .map_err(|e| BrowserError::Protocol(format!("cannot watch page navigation: {e}")))?;
+    let loaded = page
+        .event_listener::<EventLoadEventFired>()
+        .await
+        .map_err(|e| BrowserError::Protocol(format!("cannot watch page load: {e}")))?;
+    let runtime = session.runtime().clone();
     let session = Arc::downgrade(session);
-    let target_id = page.target_id().clone();
-    Ok(tokio::spawn(guard(session, target_id, navigated)))
+    Ok(runtime.spawn(guard(session, page.clone(), navigated, loaded)))
 }
 
 async fn guard(
     session: Weak<BrowserSession>,
-    target_id: TargetId,
+    page: Page,
     mut navigated: EventStream<EventFrameNavigated>,
+    mut loaded: EventStream<EventLoadEventFired>,
 ) {
-    while let Some(event) = navigated.next().await {
-        // Only the main frame moves the page; an iframe navigating is the
-        // page's own business and shows nothing on its own.
-        if event.frame.parent_id.is_some() {
-            continue;
+    loop {
+        tokio::select! {
+            event = navigated.next() => {
+                let Some(event) = event else {
+                    return;
+                };
+                // Only the main frame moves the page; an iframe navigating
+                // is the page's own business and shows nothing on its own.
+                if event.frame.parent_id.is_some() {
+                    continue;
+                }
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
+                session
+                    .page_navigated(page.target_id(), event.frame.url.clone())
+                    .await;
+            }
+            event = loaded.next() => {
+                let (Some(_), Some(session)) = (event, session.upgrade()) else {
+                    return;
+                };
+                session.page_loaded(&page).await;
+            }
         }
-        let Some(session) = session.upgrade() else {
-            return;
-        };
-        session
-            .page_navigated(&target_id, event.frame.url.clone())
-            .await;
     }
 }
 
@@ -136,8 +159,8 @@ async fn watch(
                 let (Some(event), Some(session)) = (event, session.upgrade()) else {
                     return;
                 };
-                if is_followable_target(&event.target_info, session.primary_target_id()) {
-                    session.follow_target(event.target_info.target_id.clone()).await;
+                if is_page_target(&event.target_info) {
+                    session.track_target(event.target_info.target_id.clone()).await;
                 }
             }
             event = destroyed.next() => {
@@ -156,7 +179,9 @@ mod tests {
 
     fn target(id: &str, kind: &str) -> TargetInfo {
         TargetInfo::builder()
-            .target_id(TargetId::new(id))
+            .target_id(chromiumoxide::cdp::browser_protocol::target::TargetId::new(
+                id,
+            ))
             .r#type(kind)
             .title("t")
             .url("about:blank")
@@ -167,23 +192,15 @@ mod tests {
     }
 
     #[test]
-    fn a_new_page_target_is_followed() {
-        let primary = TargetId::new("primary");
-        assert!(is_followable_target(&target("popup", "page"), &primary));
+    fn a_new_page_target_is_tracked() {
+        assert!(is_page_target(&target("popup", "page")));
     }
 
     #[test]
-    fn the_sessions_own_page_is_not_a_popup() {
-        let primary = TargetId::new("primary");
-        assert!(!is_followable_target(&target("primary", "page"), &primary));
-    }
-
-    #[test]
-    fn only_page_targets_are_followed() {
-        let primary = TargetId::new("primary");
+    fn only_page_targets_are_tracked() {
         for kind in ["iframe", "worker", "service_worker", "background_page"] {
             assert!(
-                !is_followable_target(&target("other", kind), &primary),
+                !is_page_target(&target("other", kind)),
                 "{kind} is not a page the user can drive"
             );
         }

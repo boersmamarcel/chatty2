@@ -1,16 +1,19 @@
 //! CDP session lifecycle: launch, drive, recover, tear down.
 //!
-//! One session owns one browser process and one *active* page. Three consumers
-//! share it — the agent's tools, the artifact viewport (AGE-155), and forwarded
-//! user input (AGE-156) — so the session holds the state all three need rather
-//! than any one of them owning the browser.
+//! One session owns one browser process and every page target it knows about
+//! (AGE-473). Three consumers share it — the agent's tools, the artifact
+//! viewport (AGE-155), and forwarded user input (AGE-156) — so the session
+//! holds the state all three need rather than any one of them owning the
+//! browser.
 //!
-//! The active page is not fixed for the session's lifetime: a page that opens a
-//! new tab or window (`target="_blank"`, `window.open`, an OAuth popup) hands
-//! the new target to [`BrowserSession::follow_target`], which promotes it so
-//! screencast, input and tools all follow what the user is looking at, and
-//! closing it falls back to the page the session launched with (AGE-458). See
-//! [`super::targets`] for the rule and the watcher that applies it.
+//! Exactly one tab is *active* at a time: screencast, forwarded input and the
+//! agent's tools all drive it. A page that opens a new tab or window
+//! (`target="_blank"`, `window.open`, an OAuth popup) hands the new target to
+//! [`BrowserSession::track_target`], which adds it to the tab list and makes it
+//! active; the human switches between open tabs with
+//! [`BrowserSession::select_tab`] and closes them with
+//! [`BrowserSession::close_tab`]. See [`super::targets`] for the watcher that
+//! feeds this and the per-tab navigation guard.
 //!
 //! Two rules shape everything here.
 //!
@@ -20,8 +23,8 @@
 //!
 //! **Nothing is shown or read that the navigation policy would refuse.** The
 //! policy is not a check `browser_navigate` performs once; it is a property of
-//! whatever page this session is driving, re-asserted on every navigation that
-//! page makes — see [`BrowserSession::ensure_allowed`] and
+//! every tab this session tracks, re-asserted on every navigation that tab
+//! makes, active or not — see [`BrowserSession::ensure_allowed`] and
 //! [`BrowserSession::page_navigated`].
 
 use std::sync::Arc;
@@ -56,7 +59,7 @@ pub const NAVIGATE_TIMEOUT_SECS: u64 = 60;
 /// How long a new tab gets to become drivable before we give up on it.
 const NEW_TAB_TIMEOUT_SECS: u64 = 10;
 /// How long a new tab gets to land on its real URL before the policy decides
-/// whether to follow it. `window.open` reports `about:blank` until then.
+/// whether to show it. `window.open` reports `about:blank` until then.
 const NEW_TAB_SETTLE_SECS: u64 = 2;
 
 /// The URL a newly opened tab settles on.
@@ -65,7 +68,7 @@ const NEW_TAB_SETTLE_SECS: u64 = 2;
 /// — which is both the wrong thing to show in the address bar and the wrong
 /// thing to hand the navigation policy. Wait briefly for the real one; a tab
 /// that genuinely stays blank (an opener writing into it directly) costs the
-/// wait once and is followed anyway.
+/// wait once and is tracked anyway.
 async fn settled_url(page: &Page) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(NEW_TAB_SETTLE_SECS);
     loop {
@@ -89,17 +92,107 @@ pub async fn with_deadline<T>(
     }
 }
 
-/// A live browser session: one process, one active page.
+/// One open tab as the artifact panel's tab strip shows it (AGE-473).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserTab {
+    /// The CDP target id — what [`BrowserSession::select_tab`] and
+    /// [`BrowserSession::close_tab`] take.
+    pub id: String,
+    /// Best-known title: `document.title` as of the last document load.
+    /// Empty until then, and never read off a blocked tab.
+    pub title: String,
+    /// The URL the tab last navigated to.
+    pub url: String,
+    /// Whether this is the tab every consumer drives right now.
+    pub active: bool,
+    /// Set while the tab sits somewhere the navigation policy refuses — the
+    /// URL it is blocked at. A blocked tab is never shown, read or driven.
+    pub blocked: Option<String>,
+}
+
+/// A tracked page target: the handle, what the strip shows for it, and the
+/// per-tab state the policy needs.
+struct Tab {
+    page: Page,
+    title: String,
+    url: String,
+    /// Per tab, not per session: one tab sitting somewhere refused must not
+    /// make another unreadable.
+    blocked: Option<String>,
+    /// Console/network pumps into the session's buffers. Running only while
+    /// this is the active tab: a tab nobody is driving must not go on
+    /// writing into what the tools read.
+    listeners: Vec<JoinHandle<()>>,
+}
+
+/// Every page target the session knows about, and which one is active.
+struct Tabs {
+    /// In the order they were opened; the page the session launched with is
+    /// first until it closes.
+    open: Vec<Tab>,
+    /// The page every consumer drives. A clone of one of `open`'s pages —
+    /// except between the last tab closing and its replacement opening,
+    /// when it is the page that just died and every command on it fails.
+    active: Page,
+}
+
+impl Tabs {
+    fn find(&self, target: &TargetId) -> Option<&Tab> {
+        self.open.iter().find(|tab| tab.page.target_id() == target)
+    }
+
+    fn find_mut(&mut self, target: &TargetId) -> Option<&mut Tab> {
+        self.open
+            .iter_mut()
+            .find(|tab| tab.page.target_id() == target)
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        self.find(self.active.target_id())
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let target = self.active.target_id().clone();
+        self.find_mut(&target)
+    }
+
+    fn snapshot(&self) -> Vec<BrowserTab> {
+        let active = self.active.target_id();
+        self.open
+            .iter()
+            .map(|tab| BrowserTab {
+                id: tab.page.target_id().inner().clone(),
+                title: tab.title.clone(),
+                url: tab.url.clone(),
+                active: tab.page.target_id() == active,
+                blocked: tab.blocked.clone(),
+            })
+            .collect()
+    }
+}
+
+/// What the panel is told while a tab it is looking at is refused.
+fn refusal_reason(url: &str) -> String {
+    format!("the page navigated to {url}, which this browser profile does not allow")
+}
+
+/// A live browser session: one process, one active page among the open tabs.
 pub struct BrowserSession {
+    /// The Tokio runtime the session was launched on. Every task the session
+    /// spawns and every timer it arms goes through this rather than the
+    /// caller's ambient context: the artifact panel calls `select_tab`,
+    /// `close_tab` and `start_screencast` from gpui threads that have no
+    /// Tokio runtime entered, and a `tokio::spawn` there panics (AGE-473).
+    runtime: tokio::runtime::Handle,
     /// `tokio::sync::Mutex` because the target watcher resolves new tabs
     /// through the browser handle, which is a CDP round trip.
     browser: tokio::sync::Mutex<Option<Browser>>,
-    /// The page the session launched with. Never replaced: it is what the
-    /// session falls back to when a followed tab closes (AGE-458).
-    primary: Page,
-    /// The page every consumer drives right now — the primary page, or a tab
-    /// or window one of them opened (AGE-458).
-    active: Mutex<Page>,
+    /// Every tab the session tracks and the one it drives (AGE-473).
+    tabs: Mutex<Tabs>,
+    /// The tab list, broadcast to the artifact panel's tab strip on every
+    /// change — same shape as `current_url`, so the panel runs one task per
+    /// channel rather than polling the session on every frame.
+    tab_list: watch::Sender<Vec<BrowserTab>>,
     policy: NavigationPolicy,
     profile: BrowserProfile,
     /// Console and network entries observed since the last drain.
@@ -110,22 +203,15 @@ pub struct BrowserSession {
     dead: Arc<AtomicBool>,
     /// Drives the CDP event stream. Nothing works if this is not polled.
     handler: Mutex<Option<JoinHandle<()>>>,
-    /// Pumps CDP events into `events` for the session's own page, plus the
-    /// target watcher and the primary page's navigation guard (AGE-458).
+    /// The target watcher and one navigation guard per tracked tab, alive
+    /// for the tab's whole lifetime (AGE-473). Guards end on their own when
+    /// their tab does; finished handles are pruned as new ones are added.
     listeners: Mutex<Vec<JoinHandle<()>>>,
-    /// The same pumps for the tab currently being followed (AGE-458), kept
-    /// apart because they are aborted the moment we stop driving that tab: a
-    /// tab we dropped must not go on writing into the buffers the tools read.
-    tab_listeners: Mutex<Vec<JoinHandle<()>>>,
-    /// Set when the page on screen navigated *itself* somewhere the policy
-    /// refuses and there is nothing to fall back to (AGE-458). While set, the
-    /// tools refuse, forwarded input is dropped and the cast is suspended.
-    blocked: Mutex<Option<String>>,
     /// Live `Page.startScreencast` state, when the artifact viewport
     /// (AGE-155) is watching this session. `tokio::sync::Mutex` because
     /// starting/retargeting holds the guard across CDP round trips — and
     /// because which page is active must be read *under* it (AGE-458), or a
-    /// tab promoted between the read and the lock leaves the cast behind.
+    /// tab activated between the read and the lock leaves the cast behind.
     screencast: tokio::sync::Mutex<Option<Screencast>>,
     /// Who is driving (AGE-156). Agent by default; every fresh session
     /// starts here regardless of what a previous, now-dead session had.
@@ -145,6 +231,12 @@ impl BrowserSession {
         profile: BrowserProfile,
         policy: NavigationPolicy,
     ) -> Result<Arc<Self>, BrowserError> {
+        // Launching is always under Tokio (chromiumoxide needs it to drive
+        // the process); what is captured here is what later calls from
+        // Tokio-less threads borrow.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            BrowserError::Launch("the browser must be launched from a Tokio runtime".into())
+        })?;
         let mut builder = BrowserConfig::builder().chrome_executable(&chrome);
 
         // Lane A is headless. The viewport work (AGE-155) reads frames over CDP
@@ -185,7 +277,7 @@ impl BrowserSession {
         // The handler stream must be driven or every command hangs forever.
         // Its ending is how we learn the browser died.
         let dead = Arc::new(AtomicBool::new(false));
-        let handler = tokio::spawn({
+        let handler = runtime.spawn({
             let dead = dead.clone();
             async move {
                 while handler_stream.next().await.is_some() {}
@@ -203,10 +295,10 @@ impl BrowserSession {
         .map_err(|e| BrowserError::Launch(format!("cannot open page: {e}")))?;
 
         let events = Arc::new(EventBuffers::default());
-        let listeners = super::events::spawn_listeners(&page, events.clone()).await?;
+        let listeners = super::events::spawn_listeners(&runtime, &page, events.clone()).await?;
 
-        // Subscribe *after* opening our own page, so its creation cannot be
-        // mistaken for a popup (the watcher filters it out by id as well).
+        // Subscribe *after* opening our own page, so its creation is not
+        // reported as a new tab (tracking is keyed by target id anyway).
         let created = browser
             .event_listener::<EventTargetCreated>()
             .await
@@ -215,26 +307,34 @@ impl BrowserSession {
             .event_listener::<EventTargetDestroyed>()
             .await
             .map_err(|e| BrowserError::Launch(format!("cannot watch for closed tabs: {e}")))?;
-
         info!(
             profile = profile.label(),
             chrome = %chrome.display(),
             "browser: session ready"
         );
 
+        let tabs = Tabs {
+            open: vec![Tab {
+                page: page.clone(),
+                title: String::new(),
+                url: "about:blank".to_string(),
+                blocked: None,
+                listeners,
+            }],
+            active: page.clone(),
+        };
         let session = Arc::new(Self {
+            runtime,
             browser: tokio::sync::Mutex::new(Some(browser)),
-            active: Mutex::new(page.clone()),
-            primary: page,
+            tab_list: watch::channel(tabs.snapshot()).0,
+            tabs: Mutex::new(tabs),
             policy,
             profile,
             events,
             snapshot_generation: AtomicU64::new(1),
             dead,
             handler: Mutex::new(Some(handler)),
-            listeners: Mutex::new(listeners),
-            tab_listeners: Mutex::new(Vec::new()),
-            blocked: Mutex::new(None),
+            listeners: Mutex::new(Vec::new()),
             screencast: tokio::sync::Mutex::new(None),
             control: ControlLock::new(),
             current_url: watch::channel(String::from("about:blank")).0,
@@ -246,7 +346,7 @@ impl BrowserSession {
 
         // The policy is checked again on every navigation this page makes on
         // its own, not only on the ones we asked for (AGE-458).
-        match targets::spawn_navigation_guard(&session, &session.primary).await {
+        match targets::spawn_navigation_guard(&session, &page).await {
             Ok(guard) => session.listeners.lock().push(guard),
             Err(e) => {
                 session.shutdown().await;
@@ -255,6 +355,11 @@ impl BrowserSession {
         }
 
         Ok(session)
+    }
+
+    /// The Tokio runtime every task of this session runs on.
+    pub(super) fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
     }
 
     /// True once the browser process is gone.
@@ -274,14 +379,15 @@ impl BrowserSession {
         }
     }
 
-    /// Err while the page on screen is one the navigation policy refuses
+    /// Err while the active tab is one the navigation policy refuses
     /// (AGE-458). `browser_navigate` vets the URL it is given and every
     /// redirect hop, but a page can move on its own afterwards — a script, a
     /// meta refresh, an opener setting `popup.location` — and a page the
     /// policy would have refused must not become readable just because the
     /// page, rather than the agent, is what navigated.
     fn ensure_allowed(&self) -> Result<(), BrowserError> {
-        match self.blocked.lock().as_deref() {
+        let tabs = self.tabs.lock();
+        match tabs.active_tab().and_then(|tab| tab.blocked.as_deref()) {
             Some(url) => Err(BrowserError::NavigationRefused(format!(
                 "the page navigated itself to {url}, which this browser profile does not \
                  allow; it is not readable from here — navigate somewhere allowed to continue"
@@ -292,7 +398,8 @@ impl BrowserSession {
 
     /// The page this session drives right now. Cloned rather than borrowed
     /// because it can change under the caller: a tab the page opened is
-    /// promoted to active while a tool call is in flight (AGE-458).
+    /// activated, or the user picks another one, while a tool call is in
+    /// flight (AGE-458, AGE-473).
     pub fn page(&self) -> Result<Page, BrowserError> {
         self.ensure_alive()?;
         self.ensure_allowed()?;
@@ -301,18 +408,33 @@ impl BrowserSession {
 
     /// The active page, without the liveness check.
     fn active_page(&self) -> Page {
-        self.active.lock().clone()
-    }
-
-    /// The target the session launched with — the one a followed tab falls
-    /// back to, and the one that is never itself followed (AGE-458).
-    pub(super) fn primary_target_id(&self) -> &TargetId {
-        self.primary.target_id()
+        self.tabs.lock().active.clone()
     }
 
     /// The navigation policy this session's profile carries.
     pub fn policy(&self) -> &NavigationPolicy {
         &self.policy
+    }
+
+    /// Every open tab, in strip order (AGE-473).
+    pub fn tabs(&self) -> Vec<BrowserTab> {
+        self.tabs.lock().snapshot()
+    }
+
+    /// Subscribe to the tab list (AGE-473's tab strip) — fires whenever a
+    /// tab opens, closes, changes title, is blocked or unblocked, or becomes
+    /// active. The initial value on a fresh receiver is the list as of
+    /// subscription time.
+    pub fn watch_tabs(&self) -> watch::Receiver<Vec<BrowserTab>> {
+        self.tab_list.subscribe()
+    }
+
+    /// Broadcast the tab list after a change. `send_replace`, not `send`: a
+    /// panel that subscribes later must see the current list, not the one
+    /// from when a receiver last existed.
+    fn publish_tabs(&self) {
+        let snapshot = self.tabs.lock().snapshot();
+        self.tab_list.send_replace(snapshot);
     }
 
     /// Buffered console and network entries.
@@ -399,7 +521,20 @@ impl BrowserSession {
         self.invalidate_snapshot();
         // Navigating somewhere allowed is the way out of a block (AGE-458):
         // the URL was checked above, and the page is readable again.
-        self.set_blocked(None).await;
+        let was_blocked = {
+            let mut tabs = self.tabs.lock();
+            match tabs.find_mut(page.target_id()) {
+                Some(tab) => {
+                    tab.url = final_url.clone();
+                    tab.blocked.take().is_some()
+                }
+                None => false,
+            }
+        };
+        self.publish_tabs();
+        if was_blocked {
+            self.unblocked(&page).await;
+        }
         let _ = self.current_url.send(final_url.clone());
         Ok(final_url)
     }
@@ -440,25 +575,36 @@ impl BrowserSession {
     /// Backpressure is handled inside `screencast`: a slow receiver only
     /// ever sees the latest frame, never a backlog. Calling this again while
     /// a screencast is already running retargets it — to the new size, or to
-    /// whatever page is active now (AGE-458) — rather than starting a second
-    /// one.
+    /// whatever tab is active now (AGE-458) — rather than starting a second
+    /// one. While the active tab is blocked the cast is created suspended,
+    /// carrying the reason (AGE-473): the channel has to exist for a switch
+    /// to another tab to have something to revive.
     pub async fn start_screencast(
         &self,
         width: u32,
         height: u32,
     ) -> Result<watch::Receiver<ScreencastUpdate>, BrowserError> {
         self.ensure_alive()?;
-        self.ensure_allowed()?;
         let mut guard = self.screencast.lock().await;
-        // Read the active page *under* the lock: a tab promoted between the
+        // Read the active page *under* the lock: a tab activated between the
         // read and the lock would otherwise leave the cast on the old page
         // while input and tools drive the new one (AGE-458).
-        let page = self.active_page();
+        let (page, blocked) = self.active_view();
+        if let Some(url) = blocked {
+            return screencast::hold(
+                &self.runtime,
+                &mut guard,
+                width,
+                height,
+                &refusal_reason(&url),
+            )
+            .await;
+        }
         // The state is handed over by mutable borrow, never taken out: a
         // failed retarget leaves the previous screencast — which Chrome is
         // still encoding — in place, so a later call retargets or stops it
         // instead of asking Chrome to start a second one (AGE-457).
-        screencast::start(&page, &mut guard, width, height).await
+        screencast::start(&self.runtime, &page, &mut guard, width, height).await
     }
 
     /// Stop the screencast. Idle handling (AGE-155) calls this when the
@@ -471,45 +617,56 @@ impl BrowserSession {
         }
     }
 
-    /// Make the cast show whatever page is active now (AGE-458), keeping the
-    /// channel its consumer is already watching. A no-op when nothing is
-    /// casting — following a tab must not start a cast nobody asked for.
+    /// The active page and, if it is blocked, the URL it is blocked at.
+    fn active_view(&self) -> (Page, Option<String>) {
+        let tabs = self.tabs.lock();
+        let blocked = tabs.active_tab().and_then(|tab| tab.blocked.clone());
+        (tabs.active.clone(), blocked)
+    }
+
+    /// Make the cast show whatever tab is active now, keeping the channel its
+    /// consumer is already watching: moved onto the page (AGE-458), or
+    /// suspended with the reason while that tab is blocked. A no-op when
+    /// nothing is casting — switching tabs must not start a cast nobody
+    /// asked for.
     ///
     /// Failing here leaves the cast suspended with its channel alive, so the
     /// panel says why instead of reporting a session that ended.
     async fn sync_screencast(&self) {
         let mut guard = self.screencast.lock().await;
-        let page = self.active_page();
-        let Some(screencast) = guard.as_ref() else {
+        let (page, blocked) = self.active_view();
+        let Some(screencast) = guard.as_mut() else {
             return;
         };
+        if let Some(url) = blocked {
+            // Neither the picture nor anything else of a refused page may
+            // reach the panel: stop showing it and say why.
+            screencast.hold(&refusal_reason(&url)).await;
+            return;
+        }
         // Whatever viewport the panel last asked for, now on another page.
         let (width, height) = screencast.size();
         if screencast.is_casting(&page, width, height) {
             return;
         }
-        if let Err(e) = screencast::start(&page, &mut guard, width, height).await {
-            warn!(error = %e, "browser: cannot move the screencast to the active page");
+        if let Err(e) = screencast::start(&self.runtime, &page, &mut guard, width, height).await {
+            warn!(error = %e, "browser: cannot move the screencast to the active tab");
         }
     }
 
-    /// Suspend the cast, telling whoever is watching why. The channel stays
-    /// open: a later `sync_screencast` revives it.
-    async fn hold_screencast(&self, reason: &str) {
-        if let Some(screencast) = self.screencast.lock().await.as_mut() {
-            screencast.hold(reason).await;
-        }
-    }
-
-    /// Follow a tab or window the active page opened (AGE-458): resolve it,
-    /// check it against the navigation policy, then make it the page every
-    /// consumer drives.
+    /// A page target appeared (AGE-458, AGE-473): resolve it, check it
+    /// against the navigation policy, add it to the tab list and — unless
+    /// the policy refuses where it landed — make it the tab every consumer
+    /// drives. A refused tab is tracked but never shown: it sits in the
+    /// strip blocked, and its guard lifts the block if it comes back
+    /// somewhere allowed.
     ///
-    /// Every failure leaves the session exactly as it was — an unfollowable
-    /// tab is invisible, which is what it was before this existed. The check
-    /// here is only the *first* one: a tab that passes it and then navigates
-    /// itself somewhere refused is dropped again by the navigation guard.
-    pub(super) async fn follow_target(self: &Arc<Self>, target_id: TargetId) {
+    /// Every failure leaves the session exactly as it was — an untrackable
+    /// tab is invisible, which is what it was before this existed.
+    pub(super) async fn track_target(self: &Arc<Self>, target_id: TargetId) {
+        if self.tabs.lock().find(&target_id).is_some() {
+            return;
+        }
         let Some(page) = self.resolve_page(&target_id).await else {
             warn!(target = %target_id.inner(), "browser: a new tab never became drivable");
             return;
@@ -523,166 +680,338 @@ impl BrowserSession {
         }
 
         let url = settled_url(&page).await;
-        if !targets::may_drive_url(&self.policy, &url) {
-            warn!(
-                url = %url,
-                "browser: a new tab opened outside the navigation policy; not following it"
-            );
+        self.track(&page, url).await;
+    }
+
+    /// Add `page` to the tab list. The check here is only the *first* one: a
+    /// tab that passes it and then navigates itself somewhere refused is
+    /// blocked by its navigation guard, which runs for the tab's whole
+    /// lifetime, active or not (AGE-473).
+    async fn track(self: &Arc<Self>, page: &Page, url: String) {
+        let target_id = page.target_id();
+        if self.tabs.lock().find(target_id).is_some() {
             return;
         }
+        let blocked = (!targets::may_drive_url(&self.policy, &url)).then(|| url.clone());
 
-        // The guard has to be watching before the tab is on screen, or a tab
-        // that navigates itself the instant it is promoted slips through.
-        let guard = match targets::spawn_navigation_guard(self, &page).await {
+        // The guard has to be watching before the tab is in the strip, or a
+        // tab that navigates itself the instant it is tracked slips through.
+        let guard = match targets::spawn_navigation_guard(self, page).await {
             Ok(guard) => guard,
             Err(e) => {
-                warn!(error = %e, "browser: cannot watch the new tab's navigation; not following it");
+                warn!(error = %e, "browser: cannot watch the new tab's navigation; not tracking it");
                 return;
             }
         };
-
-        info!(url = %url, "browser: following a new tab");
-        self.retire_tab_listeners();
-        // The guard goes with the session's own listeners, *not* the tab's:
-        // dropping a tab is one of the things the guard itself decides, and a
-        // task cannot abort itself mid-decision. It is self-limiting anyway —
-        // its stream ends when the tab does — and only acts while the tab it
-        // watches is the active one.
+        {
+            let mut tabs = self.tabs.lock();
+            // Two paths can learn about one target — the watcher's
+            // `targetCreated` and `reopen_blank_page` — so the insert is what
+            // dedupes, under the lock.
+            if tabs.find(target_id).is_some() {
+                guard.abort();
+                return;
+            }
+            tabs.open.push(Tab {
+                page: page.clone(),
+                title: String::new(),
+                url: if url.is_empty() {
+                    "about:blank".to_string()
+                } else {
+                    url.clone()
+                },
+                blocked: blocked.clone(),
+                listeners: Vec::new(),
+            });
+        }
         {
             let mut listeners = self.listeners.lock();
             listeners.retain(|handle| !handle.is_finished());
             listeners.push(guard);
         }
-        *self.active.lock() = page.clone();
-        // Every element ref the agent holds belongs to the page underneath.
+
+        match blocked {
+            Some(url) => {
+                warn!(
+                    url = %url,
+                    "browser: a new tab opened outside the navigation policy; blocked, not shown"
+                );
+                self.publish_tabs();
+            }
+            None => {
+                info!(url = %url, "browser: following a new tab");
+                self.activate(page).await;
+            }
+        }
+        // A tab that loaded while it was being resolved has already fired
+        // the load event its guard would have read the title on.
+        self.page_loaded(page).await;
+    }
+
+    /// Make `page` — one of the tracked tabs — the tab every consumer
+    /// drives: the screencast moves to it, forwarded input and the tools
+    /// follow, element refs are invalidated as a navigation would, the
+    /// address bar gets its URL, and its console/network output takes over
+    /// the buffers the tools read.
+    ///
+    /// Nothing happens if `page` is no longer tracked: a tab looked up a
+    /// moment ago can have closed since, and `active` must never point at a
+    /// page that is not in the list.
+    async fn activate(&self, page: &Page) {
+        let (url, blocked) = {
+            let mut tabs = self.tabs.lock();
+            let Some(tab) = tabs.find(page.target_id()) else {
+                return;
+            };
+            let (url, blocked) = (tab.url.clone(), tab.blocked.clone());
+            // The tab we are leaving must not go on writing into the buffers.
+            if let Some(previous) = tabs.active_tab_mut() {
+                for handle in previous.listeners.drain(..) {
+                    handle.abort();
+                }
+            }
+            tabs.active = page.clone();
+            (url, blocked)
+        };
+        // Every element ref the agent holds belongs to the page underneath,
+        // and whatever the previous tab logged or requested is not this one's.
         self.invalidate_snapshot();
-        self.set_blocked(None).await;
-        let _ = self.current_url.send(if url.is_empty() {
-            "about:blank".to_string()
-        } else {
-            url
-        });
-        self.attach_listeners(&page).await;
+        self.events.clear();
+        self.publish_tabs();
+        let _ = self.current_url.send(url);
+        if blocked.is_none() {
+            self.attach_listeners(page).await;
+        }
         self.sync_screencast().await;
     }
 
-    /// A target went away. When it is the one we followed, fall back to the
-    /// page the session launched with (AGE-458) rather than leaving every
-    /// consumer pointed at a page that no longer exists.
-    pub(super) async fn target_closed(&self, target_id: &TargetId) {
-        if self.active.lock().target_id() != target_id {
+    /// The human picks a tab from the strip (AGE-473). Takes control first,
+    /// like any other user-initiated change to what the session drives: the
+    /// agent's tools now address this tab, and every element ref it held is
+    /// stale.
+    pub async fn select_tab(&self, id: &str) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        let target = TargetId::new(id);
+        let page = {
+            let tabs = self.tabs.lock();
+            if tabs.active.target_id() == &target {
+                return Ok(());
+            }
+            tabs.find(&target).map(|tab| tab.page.clone())
+        }
+        .ok_or_else(|| BrowserError::Protocol(format!("no open tab with id {id}")))?;
+        self.control.take();
+        info!(target = %id, "browser: switching to another tab");
+        self.activate(&page).await;
+        Ok(())
+    }
+
+    /// The human closes a tab from the strip (AGE-473): it leaves the list
+    /// at once — falling back to a neighbour if it was the active one — and
+    /// then the CDP target is closed, not just hidden.
+    pub async fn close_tab(self: &Arc<Self>, id: &str) -> Result<(), BrowserError> {
+        self.ensure_alive()?;
+        let target = TargetId::new(id);
+        let page = self
+            .tabs
+            .lock()
+            .find(&target)
+            .map(|tab| tab.page.clone())
+            .ok_or_else(|| BrowserError::Protocol(format!("no open tab with id {id}")))?;
+        self.control.take();
+        info!(target = %id, "browser: closing a tab");
+        // Bookkeeping first, so nothing is ever pointed at a page being torn
+        // down; the `targetDestroyed` that follows finds nothing to do.
+        self.remove_tab(&target).await;
+        if let Err(e) = page.close().await {
+            debug!(error = ?e, "browser: closing the tab failed");
+        }
+        Ok(())
+    }
+
+    /// A target went away, on its own or because we closed it.
+    pub(super) async fn target_closed(self: &Arc<Self>, target_id: &TargetId) {
+        self.remove_tab(target_id).await;
+    }
+
+    /// A document finished loading in a tracked tab: read its title for the
+    /// strip. Not for a blocked tab — its title is content from an origin
+    /// the policy refuses, and nothing of that reaches anyone.
+    pub(super) async fn page_loaded(&self, page: &Page) {
+        let readable = self
+            .tabs
+            .lock()
+            .find(page.target_id())
+            .is_some_and(|tab| tab.blocked.is_none());
+        if !readable {
             return;
         }
-        if self.primary.target_id() == target_id {
-            // The session's own page closed; there is nothing to fall back to
-            // and `ensure_alive` is what reports the browser dying.
-            return;
+        let title = match page.get_title().await {
+            Ok(title) => title.unwrap_or_default(),
+            Err(e) => {
+                debug!(error = ?e, "browser: cannot read the tab title");
+                return;
+            }
+        };
+        let changed = {
+            let mut tabs = self.tabs.lock();
+            match tabs.find_mut(page.target_id()) {
+                Some(tab) if tab.blocked.is_none() && tab.title != title => {
+                    tab.title = title;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.publish_tabs();
         }
-        self.fall_back_to_primary("the followed tab closed").await;
+    }
+
+    /// Drop a tab from the list. When it was the active one, hand
+    /// screencast, input and the tools to the neighbour on its left (or the
+    /// new first tab) — never leave them on a page that no longer exists —
+    /// and when it was the last one, open a blank page to stand in.
+    async fn remove_tab(self: &Arc<Self>, target_id: &TargetId) {
+        let fallback = {
+            let mut tabs = self.tabs.lock();
+            let Some(index) = tabs
+                .open
+                .iter()
+                .position(|tab| tab.page.target_id() == target_id)
+            else {
+                return;
+            };
+            let removed = tabs.open.remove(index);
+            for handle in removed.listeners {
+                handle.abort();
+            }
+            if tabs.active.target_id() != target_id {
+                None
+            } else {
+                Some(
+                    tabs.open
+                        .get(index.saturating_sub(1))
+                        .map(|tab| tab.page.clone()),
+                )
+            }
+        };
+        self.publish_tabs();
+        match fallback {
+            None => {}
+            Some(Some(page)) => {
+                info!("browser: the active tab closed; back to another open tab");
+                self.activate(&page).await;
+            }
+            Some(None) => self.reopen_blank_page().await,
+        }
+    }
+
+    /// The last tab closed. The session stays usable: open a blank page and
+    /// track it like any other, so it is the tab every consumer drives.
+    async fn reopen_blank_page(self: &Arc<Self>) {
+        info!("browser: the last tab closed; opening a blank page");
+        // On the session's runtime: `close_tab` may be called from a thread
+        // with no Tokio context, and the deadline here is a Tokio timer.
+        let opened = self.runtime.spawn({
+            let this = self.clone();
+            async move {
+                let guard = this.browser.lock().await;
+                let browser = guard.as_ref()?;
+                match tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    browser.new_page("about:blank"),
+                )
+                .await
+                {
+                    Ok(Ok(page)) => Some(page),
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "browser: cannot open a blank page after the last tab closed");
+                        None
+                    }
+                    Err(_) => {
+                        warn!("browser: opening a blank page after the last tab closed timed out");
+                        None
+                    }
+                }
+            }
+        });
+        let Ok(Some(page)) = opened.await else {
+            return;
+        };
+        // The watcher sees this target too; `track` dedupes under the lock.
+        self.track(&page, "about:blank".to_string()).await;
     }
 
     /// A page navigated itself. The policy is re-checked here, not only when
     /// the agent asks for a navigation (AGE-458) — see [`Self::ensure_allowed`]
-    /// for why.
+    /// for why. Every tracked tab is guarded, not just the active one
+    /// (AGE-473): a background tab that lands somewhere refused is blocked
+    /// the moment it does, not once someone switches to it.
     pub(super) async fn page_navigated(&self, target_id: &TargetId, url: String) {
-        // Only the page on screen matters: a tab nobody is driving shows
-        // nothing to anyone and is readable by nothing.
-        if self.active.lock().target_id() != target_id {
-            return;
-        }
-
-        if targets::may_drive_url(&self.policy, &url) {
-            // Coming back somewhere allowed lifts a block and revives the cast.
-            if self.blocked.lock().is_some() {
-                info!(url = %url, "browser: the page came back somewhere allowed");
+        let refused = !targets::may_drive_url(&self.policy, &url);
+        let (is_active, was_blocked) = {
+            let mut tabs = self.tabs.lock();
+            let is_active = tabs.active.target_id() == target_id;
+            let Some(tab) = tabs.find_mut(target_id) else {
+                return;
+            };
+            let was_blocked = tab.blocked.is_some();
+            tab.url = url.clone();
+            tab.blocked = refused.then(|| url.clone());
+            if refused {
+                // Nothing a refused page produces may reach the tools —
+                // not even later, once the page has come back: stop the
+                // pumps here, under the same lock that puts the block up.
+                for handle in tab.listeners.drain(..) {
+                    handle.abort();
+                }
+            } else if is_active {
+                // Under the lock, so a switch cannot slip a background
+                // tab's URL into the address bar.
+                let _ = self.current_url.send(url.clone());
             }
-            self.set_blocked(None).await;
-            self.sync_screencast().await;
-            self.invalidate_snapshot();
-            let _ = self.current_url.send(url);
+            (is_active, was_blocked)
+        };
+        self.publish_tabs();
+
+        if !is_active {
+            if refused {
+                warn!(
+                    url = %url,
+                    "browser: a background tab navigated itself outside the navigation policy; blocked"
+                );
+            }
             return;
         }
 
-        if target_id == self.primary.target_id() {
+        self.invalidate_snapshot();
+        if refused {
             warn!(
                 url = %url,
                 "browser: the page navigated itself outside the navigation policy; refusing it"
             );
-            self.set_blocked(Some(url)).await;
-            return;
-        }
-
-        warn!(
-            url = %url,
-            "browser: the followed tab navigated itself outside the navigation policy; dropping it"
-        );
-        let tab = self.active_page();
-        self.fall_back_to_primary("the followed tab went somewhere this profile does not allow")
-            .await;
-        // Nothing wants a refused page left loading in the background.
-        if let Err(e) = tab.close().await {
-            debug!(error = ?e, "browser: closing the refused tab failed");
+            // Neither the picture nor the console text of a refused page
+            // may reach anyone: drop what it produced and suspend the cast.
+            self.events.clear();
+            self.sync_screencast().await;
+        } else if was_blocked {
+            info!(url = %url, "browser: the page came back somewhere allowed");
+            self.unblocked(&self.active_page()).await;
+        } else {
+            self.sync_screencast().await;
         }
     }
 
-    /// Hand screencast, input and the tools back to the page the session
-    /// launched with.
-    async fn fall_back_to_primary(&self, reason: &str) {
-        info!(reason, "browser: back to the session's own page");
-        self.retire_tab_listeners();
-        *self.active.lock() = self.primary.clone();
-        self.invalidate_snapshot();
-        // Whatever the tab logged or requested is not this page's.
+    /// The active tab came back somewhere allowed: revive the cast, and
+    /// start capturing its console/network output again — its pumps were
+    /// stopped when the block went up (or never started, for a tab
+    /// activated while blocked). Whatever reached the buffers before that
+    /// is not this page's and is dropped first.
+    async fn unblocked(&self, page: &Page) {
         self.events.clear();
-        let url = self
-            .primary
-            .url()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "about:blank".to_string());
-        // The page we are falling back to may itself be blocked — it is the
-        // same page it was, wherever it had got to.
-        let blocked = (!targets::may_drive_url(&self.policy, &url)).then(|| url.clone());
-        self.set_blocked(blocked).await;
-        let _ = self.current_url.send(url);
+        self.attach_listeners(page).await;
         self.sync_screencast().await;
-    }
-
-    /// Put the block up or take it down, keeping the cast and the event
-    /// buffers consistent with it.
-    async fn set_blocked(&self, url: Option<String>) {
-        let reason = {
-            let mut blocked = self.blocked.lock();
-            if *blocked == url {
-                return;
-            }
-            *blocked = url.clone();
-            url
-        };
-        match reason {
-            Some(url) => {
-                // Neither the picture nor the console text of a refused page
-                // may reach anyone: stop showing it and drop what it produced.
-                self.events.clear();
-                self.invalidate_snapshot();
-                self.hold_screencast(&format!(
-                    "the page navigated to {url}, which this browser profile does not allow"
-                ))
-                .await;
-            }
-            None => self.sync_screencast().await,
-        }
-    }
-
-    /// Stop the console/network pumps belonging to the tab we were following.
-    /// A tab we have dropped must not keep writing into the buffers the tools
-    /// read. (Its navigation guard lives in `listeners` — see
-    /// [`Self::follow_target`] — so this is never the caller's own task.)
-    fn retire_tab_listeners(&self) {
-        for handle in self.tab_listeners.lock().drain(..) {
-            handle.abort();
-        }
     }
 
     /// Turn a target id into a drivable page. The target is discovered before
@@ -711,15 +1040,35 @@ impl BrowserSession {
         }
     }
 
-    /// Capture console and network output from a newly followed tab too,
-    /// into the same buffers the tools drain. Best effort: losing a tab's
-    /// console is not a reason to refuse to show it.
+    /// Capture console and network output from the tab that just became
+    /// active (or readable), into the same buffers the tools drain. Best
+    /// effort: losing a tab's console is not a reason to refuse to show it.
     ///
-    /// These go in `tab_listeners`, not `listeners`: they die with the tab we
-    /// stop driving, so nothing it does afterwards reaches the tools.
+    /// The pumps are the tab's own: they are aborted when it stops being
+    /// the active one, so nothing it does afterwards reaches the tools.
     async fn attach_listeners(&self, page: &Page) {
-        match super::events::spawn_listeners(page, self.events.clone()).await {
-            Ok(handles) => self.tab_listeners.lock().extend(handles),
+        match super::events::spawn_listeners(&self.runtime, page, self.events.clone()).await {
+            Ok(handles) => {
+                let mut tabs = self.tabs.lock();
+                let still_active = tabs.active.target_id() == page.target_id();
+                match tabs.find_mut(page.target_id()) {
+                    // Still the active tab, still allowed, and not yet
+                    // pumped: the pumps are its to keep.
+                    Some(tab)
+                        if still_active && tab.blocked.is_none() && tab.listeners.is_empty() =>
+                    {
+                        tab.listeners.extend(handles);
+                    }
+                    // Closed, superseded, refused, or already pumped while
+                    // the domains were being enabled; nothing extra may
+                    // write.
+                    _ => {
+                        for handle in handles {
+                            handle.abort();
+                        }
+                    }
+                }
+            }
             Err(e) => warn!(error = %e, "browser: no console/network capture for this tab"),
         }
     }
@@ -778,10 +1127,19 @@ impl BrowserSession {
         input::dispatch_key(&self.active_page(), event).await
     }
 
+    /// Stop every task a tab owns. The guards live in `listeners`.
+    fn abort_tab_listeners(&self) {
+        for tab in self.tabs.lock().open.iter_mut() {
+            for handle in tab.listeners.drain(..) {
+                handle.abort();
+            }
+        }
+    }
+
     /// Close the browser and stop every task this session owns.
     pub async fn shutdown(&self) {
         self.stop_screencast().await;
-        self.retire_tab_listeners();
+        self.abort_tab_listeners();
         for handle in self.listeners.lock().drain(..) {
             handle.abort();
         }
@@ -807,12 +1165,8 @@ impl Drop for BrowserSession {
         // `shutdown` is the graceful path. This is the backstop for a dropped
         // session: abort the tasks so we do not leak them, and let the child
         // process die with its pipes.
-        for handle in self
-            .listeners
-            .lock()
-            .drain(..)
-            .chain(self.tab_listeners.lock().drain(..))
-        {
+        self.abort_tab_listeners();
+        for handle in self.listeners.lock().drain(..) {
             handle.abort();
         }
         if let Some(handle) = self.handler.lock().take() {
