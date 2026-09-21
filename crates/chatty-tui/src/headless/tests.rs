@@ -685,4 +685,81 @@ mod runner {
             "send_message must succeed once the cancellation has completed"
         );
     }
+
+    /// AGE-503 regression: `max_agent_turns` is rig's per-`stream_prompt`-call
+    /// budget (a fresh `AgentRun` per call, `current_turn` starting at 0
+    /// every time) — not a cumulative total across the run. Finalization
+    /// used to narrow that per-call budget down to an absolute
+    /// `FINALIZATION_MAX_AGENT_TURNS` (12) via `.min()`, even when the
+    /// operator had configured a larger one (e.g. `--max-agent-turns 30`),
+    /// so a wrap-up prompt that legitimately needed more than 12 model
+    /// calls died with `MaxTurnsError`. A configured budget already at or
+    /// above the floor must be left untouched.
+    #[tokio::test]
+    async fn finalization_never_narrows_a_configured_budget_below_the_floor() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 30;
+        for _ in 0..20 {
+            runner.transcript.start_assistant();
+        }
+
+        send_answer_file_finalization_prompt(
+            &mut runner,
+            "Write ONLY the final answer to /app/answer.txt",
+        );
+
+        assert_eq!(
+            runner.execution_settings.max_agent_turns, 30,
+            "a configured budget already above the floor must be left untouched \
+             (the old `.min()` code would have narrowed this to 12)"
+        );
+    }
+
+    /// AGE-503: there is no cumulative "turns used" accounting anywhere in
+    /// the real turn-limit path, so the finalization budget must not depend
+    /// on how many assistant rows the transcript already has. A runner with
+    /// 0 prior rows and one with 20 must land on the exact same budget.
+    #[tokio::test]
+    async fn finalization_budget_is_independent_of_turns_already_used() {
+        let (mut fresh, _event_rx) = test_runner().await;
+        fresh.execution_settings.max_agent_turns = 30;
+        send_answer_file_finalization_prompt(
+            &mut fresh,
+            "Write ONLY the final answer to /app/answer.txt",
+        );
+
+        let (mut used, _event_rx2) = test_runner().await;
+        used.execution_settings.max_agent_turns = 30;
+        for _ in 0..20 {
+            used.transcript.start_assistant();
+        }
+        send_answer_file_finalization_prompt(
+            &mut used,
+            "Write ONLY the final answer to /app/answer.txt",
+        );
+
+        assert_eq!(
+            fresh.execution_settings.max_agent_turns, used.execution_settings.max_agent_turns,
+            "the finalization budget must be identical regardless of turns already used"
+        );
+    }
+
+    /// AGE-503: a configured budget smaller than `FINALIZATION_MAX_AGENT_TURNS`
+    /// is raised to the floor so the wrap-up pass always gets at least 12
+    /// model calls.
+    #[tokio::test]
+    async fn finalization_raises_a_too_small_configured_budget_to_the_floor() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 5;
+
+        send_answer_file_finalization_prompt(
+            &mut runner,
+            "Write ONLY the final answer to /app/answer.txt",
+        );
+
+        assert_eq!(
+            runner.execution_settings.max_agent_turns,
+            FINALIZATION_MAX_AGENT_TURNS
+        );
+    }
 }
