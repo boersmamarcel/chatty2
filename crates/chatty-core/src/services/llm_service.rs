@@ -322,9 +322,9 @@ fn classify_streaming_error(err: &StreamingError) -> StreamErrorKind {
             PromptError::UnknownToolCall { .. } => StreamErrorKind::UnknownToolCall,
             // Exhausted its turn budget, or was cancelled: neither is a
             // provider transport failure, and neither is worth a nudge.
-            PromptError::MaxTurnsError { .. } | PromptError::PromptCancelled { .. } | PromptError::MemoryError(_) => {
-                StreamErrorKind::Other
-            }
+            PromptError::MaxTurnsError { .. }
+            | PromptError::PromptCancelled { .. }
+            | PromptError::MemoryError(_) => StreamErrorKind::Other,
         },
     }
 }

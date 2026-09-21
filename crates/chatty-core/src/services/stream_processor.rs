@@ -907,7 +907,11 @@ mod tests {
                 RecoveryAction::Nudge
             );
             assert_eq!(
-                decide_recovery(kind, StreamSurface::Headless, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS),
+                decide_recovery(
+                    kind,
+                    StreamSurface::Headless,
+                    HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS
+                ),
                 RecoveryAction::Stop
             );
         }
