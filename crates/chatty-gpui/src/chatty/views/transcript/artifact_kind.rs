@@ -30,6 +30,7 @@ pub fn is_lane_a_browser_tool(tool_name: &str) -> bool {
             | "browser_network"
             | "browser_resize"
             | "browser_click"
+            | "browser_type"
     )
 }
 

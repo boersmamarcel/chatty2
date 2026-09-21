@@ -38,10 +38,10 @@ use crate::tools::add_attachment_tool::PendingArtifacts;
 
 use crate::services::browser::session::{DEFAULT_TIMEOUT_SECS, with_deadline};
 use crate::services::browser::snapshot::{AxNode, flatten_ax_tree};
-use crate::services::browser::{BrowserError, BrowserManager, NavigationPolicy};
+use crate::services::browser::{BrowserError, BrowserManager, MAX_TEXT_LEN, NavigationPolicy};
 use crate::tools::ToolError;
 
-/// Bundle of the seven browser tools, so the agent factory moves one value.
+/// Bundle of the eight browser tools, so the agent factory moves one value.
 pub type BrowserTools = (
     BrowserNavigateTool,
     BrowserSnapshotTool,
@@ -50,6 +50,7 @@ pub type BrowserTools = (
     BrowserNetworkTool,
     BrowserResizeTool,
     BrowserClickTool,
+    BrowserTypeTool,
 );
 
 /// Build every browser tool over one shared manager. `pending_approvals` is
@@ -81,6 +82,10 @@ pub fn build_browser_tools(
             manager: manager.clone(),
         },
         BrowserClickTool {
+            manager: manager.clone(),
+            pending_approvals: pending_approvals.clone(),
+        },
+        BrowserTypeTool {
             manager,
             pending_approvals,
         },
@@ -653,26 +658,163 @@ pub struct BrowserClickTool {
     pending_approvals: Option<PendingApprovals>,
 }
 
-/// Whether a click on a page at `url` needs the user's approval: anything
+/// Whether an action on a page at `url` needs the user's approval: anything
 /// that is not a Lane A origin (loopback http(s) or workspace `file://`).
 /// Decided by the URL, not the manager's policy — with internet access on,
 /// the same session serves both the agent's own dev server and the open
 /// web, and only the latter can carry a session the user logged into.
-fn click_needs_approval(url: &str, workspace: Option<&std::path::Path>) -> bool {
+fn action_needs_approval(url: &str, workspace: Option<&std::path::Path>) -> bool {
     NavigationPolicy::local_only(workspace.map(|w| w.to_path_buf()))
         .check(url)
         .is_err()
 }
 
-/// The approval-card text: what would be clicked, where.
-fn click_approval_label(role: &str, name: &str, url: &str) -> String {
-    const MAX_NAME: usize = 80;
-    let name: String = if name.chars().count() > MAX_NAME {
-        format!("{}…", name.chars().take(MAX_NAME).collect::<String>())
+/// `s` on one line, cut to `max` characters with an ellipsis.
+fn short(s: &str, max: usize) -> String {
+    let one_line: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if one_line.chars().count() > max {
+        format!("{}…", one_line.chars().take(max).collect::<String>())
     } else {
-        name.to_string()
+        one_line
+    }
+}
+
+/// A page URL as the approval card shows it: the host in full — that is
+/// what tells the user which site is being acted on — then the path cut
+/// short, and never the query or fragment, which may carry session tokens
+/// and would otherwise be persisted as the card's text (AGE-492).
+fn display_url(url: &str) -> String {
+    const MAX_PATH: usize = 40;
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return short(url, MAX_PATH);
     };
-    format!("[browser] click {role} \"{name}\" on {url}")
+    let host = parsed.host_str().unwrap_or_default();
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let path = if parsed.path() == "/" {
+        String::new()
+    } else {
+        short(parsed.path(), MAX_PATH)
+    };
+    let query = if parsed.query().is_some() { "?…" } else { "" };
+    if host.is_empty() {
+        // file:// — the path is all there is; keep its tail, where the name is.
+        let tail: String = parsed.path().chars().rev().take(MAX_PATH).collect();
+        let tail: String = tail.chars().rev().collect();
+        return if tail.len() < parsed.path().len() {
+            format!("{}:…{tail}", parsed.scheme())
+        } else {
+            format!("{}:{tail}", parsed.scheme())
+        };
+    }
+    format!("{host}{port}{path}{query}")
+}
+
+/// The approval-card text for a click: what would be clicked, where.
+fn click_approval_label(role: &str, name: &str, url: &str) -> String {
+    format!(
+        "[browser] click {role} \"{}\" on {}",
+        short(name, 80),
+        display_url(url)
+    )
+}
+
+/// The approval-card text for typing: what would be typed, into what, where.
+fn type_approval_label(role: &str, name: &str, text: &str, url: &str) -> String {
+    format!(
+        "[browser] type \"{}\" into {role} \"{}\" on {}",
+        short(text, 60),
+        short(name, 60),
+        display_url(url)
+    )
+}
+
+/// `role "name"`, or just the role for an unnamed element.
+fn describe(node: &crate::services::browser::SnapshotNode) -> String {
+    if node.name.is_empty() {
+        node.role.clone()
+    } else {
+        format!("{} \"{}\"", node.role, node.name)
+    }
+}
+
+/// Everything an acting tool does before it acts (AGE-489): resolve the ref
+/// against the current generation and, off Lane A origins, put the action to
+/// the user as an approval card first. `label` builds that card's text from
+/// the element and the page URL; `verb` names the action in refusals.
+async fn prepare_action(
+    manager: &BrowserManager,
+    pending_approvals: Option<&PendingApprovals>,
+    r#ref: &str,
+    verb: &str,
+    label: impl FnOnce(&crate::services::browser::SnapshotNode, &str) -> String,
+) -> Result<
+    (
+        Arc<crate::services::browser::BrowserSession>,
+        crate::services::browser::SnapshotNode,
+    ),
+    ToolError,
+> {
+    // Before touching the session: a missing snapshot is a model mistake
+    // and must not launch a browser to be reported.
+    let snapshot = manager.snapshot().await.ok_or_else(|| {
+        ToolError::OperationFailed(
+            "no snapshot to take refs from; call browser_snapshot first".to_string(),
+        )
+    })?;
+    let session = manager.session().await?;
+    session.ensure_agent_control()?;
+    let page = session.page()?;
+    let node = snapshot
+        .resolve(r#ref, session.snapshot_generation())?
+        .clone();
+
+    let url = page
+        .url()
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| ToolError::OperationFailed("cannot read the page URL".into()))?;
+    if action_needs_approval(&url, manager.workspace().ok()) {
+        let Some(pending) = pending_approvals else {
+            return Err(ToolError::OperationFailed(format!(
+                "{verb} on {} needs the user's approval and no approval channel is available \
+                 in this session",
+                display_url(&url)
+            )));
+        };
+        // Always asks: the shell's auto-approve modes are about commands
+        // the user chose to trust, not about acting inside their web
+        // sessions (AGE-158: per action, never generalised).
+        let approved = request_execution_approval(
+            pending,
+            &ApprovalMode::AlwaysAsk,
+            &label(&node, &url),
+            false,
+        )
+        .await
+        .map_err(|e| ToolError::OperationFailed(format!("approval failed: {e}")))?;
+        if !approved {
+            return Err(ToolError::OperationFailed(format!(
+                "the user declined to {verb} {} on {}",
+                describe(&node),
+                display_url(&url)
+            )));
+        }
+        // The card may have been open for minutes; the page the user
+        // approved must be the page that gets acted on.
+        if session.snapshot_generation() != snapshot.generation {
+            return Err(BrowserError::StaleRef(
+                r#ref.to_string(),
+                snapshot.generation,
+                session.snapshot_generation(),
+            )
+            .into());
+        }
+    }
+    Ok((session, node))
 }
 
 impl Tool for BrowserClickTool {
@@ -715,62 +857,15 @@ impl Tool for BrowserClickTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        // Before touching the session: a missing snapshot is a model mistake
-        // and must not launch a browser to be reported.
-        let snapshot = self.manager.snapshot().await.ok_or_else(|| {
-            ToolError::OperationFailed(
-                "no snapshot to take refs from; call browser_snapshot first".to_string(),
-            )
-        })?;
-        let session = self.manager.session().await?;
-        session.ensure_agent_control()?;
-        let page = session.page()?;
-        let node = snapshot
-            .resolve(&args.r#ref, session.snapshot_generation())?
-            .clone();
-        let clicked = if node.name.is_empty() {
-            node.role.clone()
-        } else {
-            format!("{} \"{}\"", node.role, node.name)
-        };
-
-        let url = page
-            .url()
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| ToolError::OperationFailed("cannot read the page URL".into()))?;
-        if click_needs_approval(&url, self.manager.workspace().ok()) {
-            let Some(pending) = &self.pending_approvals else {
-                return Err(ToolError::OperationFailed(format!(
-                    "clicking on {url} needs the user's approval and no approval channel is \
-                     available in this session"
-                )));
-            };
-            let label = click_approval_label(&node.role, &node.name, &url);
-            // Always asks: the shell's auto-approve modes are about commands
-            // the user chose to trust, not about acting inside their web
-            // sessions (AGE-158: per action, never generalised).
-            let approved =
-                request_execution_approval(pending, &ApprovalMode::AlwaysAsk, &label, false)
-                    .await
-                    .map_err(|e| ToolError::OperationFailed(format!("approval failed: {e}")))?;
-            if !approved {
-                return Err(ToolError::OperationFailed(format!(
-                    "the user declined to click {clicked} on {url}"
-                )));
-            }
-            // The card may have been open for minutes; the page the user
-            // approved must be the page that gets clicked.
-            if session.snapshot_generation() != snapshot.generation {
-                return Err(BrowserError::StaleRef(
-                    args.r#ref.clone(),
-                    snapshot.generation,
-                    session.snapshot_generation(),
-                )
-                .into());
-            }
-        }
+        let (session, node) = prepare_action(
+            &self.manager,
+            self.pending_approvals.as_ref(),
+            &args.r#ref,
+            "click",
+            |node, url| click_approval_label(&node.role, &node.name, url),
+        )
+        .await?;
+        let clicked = describe(&node);
 
         let result = session.click(&node).await?;
         info!(r#ref = %args.r#ref, clicked = %clicked, url = %result.url, navigated = result.navigated, "browser: clicked");
@@ -789,6 +884,109 @@ impl Tool for BrowserClickTool {
             navigated: result.navigated,
             snapshot_generation: result.snapshot_generation,
             note,
+        })
+    }
+}
+
+// ── type ────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct TypeArgs {
+    /// An element ref from the latest `browser_snapshot`, e.g. `e12`.
+    pub r#ref: String,
+    /// What the field should contain afterwards.
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TypeOutput {
+    /// The field, as the snapshot described it.
+    pub typed_into: String,
+    /// What the field reads now, from the accessibility tree.
+    pub value: String,
+    pub snapshot_generation: u64,
+    pub note: String,
+}
+
+/// Replace a text field's contents by snapshot ref (AGE-492).
+///
+/// Same locate-and-verify path and the same approval gate as
+/// [`BrowserClickTool`]; on top, password and payment-card fields are
+/// refused outright — see `services::browser::typing`.
+#[derive(Clone)]
+pub struct BrowserTypeTool {
+    manager: Arc<BrowserManager>,
+    pending_approvals: Option<PendingApprovals>,
+}
+
+impl Tool for BrowserTypeTool {
+    const NAME: &'static str = "browser_type";
+    type Error = ToolError;
+    type Args = TypeArgs;
+    type Output = TypeOutput;
+
+    fn description(&self) -> String {
+        "Replace the contents of a text field (input, textarea, search box, editable area) \
+         with the given text, by its [eN] ref from the latest browser_snapshot. Whatever the \
+         field held before is replaced, not appended to. Password and payment-card fields \
+         are refused — ask the user to take control and fill those in. Does not press \
+         Enter; to submit, browser_click the form's button. On pages outside localhost and \
+         the workspace, every call first asks the user for approval."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Element ref from the latest browser_snapshot, e.g. 'e12'."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The text the field should contain afterwards."
+                }
+            },
+            "required": ["ref", "text"]
+        })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        if args.text.chars().count() > MAX_TEXT_LEN {
+            return Err(ToolError::OperationFailed(format!(
+                "text is longer than {MAX_TEXT_LEN} characters; split it up"
+            )));
+        }
+        let (session, node) = prepare_action(
+            &self.manager,
+            self.pending_approvals.as_ref(),
+            &args.r#ref,
+            "type into",
+            |node, url| type_approval_label(&node.role, &node.name, &args.text, url),
+        )
+        .await?;
+        let typed_into = describe(&node);
+
+        let value = session.type_text(&node, &args.text).await?;
+        info!(r#ref = %args.r#ref, typed_into = %typed_into, chars = args.text.chars().count(), "browser: typed");
+        Ok(TypeOutput {
+            typed_into,
+            value,
+            snapshot_generation: session.snapshot_generation(),
+            note: "The field was not submitted. Refs stay valid; browser_click a button or \
+                   take a new browser_snapshot to continue."
+                .to_string(),
         })
     }
 }
@@ -851,7 +1049,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_definition_naming_the_browser() {
-        let (nav, snap, shot, console, net, resize, click) =
+        let (nav, snap, shot, console, net, resize, click, r#type) =
             build_browser_tools(manager(), artifacts(), None);
         assert_eq!(tool_definition(&nav).name, "browser_navigate");
         assert_eq!(tool_definition(&snap).name, "browser_snapshot");
@@ -860,6 +1058,7 @@ mod tests {
         assert_eq!(tool_definition(&net).name, "browser_network");
         assert_eq!(tool_definition(&resize).name, "browser_resize");
         assert_eq!(tool_definition(&click).name, "browser_click");
+        assert_eq!(tool_definition(&r#type).name, "browser_type");
     }
 
     /// The model reached for `javascript:` URLs because nothing told it how
@@ -880,7 +1079,7 @@ mod tests {
 
     #[test]
     fn click_schema_takes_exactly_one_ref() {
-        let (.., click) = build_browser_tools(manager(), artifacts(), None);
+        let (.., click, _) = build_browser_tools(manager(), artifacts(), None);
         let definition = tool_definition(&click);
         assert_eq!(
             definition.parameters["required"],
@@ -907,7 +1106,10 @@ mod tests {
             "https://app.localhost/",
             "file:///ws/dist/index.html",
         ] {
-            assert!(!click_needs_approval(url, Some(ws)), "{url} should be free");
+            assert!(
+                !action_needs_approval(url, Some(ws)),
+                "{url} should be free"
+            );
         }
         for url in [
             "https://example.com/",
@@ -915,17 +1117,17 @@ mod tests {
             "file:///etc/passwd",
             "about:blank",
         ] {
-            assert!(click_needs_approval(url, Some(ws)), "{url} should ask");
+            assert!(action_needs_approval(url, Some(ws)), "{url} should ask");
         }
         // No workspace: file:// has nothing to be inside of.
-        assert!(click_needs_approval("file:///ws/index.html", None));
+        assert!(action_needs_approval("file:///ws/index.html", None));
     }
 
     #[test]
     fn click_approval_label_names_the_element_and_the_page() {
         assert_eq!(
             click_approval_label("button", "Buy now", "https://shop.example/cart"),
-            "[browser] click button \"Buy now\" on https://shop.example/cart"
+            "[browser] click button \"Buy now\" on shop.example/cart"
         );
         let long = "x".repeat(200);
         let label = click_approval_label("link", &long, "https://e.com/");
@@ -933,11 +1135,92 @@ mod tests {
         assert!(!label.contains(&"x".repeat(81)));
     }
 
+    /// AGE-492: the card must stay readable, and must never carry a query
+    /// string — that is where session tokens live.
+    #[test]
+    fn display_url_keeps_the_host_and_drops_the_rest() {
+        assert_eq!(display_url("https://shop.example/"), "shop.example");
+        assert_eq!(display_url("http://localhost:3000/"), "localhost:3000");
+        assert_eq!(
+            display_url("https://shop.example/cart?session=abc&token=verysecret#top"),
+            "shop.example/cart?…"
+        );
+        let long_path = format!("https://app.example.com/{}", "segment/".repeat(20));
+        let shown = display_url(&long_path);
+        assert!(shown.starts_with("app.example.com/segment/"), "{shown}");
+        assert!(shown.ends_with('…'), "{shown}");
+        assert!(shown.chars().count() < 60, "{shown}");
+        assert!(!shown.contains("segment/".repeat(8).as_str()), "{shown}");
+        // A very long host is never cut: it is the one thing the user must see whole.
+        let host = format!("https://{}.example.com/x", "sub.".repeat(20));
+        assert!(display_url(&host).contains(&"sub.".repeat(20)));
+        // file:// keeps the tail of the path, where the file name is.
+        let file = display_url("file:///ws/very/deep/directory/tree/dist/index.html");
+        assert!(file.starts_with("file:…"), "{file}");
+        assert!(file.ends_with("dist/index.html"), "{file}");
+        assert_eq!(display_url("file:///ws/index.html"), "file:/ws/index.html");
+        assert_eq!(display_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn type_approval_label_shows_the_text_on_one_line_and_cut() {
+        assert_eq!(
+            type_approval_label(
+                "textbox",
+                "Email",
+                "me@example.com",
+                "https://a.example/login"
+            ),
+            "[browser] type \"me@example.com\" into textbox \"Email\" on a.example/login"
+        );
+        let label = type_approval_label(
+            "textbox",
+            "Body",
+            "line one\nline two",
+            "https://a.example/",
+        );
+        assert!(label.contains("\"line one line two\""), "{label}");
+        let label = type_approval_label("textbox", "Body", &"y".repeat(100), "https://a.example/");
+        assert!(label.contains(&format!("{}…", "y".repeat(60))));
+    }
+
+    #[test]
+    fn type_schema_takes_a_ref_and_text() {
+        let (.., r#type) = build_browser_tools(manager(), artifacts(), None);
+        let definition = tool_definition(&r#type);
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["ref", "text"])
+        );
+        assert!(
+            definition.description.contains("Password"),
+            "{}",
+            definition.description
+        );
+    }
+
+    #[tokio::test]
+    async fn type_refuses_oversized_text_before_touching_the_browser() {
+        let (.., r#type) = build_browser_tools(manager(), artifacts(), None);
+        let args = TypeArgs {
+            r#ref: "e1".to_string(),
+            text: "z".repeat(MAX_TEXT_LEN + 1),
+        };
+        let err = r#type
+            .call(&mut ToolContext::new(), args)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("longer than"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn click_without_a_snapshot_says_so_rather_than_launching_a_browser() {
         // `session()` would provision and launch Chrome; the snapshot check
         // comes first so a model mistake never costs a browser process.
-        let (.., click) = build_browser_tools(manager(), artifacts(), None);
+        let (.., click, _) = build_browser_tools(manager(), artifacts(), None);
         let args = ClickArgs {
             r#ref: "e1".to_string(),
         };
@@ -981,7 +1264,7 @@ mod tests {
 
     #[tokio::test]
     async fn resize_rejects_out_of_range_viewports() {
-        let (_, _, _, _, _, resize, _) = build_browser_tools(manager(), artifacts(), None);
+        let (_, _, _, _, _, resize, _, _) = build_browser_tools(manager(), artifacts(), None);
         for (width, height) in [(0, 800), (800, 0), (MAX_VIEWPORT + 1, 800)] {
             let result = resize
                 .call(&mut ToolContext::new(), ResizeArgs { width, height })

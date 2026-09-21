@@ -408,6 +408,10 @@ impl ListToolsTool {
                     "browser_click",
                     "Left-click an element by its snapshot ref; asks the user first off localhost.",
                 ),
+                (
+                    "browser_type",
+                    "Replace a text field's contents by its snapshot ref; asks the user first off localhost.",
+                ),
             ] {
                 native_tools.push(ToolInfo {
                     name: name.to_string(),

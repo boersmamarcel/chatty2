@@ -39,6 +39,18 @@ pub struct ClickPoint {
 
 /// Click `node`, refusing unless every check in the module doc passes.
 pub(super) async fn click(page: &Page, node: &SnapshotNode) -> Result<ClickPoint, BrowserError> {
+    let (_, point) = locate(page, node).await?;
+    press(page, point).await?;
+    Ok(point)
+}
+
+/// Run every check in the module doc against `node` and return the backend
+/// node plus the point a pointer event should land on. Shared with
+/// [`super::typing`], which focuses a field by clicking it the same way.
+pub(super) async fn locate(
+    page: &Page,
+    node: &SnapshotNode,
+) -> Result<(BackendNodeId, ClickPoint), BrowserError> {
     let r#ref = &node.r#ref;
     let backend_id = node.backend_node_id.ok_or_else(|| {
         BrowserError::Protocol(format!(
@@ -128,7 +140,11 @@ pub(super) async fn click(page: &Page, node: &SnapshotNode) -> Result<ClickPoint
         }
     }
 
-    // Move, press, release — what a pointer does.
+    Ok((target, point))
+}
+
+/// Move, press, release — what a pointer does.
+pub(super) async fn press(page: &Page, point: ClickPoint) -> Result<(), BrowserError> {
     for action in [
         MouseAction::Move,
         MouseAction::Down {
@@ -151,11 +167,11 @@ pub(super) async fn click(page: &Page, node: &SnapshotNode) -> Result<ClickPoint
         )
         .await?;
     }
-    Ok(point)
+    Ok(())
 }
 
 /// The string inside a CDP `AXValue`, or empty.
-fn ax_value(
+pub(super) fn ax_value(
     value: Option<&chromiumoxide::cdp::browser_protocol::accessibility::AxValue>,
 ) -> String {
     match value.and_then(|v| v.value.as_ref()) {
