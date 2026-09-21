@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::resizable::ResizableState;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -408,6 +409,10 @@ pub type GlobalChattyApp = crate::global_entity::GlobalWeakEntity<ChattyApp>;
 pub struct ChattyApp {
     pub chat_view: Entity<ChatView>,
     pub sidebar_view: Entity<SidebarView>,
+    /// Drag state for the sidebar/chat-view split, so long filenames in the
+    /// file tree (AGE-476) aren't stuck truncated behind a fixed-width
+    /// panel. Mirrors `ChatView::artifact_split`.
+    pub sidebar_split: Entity<ResizableState>,
     conversation_repo: Arc<dyn ConversationRepository>,
     is_ready: bool,
     /// Held while a conversation is being created; prevents concurrent creations.
@@ -449,6 +454,7 @@ impl ChattyApp {
         let app = Self {
             chat_view,
             sidebar_view,
+            sidebar_split: cx.new(|_| ResizableState::default()),
             conversation_repo,
             is_ready: false,
             active_create_task: None,
