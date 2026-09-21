@@ -62,6 +62,8 @@ When browser tools are on, a live view of the page the agent is driving docks in
 
 The sidebar doubles as a light IDE over your working directory. A **Chats | Files** toggle sits in the status bar at the bottom of the window, next to the warning/error indicators; switching to Files replaces the conversation list with a tree rooted at your workspace directory (or the current folder if none is set), folders first, and picks up files the agent adds or removes within a couple of seconds without needing a refresh. Switching conversations re-roots the tree to that conversation's own working directory. You can also reach it from the caret next to the artifact button in the titlebar (or the floating button on macOS) — pick **Files**, which expands the sidebar if it's collapsed and switches it to Files mode.
 
+Drag the edge between the sidebar and the chat to resize it — handy for reading long filenames or deeply nested paths in full.
+
 Click a file to open it in the artifact panel, using the same viewers as agent-produced artifacts (Markdown, code, PDF, PowerPoint, images, tables). Right-click a row, the header, or an empty folder for **New file…**, **New folder…**, **Rename…**, **Delete…**, **Reveal in file manager** and **Copy path**. Deleting asks for confirmation first and cannot be undone.
 
 Ctrl/⌘-click a row to add it to a selection, or Shift-click to select a range; the right-click menu then reads **Delete N items…** and **Copy paths** for the whole selection. Drag a selected row onto a folder (or onto the empty area to move it to the workspace root) to move it there — an open file's tab follows it to the new path.
