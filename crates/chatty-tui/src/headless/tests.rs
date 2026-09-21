@@ -270,6 +270,20 @@ fn extracts_known_paths_for_finalization() {
     assert!(paths.contains("data/merchant_data.json"));
 }
 
+/// AGE-497: the recovery prompt echoes rig's own `UnknownToolCall` message
+/// (which already lists the available/allowed tools) rather than the
+/// generic stream-error prompt.
+#[test]
+fn unknown_tool_call_recovery_prompt_echoes_the_rig_error_and_asks_for_a_real_tool() {
+    let rig_message = "UnknownToolCall: model attempted to call unknown or disallowed tool \
+                        `web_search`. Available tools: [\"search_web\"]. Allowed tools for \
+                        this turn: [\"search_web\"]";
+    let prompt = unknown_tool_call_recovery_prompt(rig_message);
+    assert!(prompt.contains("web_search"));
+    assert!(prompt.contains("search_web"));
+    assert!(prompt.contains("exact name"));
+}
+
 /// The headless runner on its own (AGE-196): a turn runs with no engine
 /// behind it, and the deferred-send gate `run_headless` relies on holds.
 ///

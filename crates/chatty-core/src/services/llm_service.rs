@@ -316,11 +316,13 @@ fn classify_streaming_error(err: &StreamingError) -> StreamErrorKind {
         StreamingError::Completion(e) => classify_completion_error(e),
         StreamingError::Prompt(e) => match e.as_ref() {
             PromptError::CompletionError(e) => classify_completion_error(e),
-            // The model called a tool that doesn't exist / isn't allowed, or
-            // exhausted its turn budget, or was cancelled: none of these are
-            // provider transport failures.
-            PromptError::UnknownToolCall { .. }
-            | PromptError::MaxTurnsError { .. }
+            // A one-token tool-name mistake (AGE-497): worth a nudge, not an
+            // outright stop, since rig's own error text already lists the
+            // available/allowed tools the model can retry with.
+            PromptError::UnknownToolCall { .. } => StreamErrorKind::UnknownToolCall,
+            // Exhausted its turn budget, or was cancelled: neither is a
+            // provider transport failure, and neither is worth a nudge.
+            PromptError::MaxTurnsError { .. }
             | PromptError::PromptCancelled { .. }
             | PromptError::MemoryError(_) => StreamErrorKind::Other,
         },
@@ -849,6 +851,22 @@ mod tests {
             prompt: Box::new(Message::user("hi")),
         }));
         assert_eq!(classify_streaming_error(&err), StreamErrorKind::Other);
+    }
+
+    /// AGE-497: a hallucinated tool name is worth a nudge, not the same
+    /// outright `Stop` as max-turns/cancellation/memory errors.
+    #[test]
+    fn classifies_unknown_tool_call_distinctly_from_other() {
+        let err = StreamingError::Prompt(Box::new(PromptError::UnknownToolCall {
+            tool_name: "web_search".to_string(),
+            available_tools: vec!["search_web".to_string()],
+            allowed_tools: vec!["search_web".to_string()],
+            chat_history: Box::new(Vec::new()),
+        }));
+        assert_eq!(
+            classify_streaming_error(&err),
+            StreamErrorKind::UnknownToolCall
+        );
     }
 
     #[test]
