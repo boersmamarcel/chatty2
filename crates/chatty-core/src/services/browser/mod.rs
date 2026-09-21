@@ -34,6 +34,7 @@ pub mod screencast;
 pub mod session;
 pub mod snapshot;
 mod targets;
+mod typing;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +51,7 @@ pub use profile::{BrowserProfile, NavigationPolicy};
 pub use screencast::{ScreencastFrame, ScreencastUpdate};
 pub use session::{BrowserSession, BrowserTab};
 pub use snapshot::{Snapshot, SnapshotNode};
+pub use typing::MAX_TEXT_LEN;
 
 /// The handle the browser tools hold.
 ///

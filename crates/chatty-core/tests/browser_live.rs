@@ -20,7 +20,7 @@ use chatty_core::services::browser::{
     MouseButtonKind, MouseInput, ScreencastUpdate,
 };
 use chatty_core::tools::browser_tools::{
-    ClickArgs, NavigateArgs, NoArgs, ResizeArgs, build_browser_tools,
+    ClickArgs, NavigateArgs, NoArgs, ResizeArgs, TypeArgs, build_browser_tools,
 };
 use rig_agent::tool::{Tool, ToolContext};
 use tokio::sync::watch;
@@ -358,7 +358,7 @@ async fn lane_a_round_trip() {
     let dir = fixture_workspace();
     let manager = manager(&dir);
     let artifacts = artifacts();
-    let (navigate, snapshot, screenshot, console, network, resize, _) =
+    let (navigate, snapshot, screenshot, console, network, resize, ..) =
         build_browser_tools(manager.clone(), artifacts.clone(), None);
     let cx = &mut ToolContext::new();
 
@@ -1667,7 +1667,8 @@ fn ref_of(tree: &str, role: &str, name: &str) -> String {
 async fn click_lands_on_what_the_snapshot_showed_and_nothing_else() {
     let dir = click_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, .., click) = build_browser_tools(manager.clone(), artifacts(), None);
+    let (navigate, snapshot, .., click, _) =
+        build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -1781,6 +1782,141 @@ async fn click_lands_on_what_the_snapshot_showed_and_nothing_else() {
         "tree was:\n{}",
         fourth.tree
     );
+
+    manager.shutdown().await;
+}
+
+/// AGE-492. A form with a prefilled input, a textarea, a password field and
+/// a card-number field, plus a covered input.
+fn type_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("index.html"),
+        r#"<!doctype html>
+<html>
+  <head><title>Type fixture</title></head>
+  <body>
+    <input aria-label="Name" value="old value">
+    <textarea aria-label="Notes"></textarea>
+    <input aria-label="Secret" type="password">
+    <input aria-label="Card" autocomplete="cc-number">
+    <div style="position: relative; width: 200px; height: 40px;">
+      <input aria-label="Hidden" style="position: absolute; inset: 0;">
+      <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.5);"></div>
+    </div>
+  </body>
+</html>"#,
+    )
+    .expect("write fixture");
+    dir
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn typing_replaces_a_field_and_refuses_credentials() {
+    let dir = type_workspace();
+    let manager = manager(&dir);
+    let (navigate, snapshot, .., typing) = build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("page loads");
+    let snap = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    let name = ref_of(&snap.tree, "textbox", "Name");
+    let notes = ref_of(&snap.tree, "textbox", "Notes");
+    let secret = ref_of(&snap.tree, "textbox", "Secret");
+    let card = ref_of(&snap.tree, "textbox", "Card");
+    let hidden = ref_of(&snap.tree, "textbox", "Hidden");
+
+    // Replace, not append.
+    let out = typing
+        .call(
+            cx,
+            TypeArgs {
+                r#ref: name.clone(),
+                text: "Ada Lovelace".to_string(),
+            },
+        )
+        .await
+        .expect("typing succeeds");
+    assert_eq!(out.value, "Ada Lovelace", "{out:?}");
+    assert_eq!(out.typed_into, "textbox \"Name\"");
+
+    // Multi-line text into a textarea.
+    let out = typing
+        .call(
+            cx,
+            TypeArgs {
+                r#ref: notes,
+                text: "first line\nsecond line".to_string(),
+            },
+        )
+        .await
+        .expect("textarea typing succeeds");
+    assert_eq!(out.value, "first line\nsecond line", "{out:?}");
+
+    // Credential fields are refused before anything is typed.
+    for (r#ref, kind) in [(secret, "password"), (card, "payment card")] {
+        let err = typing
+            .call(
+                cx,
+                TypeArgs {
+                    r#ref,
+                    text: "hunter2".to_string(),
+                },
+            )
+            .await
+            .expect_err("credential field must be refused");
+        assert!(err.to_string().contains(kind), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("take control"),
+            "unexpected: {err}"
+        );
+    }
+
+    // The same locate checks as a click: a covered field is refused.
+    let err = typing
+        .call(
+            cx,
+            TypeArgs {
+                r#ref: hidden,
+                text: "x".to_string(),
+            },
+        )
+        .await
+        .expect_err("a covered field must be refused");
+    assert!(err.to_string().contains("covered"), "unexpected: {err}");
+
+    // While the user drives, the agent's typing is refused outright.
+    let session = manager.session().await.expect("session");
+    session.take_control();
+    let err = typing
+        .call(
+            cx,
+            TypeArgs {
+                r#ref: name,
+                text: "nope".to_string(),
+            },
+        )
+        .await
+        .expect_err("refused while the user holds control");
+    assert!(
+        err.to_string().contains("user is currently driving"),
+        "unexpected: {err}"
+    );
+    session.release_control();
+
+    // Nothing above changed the page for the snapshot: the name field still
+    // reads what the agent typed, and the secret is still empty.
+    let after = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    assert!(after.tree.contains("textbox \"Name\""), "{}", after.tree);
 
     manager.shutdown().await;
 }

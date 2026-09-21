@@ -53,6 +53,7 @@ use super::profile::{BrowserProfile, NavigationPolicy};
 use super::screencast::{self, Screencast, ScreencastUpdate};
 use super::snapshot::SnapshotNode;
 use super::targets;
+use super::typing;
 
 /// Default deadline for a CDP round trip.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -1158,6 +1159,22 @@ impl BrowserSession {
             navigated: snapshot_generation != generation_before,
             snapshot_generation,
         })
+    }
+
+    /// Replace the contents of a text field the agent saw in its latest
+    /// snapshot (AGE-492). Same refusals as [`Self::click`]; the checks
+    /// specific to typing — credential fields, read-back — live in
+    /// [`super::typing`]. Returns the field's value afterwards.
+    pub async fn type_text(&self, node: &SnapshotNode, text: &str) -> Result<String, BrowserError> {
+        self.ensure_alive()?;
+        self.control.ensure_agent()?;
+        let page = self.page()?;
+        with_deadline(
+            DEFAULT_TIMEOUT_SECS,
+            &format!("typing into {}", node.r#ref),
+            typing::type_text(&page, node, text),
+        )
+        .await
     }
 
     /// Forward a mouse event. A no-op — not an error — when the agent
