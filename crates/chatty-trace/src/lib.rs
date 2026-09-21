@@ -1,4 +1,4 @@
-//! Trace substrate for reflection (AGE-5).
+//! Trace substrate for reflection (AGE-5 / AGE-22).
 //!
 //! # Promises (AGE-26 production bar)
 //!
@@ -11,11 +11,16 @@
 //! # Status
 //!
 //! Types `Trajectory`, `Step`, `Action`, `Outcome`, and `FeedbackFn` are **reserved**
-//! ([`RESERVED.md`](../../../RESERVED.md)). They are extracted from the AGE-22 walking
-//! skeleton after Marcel's ReAct/GEPA reflection gates (AGE-27 / AGE-28) land — do not
-//! invent them here.
+//! ([`RESERVED.md`](../../../RESERVED.md)). Marcel defines them after the AGE-22 walking
+//! skeleton exposes what ATIF v1.6 + rig-tap can attribute.
 
 #![forbid(unsafe_code)]
+
+pub mod feedback;
+pub mod trace;
+
+pub use feedback::{FeedbackFn, UnimplementedFeedback};
+pub use trace::{Action, Outcome, Step, Trajectory};
 
 use thiserror::Error;
 
