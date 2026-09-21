@@ -482,7 +482,6 @@ impl Render for SidebarView {
         // online mode is account-scoped, so the menu simply does not offer it.
         let move_enabled = crate::chatty::controllers::app_controller::move_ui_enabled(cx);
 
-        let width = if self.is_collapsed { px(0.) } else { px(255.) };
         let files_mode = self.is_files_mode();
 
         // The explorer follows the disk on a timer (AGE-476); a `true` means
@@ -500,8 +499,13 @@ impl Render for SidebarView {
 
         v_flex()
             .id("sidebar")
-            .w(width)
-            .flex_shrink_0()
+            // Collapsed: pin to zero width, same as before (app_view.rs
+            // skips the resizable wrapper in this case). Expanded: fill
+            // whatever width the resizable_panel around this view gives it
+            // (app_view.rs), instead of a hardcoded width — that's what let
+            // a user drag the divider to see long filenames in full.
+            .when(self.is_collapsed, |this| this.w(px(0.)).flex_shrink_0())
+            .when(!self.is_collapsed, |this| this.w_full())
             .h_full()
             .overflow_hidden()
             .relative()
