@@ -24,6 +24,11 @@ pub struct FetchToolArgs {
     /// Maximum length of the returned content in characters (default: 50000)
     #[serde(default)]
     pub max_length: Option<usize>,
+    /// Override the User-Agent header for this request. Useful when a site's
+    /// automated-traffic policy asks for a specific declared identity (e.g.
+    /// SEC EDGAR — AGE-496) that the default Chatty user-agent doesn't satisfy.
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 /// Output from the fetch tool
@@ -64,6 +69,16 @@ impl FetchTool {
             workspace_dir,
         }
     }
+
+    /// Build a GET request, overriding the client's default User-Agent when
+    /// the caller declared one (AGE-496).
+    fn request(&self, url: &str, user_agent: Option<&str>) -> reqwest::RequestBuilder {
+        let request = self.client.get(url);
+        match user_agent {
+            Some(ua) => request.header(reqwest::header::USER_AGENT, ua),
+            None => request,
+        }
+    }
 }
 
 impl Tool for FetchTool {
@@ -92,6 +107,10 @@ impl Tool for FetchTool {
                 "max_length": {
                     "type": "integer",
                     "description": "Maximum length of returned content in characters. Defaults to 50000."
+                },
+                "user_agent": {
+                    "type": "string",
+                    "description": "Override the User-Agent header for this request. Use this when a site rejects the default identity and states what it expects (e.g. \"declare an automated tool with contact info\")."
                 }
             },
             "required": ["url", "max_length"]
@@ -128,8 +147,7 @@ impl Tool for FetchTool {
         // to validate each redirect target against the private-host denylist.
         let mut current_url = url.clone();
         let mut response = self
-            .client
-            .get(&current_url)
+            .request(&current_url, args.user_agent.as_deref())
             .send()
             .await
             .map_err(|e| ToolError::OperationFailed(format!("Request failed: {}", e)))?;
@@ -171,8 +189,7 @@ impl Tool for FetchTool {
             current_url = next_url;
 
             response = self
-                .client
-                .get(&current_url)
+                .request(&current_url, args.user_agent.as_deref())
                 .send()
                 .await
                 .map_err(|e| ToolError::OperationFailed(format!("Redirect failed: {}", e)))?;
@@ -634,12 +651,68 @@ mod tests {
         assert!(def.description.contains("Fetch a URL"));
     }
 
+    /// AGE-496: SEC EDGAR (and similar automated-traffic policies) reject
+    /// requests that don't declare a contact; the default UA must keep one.
+    #[test]
+    fn test_default_user_agent_declares_a_contact() {
+        assert!(crate::services::http_client::USER_AGENT.contains('@'));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_request_overrides_user_agent_when_declared() {
+        let tool = FetchTool::new(None);
+        let built = tool
+            .request(
+                "https://example.com",
+                Some("Custom/1.0 contact@example.com"),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(
+            built.headers().get(reqwest::header::USER_AGENT).unwrap(),
+            "Custom/1.0 contact@example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_request_uses_default_user_agent_when_not_declared() {
+        // The client's own default User-Agent (set once in `no_redirect_client`)
+        // is applied by reqwest at send time, not baked into `build()`'s
+        // `Request` — so "no override" means no per-request header at all.
+        let tool = FetchTool::new(None);
+        let built = tool.request("https://example.com", None).build().unwrap();
+        assert!(built.headers().get(reqwest::header::USER_AGENT).is_none());
+    }
+
+    /// AGE-496: confirms the EDGAR-compliant default UA actually gets past
+    /// SEC's automated-traffic block, against the live API.
+    ///
+    /// ```
+    /// cargo test -p chatty-core --lib fetches_sec_edgar_with_default_user_agent -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "hits the live data.sec.gov API"]
+    async fn fetches_sec_edgar_with_default_user_agent() {
+        let tool = FetchTool::new(None);
+        let args = FetchToolArgs {
+            url: "https://data.sec.gov/submissions/CIK0001408198.json".to_string(),
+            max_length: None,
+            user_agent: None,
+        };
+        let result = tool
+            .call(&mut ToolContext::new(), args)
+            .await
+            .expect("EDGAR should accept the default declared user-agent");
+        assert_eq!(result.status, 200);
+    }
+
     #[tokio::test]
     async fn test_fetch_tool_invalid_url() {
         let tool = FetchTool::new(None);
         let args = FetchToolArgs {
             url: "not-a-url".to_string(),
             max_length: None,
+            user_agent: None,
         };
         let result = tool.call(&mut ToolContext::new(), args).await;
         assert!(result.is_err());
@@ -714,6 +787,7 @@ mod tests {
         let args = FetchToolArgs {
             url: "http://169.254.169.254/latest/meta-data/".to_string(),
             max_length: None,
+            user_agent: None,
         };
         let result = tool.call(&mut ToolContext::new(), args).await;
         assert!(result.is_err());
