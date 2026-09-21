@@ -447,6 +447,15 @@ pub async fn run_headless(
             }
             AppEvent::StreamCancelled => {
                 engine.handle_event(AppEvent::StreamCancelled);
+                // A deferred prompt (loop-pivot or compact-file finalization)
+                // is waiting for `StreamCompleted` to confirm the
+                // cancellation went through (AGE-242 / D3). That arm fires
+                // right after this one, so keep looping instead of breaking
+                // here — otherwise the prompt is dropped and the run ends
+                // with whatever was on disk (AGE-493).
+                if pending_loop_pivot_prompt.is_some() || pending_compact_file_prompt.is_some() {
+                    continue;
+                }
                 if should_request_answer_file_finalization(
                     answer_file_required,
                     finalization_attempts,
