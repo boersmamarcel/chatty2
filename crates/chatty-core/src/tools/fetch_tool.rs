@@ -662,7 +662,10 @@ mod tests {
     async fn test_fetch_request_overrides_user_agent_when_declared() {
         let tool = FetchTool::new(None);
         let built = tool
-            .request("https://example.com", Some("Custom/1.0 contact@example.com"))
+            .request(
+                "https://example.com",
+                Some("Custom/1.0 contact@example.com"),
+            )
             .build()
             .unwrap();
         assert_eq!(
