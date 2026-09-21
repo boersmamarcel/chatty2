@@ -268,10 +268,9 @@ impl SearchWebTool {
             )));
         }
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| ToolError::OperationFailed(format!("Failed to read Bing response: {}", e)))?;
+        let html = response.text().await.map_err(|e| {
+            ToolError::OperationFailed(format!("Failed to read Bing response: {}", e))
+        })?;
 
         Ok(parse_bing_results(&html, max_results))
     }
