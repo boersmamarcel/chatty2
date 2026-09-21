@@ -8,7 +8,18 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Default user-agent for outgoing HTTP requests.
-pub const USER_AGENT: &str = "Chatty/1.0 (Desktop AI Assistant)";
+///
+/// Includes a contact so sites with an automated-traffic policy (e.g. SEC
+/// EDGAR, which rejects anything without one — AGE-496) have somewhere to
+/// reach a human about this traffic, rather than blocking it outright.
+/// Kept to the plain `Name contact@domain` shape EDGAR's own examples use —
+/// reproduction on 2026-09-21 showed it 403s a UA that wraps the contact in
+/// `(+https://...; ...)` instead.
+pub const USER_AGENT: &str = concat!(
+    "Chatty/",
+    env!("CARGO_PKG_VERSION"),
+    " research@example.com"
+);
 
 /// Browser-like user-agent for web scraping (e.g. DuckDuckGo fallback).
 pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
