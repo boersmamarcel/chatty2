@@ -6,6 +6,7 @@ use crate::settings::models::general_model::GeneralSettingsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable,
     button::{Button, ButtonVariants, DropdownButton},
@@ -41,22 +42,33 @@ impl Render for ChattyApp {
                 // Custom titlebar with toggle button
                 AppTitleBar::new(self.sidebar_view.clone(), self.chat_view.clone()),
             )
-            .child(
-                // Content area - existing panels
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .child(
-                        // Sidebar - left panel
-                        self.sidebar_view.clone(),
+            .child({
+                // Content area - existing panels. A flexible, drag-resizable
+                // split between the sidebar (conversations or the file tree,
+                // AGE-476/480) and the chat view, so long filenames aren't
+                // stuck truncated behind a fixed-width panel. Skipped while
+                // collapsed: a zero-width drag handle makes no sense, and the
+                // resizable panel's own minimum width would fight the
+                // collapse down to 0.
+                let content = div().flex_1().flex().flex_row().overflow_hidden();
+                if sidebar.read(cx).is_collapsed() {
+                    content
+                        .child(self.sidebar_view.clone())
+                        .child(self.chat_view.clone())
+                } else {
+                    content.child(
+                        h_resizable("sidebar-chat-split")
+                            .with_state(&self.sidebar_split)
+                            .child(
+                                resizable_panel()
+                                    .size(px(255.))
+                                    .size_range(px(180.)..px(600.))
+                                    .child(self.sidebar_view.clone()),
+                            )
+                            .child(resizable_panel().child(self.chat_view.clone())),
                     )
-                    .child(
-                        // Chat view - right panel
-                        self.chat_view.clone(),
-                    ),
-            )
+                }
+            })
             .child(
                 // Footer bar
                 StatusFooterView::new(self.sidebar_view.clone()),
