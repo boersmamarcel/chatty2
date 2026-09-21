@@ -38,7 +38,10 @@ pub enum StreamErrorKind {
     EmptyCompletion,
     /// The turn was cancelled by the user.
     Cancelled,
-    /// Anything else (unknown tool call, max turns, memory error, ...).
+    /// The model called a tool name that isn't registered or isn't allowed
+    /// this turn — usually a one-token alias mistake (AGE-497).
+    UnknownToolCall,
+    /// Anything else (max turns, memory error, ...).
     Other,
 }
 
@@ -133,7 +136,7 @@ pub fn decide_recovery(
         },
         // One protocol nudge, same on every surface; headless counts it
         // against its own (smaller) recovery budget.
-        StreamErrorKind::MalformedToolCall => {
+        StreamErrorKind::MalformedToolCall | StreamErrorKind::UnknownToolCall => {
             let limit = match surface {
                 StreamSurface::Headless => HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS,
                 StreamSurface::Desktop | StreamSurface::InteractiveTui => 1,
@@ -793,7 +796,7 @@ mod tests {
     // Recovery policy (AGE-244 / D5): every kind x surface combination.
     // -------------------------------------------------------------------
 
-    const ALL_KINDS: [StreamErrorKind; 9] = [
+    const ALL_KINDS: [StreamErrorKind; 10] = [
         StreamErrorKind::Auth,
         StreamErrorKind::RateLimited,
         StreamErrorKind::ProviderStatus(503),
@@ -801,6 +804,7 @@ mod tests {
         StreamErrorKind::MalformedToolCall,
         StreamErrorKind::Stalled,
         StreamErrorKind::Cancelled,
+        StreamErrorKind::UnknownToolCall,
         StreamErrorKind::EmptyCompletion,
         StreamErrorKind::Other,
     ];
@@ -880,36 +884,42 @@ mod tests {
 
     #[test]
     fn malformed_tool_call_nudges_once_on_interactive_surfaces() {
-        for surface in [StreamSurface::Desktop, StreamSurface::InteractiveTui] {
-            assert_eq!(
-                decide_recovery(StreamErrorKind::MalformedToolCall, surface, 0),
-                RecoveryAction::Nudge
-            );
-            assert_eq!(
-                decide_recovery(StreamErrorKind::MalformedToolCall, surface, 1),
-                RecoveryAction::Stop
-            );
+        for kind in [
+            StreamErrorKind::MalformedToolCall,
+            StreamErrorKind::UnknownToolCall,
+        ] {
+            for surface in [StreamSurface::Desktop, StreamSurface::InteractiveTui] {
+                assert_eq!(decide_recovery(kind, surface, 0), RecoveryAction::Nudge);
+                assert_eq!(decide_recovery(kind, surface, 1), RecoveryAction::Stop);
+            }
         }
     }
 
     #[test]
     fn malformed_tool_call_uses_the_smaller_headless_budget() {
         let last_retry = HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS - 1;
-        assert_eq!(
-            decide_recovery(
-                StreamErrorKind::MalformedToolCall,
-                StreamSurface::Headless,
-                last_retry
-            ),
-            RecoveryAction::Nudge
-        );
-        assert_eq!(
-            decide_recovery(
-                StreamErrorKind::MalformedToolCall,
-                StreamSurface::Headless,
-                HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS
-            ),
-            RecoveryAction::Stop
+        for kind in [
+            StreamErrorKind::MalformedToolCall,
+            StreamErrorKind::UnknownToolCall,
+        ] {
+            assert_eq!(
+                decide_recovery(kind, StreamSurface::Headless, last_retry),
+                RecoveryAction::Nudge
+            );
+            assert_eq!(
+                decide_recovery(kind, StreamSurface::Headless, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS),
+                RecoveryAction::Stop
+            );
+        }
+    }
+
+    /// AGE-497: an unknown-tool call used to fall into `Other` (always
+    /// `Stop`), ending the run outright on a one-token tool-name mistake.
+    #[test]
+    fn unknown_tool_call_is_not_lumped_into_other() {
+        assert_ne!(
+            decide_recovery(StreamErrorKind::UnknownToolCall, StreamSurface::Headless, 0),
+            decide_recovery(StreamErrorKind::Other, StreamSurface::Headless, 0)
         );
     }
 

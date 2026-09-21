@@ -24,7 +24,9 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
-use chatty_core::services::{AgentLoopGuard, RecoveryAction, StreamError, is_agent_todo_tool};
+use chatty_core::services::{
+    AgentLoopGuard, RecoveryAction, StreamError, StreamErrorKind, is_agent_todo_tool,
+};
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -44,6 +46,17 @@ const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 4_000;
 const TEXT_HARD_STOP_BYTES: usize = 20_000;
 const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
+
+/// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is
+/// rig's own `UnknownToolCall` display text, which already lists the
+/// available and allowed tool names for this turn, so it is echoed verbatim
+/// rather than paraphrased.
+fn unknown_tool_call_recovery_prompt(error_message: &str) -> String {
+    format!(
+        "Your last tool call failed — {error_message} Call one of the listed available tools \
+         with its exact name instead."
+    )
+}
 
 /// Run in headless mode: send a message, collect the response, print to stdout.
 pub async fn run_headless(
@@ -77,6 +90,10 @@ pub async fn run_headless(
     // The session decides whether a stream error is retried and after how
     // long (AGE-273); the delay is held here until the turn has ended.
     let mut recovery_pending_after_error: Option<std::time::Duration> = None;
+    // AGE-497: rig's own `UnknownToolCall` message already lists the
+    // available/allowed tool names, so it is worth re-sending verbatim
+    // instead of the generic recovery prompt below.
+    let mut pending_unknown_tool_call_message: Option<String> = None;
     // A stream error the session would not retry ends the run as a failure
     // (AGE-401): the exit code says so, not an empty stdout.
     let mut unrecovered_error: Option<StreamError> = None;
@@ -323,7 +340,11 @@ pub async fn run_headless(
                         delay.as_secs()
                     );
                     tokio::time::sleep(delay).await;
-                    if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
+                    if let Some(error_message) = pending_unknown_tool_call_message.take() {
+                        engine.send_recovery_prompt(unknown_tool_call_recovery_prompt(
+                            &error_message,
+                        ));
+                    } else if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
                         engine.send_recovery_prompt(build_compact_file_recovery_prompt(
                             compact_prompt,
                         ));
@@ -429,6 +450,9 @@ pub async fn run_headless(
                     RecoveryAction::Stop => None,
                 };
                 if let Some(after) = retry_after {
+                    if error.kind == StreamErrorKind::UnknownToolCall {
+                        pending_unknown_tool_call_message = Some(error.message.clone());
+                    }
                     recovery_pending_after_error = Some(after);
                     continue;
                 }

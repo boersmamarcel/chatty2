@@ -38,6 +38,18 @@ pub const MALFORMED_TOOL_CALL_FOLLOW_UP: &str = "Agent protocol follow-up: your 
      fully closed. If the arguments were large, write the content to a file in smaller steps \
      instead.";
 
+/// Injected when the model calls a tool name that isn't registered or isn't
+/// allowed this turn — an easy one-token mistake (`web_search` for
+/// `search_web`) that used to end the run outright (AGE-497). `error_message`
+/// is rig's own `UnknownToolCall` display text, which already lists the
+/// available and allowed tool names for this turn.
+fn unknown_tool_call_follow_up(error_message: &str) -> String {
+    format!(
+        "Agent protocol follow-up: your last tool call failed — {error_message} Call one of \
+         the listed available tools with its exact name instead."
+    )
+}
+
 /// What ends the turn when the model's final completion is empty even after
 /// [`EmptyTurnRetry`](crate::factories::agent_factory::EmptyTurnRetry)
 /// nudged it once inside the turn (AGE-401). Reported as
@@ -262,8 +274,14 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
                 // here would reset each time and the retry would never
                 // terminate (AGE-150 Defect 2).
                 if self.pending_follow_up.is_none() && !self.already_asked_to_retry {
-                    tracing::warn!(error = %error.message, "Malformed tool-call JSON; asking the model to retry");
-                    self.pending_follow_up = Some(MALFORMED_TOOL_CALL_FOLLOW_UP.to_string());
+                    let follow_up = if error.kind == StreamErrorKind::UnknownToolCall {
+                        tracing::warn!(error = %error.message, "Unknown tool call; asking the model to retry with a real tool");
+                        unknown_tool_call_follow_up(&error.message)
+                    } else {
+                        tracing::warn!(error = %error.message, "Malformed tool-call JSON; asking the model to retry");
+                        MALFORMED_TOOL_CALL_FOLLOW_UP.to_string()
+                    };
+                    self.pending_follow_up = Some(follow_up);
                 }
             }
             RecoveryAction::Stop => {}
@@ -529,5 +547,42 @@ mod tests {
         }
 
         assert!(!cancel_flag.load(Ordering::Relaxed));
+    }
+
+    /// AGE-497: a hallucinated tool name (`web_search` for `search_web`)
+    /// used to fall into `StreamErrorKind::Other`, which only ever `Stop`s —
+    /// the turn ended outright instead of asking the model to retry with a
+    /// real tool name.
+    #[test]
+    fn unknown_tool_call_queues_a_corrective_follow_up_instead_of_stopping() {
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        let mut handler = SessionStreamHandler::new(
+            move |event| events_clone.lock().unwrap().push(event),
+            AgentTaskController::new(),
+            cancel_flag,
+            test_policy(),
+        );
+
+        let error = StreamError::new(
+            StreamErrorKind::UnknownToolCall,
+            "UnknownToolCall: model attempted to call unknown or disallowed tool `web_search`. \
+             Available tools: [\"search_web\"]. Allowed tools for this turn: [\"search_web\"]"
+                .to_string(),
+        );
+        handler.on_chunk(Ok(StreamChunk::Error(error))).unwrap();
+        handler.on_stream_ended();
+
+        let events = events.lock().unwrap();
+        let follow_up = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::FollowUp(prompt) => Some(prompt.clone()),
+                _ => None,
+            })
+            .expect("an unknown-tool-call error must queue a corrective follow-up, not just stop");
+        assert!(follow_up.contains("web_search"));
+        assert!(follow_up.contains("search_web"));
     }
 }
