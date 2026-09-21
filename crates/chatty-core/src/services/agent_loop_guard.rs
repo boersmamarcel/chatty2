@@ -70,7 +70,10 @@ pub struct AgentLoopGuard {
     /// Hard maximum number of agent turns for this session.
     max_agent_turns: usize,
 
-    /// Ring buffer of `(tool_name, truncated_input)` for the last N tool calls.
+    /// Ring buffer of `(tool_name, trimmed_input)` for the last N tool calls.
+    /// The full (untruncated) input is kept here so repetition detection isn't
+    /// fooled by two different calls sharing a long common prefix; truncation
+    /// is applied only when building the pivot message preview.
     recent_tool_calls: VecDeque<(String, String)>,
 
     /// How many loop-pivot prompts have been injected so far.
@@ -114,7 +117,7 @@ impl AgentLoopGuard {
     /// Returns a pivot message to inject if the same `(name, input)` pair has
     /// appeared at least twice consecutively in the recent history.
     pub fn on_tool_completed(&mut self, name: &str, input: &str) -> Option<String> {
-        let entry = (name.to_string(), truncate_input(input));
+        let entry = (name.to_string(), input.trim().to_string());
         self.tool_called_this_turn = true;
 
         // Add to ring buffer.
@@ -135,7 +138,7 @@ impl AgentLoopGuard {
         let prev = &self.recent_tool_calls[len - 2];
         if last == prev {
             self.loop_pivot_count += 1;
-            let input_preview = &last.1;
+            let input_preview = truncate_input(&last.1);
             Some(format!(
                 "LOOP DETECTED: You just called `{name}` with the same arguments twice in a row \
                  (input: {input_preview}). That approach is not working. \
@@ -261,6 +264,16 @@ mod tests {
         let msg = result.unwrap();
         assert!(msg.contains("search_web"));
         assert!(msg.contains("LOOP DETECTED"));
+    }
+
+    #[test]
+    fn no_pivot_when_calls_share_only_a_long_common_prefix() {
+        let mut g = guard();
+        let shared_prefix = "a".repeat(120);
+        let first = format!("{shared_prefix} version one");
+        let second = format!("{shared_prefix} version two");
+        g.on_tool_completed("write_file", &first);
+        assert!(g.on_tool_completed("write_file", &second).is_none());
     }
 
     #[test]
