@@ -18,11 +18,14 @@
 //! The history budget in tokens is
 //!
 //! ```text
-//! context_window − response_reserve − base − prompt
+//! context_window − headroom − response_reserve − base − prompt
 //! ```
 //!
 //! where `context_window` is the model's `max_context_window` (an assumed
-//! 32k when the model has none configured), `response_reserve` is the
+//! 32k when the model has none configured), `headroom` is a tenth of it for
+//! what the count cannot see (the chat template's per-message wrapping, and
+//! the gap between the tiktoken estimate and the model's own tokenizer —
+//! measured at ~2k tokens on a 32k Qwen request), `response_reserve` is the
 //! model's `max_tokens` (4096 when unset), `base` is the preamble plus the
 //! tool schemas — measured once when the agent is built, see
 //! [`ContextShaper::set_base_tokens`] — and `prompt` is the message the call
@@ -80,6 +83,10 @@ const ASSUMED_CONTEXT_WINDOW: usize = 32_768;
 /// Tokens left for the model's reply when it has no `max_tokens` configured.
 const RESPONSE_RESERVE: usize = 4_096;
 
+/// Fraction of the window kept free for what the count cannot see: the chat
+/// template's wrapping and the tokenizer mismatch (see the module docs).
+const HEADROOM_FRACTION: f64 = 0.10;
+
 /// The compact stages keep this many characters of a tool result.
 const COMPACT_PREVIEW_CHARS: usize = 120;
 
@@ -114,6 +121,10 @@ pub struct ContextShaperSettings {
 
     /// Tokens reserved for the model's reply.
     pub response_reserve: usize,
+
+    /// Fraction of the window kept free for the chat template and the
+    /// tokenizer mismatch.
+    pub headroom_fraction: f64,
 }
 
 impl Default for ContextShaperSettings {
@@ -124,6 +135,7 @@ impl Default for ContextShaperSettings {
             keep_tail: KEEP_TAIL,
             assumed_context_window: ASSUMED_CONTEXT_WINDOW,
             response_reserve: RESPONSE_RESERVE,
+            headroom_fraction: HEADROOM_FRACTION,
         }
     }
 }
@@ -210,10 +222,13 @@ impl ContextShaper {
             .unwrap_or(self.inner.settings.assumed_context_window)
     }
 
-    /// Tokens available to the history once the reply reserve, the base and
-    /// `prompt_tokens` are taken off the window.
+    /// Tokens available to the history once the headroom, the reply reserve,
+    /// the base and `prompt_tokens` are taken off the window.
     pub fn history_budget(&self, prompt_tokens: usize) -> usize {
-        self.context_window()
+        let window = self.context_window();
+        let headroom = (window as f64 * self.inner.settings.headroom_fraction) as usize;
+        window
+            .saturating_sub(headroom)
             .saturating_sub(self.inner.settings.response_reserve)
             .saturating_sub(self.inner.base_tokens.load(Ordering::Relaxed))
             .saturating_sub(prompt_tokens)
@@ -463,6 +478,7 @@ mod tests {
             keep_head: 1,
             keep_tail: 2,
             response_reserve: 0,
+            headroom_fraction: 0.0,
             ..ContextShaperSettings::default()
         }
     }
@@ -484,13 +500,18 @@ mod tests {
         let shaper = ContextShaper::new(
             ContextShaperSettings {
                 response_reserve: 100,
+                headroom_fraction: 0.1,
                 ..ContextShaperSettings::default()
             },
             counter(),
             Some(1_000),
         );
         shaper.set_base_tokens(300);
-        assert_eq!(shaper.history_budget(50), 550);
+        assert_eq!(
+            shaper.history_budget(50),
+            450,
+            "1000 − 100 headroom − 100 reserve − 300 base − 50 prompt"
+        );
         assert_eq!(
             shaper.history_budget(10_000),
             0,
@@ -510,7 +531,7 @@ mod tests {
         assert_eq!(shaper.context_window(), ASSUMED_CONTEXT_WINDOW);
         assert_eq!(
             shaper.history_budget(0),
-            ASSUMED_CONTEXT_WINDOW - RESPONSE_RESERVE
+            ASSUMED_CONTEXT_WINDOW - ASSUMED_CONTEXT_WINDOW / 10 - RESPONSE_RESERVE
         );
     }
 
@@ -525,7 +546,7 @@ mod tests {
         config.max_context_window = Some(200_000);
         config.max_tokens = Some(8_000);
         let shaper = ContextShaper::for_model(&config);
-        assert_eq!(shaper.history_budget(0), 192_000);
+        assert_eq!(shaper.history_budget(0), 200_000 - 20_000 - 8_000);
     }
 
     #[test]

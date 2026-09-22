@@ -37,11 +37,14 @@ raw tool result. Before AGE-504 the shaper ran once per user turn, before the st
 counts by its serialized text, which is what the provider bills):
 
 ```
-context_window − response_reserve − base − prompt
+context_window − headroom − response_reserve − base − prompt
 ```
 
 - `context_window`: the model's `max_context_window`; an assumed **32 768** when the model
   has none configured (CLI-discovered and headless models).
+- `headroom`: a tenth of the window, for what the count cannot see — the chat template's
+  per-message wrapping and the gap between the tiktoken estimate and the model's own
+  tokenizer (about 2k tokens on a 32k Qwen request with the full tool set).
 - `response_reserve`: the model's `max_tokens`, or 4 096.
 - `base`: the preamble plus the tool schemas, measured once when the agent is built
   (`calibrate_context_shaper` in `factories/agent_factory/mod.rs`). With the full native
