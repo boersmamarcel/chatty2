@@ -39,8 +39,10 @@ use super::AgentClient;
 use super::prompt_cache_http::PromptCachingHttpClient;
 use crate::models::token_usage::{ApiCallUsage, format_hit_rate};
 use crate::services::AgentTaskController;
+use crate::services::context_shaper::ContextShaper;
 use crate::services::http_client::llm_client;
 use crate::services::llm_service::{StreamChunk, stream_prompt};
+use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderType;
 
 const KEY_ENV: &str = "OPENROUTER_API_KEY";
@@ -113,11 +115,20 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
             AgentBuilder::new(model).preamble(preamble).build()
         }
     };
+    // The probe's agents carry no hooks: the guard here is inert bookkeeping
+    // so the client can be constructed, not a registered hook.
+    let model_config = ModelConfig::new(
+        model.to_string(),
+        model.to_string(),
+        ProviderType::OpenRouter,
+        model.to_string(),
+    );
     AgentClient {
         agent: agent.clone(),
         task_controller: AgentTaskController::new(),
         provider: ProviderType::OpenRouter,
         utility: agent,
+        context_shaper: ContextShaper::for_model(&model_config),
     }
 }
 

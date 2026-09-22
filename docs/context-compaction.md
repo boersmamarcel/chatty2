@@ -3,39 +3,67 @@
 **When to read this:** You need to know what Chatty does to a long conversation
 history before it goes to the model, and what `/compact` and auto-summarise change.
 
-Two mechanisms keep a conversation inside the model's context window: per-request
-shaping, which never calls the model, and summarisation, which rewrites the persisted
-history and runs only on demand or at critical pressure.
+Two mechanisms keep a conversation inside the model's context window: the
+per-request guard, which never calls the model and runs before every model call of a
+turn, and summarisation, which rewrites the persisted history and runs only on demand
+or at critical pressure.
 
 ```mermaid
 flowchart LR
-    hist["Conversation history"] --> shaper["shape_context()<br/>per request, in memory"]
-    shaper --> req["Request to the model"]
+    hist["Conversation history"] --> guard["ContextShaper hook<br/>per model call, in memory"]
+    guard --> req["Request to the model"]
     hist -. "/compact, or auto-summarise<br/>at critical pressure" .-> sum["summarize_oldest_half()<br/>one LLM call"]
     sum --> rep["Conversation::replace_history()<br/>persisted"]
     rep --> hist
 ```
 
-## Per-request shaping
+## The per-request guard
 
-Both frontends call `shape_context`
-(`crates/chatty-core/src/services/context_shaper.rs`) on the history immediately
-before `stream_prompt`, with `agent = None`. The result is what the model sees for
-that request; the stored conversation is untouched. Stages run in order and the
-pipeline stops as soon as the history fits under the next threshold. All thresholds
-are character counts (`ContextShaperSettings::default()`), not tokens, and they do not
-consult the model's `max_context_window`.
+Every chat agent carries a `ContextShaper`
+(`crates/chatty-core/src/services/context_shaper.rs`) as a rig `AgentHook`. Before each
+model call of a run — the first one and every call after a tool round-trip — the hook
+measures the history that call would send and, only when the request would not fit the
+model's window, hands rig a shorter history for that one request
+(`RequestPatch::history`). The stored conversation is untouched, and a request that fits
+goes out byte for byte as recorded, so consecutive requests under budget share their
+prompt-cache prefix.
 
-| # | Stage | Trigger | Effect |
-|---|-------|---------|--------|
-| 1 | Budget reduction | always | Truncate any single tool result above 8 KB to a stub |
-| 2 | Snip | history > 80 000 chars | Keep the first 2 and last 8 messages, drop the middle |
-| 3 | Micro-compact | still > 50 000 chars | Replace tool-result bodies in the middle band with one-liners |
+The guard runs inside the tool loop because that is where a turn's context grows: a
+headless task is one user turn and up to `max_agent_turns` model calls, each appending a
+raw tool result. Before AGE-504 the shaper ran once per user turn, before the stream, and
+62 of 165 GAIA trials died mid-loop on `maximum context length is 32768 tokens`.
 
-Stages 4 and 5 (summarising with an LLM) need an `AgentClient`; neither call site
-passes one, so shaping never calls the model. Because the last-8 window slides by one
-message each turn, consecutive requests stop sharing a prompt-cache prefix once stage
-2 fires.
+**Budget.** In tokens, counted with the model's `TokenCounter` (a typed tool's JSON result
+counts by its serialized text, which is what the provider bills):
+
+```
+context_window − response_reserve − base − prompt
+```
+
+- `context_window`: the model's `max_context_window`; an assumed **32 768** when the model
+  has none configured (CLI-discovered and headless models).
+- `response_reserve`: the model's `max_tokens`, or 4 096.
+- `base`: the preamble plus the tool schemas, measured once when the agent is built
+  (`calibrate_context_shaper` in `factories/agent_factory/mod.rs`). With the full native
+  tool set this is around 16k tokens — the tool block alone is ~52 KB of JSON.
+- `prompt`: the message the call is about to send (a user message or the latest tool
+  results). It is never shaped.
+
+**Stages.** Applied in order, cheapest information loss first, stopping as soon as the
+history fits. The most recent 8 messages are what the model is working with and stay
+whole for as long as possible.
+
+| # | Stage | Effect |
+|---|-------|--------|
+| 1 | Cap | Stub every tool result over 8 KB outside the tail (`[tool result truncated — N chars]` plus a 200-char preview) |
+| 2 | Compact | Replace every tool result outside the tail with a one-liner (`[compacted] …`, 120 chars) |
+| 3 | Snip | Keep the first 2 and last 8 messages, replace the middle with one marker |
+| 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first; the last message is never touched |
+
+A history still over budget after stage 4 is sent as is (a warning is logged): without
+summarising there is nothing left to take. Once a run is over budget the tail boundary
+moves by one message per call, so requests stop sharing a prefix until it fits again —
+the price of not crashing, and what the planned engine below removes.
 
 ## Summarisation
 
@@ -80,12 +108,13 @@ conversation's model.
 
 ## Planned
 
-A generational compaction engine is designed but not implemented: a trigger on the
-token estimate, cuts only at exchange boundaries with the most recent exchanges kept
+A generational compaction engine is designed but not implemented (AGE-248): a trigger on
+the token estimate, cuts only at exchange boundaries with the most recent exchanges kept
 whole, a structured summary rendered as a collapsible card, summarisation on a
 cheaper utility model, compaction events on both frontends, and auto-summarise on by
-default. It replaces the per-request shaper so consecutive requests share a stable
-prompt-cache prefix.
+default. It persists its result, so consecutive requests share a stable prompt-cache
+prefix even over budget; the per-request guard stays as the last line of defence
+inside a turn.
 
 ## Related
 

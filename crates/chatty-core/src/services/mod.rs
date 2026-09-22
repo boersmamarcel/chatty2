@@ -84,7 +84,7 @@ pub use agent_task_controller::{
     AgentTaskController, AgentTaskResponse, AgentTaskSnapshot, AgentTodo, AgentTodoStatus,
     is_agent_todo_tool, is_protocol_follow_up_text, snapshot_from_tool_output,
 };
-pub use context_shaper::{ContextShaperSettings, ShapedContext, shape_context};
+pub use context_shaper::{ContextShaper, ContextShaperSettings, ContextShaperStage, ShapedContext};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
 pub use llm_service::{StreamChunk, stream_prompt};
