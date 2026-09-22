@@ -620,68 +620,158 @@ async fn openrouter_moving_breakpoint_rewrites_the_previously_last_message() {
     );
 }
 
-/// The guard's job (AGE-504): a run whose tool results outgrow the window
-/// gets a shorter history on its next model call, inside the tool loop, with
-/// the message the model is answering left whole.
-///
-/// The fixture model has a 2 000-token window, which the preamble and tool
-/// block alone exceed, so every request with any history is over budget. The
-/// daemon scripts two tool calls: request 2 carries the first result raw (it
-/// is that call's prompt, never shaped); request 3 carries it as history,
-/// where the guard stubs it, while the second result — now the prompt — goes
-/// out whole.
-#[tokio::test]
-async fn the_context_guard_shapes_inside_the_tool_loop() {
-    let workspace = workspace_with_payload(150);
-    let daemon = FakeDaemon::ollama(vec![
-        tool_call_response("payload"),
-        tool_call_response("payload"),
-        text_response("A lot of files, twice."),
-    ]);
+/// A session against the Ollama daemon whose model has `window` tokens and a
+/// 64-token reply reserve, for the guard tests below.
+async fn session_with_window(daemon: &FakeDaemon, workspace: &Path, window: i32) -> AgentSession {
     let mut model_config = ModelConfig::new(
         "age-504".to_string(),
         "Guard Fixture".to_string(),
         ProviderType::Ollama,
         "llama3.2".to_string(),
     );
-    model_config.max_context_window = Some(2_000);
+    model_config.max_context_window = Some(window);
     model_config.max_tokens = Some(64);
     let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
         .with_base_url(daemon.base_url());
-    let mut session = session_with(&model_config, &provider_config, workspace.path()).await;
+    session_with(&model_config, &provider_config, workspace).await
+}
+
+fn guard_of(session: &AgentSession) -> crate::services::ContextShaper {
+    session
+        .conversation()
+        .expect("the fixture conversation")
+        .agent()
+        .context_shaper()
+        .clone()
+}
+
+/// The guard's job (AGE-504), part one: results that fit the recording cap
+/// but together outgrow the window get a shorter history on the next model
+/// call, inside the tool loop, with the message the model is answering — the
+/// newest result — sent exactly as recorded.
+///
+/// The daemon scripts six identical tool calls. Each 15 KB listing is under
+/// the recording cap (the window is chosen so), so every result is recorded
+/// whole; by the last request five of them are history and do not fit, so
+/// the guard shapes them while the sixth — the prompt — goes out untouched.
+#[tokio::test]
+async fn the_context_guard_shapes_inside_the_tool_loop() {
+    let workspace = workspace_with_payload(150);
+    let daemon = FakeDaemon::ollama(vec![
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        text_response("A lot of files, six times."),
+    ]);
+    let mut session = session_with_window(&daemon, workspace.path(), 30_000).await;
+
+    let events = run_and_commit_turn(&mut session, "what is in payload?").await;
+    assert_no_stream_error(&events, "the turn");
+
+    let bodies = daemon.bodies();
+    assert_eq!(bodies.len(), 7, "six tool calls, then the answer");
+
+    // Guard the premise: the result is over the 8 KB cap the shaping stages
+    // use and under the recording cap, so it is recorded whole.
+    let raw = message_elements(&bodies[1]);
+    let result = raw
+        .iter()
+        .find(|m| m.contains("\"role\":\"tool\""))
+        .expect("request 2 carries the tool result");
+    assert!(
+        result.len() > 8_192,
+        "the fixture's tool result exceeds 8 KB"
+    );
+    assert!(
+        !result.contains("[tool result truncated"),
+        "recorded whole: {}…",
+        &result[..200]
+    );
+    let guard = guard_of(&session);
+    assert!(
+        guard.counter().count(result) <= guard.recording_cap(),
+        "fixture: the result must be under the recording cap {}",
+        guard.recording_cap()
+    );
+
+    let last_request = message_elements(&bodies[6]);
+    let shaped_at: Vec<usize> = last_request
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.contains("[tool result truncated")
+                || m.contains("[compacted]")
+                || m.contains("snipped")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !shaped_at.is_empty(),
+        "five results in history do not fit a {}-token budget, so the guard shaped the request; sizes: {:?}",
+        guard.history_budget(0),
+        last_request.iter().map(|m| m.len()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        last_request.last().map(String::len),
+        Some(result.len()),
+        "the newest result is the prompt and goes out as recorded"
+    );
+}
+
+/// The guard's job, part two: a result larger than the recording cap is cut
+/// down once, where it is recorded, so it is the same bytes on every later
+/// request — the append-only property holds for it — and the conversation
+/// persists the recorded form.
+///
+/// The fixture window leaves a budget the 12 KB listing exceeds half of, so
+/// it is cut at recording; the cut form then fits the budget, so request 3
+/// is not shaped and carries it unchanged.
+#[tokio::test]
+async fn a_result_over_the_recording_cap_is_recorded_truncated_once() {
+    let workspace = workspace_with_payload(150);
+    let daemon = FakeDaemon::ollama(vec![
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        text_response("A lot of files, twice."),
+    ]);
+    let mut session = session_with_window(&daemon, workspace.path(), 16_000).await;
 
     let events = run_and_commit_turn(&mut session, "what is in payload?").await;
     assert_no_stream_error(&events, "the turn");
 
     let bodies = daemon.bodies();
     assert_eq!(bodies.len(), 3, "two tool calls, then the answer");
-
-    let raw = message_elements(&bodies[1]);
-    let shaped = message_elements(&bodies[2]);
-    let stub = "[tool result truncated";
+    let header = "[tool result truncated — kept ";
+    let guard = guard_of(&session);
     assert!(
-        !raw.iter().any(|m| m.contains(stub)),
-        "the first result is request 2's prompt and goes out whole"
-    );
-    assert!(
-        raw.iter().any(|m| m.len() > 8_192),
-        "the fixture's tool result did not exceed the cap"
+        guard.recording_cap() > crate::services::context_shaper::RECORDING_CAP_FLOOR_TOKENS
+            && guard.recording_cap() <= guard.history_budget(0),
+        "fixture: the cap ({}) sits inside the budget ({})",
+        guard.recording_cap(),
+        guard.history_budget(0)
     );
 
-    let stubbed: Vec<&String> = shaped.iter().filter(|m| m.contains(stub)).collect();
+    let second = message_elements(&bodies[1]);
+    let recorded = second
+        .iter()
+        .find(|m| m.contains(header))
+        .expect("request 2 carries the first result cut to the recording cap");
+    assert!(recorded.len() < 8_192, "cut well under the raw 12 KB");
+    let third = message_elements(&bodies[2]);
     assert_eq!(
-        stubbed.len(),
-        1,
-        "request 3 carries the first result as history, stubbed by the guard:\n{shaped:#?}"
+        third.get(second.len() - 1),
+        Some(recorded),
+        "request 3 carries the same bytes: cut once, at recording"
     );
-    assert_eq!(
-        shaped.len(),
-        raw.len() + 2,
-        "nothing is dropped: the second call and its result are appended"
-    );
-    let last = shaped.last().expect("request 3 has messages");
+
+    let persisted = session.conversation().expect("conversation").messages();
     assert!(
-        last.len() > 8_192 && !last.contains(stub),
-        "the second result is request 3's prompt and goes out whole"
+        persisted
+            .iter()
+            .any(|m| serde_json::to_string(m).unwrap().contains(header)),
+        "the conversation persists the recorded form"
     );
 }

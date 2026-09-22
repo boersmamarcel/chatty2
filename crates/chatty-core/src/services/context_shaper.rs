@@ -48,16 +48,29 @@
 //!
 //! A history that is still over budget after stage 4 is sent as is: without
 //! summarising there is nothing left to take.
+//!
+//! # The one result that can never fit
+//!
+//! The message a call is about to send — the latest tool results — is never
+//! shaped, and a single result can be larger than the whole budget (a 36 KB
+//! dump of 450 Wikipedia revisions was, in AGE-500). The only place that can
+//! be caught is where the result is recorded: `on_tool_result` truncates a
+//! result over two fifths of the history budget, once, so the same bytes go out on
+//! every later call (the AGE-277 property holds for it too) and the model
+//! sees as much of it as the window allows. Everything under that cap is
+//! recorded whole.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rig_agent::agent::{
     AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
+    ToolResultAction, ToolResultEvent,
 };
 use rig_core::completion::Message;
 use rig_core::completion::message::{Text, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
+use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
 
 use crate::settings::models::models_store::ModelConfig;
@@ -89,6 +102,11 @@ const HEADROOM_FRACTION: f64 = 0.10;
 
 /// The compact stages keep this many characters of a tool result.
 const COMPACT_PREVIEW_CHARS: usize = 120;
+
+/// The recording cap never drops below this many tokens, however small the
+/// budget: a model whose base alone fills the window is broken anyway, and a
+/// result cut to nothing would hide why.
+pub const RECORDING_CAP_FLOOR_TOKENS: usize = 512;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -239,6 +257,68 @@ impl ContextShaper {
         &self.inner.counter
     }
 
+    /// Tokens a single tool result may occupy when it is recorded: two
+    /// fifths of the history budget, so the newest two results fit together
+    /// with a fifth to spare for the calls around them, with a floor of
+    /// [`RECORDING_CAP_FLOOR_TOKENS`].
+    pub fn recording_cap(&self) -> usize {
+        (self.history_budget(0) * 2 / 5).max(RECORDING_CAP_FLOOR_TOKENS)
+    }
+
+    /// The presentation a tool result is recorded with: `output` itself when
+    /// it fits the recording cap, else its text cut down to the cap with a
+    /// header saying how much was kept. Image blocks are never touched.
+    pub fn record_tool_output(&self, output: &ToolOutput) -> Option<ToolOutput> {
+        let content = output.as_content();
+        if content
+            .iter()
+            .any(|block| matches!(block, ToolResultContent::Image(_)))
+        {
+            return None;
+        }
+        let text = content
+            .iter()
+            .map(|block| match block {
+                ToolResultContent::Text(text) => text.text.clone(),
+                ToolResultContent::Json { value } => value.to_string(),
+                ToolResultContent::Image(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tokens = self.inner.counter.count(&text);
+        let cap = self.recording_cap();
+        if tokens <= cap {
+            return None;
+        }
+        // Keep the share of the text the cap allows, at this result's own
+        // chars-per-token ratio, on a char boundary; the ratio of a prefix
+        // is only close to the whole's, so recount and cut again while the
+        // kept part plus its header is still over the cap.
+        let header = |kept: usize| {
+            format!(
+                "[tool result truncated — kept {kept} of {} chars; the rest did not fit the model's context window]\n",
+                text.len()
+            )
+        };
+        let budget = cap.saturating_sub(self.inner.counter.count(&header(text.len())));
+        let mut keep = text.len() * budget / tokens;
+        for _ in 0..4 {
+            let cut = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|i| *i <= keep)
+                .last()
+                .unwrap_or(0);
+            let kept = &text[..cut];
+            let kept_tokens = self.inner.counter.count(kept);
+            if kept_tokens <= budget || cut == 0 {
+                return Some(ToolOutput::text(format!("{}{kept}", header(cut))));
+            }
+            keep = cut * budget / kept_tokens;
+        }
+        Some(ToolOutput::text(header(0)))
+    }
+
     /// Shape `history` for a request whose prompt costs `prompt_tokens`.
     /// `None` when it already fits: the request goes out exactly as recorded.
     pub fn shape(&self, history: &[Message], prompt_tokens: usize) -> Option<ShapedContext> {
@@ -355,6 +435,24 @@ impl AgentHook for ContextShaper {
                 CompletionCallAction::patch(RequestPatch::new().history(shaped.messages))
             }
             None => CompletionCallAction::Continue,
+        }
+    }
+
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        match self.record_tool_output(event.presentation) {
+            Some(truncated) => {
+                warn!(
+                    tool = event.tool_name,
+                    cap_tokens = self.recording_cap(),
+                    "context shaper: tool result larger than the recording cap; recorded truncated"
+                );
+                ToolResultAction::Rewrite(truncated)
+            }
+            None => ToolResultAction::Keep,
         }
     }
 }
@@ -689,5 +787,59 @@ mod tests {
         );
         assert!(!cap_tool_results(&mut message, 1));
         assert!(!compact_tool_results(&mut message));
+    }
+
+    #[test]
+    fn a_result_under_the_recording_cap_is_recorded_whole() {
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10_000));
+        let output =
+            ToolOutput::json(serde_json::json!({ "content": vec!["word"; 200].join(" ") }));
+        assert!(shaper.record_tool_output(&output).is_none());
+    }
+
+    #[test]
+    fn a_result_over_the_recording_cap_is_cut_to_the_cap_once() {
+        // Budget 2 000 → cap 800 tokens; 3 000 words are ~3 000 tokens.
+        let shaper = ContextShaper::new(settings(100), counter(), Some(2_000));
+        let words = vec!["word"; 3_000].join(" ");
+        let output = ToolOutput::json(serde_json::json!({ "content": words }));
+        let recorded = shaper.record_tool_output(&output).expect("over the cap");
+        let text = recorded.as_text().expect("recorded as text");
+        assert!(text.starts_with("[tool result truncated — kept "));
+        let kept = shaper.counter().count(text);
+        assert!(
+            kept <= shaper.recording_cap() + 40,
+            "kept {kept} tokens against a cap of {}",
+            shaper.recording_cap()
+        );
+        assert!(
+            kept > shaper.recording_cap() / 2,
+            "keeps most of what fits, not a stub"
+        );
+        // Recording again is a no-op: the truncated form fits.
+        assert!(shaper.record_tool_output(&recorded).is_none());
+    }
+
+    #[test]
+    fn the_recording_cap_has_a_floor() {
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10));
+        assert_eq!(shaper.recording_cap(), RECORDING_CAP_FLOOR_TOKENS);
+    }
+
+    #[test]
+    fn a_result_with_an_image_is_recorded_whole() {
+        use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10));
+        let output = ToolOutput::content(vec![
+            ToolResultContent::Text(Text::new(vec!["word"; 3_000].join(" "))),
+            ToolResultContent::Image(Image {
+                data: DocumentSourceKind::base64("AAAA"),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                additional_params: None,
+            }),
+        ])
+        .unwrap();
+        assert!(shaper.record_tool_output(&output).is_none());
     }
 }

@@ -64,7 +64,17 @@ whole for as long as possible.
 | 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first; the last message is never touched |
 
 A history still over budget after stage 4 is sent as is (a warning is logged): without
-summarising there is nothing left to take. Once a run is over budget the tail boundary
+summarising there is nothing left to take.
+
+**The one result that can never fit.** The prompt — the latest tool results — is never
+shaped, and a single result can be larger than the whole budget (a 237 KB shell dump
+was, in the AGE-500 rerun). That is caught where the result is recorded: the same hook's
+`on_tool_result` cuts a result over **two fifths of the history budget** (floor 512
+tokens) down to the cap, once, with a header saying how much was kept. The cut form is
+what the transcript shows, what the conversation persists and what every later request
+carries, so the append-only property holds for it too. On a 32k model with the full
+tool set that cap is ~4k tokens (~16 KB); on a 200k model it is ~70k tokens and never
+bites in practice. Once a run is over budget the tail boundary
 moves by one message per call, so requests stop sharing a prefix until it fits again —
 the price of not crashing, and what the planned engine below removes.
 
