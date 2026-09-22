@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use crate::settings::models::search_settings::SearchProvider;
 use crate::tools::ToolError;
+use crate::tools::html_entities::decode_html_entities;
 
 /// Request timeout for search API calls
 const SEARCH_TIMEOUT_SECS: u64 = 15;
@@ -665,123 +666,6 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
     decode_html_entities(&result)
-}
-
-/// HTML named entities for U+00A0–U+00FF in code point order: index 0 is
-/// `&nbsp;` (U+00A0), index 95 is `&yuml;` (U+00FF). This covers the accented
-/// Latin characters and Latin-1 punctuation real search results carry.
-const LATIN1_ENTITY_NAMES: [&str; 96] = [
-    "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf",
-    "laquo", "not", "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro",
-    "para", "middot", "cedil", "sup1", "ordm", "raquo", "frac14", "frac12", "frac34", "iquest",
-    "Agrave", "Aacute", "Acirc", "Atilde", "Auml", "Aring", "AElig", "Ccedil", "Egrave", "Eacute",
-    "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH", "Ntilde", "Ograve", "Oacute",
-    "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc", "Uuml", "Yacute",
-    "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
-    "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde",
-    "ograve", "oacute", "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc",
-    "uuml", "yacute", "thorn", "yuml",
-];
-
-/// Common named entities outside the Latin-1 block.
-const EXTRA_ENTITIES: &[(&str, char)] = &[
-    ("amp", '&'),
-    ("lt", '<'),
-    ("gt", '>'),
-    ("quot", '"'),
-    ("apos", '\''),
-    ("ndash", '–'),
-    ("mdash", '—'),
-    ("lsquo", '‘'),
-    ("rsquo", '’'),
-    ("sbquo", '‚'),
-    ("ldquo", '“'),
-    ("rdquo", '”'),
-    ("bdquo", '„'),
-    ("dagger", '†'),
-    ("Dagger", '‡'),
-    ("bull", '•'),
-    ("hellip", '…'),
-    ("permil", '‰'),
-    ("prime", '′'),
-    ("Prime", '″'),
-    ("lsaquo", '‹'),
-    ("rsaquo", '›'),
-    ("oline", '‾'),
-    ("frasl", '⁄'),
-    ("euro", '€'),
-    ("trade", '™'),
-    ("larr", '←'),
-    ("uarr", '↑'),
-    ("rarr", '→'),
-    ("darr", '↓'),
-    ("harr", '↔'),
-    ("minus", '−'),
-    ("ensp", ' '),
-    ("emsp", ' '),
-    ("thinsp", ' '),
-];
-
-/// Resolve one entity name (the text between `&` and `;`) to its character.
-fn entity_char(name: &str) -> Option<char> {
-    if let Some(digits) = name.strip_prefix('#') {
-        let code = match digits.strip_prefix(['x', 'X']) {
-            Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-            None => digits.parse::<u32>().ok()?,
-        };
-        return char::from_u32(code);
-    }
-    // A plain space keeps snippets trimmable, as the old table did.
-    if name == "nbsp" {
-        return Some(' ');
-    }
-    if let Some(index) = LATIN1_ENTITY_NAMES
-        .iter()
-        .position(|entity| *entity == name)
-    {
-        return char::from_u32(0xA0 + index as u32);
-    }
-    EXTRA_ENTITIES
-        .iter()
-        .find(|(entity, _)| *entity == name)
-        .map(|(_, ch)| *ch)
-}
-
-/// Decode HTML character references — named (`&eacute;`) and numeric
-/// (`&#233;`, `&#x27;`, `&#0183;`) — in a single pass, so `&amp;lt;` decodes
-/// to the literal text `&lt;` rather than `<`. An unknown or malformed
-/// reference is left exactly as it was written.
-fn decode_html_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        let after = &rest[amp + 1..];
-        let decoded = after.find(';').and_then(|semi| {
-            let name = &after[..semi];
-            // Entity names are short and have no markup or whitespace in them.
-            if name.is_empty() || name.len() > 32 || name.contains(['&', '<', ' ']) {
-                None
-            } else {
-                entity_char(name).map(|ch| (ch, semi))
-            }
-        });
-        match decoded {
-            Some((ch, semi)) => {
-                out.push(ch);
-                rest = &after[semi + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Truncate a snippet to a maximum length at a word boundary
