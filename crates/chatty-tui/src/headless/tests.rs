@@ -763,3 +763,24 @@ mod runner {
         );
     }
 }
+
+/// A plain `chatty-tui --headless -m "..."` run (and every delegated
+/// sub-agent turn, which rides the same path) must not be told it is running
+/// a benchmark or asked for `/app/answer.txt` when a provider stream error
+/// interrupts it — nothing in that run writes an answer file.
+#[test]
+fn stream_error_recovery_prompt_is_benchmark_free_without_an_answer_file() {
+    let prompt = stream_error_recovery_prompt(false);
+    assert!(!prompt.contains("benchmark"));
+    assert!(!prompt.contains("answer.txt"));
+    assert!(prompt.contains("Continue the same task"));
+}
+
+/// An answer-file task is still told where to write, since that file is what
+/// the run produces.
+#[test]
+fn stream_error_recovery_prompt_names_the_answer_file_when_one_is_required() {
+    let prompt = stream_error_recovery_prompt(true);
+    assert!(prompt.contains("/app/answer.txt"));
+    assert_eq!(prompt, ANSWER_FILE_STREAM_ERROR_RECOVERY_PROMPT);
+}

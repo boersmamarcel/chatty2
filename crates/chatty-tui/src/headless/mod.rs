@@ -45,7 +45,27 @@ const FINALIZATION_EVIDENCE_CHARS: usize = 16_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 4_000;
 const TEXT_HARD_STOP_BYTES: usize = 20_000;
 const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
-const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
+/// Sent after a provider stream error on an answer-file task. Names the
+/// expected output path because the run is scored on that file.
+const ANSWER_FILE_STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
+/// Sent after a provider stream error on an ordinary headless run — a script,
+/// a pipeline, or a delegated worker turn. The answer-file wording above must
+/// not reach these: they have no `/app/answer.txt` to write and no benchmark
+/// task to continue.
+const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same task from the visible evidence. If you already have what you need, give the final answer now. Otherwise use at most one compact tool call and keep output short.";
+
+/// Picks the recovery prompt for a provider stream error. Everything else in
+/// the answer-file cluster is gated on `answer_file_required`; this prompt was
+/// not, so every headless run — including the sub-agent workers that ride this
+/// same path — was told to continue "the same benchmark task" and write
+/// `/app/answer.txt`.
+fn stream_error_recovery_prompt(answer_file_required: bool) -> &'static str {
+    if answer_file_required {
+        ANSWER_FILE_STREAM_ERROR_RECOVERY_PROMPT
+    } else {
+        STREAM_ERROR_RECOVERY_PROMPT
+    }
+}
 
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is
 /// rig's own `UnknownToolCall` display text, which already lists the
@@ -349,7 +369,9 @@ pub async fn run_headless(
                             compact_prompt,
                         ));
                     } else {
-                        engine.send_recovery_prompt(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                        engine.send_recovery_prompt(
+                            stream_error_recovery_prompt(answer_file_required).to_string(),
+                        );
                     }
                     continue;
                 }
