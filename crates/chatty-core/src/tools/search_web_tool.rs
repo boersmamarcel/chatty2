@@ -258,7 +258,7 @@ impl SearchWebTool {
         let response = self
             .client
             .get("https://www.bing.com/search")
-            .query(&[("q", query)])
+            .query(&bing_query_params(query))
             .send()
             .await
             .map_err(|e| ToolError::OperationFailed(format!("Bing request failed: {}", e)))?;
@@ -517,6 +517,16 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
 fn looks_like_ddg_challenge_page(html: &str) -> bool {
     let lower = html.to_lowercase();
     lower.contains("anomaly") || lower.contains("challenge")
+}
+
+/// Query parameters for a Bing search request.
+///
+/// `setlang`/`cc` ask Bing for English results/UI and US ranking instead of
+/// guessing locale from the requester's IP (AGE-508); complementary to the
+/// `Accept-Language` header the shared HTTP client builders now send
+/// (`services::http_client`).
+fn bing_query_params(query: &str) -> [(&str, &str); 3] {
+    [("q", query), ("setlang", "en"), ("cc", "US")]
 }
 
 /// Parse search results from a Bing HTML results page.
@@ -779,6 +789,33 @@ mod tests {
         let no_results_page = "<html><body>No results.</body></html>";
         assert!(parse_ddg_lite_results(no_results_page, 5).is_empty());
         assert!(!looks_like_ddg_challenge_page(no_results_page));
+    }
+
+    /// AGE-508: the Bing request asks for English results / US ranking
+    /// (`setlang`/`cc`) instead of letting Bing guess locale from IP, and
+    /// still carries the query text — checked on the actual built request
+    /// URL, not just the parameter tuple, since `RequestBuilder::query`
+    /// could in principle be wired up wrong.
+    #[test]
+    fn test_bing_request_includes_setlang_and_cc() {
+        assert_eq!(
+            bing_query_params("rust lang"),
+            [("q", "rust lang"), ("setlang", "en"), ("cc", "US")]
+        );
+
+        let client = crate::services::http_client::browser_client(1);
+        let request = client
+            .get("https://www.bing.com/search")
+            .query(&bing_query_params("rust lang"))
+            .build()
+            .unwrap();
+        let query = request.url().query().unwrap_or("");
+        assert!(
+            query.contains("q=rust+lang") || query.contains("q=rust%20lang"),
+            "got {query}"
+        );
+        assert!(query.contains("setlang=en"), "got {query}");
+        assert!(query.contains("cc=US"), "got {query}");
     }
 
     /// AGE-495: Bing HTML fallback, kept working when DDG serves a challenge.
