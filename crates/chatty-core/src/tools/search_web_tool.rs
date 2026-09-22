@@ -1,3 +1,4 @@
+use base64::Engine as _;
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
@@ -272,7 +273,20 @@ impl SearchWebTool {
             ToolError::OperationFailed(format!("Failed to read Bing response: {}", e))
         })?;
 
-        Ok(parse_bing_results(&html, max_results))
+        let results = parse_bing_results(&html, max_results);
+        // Bing answers some clients with decoy results — well-formed `b_algo`
+        // blocks about something else entirely, re-rolled on every request
+        // (AGE-506). Like the DDG challenge page below, that is an
+        // unavailable backend, not an answer, so say so instead of handing
+        // the model a confident-looking list of unrelated links.
+        if !results.is_empty() && !results_match_query(query, &results) {
+            return Err(ToolError::OperationFailed(
+                "Bing returned results unrelated to the query (anti-scraping decoy page); \
+                 web search is unavailable"
+                    .to_string(),
+            ));
+        }
+        Ok(results)
     }
 
     /// Fallback search using DuckDuckGo lite (no API key required).
@@ -540,7 +554,7 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
         let Some(href_end) = after_h2[href_value_start..].find('"') else {
             continue;
         };
-        let url = after_h2[href_value_start..href_value_start + href_end].to_string();
+        let url = decode_bing_redirect(&after_h2[href_value_start..href_value_start + href_end]);
         if !url.starts_with("http") {
             continue;
         }
@@ -558,6 +572,57 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     }
 
     results
+}
+
+/// Resolve a Bing result href to the page it actually points at.
+///
+/// Bing wraps every organic result in a tracking redirect shaped
+/// `https://www.bing.com/ck/a?...&u=a1<base64url of the real URL>&ntb=1`, and
+/// the source page carries it HTML-escaped (`&amp;`). Without this the model
+/// only ever sees the redirect and has to guess URLs from titles (AGE-506).
+///
+/// Best effort: anything that is not that exact shape — a direct link, a
+/// changed redirect format, a payload that is not base64url of a URL — falls
+/// back to the href as found rather than failing the search.
+fn decode_bing_redirect(href: &str) -> String {
+    decode_bing_redirect_inner(href).unwrap_or_else(|| href.to_string())
+}
+
+fn decode_bing_redirect_inner(href: &str) -> Option<String> {
+    let unescaped = decode_html_entities(href);
+    if !unescaped.contains("bing.com/ck/a") {
+        return None;
+    }
+    let query = unescaped.split_once('?')?.1;
+    let u = query
+        .split('&')
+        .find_map(|param| param.strip_prefix("u="))?;
+    // Bing prefixes the base64url payload with a two-character scheme tag.
+    let payload = u.strip_prefix("a1").unwrap_or(u);
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let url = String::from_utf8(bytes).ok()?;
+    url.starts_with("http").then_some(url)
+}
+
+/// Whether any parsed result plausibly belongs to `query`: one content term
+/// (a word of 4+ characters) of the query occurring in some result's title,
+/// snippet or URL is enough. A query with no such term (e.g. "who won") can't
+/// be judged this way and passes.
+fn results_match_query(query: &str, results: &[SearchResult]) -> bool {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 4)
+        .map(str::to_lowercase)
+        .collect();
+    if terms.is_empty() {
+        return true;
+    }
+    results.iter().any(|result| {
+        let haystack = format!("{} {} {}", result.title, result.snippet, result.url).to_lowercase();
+        terms.iter().any(|term| haystack.contains(term))
+    })
 }
 
 /// Extract the anchor text of the first `<a ...>...</a>` in `html`, with
@@ -599,14 +664,124 @@ fn strip_html_tags(html: &str) -> String {
             _ => {}
         }
     }
-    // Decode common HTML entities
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&nbsp;", " ")
+    decode_html_entities(&result)
+}
+
+/// HTML named entities for U+00A0–U+00FF in code point order: index 0 is
+/// `&nbsp;` (U+00A0), index 95 is `&yuml;` (U+00FF). This covers the accented
+/// Latin characters and Latin-1 punctuation real search results carry.
+const LATIN1_ENTITY_NAMES: [&str; 96] = [
+    "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf",
+    "laquo", "not", "shy", "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro",
+    "para", "middot", "cedil", "sup1", "ordm", "raquo", "frac14", "frac12", "frac34", "iquest",
+    "Agrave", "Aacute", "Acirc", "Atilde", "Auml", "Aring", "AElig", "Ccedil", "Egrave", "Eacute",
+    "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH", "Ntilde", "Ograve", "Oacute",
+    "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc", "Uuml", "Yacute",
+    "THORN", "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
+    "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde",
+    "ograve", "oacute", "ocirc", "otilde", "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc",
+    "uuml", "yacute", "thorn", "yuml",
+];
+
+/// Common named entities outside the Latin-1 block.
+const EXTRA_ENTITIES: &[(&str, char)] = &[
+    ("amp", '&'),
+    ("lt", '<'),
+    ("gt", '>'),
+    ("quot", '"'),
+    ("apos", '\''),
+    ("ndash", '–'),
+    ("mdash", '—'),
+    ("lsquo", '‘'),
+    ("rsquo", '’'),
+    ("sbquo", '‚'),
+    ("ldquo", '“'),
+    ("rdquo", '”'),
+    ("bdquo", '„'),
+    ("dagger", '†'),
+    ("Dagger", '‡'),
+    ("bull", '•'),
+    ("hellip", '…'),
+    ("permil", '‰'),
+    ("prime", '′'),
+    ("Prime", '″'),
+    ("lsaquo", '‹'),
+    ("rsaquo", '›'),
+    ("oline", '‾'),
+    ("frasl", '⁄'),
+    ("euro", '€'),
+    ("trade", '™'),
+    ("larr", '←'),
+    ("uarr", '↑'),
+    ("rarr", '→'),
+    ("darr", '↓'),
+    ("harr", '↔'),
+    ("minus", '−'),
+    ("ensp", ' '),
+    ("emsp", ' '),
+    ("thinsp", ' '),
+];
+
+/// Resolve one entity name (the text between `&` and `;`) to its character.
+fn entity_char(name: &str) -> Option<char> {
+    if let Some(digits) = name.strip_prefix('#') {
+        let code = match digits.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+            None => digits.parse::<u32>().ok()?,
+        };
+        return char::from_u32(code);
+    }
+    // A plain space keeps snippets trimmable, as the old table did.
+    if name == "nbsp" {
+        return Some(' ');
+    }
+    if let Some(index) = LATIN1_ENTITY_NAMES
+        .iter()
+        .position(|entity| *entity == name)
+    {
+        return char::from_u32(0xA0 + index as u32);
+    }
+    EXTRA_ENTITIES
+        .iter()
+        .find(|(entity, _)| *entity == name)
+        .map(|(_, ch)| *ch)
+}
+
+/// Decode HTML character references — named (`&eacute;`) and numeric
+/// (`&#233;`, `&#x27;`, `&#0183;`) — in a single pass, so `&amp;lt;` decodes
+/// to the literal text `&lt;` rather than `<`. An unknown or malformed
+/// reference is left exactly as it was written.
+fn decode_html_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let decoded = after.find(';').and_then(|semi| {
+            let name = &after[..semi];
+            // Entity names are short and have no markup or whitespace in them.
+            if name.is_empty() || name.len() > 32 || name.contains(['&', '<', ' ']) {
+                None
+            } else {
+                entity_char(name).map(|ch| (ch, semi))
+            }
+        });
+        match decoded {
+            Some((ch, semi)) => {
+                out.push(ch);
+                rest = &after[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Truncate a snippet to a maximum length at a word boundary
@@ -744,6 +919,117 @@ mod tests {
         assert_eq!(results[0].snippet, "First snippet text.");
         assert_eq!(results[1].url, "https://example.com/two");
         assert_eq!(results[1].title, "Second Result");
+    }
+
+    /// AGE-506 (1): every real Bing href is an HTML-escaped `ck/a` tracking
+    /// redirect; the model needs the destination, not the redirect.
+    #[test]
+    fn test_parse_bing_results_decodes_redirect_href() {
+        let html = r#"<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc123&amp;u=a1aHR0cHM6Ly93d3cuYnJpdGlzaG11c2V1bS5vcmcvY29sbGVjdGlvbg&amp;ntb=1">The British Museum</a></h2>
+            <div class="b_caption"><p>Collection of the British Museum.</p></div></li>"#;
+        let results = parse_bing_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://www.britishmuseum.org/collection");
+    }
+
+    /// The exact payload shape observed in the wild (AGE-506 evidence).
+    #[test]
+    fn test_decode_bing_redirect_matches_observed_payload() {
+        let href =
+            "https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvVGhl&ntb=1";
+        assert_eq!(
+            decode_bing_redirect(href),
+            "https://en.wikipedia.org/wiki/The"
+        );
+    }
+
+    #[test]
+    fn test_decode_bing_redirect_leaves_direct_links_alone() {
+        let href = "https://example.com/one";
+        assert_eq!(decode_bing_redirect(href), href);
+    }
+
+    /// Best effort: a redirect we can't decode must degrade to the raw href,
+    /// never fail the whole search.
+    #[test]
+    fn test_decode_bing_redirect_falls_back_on_malformed_payload() {
+        for href in [
+            "https://www.bing.com/ck/a?p=abc&ntb=1", // no u= at all
+            "https://www.bing.com/ck/a?u=a1!!!not-base64!!!", // undecodable
+            "https://www.bing.com/ck/a?u=a1bm90IGEgdXJs", // decodes to "not a url"
+            "https://www.bing.com/ck/a",             // no query string
+        ] {
+            assert_eq!(decode_bing_redirect(href), href, "href: {href}");
+        }
+    }
+
+    /// AGE-506 (2): decoy results parse perfectly but have nothing to do with
+    /// the query, the same way the DDG challenge page parses to nothing.
+    #[test]
+    fn test_bing_decoy_results_are_detected() {
+        let decoys = vec![
+            SearchResult {
+                title: "British Airways | Book flights".to_string(),
+                url: "https://www.britishairways.com/".to_string(),
+                snippet: "Find cheap flights and book online.".to_string(),
+            },
+            SearchResult {
+                title: "Quiz Widget".to_string(),
+                url: "https://quizwidget.example/".to_string(),
+                snippet: "Add a quiz to your page.".to_string(),
+            },
+        ];
+        assert!(!results_match_query("Virtue restaurant Chicago", &decoys));
+    }
+
+    #[test]
+    fn test_bing_relevant_results_pass_the_guard() {
+        let real = vec![SearchResult {
+            title: "The British Museum".to_string(),
+            url: "https://www.britishmuseum.org/collection".to_string(),
+            snippet: "Explore the collection.".to_string(),
+        }];
+        assert!(results_match_query("British Museum opening hours", &real));
+        // A term may match through the decoded URL or the snippet alone.
+        assert!(results_match_query("britishmuseum collection", &real));
+    }
+
+    #[test]
+    fn test_query_without_content_terms_is_not_judged() {
+        let results = vec![SearchResult {
+            title: "Quiz Widget".to_string(),
+            url: "https://quizwidget.example/".to_string(),
+            snippet: "Add a quiz to your page.".to_string(),
+        }];
+        assert!(results_match_query("who won", &results));
+    }
+
+    /// AGE-506 (3): real Bing output carries numeric references and accented
+    /// Latin entities the old six-entry table passed through unrendered.
+    #[test]
+    fn test_strip_html_tags_decodes_numeric_and_named_entities() {
+        assert_eq!(
+            strip_html_tags("caf&#233; &#0183; r&eacute;sum&eacute;"),
+            "café · résumé"
+        );
+        assert_eq!(strip_html_tags("&#x27;quoted&#x27;"), "'quoted'");
+        assert_eq!(
+            strip_html_tags("2024 &ndash; 2025 &hellip;"),
+            "2024 – 2025 …"
+        );
+        assert_eq!(
+            strip_html_tags("&copy; M&uuml;ller &amp; S&oslash;n"),
+            "© Müller & Søn"
+        );
+        assert_eq!(strip_html_tags("a&nbsp;b"), "a b");
+    }
+
+    #[test]
+    fn test_decode_html_entities_leaves_unknown_and_bare_ampersands() {
+        assert_eq!(decode_html_entities("AT&T and Q&A"), "AT&T and Q&A");
+        assert_eq!(decode_html_entities("&notareal;"), "&notareal;");
+        // Single pass: an escaped entity stays escaped text.
+        assert_eq!(decode_html_entities("&amp;lt;"), "&lt;");
     }
 
     #[test]
