@@ -538,8 +538,16 @@ impl ShellSession {
         // (e.g. `echo msg >&2`).  Without the group, `cmd >&2 2>&1` fails
         // because bash applies redirections left-to-right.
         // The marker line format: __CHATTY_SHELL_MARKER_{uuid}_{exit_code}__
+        //
+        // `printf`'s leading `\n` guarantees the marker always starts its own
+        // line even when the command's own output has no trailing newline
+        // (e.g. `printf abc`, `head -c N file`) — otherwise the marker glues
+        // onto the end of the last output line and the read loop below never
+        // recognizes it, burning the full command timeout (AGE-505). The read
+        // loop absorbs the resulting blank line via the existing
+        // `trim_end()` on the captured output.
         let wrapped_command = format!(
-            "{{ {}\n}} 2>&1\n__chatty_ec=$?\necho \"{}${{__chatty_ec}}__\"\n",
+            "{{ {}\n}} 2>&1\n__chatty_ec=$?\nprintf '\\n%s%s__\\n' \"{}\" \"$__chatty_ec\"\n",
             command, marker_prefix
         );
 
@@ -587,12 +595,23 @@ impl ShellSession {
 
                 let line = Self::decode_output_line(&line);
 
+                // `starts_with` is correct and sufficient here: the shell
+                // side (`printf`, above) unconditionally writes a leading
+                // `\n` before the marker, so the marker always begins a
+                // fresh line by construction — it can never be glued to
+                // preceding output (AGE-505). Matching anywhere in the line
+                // (`contains`) was tried and rejected: a command that echoes
+                // its own stdin (e.g. bare `cat`) sees the wrapper script's
+                // own source text, which contains the marker prefix as a
+                // substring without starting a line with it, so `contains`
+                // falsely treats that echoed line as the terminator — a
+                // silent, permanent session wedge that's worse than the
+                // original bug.
                 if line.starts_with(&marker_prefix) {
                     // Parse exit code from marker line
-                    let exit_code = line
-                        .trim()
-                        .strip_prefix(&marker_prefix)
-                        .and_then(|s| s.strip_suffix("__"))
+                    let exit_code = line[marker_prefix.len()..]
+                        .trim_end()
+                        .strip_suffix("__")
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(-1);
 

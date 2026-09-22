@@ -211,6 +211,71 @@ async fn test_multiline_output() {
     assert!(output.stdout.contains("line3"));
 }
 
+/// Regression test for AGE-505: a command whose only output has no trailing
+/// newline used to glue the shell's end-of-command marker onto the end of
+/// that output line, so the reader loop's `starts_with` check never matched
+/// it and the call burned the full timeout before failing. Use a short
+/// session timeout so a reintroduced bug shows up as a fast `Err` here
+/// instead of this test actually waiting it out, and assert the elapsed
+/// time stayed far below that timeout to prove the timeout path was never
+/// taken.
+#[tokio::test]
+async fn test_no_trailing_newline_output_completes_without_timeout() {
+    let session = ShellSession::with_secrets(None, 3, 51200, false, vec![]);
+
+    let start = tokio::time::Instant::now();
+    let result = session.execute("printf abc").await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        result.is_ok(),
+        "command should complete normally, not time out: {result:?}"
+    );
+    let output = result.unwrap();
+    assert_eq!(output.exit_code, 0);
+    // Exactly the command's output: no marker/exit-code text, and no
+    // spurious trailing blank line from the marker's forced leading newline.
+    assert_eq!(output.stdout, "abc");
+    assert!(
+        elapsed < tokio::time::Duration::from_secs(2),
+        "command took {elapsed:?}, expected near-instant completion (marker-gluing regression would take ~3s)"
+    );
+}
+
+/// Same AGE-505 shape as above but matching one of the exact patterns from
+/// the bug report: writing an answer file with `echo -n` (no trailing
+/// newline) and then `cat`-ing it back out.
+#[tokio::test]
+async fn test_echo_n_then_cat_completes_without_timeout() {
+    let temp_dir = std::env::temp_dir();
+    let answer_file = temp_dir.join(format!("chatty_shell_test_{}.txt", uuid::Uuid::new_v4()));
+    let answer_path = answer_file.to_str().unwrap();
+
+    let session = ShellSession::with_secrets(None, 3, 51200, false, vec![]);
+
+    let start = tokio::time::Instant::now();
+    let result = session
+        .execute(&format!(
+            "echo -n \"42\" > {answer_path} && cat {answer_path}"
+        ))
+        .await;
+    let elapsed = start.elapsed();
+
+    let _ = std::fs::remove_file(&answer_file);
+
+    assert!(
+        result.is_ok(),
+        "command should complete normally, not time out: {result:?}"
+    );
+    let output = result.unwrap();
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, "42");
+    assert!(
+        elapsed < tokio::time::Duration::from_secs(2),
+        "command took {elapsed:?}, expected near-instant completion (marker-gluing regression would take ~3s)"
+    );
+}
+
 #[test]
 fn test_decode_output_line_lossy_decodes_non_utf8() {
     let decoded = ShellSession::decode_output_line(b"\xff\xfeabc\n");
