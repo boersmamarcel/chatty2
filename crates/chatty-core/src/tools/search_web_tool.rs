@@ -617,15 +617,29 @@ fn decode_bing_redirect_inner(href: &str) -> Option<String> {
     url.starts_with("http").then_some(url)
 }
 
+/// Common English stopwords long enough (4+ characters) to otherwise pass
+/// the length filter in `results_match_query` despite carrying no real
+/// search-relevance signal (AGE-511). A Bing decoy page's boilerplate is
+/// likely to contain one of these purely by chance, which is how "what is
+/// the capital of France" got waved through on the word "what" alone.
+const STOPWORDS: &[&str] = &[
+    "this", "that", "these", "those", "what", "which", "when", "where", "while", "have", "will",
+    "does", "were", "from", "with", "into", "about", "your", "their", "they", "them", "then",
+    "than", "also", "been", "being", "would", "could", "should", "there", "here", "some", "such",
+    "only", "just", "very", "much", "many", "most", "more", "over", "under", "between", "during",
+    "after", "before", "through", "both", "each",
+];
+
 /// Whether any parsed result plausibly belongs to `query`: one content term
-/// (a word of 4+ characters) of the query occurring in some result's title,
-/// snippet or URL is enough. A query with no such term (e.g. "who won") can't
-/// be judged this way and passes.
+/// (a word of 4+ characters, excluding common stopwords) of the query
+/// occurring in some result's title, snippet or URL is enough. A query with
+/// no such term left (e.g. "who won", or a query that is entirely stopwords)
+/// can't be judged this way and passes.
 fn results_match_query(query: &str, results: &[SearchResult]) -> bool {
     let terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 4)
         .map(str::to_lowercase)
+        .filter(|word| word.chars().count() >= 4 && !STOPWORDS.contains(&word.as_str()))
         .collect();
     if terms.is_empty() {
         return true;
@@ -923,6 +937,47 @@ mod tests {
             snippet: "Add a quiz to your page.".to_string(),
         }];
         assert!(results_match_query("who won", &results));
+    }
+
+    /// AGE-511: a decoy page that happens to contain the stopword "what"
+    /// (which is 4+ characters and previously counted as a content term)
+    /// must not be waved through — "what" carries no search-relevance
+    /// signal, unlike "capital" or "france".
+    #[test]
+    fn test_stopword_only_overlap_is_rejected_as_decoy() {
+        let decoys = vec![SearchResult {
+            title: "BTS World Tour Tickets".to_string(),
+            url: "https://tickets.example/bts".to_string(),
+            snippet: "See what fans are saying about the tour.".to_string(),
+        }];
+        assert!(!results_match_query(
+            "what is the capital of France",
+            &decoys
+        ));
+    }
+
+    /// Same query as above, but a result that actually shares a real
+    /// content term ("france"/"capital") with the query must still pass.
+    #[test]
+    fn test_real_content_term_still_passes_alongside_stopwords() {
+        let real = vec![SearchResult {
+            title: "Paris - Wikipedia".to_string(),
+            url: "https://en.wikipedia.org/wiki/Paris".to_string(),
+            snippet: "Paris is the capital and most populous city of France.".to_string(),
+        }];
+        assert!(results_match_query("what is the capital of France", &real));
+    }
+
+    /// A query built entirely from stopwords has no content terms left,
+    /// so it can't be judged and passes unjudged, same as a too-short query.
+    #[test]
+    fn test_query_of_only_stopwords_is_not_judged() {
+        let results = vec![SearchResult {
+            title: "Quiz Widget".to_string(),
+            url: "https://quizwidget.example/".to_string(),
+            snippet: "Add a quiz to your page.".to_string(),
+        }];
+        assert!(results_match_query("what should this have been", &results));
     }
 
     /// AGE-506 (3): real Bing output carries numeric references and accented
