@@ -60,11 +60,23 @@ whole for as long as possible.
 |---|-------|--------|
 | 1 | Cap | Stub every tool result over 8 KB outside the tail (`[tool result truncated — N chars]` plus a 200-char preview) |
 | 2 | Compact | Replace every tool result outside the tail with a one-liner (`[compacted] …`, 120 chars) |
-| 3 | Snip | Keep the first 2 and last 8 messages, replace the middle with one marker |
+| 3 | Snip | Keep the first 2 and last 8 messages, replace the middle with one marker; both ends of the cut move off a tool round-trip first (see below) |
 | 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first; the last message is never touched |
 
 A history still over budget after stage 4 is sent as is (a warning is logged): without
 summarising there is nothing left to take.
+
+**Neither half of a tool round-trip is dropped alone.** Because the guard runs on every
+model call of a run, stage 3's cut usually falls inside a live tool loop, where the
+message at the tail boundary is a tool result and the one before it is the assistant
+`tool_calls` message it answers. Splitting the two is a 400 from every OpenAI-compatible
+provider — `messages with role 'tool' must be a response to a preceding message with
+'tool_calls'` — on the *request the guard itself builds*. So the kept tail starts no
+later than the assistant message issuing the calls it answers, and the kept head ends no
+later than the last call the snip still answers; the boundaries only ever move backwards,
+keeping a message or two more than asked. A result whose call is nowhere in the history
+is left where it is: that history was already malformed, and moving the cut cannot repair
+it (AGE-512; the companion repair at recording time is AGE-485).
 
 **The one result that can never fit.** The prompt — the latest tool results — is never
 shaped, and a single result can be larger than the whole budget (a 237 KB shell dump
