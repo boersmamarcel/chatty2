@@ -18,6 +18,7 @@ use rig_agent::Agent;
 use rig_agent::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
+use crate::services::context_shaper::ContextShaper;
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
 use crate::services::search_service::CodeSearchService;
@@ -183,6 +184,8 @@ pub struct AgentClient {
     /// non-streaming calls (title generation, summarization) that need a
     /// short reply and must not risk a tool call (AGE-227).
     utility: Agent,
+    /// The in-loop context guard registered on `agent` (AGE-504).
+    context_shaper: ContextShaper,
 }
 
 impl AgentClient {
@@ -197,6 +200,11 @@ impl AgentClient {
 
     pub fn task_controller(&self) -> crate::services::AgentTaskController {
         self.task_controller.clone()
+    }
+
+    /// The in-loop context guard this agent's requests go through (AGE-504).
+    pub fn context_shaper(&self) -> &ContextShaper {
+        &self.context_shaper
     }
 
     /// Create AgentClient from ModelConfig, ProviderConfig and build context
@@ -1266,6 +1274,9 @@ impl AgentClient {
             agent_task_controller,
         )
         .await?;
+        // What every request carries before any history — the preamble and
+        // the tool schemas — is only measurable once the agent exists.
+        calibrate_context_shaper(&agent.context_shaper, &agent.agent, &preamble).await;
 
         tracing::info!(
             workspace = ?exec_settings.as_ref().and_then(|s| s.workspace_dir.as_ref()),
@@ -1285,6 +1296,39 @@ impl AgentClient {
     pub fn provider(&self) -> crate::settings::models::providers_store::ProviderType {
         self.provider.clone()
     }
+}
+
+/// Tell the context guard what every request of `agent` carries before any
+/// history: the preamble and the tool schemas, counted the way the guard
+/// counts history. The schemas are read back from the built agent because
+/// that is the only place their provider-facing form exists. A failure to
+/// read them leaves the base at the preamble alone, which only makes the
+/// guard more lenient.
+async fn calibrate_context_shaper(shaper: &ContextShaper, agent: &Agent, preamble: &str) {
+    let counter = shaper.counter();
+    let preamble_tokens = counter.count_preamble(preamble);
+    let tool_tokens = match agent.tool_definitions(None).await {
+        Ok(definitions) => definitions
+            .iter()
+            .map(|definition| {
+                counter.count(&definition.name)
+                    + counter.count(&definition.description)
+                    + counter.count(&definition.parameters.to_string())
+            })
+            .sum(),
+        Err(e) => {
+            tracing::warn!(error = %e, "Context guard: could not read tool definitions; base is the preamble alone");
+            0
+        }
+    };
+    shaper.set_base_tokens(preamble_tokens + tool_tokens);
+    tracing::debug!(
+        preamble_tokens,
+        tool_tokens,
+        context_window = shaper.context_window(),
+        history_budget = shaper.history_budget(0),
+        "Context guard calibrated"
+    );
 }
 
 #[cfg(test)]

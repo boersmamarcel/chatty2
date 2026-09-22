@@ -69,9 +69,9 @@ use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::repositories::ConversationData;
 use crate::services::{
-    AgentTaskController, AgentTaskSnapshot, ContextShaperSettings, RecoveryAction, StreamError,
-    StreamErrorKind, StreamSurface, decide_recovery, exchange_count, extract_user_text,
-    install_progress_channel, run_stream_loop, shape_context, stream_prompt,
+    AgentTaskController, AgentTaskSnapshot, RecoveryAction, StreamError, StreamErrorKind,
+    StreamSurface, decide_recovery, exchange_count, extract_user_text, install_progress_channel,
+    run_stream_loop, stream_prompt,
 };
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelConfig;
@@ -893,16 +893,12 @@ struct PreparedTurn {
 impl PreparedTurn {
     /// Open the stream and drive it.
     async fn run<F: FnMut(SessionEvent)>(self, mut emit: F) {
-        // Stages 1-3 of context shaping are free; stages 4-5 need an LLM
-        // call, so no agent is passed and shaping caps at stage 3.
-        let shaped = shape_context(self.history, &ContextShaperSettings::default(), None).await;
-        if let Some(stage) = shaped.stage_applied {
-            tracing::debug!(stage = ?stage, chars_freed = shaped.chars_freed, "context shaper applied before stream");
-        }
-
+        // The history goes out as recorded: the agent's own context guard
+        // (`ContextShaper`, a rig hook) shapes it per model call, inside the
+        // tool loop where it actually grows (AGE-504).
         let stream = stream_prompt(
             &self.agent,
-            shaped.messages,
+            self.history,
             self.contents,
             Some(self.approval_rx),
             Some(self.resolution_rx),

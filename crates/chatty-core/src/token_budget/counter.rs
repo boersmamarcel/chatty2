@@ -118,7 +118,9 @@ impl TokenCounter {
     /// passed through the BPE encoder: each non-text part counts as a fixed
     /// [`NON_TEXT_CONTENT_TOKENS`] instead (AGE-229). Text parts (plain
     /// text, tool-result text, tool-call name/arguments) are counted via BPE
-    /// as before.
+    /// as before. A typed tool's JSON result is text to the provider — it is
+    /// serialized into the request — so it is counted by its serialized form
+    /// (AGE-504); every native chatty tool returns one.
     pub fn count_message(&self, message: &Message) -> usize {
         match message {
             Message::System { content } => self.count(content),
@@ -138,9 +140,8 @@ impl TokenCounter {
                 .iter()
                 .map(|item| match item {
                     ToolResultContent::Text(text) => self.count(&text.text),
-                    ToolResultContent::Image(_) | ToolResultContent::Json { .. } => {
-                        NON_TEXT_CONTENT_TOKENS
-                    }
+                    ToolResultContent::Json { value } => self.count(&value.to_string()),
+                    ToolResultContent::Image(_) => NON_TEXT_CONTENT_TOKENS,
                 })
                 .sum(),
             UserContent::Image(_)

@@ -133,7 +133,7 @@ patch in after the stream completes.
 |---------|-----|-----------|
 | Token tracking | [token-tracking.md](../token-tracking.md) | `token_budget/`, `GlobalTokenBudget` |
 | Response reserve | — | `TokenTrackingSettings.response_reserve` (default 4096) |
-| Summarization | [context-compaction.md](../context-compaction.md) | `summarizer.rs` — `summarize_oldest_half` ships (context shaper stages 4–5, `/compact`); only the secondary-model variant `summarize_with_model` is still a stub |
+| Summarization | [context-compaction.md](../context-compaction.md) | `summarizer.rs` — `summarize_oldest_half` ships (`/compact`, desktop auto-summarise); only the secondary-model variant `summarize_with_model` is still a stub |
 
 **Research touchpoints**
 
@@ -143,10 +143,10 @@ patch in after the stream completes.
 | [M4 ACE](./modules/m4-ace.md) | Playbook growth competes for context; paper assumes prompt-cache prefix reuse |
 | [M0](./modules/m0-trace.md) | `RolloutBudget` extends token accounting for train vs validation rollouts |
 
-**Future product link:** conversation compaction (`services/context_shaper.rs`, a
-graduated pipeline that ends in `summarize_oldest_half`) is the natural place to apply ACE
-grow-and-refine eviction when playbook + history exceed pressure thresholds — the
-compaction ships; the playbook hook into it does not exist yet.
+**Future product link:** conversation compaction (the per-call guard in
+`services/context_shaper.rs` and the persisted `summarize_oldest_half`) is the natural
+place to apply ACE grow-and-refine eviction when playbook + history exceed pressure
+thresholds — the compaction ships; the playbook hook into it does not exist yet.
 
 ---
 
