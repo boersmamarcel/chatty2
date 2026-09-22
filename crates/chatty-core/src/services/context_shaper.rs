@@ -76,13 +76,12 @@ use rig_agent::agent::{
     ToolResultAction, ToolResultEvent,
 };
 use rig_core::completion::Message;
-use rig_core::completion::message::{
-    AssistantContent, Text, ToolCallId, ToolResult, ToolResultContent,
-};
+use rig_core::completion::message::{Text, ToolCallId, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
 
+use crate::services::{call_ids, enforce_tool_round_trips, result_ids, tool_round_trips_intact};
 use crate::settings::models::models_store::ModelConfig;
 use crate::token_budget::counter::TokenCounter;
 
@@ -329,6 +328,49 @@ impl ContextShaper {
         Some(ToolOutput::text(header(0)))
     }
 
+    /// The history one request should carry, or `None` when the recorded
+    /// history goes out byte for byte — under budget and well formed, which
+    /// is what keeps the append-only prefix property (AGE-277) and with it
+    /// the provider's prompt cache.
+    ///
+    /// This is what the completion-call hook decides; it is a method so it
+    /// can be tested without a `HookContext`, which rig only builds inside a
+    /// run. `turn` is the model-call index, for the log line.
+    pub fn request_history(
+        &self,
+        history: &[Message],
+        prompt: &Message,
+        turn: usize,
+    ) -> Option<Vec<Message>> {
+        let prompt_tokens = self.inner.counter.count_message(prompt);
+        // rig hands the hook the prompt separately from the history, and
+        // mid-tool-loop that prompt is the result answering the history's
+        // last call — a call it answers is not a dangling one (AGE-513).
+        let answered_by_prompt: Vec<ToolCallId> = result_ids(prompt).cloned().collect();
+
+        let history = match self.shape(history, prompt_tokens) {
+            Some(shaped) => {
+                debug!(
+                    turn,
+                    stage = ?shaped.stage_applied,
+                    tokens_before = shaped.tokens_before,
+                    tokens_after = shaped.tokens_after,
+                    budget = self.history_budget(prompt_tokens),
+                    "context shaper applied before model call"
+                );
+                shaped.messages
+            }
+            None if tool_round_trips_intact(history, &answered_by_prompt) => return None,
+            None => history.to_vec(),
+        };
+
+        // The last place we own before the request leaves. Shaping cannot
+        // split a round-trip any more (AGE-512), but a history persisted
+        // malformed by something else still would, and this is where that
+        // stops being the provider's problem.
+        Some(enforce_tool_round_trips(history, &answered_by_prompt))
+    }
+
     /// Shape `history` for a request whose prompt costs `prompt_tokens`.
     /// `None` when it already fits: the request goes out exactly as recorded.
     pub fn shape(&self, history: &[Message], prompt_tokens: usize) -> Option<ShapedContext> {
@@ -436,19 +478,8 @@ impl AgentHook for ContextShaper {
         _ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        let prompt_tokens = self.inner.counter.count_message(event.prompt);
-        match self.shape(event.history, prompt_tokens) {
-            Some(shaped) => {
-                debug!(
-                    turn = event.turn,
-                    stage = ?shaped.stage_applied,
-                    tokens_before = shaped.tokens_before,
-                    tokens_after = shaped.tokens_after,
-                    budget = self.history_budget(prompt_tokens),
-                    "context shaper applied before model call"
-                );
-                CompletionCallAction::patch(RequestPatch::new().history(shaped.messages))
-            }
+        match self.request_history(event.history, event.prompt, event.turn) {
+            Some(history) => CompletionCallAction::patch(RequestPatch::new().history(history)),
             None => CompletionCallAction::Continue,
         }
     }
@@ -473,30 +504,6 @@ impl AgentHook for ContextShaper {
 }
 
 // ── Round trips ───────────────────────────────────────────────────────────────
-
-/// The ids of the tool calls `message` makes.
-fn call_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
-    let content = match message {
-        Message::Assistant { content, .. } => Some(content.iter()),
-        _ => None,
-    };
-    content.into_iter().flatten().filter_map(|item| match item {
-        AssistantContent::ToolCall(call) => Some(&call.id),
-        _ => None,
-    })
-}
-
-/// The ids of the tool calls `message` answers.
-fn result_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
-    let content = match message {
-        Message::User { content } => Some(content.iter()),
-        _ => None,
-    };
-    content.into_iter().flatten().filter_map(|item| match item {
-        UserContent::ToolResult(result) => Some(&result.call),
-        _ => None,
-    })
-}
 
 /// Pull the head of the snip back off an assistant `tool_calls` message whose
 /// results the snip would drop: a call nothing answers is a 400 from every
@@ -612,7 +619,7 @@ fn map_tool_result_text(message: &mut Message, rewrite: impl Fn(&str) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::ToolCallId;
+    use rig_core::completion::message::{AssistantContent, ToolCallId};
 
     fn user_text(s: &str) -> Message {
         Message::User {
@@ -866,6 +873,64 @@ mod tests {
             history.push(text_result(&format!("t{i}"), 20));
         }
         history
+    }
+
+    /// The request a live tool loop makes: the history ends on the call, and
+    /// the result answering it is the prompt rig passes separately. Nothing
+    /// is dangling, so the request goes out exactly as recorded — the
+    /// AGE-277 property, and the thing a naive validator would break by
+    /// synthesizing a second answer for the id the prompt carries.
+    #[test]
+    fn a_call_the_prompt_answers_is_not_a_reason_to_patch() {
+        let history = vec![user_text("task"), tool_call("t0")];
+        let prompt = text_result("t0", 20);
+        let shaper = ContextShaper::new(settings(1_000), counter(), Some(10_000));
+
+        assert_eq!(shaper.request_history(&history, &prompt, 2), None);
+    }
+
+    /// A history that fits but carries an orphaned tool result is still
+    /// patched: the guard is the last place that can catch it, whatever left
+    /// it that way (AGE-513).
+    #[test]
+    fn an_orphaned_result_is_repaired_even_under_budget() {
+        let history = vec![user_text("task"), text_result("nobody-called-this", 20)];
+        let shaper = ContextShaper::new(settings(1_000), counter(), Some(10_000));
+
+        let patched = shaper
+            .request_history(&history, &user_text("and now?"), 1)
+            .expect("a malformed history is patched even when it fits");
+
+        assert_eq!(patched.len(), 1, "the orphaned result is gone");
+        assert_round_trips_intact(&patched);
+    }
+
+    /// Shaping and repair compose: an over-budget history that also ends on
+    /// a call nothing answers comes back both shorter and whole.
+    #[test]
+    fn a_shaped_history_is_repaired_too() {
+        let mut history = tool_loop(3);
+        // The run was cut off after this call and before its result.
+        history.push(tool_call("never-answered"));
+        let settings = ContextShaperSettings {
+            keep_head: 1,
+            keep_tail: 2,
+            ..settings(1_000)
+        };
+        let shaper = shaper_just_over(&history, settings);
+
+        // The prompt is a new user turn, so it answers nothing.
+        let patched = shaper
+            .request_history(&history, &user_text("and now?"), 4)
+            .expect("over budget");
+
+        assert!(patched.len() < history.len(), "still shaped");
+        assert_round_trips_intact(&patched);
+        assert!(
+            result_text(patched.last().expect("a repaired history is not empty"))
+                .starts_with("Cancelled:"),
+            "the unanswered call got its placeholder"
+        );
     }
 
     /// The AGE-512 400: the cut fell between an assistant `tool_calls`

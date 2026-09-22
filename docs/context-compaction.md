@@ -78,6 +78,15 @@ keeping a message or two more than asked. A result whose call is nowhere in the 
 is left where it is: that history was already malformed, and moving the cut cannot repair
 it (AGE-512; the companion repair at recording time is AGE-485).
 
+Both rules live in one validator, `services::enforce_tool_round_trips`, and the guard
+runs it on every outgoing request's history — not just the ones it shaped — so a
+conversation persisted malformed by anything else is repaired on its way out too
+(AGE-513). A history that is already intact is returned untouched, which is what keeps
+the byte-for-byte property above. The check takes the ids answered by the request's
+`prompt`, which rig passes separately from the history: mid-tool-loop that prompt *is*
+the result answering the history's last call, and synthesizing a second answer for it
+would be its own 400.
+
 **The one result that can never fit.** The prompt — the latest tool results — is never
 shaped, and a single result can be larger than the whole budget (a 237 KB shell dump
 was, in the AGE-500 rerun). That is caught where the result is recorded: the same hook's
