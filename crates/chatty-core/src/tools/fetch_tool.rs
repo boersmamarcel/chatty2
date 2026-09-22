@@ -16,6 +16,15 @@ const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
 /// Request timeout in seconds
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// Maximum length of a non-2xx error body, in bytes of UTF-8 text.
+///
+/// An error page's useful content — the message a 404 or 429 actually wants
+/// to convey — is rarely more than a short paragraph; the rest is markup the
+/// model never needed (AGE-508). Applied on top of `max_length` (the smaller
+/// of the two wins) rather than replacing it, so a caller who explicitly
+/// asks for a smaller window still gets it.
+const ERROR_MAX_LENGTH: usize = 2_048;
+
 /// Arguments for the fetch tool
 #[derive(Deserialize, Serialize)]
 pub struct FetchToolArgs {
@@ -232,10 +241,17 @@ impl Tool for FetchTool {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
-            let (body, truncated) = window(&body, start_index, max_length);
+            let (content, truncated) = error_body_window(
+                &body,
+                &content_type,
+                Some(&current_url),
+                fragment.as_deref(),
+                start_index,
+                max_length,
+            );
             return Ok(FetchToolOutput {
                 status,
-                content: body,
+                content,
                 content_type,
                 truncated,
                 saved_to: None,
@@ -494,6 +510,30 @@ fn window(s: &str, start_index: usize, max_length: usize) -> (String, bool) {
         start + end
     ));
     (result, true)
+}
+
+/// Turn a non-2xx response body into the text the error path returns
+/// (AGE-508): run it through the same HTML-to-text extraction a success
+/// response gets — an error body is frequently a full HTML error page, and
+/// none of that markup is ever what the model needed — then window it to
+/// `max_length`, capped at [`ERROR_MAX_LENGTH`] (the smaller of the two
+/// wins, so a caller who explicitly asks for a smaller window still gets
+/// it).
+fn error_body_window(
+    body: &str,
+    content_type: &str,
+    base_url: Option<&str>,
+    fragment: Option<&str>,
+    start_index: usize,
+    max_length: usize,
+) -> (String, bool) {
+    let is_html = content_type.contains("text/html") || looks_like_html(body);
+    let content = if is_html {
+        html_to_text(body, base_url, fragment)
+    } else {
+        body.to_string()
+    };
+    window(&content, start_index, max_length.min(ERROR_MAX_LENGTH))
 }
 
 /// Elements whose text is site furniture rather than page content. Skipped
@@ -940,6 +980,82 @@ mod tests {
         assert!(!truncated);
     }
 
+    // --- AGE-508 criterion 3: non-2xx bodies go through html_to_text and a small cap ---
+
+    #[test]
+    fn test_error_body_window_strips_html_error_page() {
+        let body = "<html><body><nav>Site nav</nav>\
+                    <h1>404 Not Found</h1>\
+                    <p>The page you requested does not exist.</p>\
+                    <footer>Copyright 2026</footer></body></html>";
+        let (content, truncated) = error_body_window(body, "text/html", None, None, 0, 50_000);
+        assert!(!truncated);
+        assert!(content.contains("404 Not Found"), "got {content:?}");
+        assert!(
+            content.contains("The page you requested does not exist"),
+            "got {content:?}"
+        );
+        assert!(!content.contains("Site nav"), "chrome leaked: {content:?}");
+        assert!(
+            !content.contains("<html>"),
+            "raw markup leaked: {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_error_body_window_leaves_non_html_bodies_alone() {
+        let body = r#"{"error":"rate limited"}"#;
+        let (content, truncated) =
+            error_body_window(body, "application/json", None, None, 0, 50_000);
+        assert!(!truncated);
+        assert_eq!(content, body);
+    }
+
+    /// The error cap (2KB) applies even when the caller's `max_length` is
+    /// larger (the default is 50000) — an error page's useful content is
+    /// rarely more than a short message.
+    #[test]
+    fn test_error_body_window_caps_below_default_max_length() {
+        let long_message: String = std::iter::repeat_n('a', ERROR_MAX_LENGTH * 5).collect();
+        let body = format!("<p>{long_message}</p>");
+        let (content, truncated) =
+            error_body_window(&body, "text/html", None, None, 0, DEFAULT_MAX_LENGTH);
+        assert!(truncated);
+        assert!(
+            content.len() <= ERROR_MAX_LENGTH + 100, // + the truncation note
+            "error body was not capped to ~{ERROR_MAX_LENGTH} bytes: {} bytes",
+            content.len()
+        );
+    }
+
+    /// A caller-supplied `max_length` smaller than the error cap still wins
+    /// (the smaller of the two applies).
+    #[test]
+    fn test_error_body_window_respects_smaller_caller_max_length() {
+        let body = "<p>Not found, sorry about that.</p>";
+        let (content, truncated) = error_body_window(body, "text/html", None, None, 0, 10);
+        assert!(truncated);
+        let text = content.split("\n\n[Content truncated").next().unwrap();
+        assert_eq!(text.len(), 10);
+    }
+
+    /// The error path resolves the requested `#fragment` the same way a
+    /// success response does, since it reuses `html_to_text` directly.
+    #[test]
+    fn test_error_body_window_honours_fragment() {
+        let body = "<p>Lead</p><h2 id=\"detail\">Detail</h2><p>More detail text.</p>";
+        let (content, _) = error_body_window(
+            body,
+            "text/html",
+            Some("https://example.com/error"),
+            Some("detail"),
+            0,
+            50_000,
+        );
+        assert!(content.starts_with("Detail"), "got {content:?}");
+        assert!(!content.contains("Lead"), "got {content:?}");
+    }
+
     // --- AGE-507 criterion 3: navigation chrome is skipped ---
 
     #[test]
@@ -1328,6 +1444,41 @@ mod tests {
             format!("{}{}", strip(&first.content), strip(&second.content)),
             strip(&whole.content),
             "two 3000-byte windows must rebuild one 6000-byte window exactly"
+        );
+    }
+
+    /// AGE-508 criterion 3, end to end: a live 404 HTML error page comes back
+    /// through `call()` as extracted text, not raw markup, and capped well
+    /// under the 50000-byte default.
+    ///
+    /// ```
+    /// cargo test -p chatty-core --lib fetch_of_a_404_page_returns_extracted_text -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "hits the live en.wikipedia.org site"]
+    async fn fetch_of_a_404_page_returns_extracted_text() {
+        let tool = FetchTool::new(None);
+        let args = FetchToolArgs {
+            url: "https://en.wikipedia.org/wiki/Special:This_page_does_not_exist_af8s7d6f"
+                .to_string(),
+            max_length: None,
+            start_index: None,
+            user_agent: None,
+        };
+        let result = tool
+            .call(&mut ToolContext::new(), args)
+            .await
+            .expect("a 404 is still Ok(..) with the error status recorded, not an Err");
+        assert_eq!(result.status, 404);
+        assert!(
+            !result.content.contains("<html"),
+            "raw markup leaked into a 404 body: {:?}",
+            &result.content[..200.min(result.content.len())]
+        );
+        assert!(
+            result.content.len() <= ERROR_MAX_LENGTH + 100,
+            "404 body was not capped: {} bytes",
+            result.content.len()
         );
     }
 
