@@ -1,555 +1,516 @@
-//! Graduated context-shaping pipeline.
+//! The in-loop context guard (AGE-504).
 //!
-//! Before every LLM call, this pipeline can optionally reshape the conversation
-//! history to reduce its token footprint. The five stages are applied lazily in
-//! order — the pipeline stops as soon as the history fits within the pressure
-//! threshold, so "compress as little as you can get away with."
+//! Every chat agent carries a [`ContextShaper`] as a rig [`AgentHook`]. Before
+//! each model call of a run — the first one and every call after a tool
+//! round-trip — the hook measures the history the call would send and, only
+//! when the request would not fit the model's context window, hands rig a
+//! shorter history for that one request through
+//! [`RequestPatch::history`]. Nothing is persisted: the conversation keeps
+//! every message, and a request that fits is sent byte for byte as recorded,
+//! so the append-only prefix property (AGE-277) is untouched for every
+//! conversation that fits.
 //!
-//! # Stages (cheapest → most expensive)
+//! This is a crash guard, not the compaction engine. It never calls a model;
+//! the generational, persisted, LLM-summarised compaction is AGE-248's.
 //!
-//! | # | Name | Cost | What it does |
-//! |---|------|------|--------------|
-//! | 1 | **Budget reduction** | free | Trim individual tool-result messages > 8 KB to a short stub |
-//! | 2 | **Snip** | free | Drop oldest middle messages when total chars > snip threshold |
-//! | 3 | **Micro-compact** | free | Replace middle tool-result blocks with one-line summaries |
-//! | 4 | **Context collapse** | 1 LLM call | Summarise middle band via `summarize_oldest_half` |
-//! | 5 | **Auto-compact** | 1 LLM call | Full `summarize_oldest_half` pass on the whole history |
+//! # Budget
 //!
-//! Stages 4–5 require an [`AgentClient`] and are only reachable when one is
-//! provided.  If `agent` is `None`, the pipeline caps at stage 3.
+//! The history budget in tokens is
 //!
-//! ## Usage
-//!
-//! ```ignore
-//! let settings = ContextShaperSettings::default();
-//! let shaped = shape_context(history, &settings, None).await;
-//! // shaped.messages is the (possibly shortened) history to pass to the LLM.
-//! eprintln!("context shaper applied: {:?}", shaped.stage_applied);
+//! ```text
+//! context_window − headroom − response_reserve − base − prompt
 //! ```
+//!
+//! where `context_window` is the model's `max_context_window` (an assumed
+//! 32k when the model has none configured), `headroom` is a tenth of it for
+//! what the count cannot see (the chat template's per-message wrapping, and
+//! the gap between the tiktoken estimate and the model's own tokenizer —
+//! measured at ~2k tokens on a 32k Qwen request), `response_reserve` is the
+//! model's `max_tokens` (4096 when unset), `base` is the preamble plus the
+//! tool schemas — measured once when the agent is built, see
+//! [`ContextShaper::set_base_tokens`] — and `prompt` is the message the call
+//! is about to send, which is never shaped. Tokens are counted with the
+//! model's [`TokenCounter`]; a typed tool's JSON result counts by its
+//! serialized text, which is what the provider bills.
+//!
+//! # Stages
+//!
+//! Applied in order, cheapest information loss first, stopping as soon as the
+//! history fits. The most recent `keep_tail` messages are what the model is
+//! working with right now and stay whole for as long as possible.
+//!
+//! | # | Stage | What it does |
+//! |---|-------|--------------|
+//! | 1 | Cap | Stub every tool result over `tool_result_cap_bytes` outside the tail |
+//! | 2 | Compact | Replace every tool result outside the tail with a one-liner |
+//! | 3 | Snip | Keep the first `keep_head` and last `keep_tail` messages, drop the middle |
+//! | 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first, never the last message |
+//!
+//! A history that is still over budget after stage 4 is sent as is: without
+//! summarising there is nothing left to take.
+//!
+//! # The one result that can never fit
+//!
+//! The message a call is about to send — the latest tool results — is never
+//! shaped, and a single result can be larger than the whole budget (a 36 KB
+//! dump of 450 Wikipedia revisions was, in AGE-500). The only place that can
+//! be caught is where the result is recorded: `on_tool_result` truncates a
+//! result over two fifths of the history budget, once, so the same bytes go out on
+//! every later call (the AGE-277 property holds for it too) and the model
+//! sees as much of it as the window allows. Everything under that cap is
+//! recorded whole.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rig_agent::agent::{
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
+    ToolResultAction, ToolResultEvent,
+};
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, Text, ToolResult, ToolResultContent};
+use rig_core::completion::message::{Text, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
-use tracing::debug;
+use rig_core::tool::ToolOutput;
+use tracing::{debug, warn};
 
-use crate::factories::AgentClient;
-use crate::token_budget::summarize_oldest_half;
+use crate::settings::models::models_store::ModelConfig;
+use crate::token_budget::counter::TokenCounter;
 
 // ── Tunables ──────────────────────────────────────────────────────────────────
 
-/// Tool result payloads larger than this are truncated by stage 1.
-const BUDGET_REDUCTION_TOOL_RESULT_BYTES: usize = 8_192;
+/// Tool result payloads larger than this are stubbed by the cap stages.
+const TOOL_RESULT_CAP_BYTES: usize = 8_192;
 
-/// Total history char count above which stage 2 (snip) fires.
-const SNIP_THRESHOLD_CHARS: usize = 80_000;
+/// Messages kept whole at the head of the history when snipping.
+const KEEP_HEAD: usize = 2;
 
-/// Number of messages to keep at the head and tail of history after snipping.
-const SNIP_KEEP_HEAD: usize = 2;
-const SNIP_KEEP_TAIL: usize = 8;
+/// Messages kept whole at the tail of the history: what the model is working
+/// with right now.
+const KEEP_TAIL: usize = 8;
 
-/// Total char count above which stage 3 (micro-compact) fires after snipping.
-const MICRO_COMPACT_THRESHOLD_CHARS: usize = 50_000;
+/// The context window assumed for a model that has none configured. Every
+/// local model chatty is run against today fits in 32k; a larger window only
+/// costs a model some history it could have kept.
+const ASSUMED_CONTEXT_WINDOW: usize = 32_768;
 
-/// Total char count above which stage 4 (context collapse) fires.
-const COLLAPSE_THRESHOLD_CHARS: usize = 30_000;
+/// Tokens left for the model's reply when it has no `max_tokens` configured.
+const RESPONSE_RESERVE: usize = 4_096;
 
-/// Total char count above which stage 5 (auto-compact) fires.
-const AUTO_COMPACT_THRESHOLD_CHARS: usize = 20_000;
+/// Fraction of the window kept free for what the count cannot see: the chat
+/// template's wrapping and the tokenizer mismatch (see the module docs).
+const HEADROOM_FRACTION: f64 = 0.10;
+
+/// The compact stages keep this many characters of a tool result.
+const COMPACT_PREVIEW_CHARS: usize = 120;
+
+/// The recording cap never drops below this many tokens, however small the
+/// budget: a model whose base alone fills the window is broken anyway, and a
+/// result cut to nothing would hide why.
+pub const RECORDING_CAP_FLOOR_TOKENS: usize = 512;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Which stage of the context shaper was applied (or `None` if no change was needed).
+/// Which stage was the last one applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextShaperStage {
-    BudgetReduction,
+    Cap,
+    Compact,
     Snip,
-    MicroCompact,
-    Collapse,
-    AutoCompact,
+    CapTail,
 }
 
 /// Settings that control the shaping pipeline.
 ///
-/// All fields have sensible defaults. You can override individual thresholds
-/// by constructing the struct directly.
+/// All fields have sensible defaults. You can override individual values by
+/// constructing the struct directly.
 #[derive(Debug, Clone)]
 pub struct ContextShaperSettings {
-    /// Maximum bytes per tool result before stage 1 truncates it.
-    pub budget_reduction_tool_result_bytes: usize,
+    /// Maximum bytes per tool result before a cap stage stubs it.
+    pub tool_result_cap_bytes: usize,
 
-    /// Total-chars threshold that triggers stage 2 (snip).
-    pub snip_threshold_chars: usize,
+    /// Messages kept whole at the head of the history when snipping.
+    pub keep_head: usize,
 
-    /// Total-chars threshold that triggers stage 3 (micro-compact).
-    pub micro_compact_threshold_chars: usize,
+    /// Messages kept whole at the tail of the history.
+    pub keep_tail: usize,
 
-    /// Total-chars threshold that triggers stage 4 (context collapse).
-    pub collapse_threshold_chars: usize,
+    /// Context window assumed when the model has none configured.
+    pub assumed_context_window: usize,
 
-    /// Total-chars threshold that triggers stage 5 (auto-compact).
-    pub auto_compact_threshold_chars: usize,
+    /// Tokens reserved for the model's reply.
+    pub response_reserve: usize,
 
-    /// Number of messages to keep at the head of history when snipping.
-    pub snip_keep_head: usize,
-
-    /// Number of messages to keep at the tail of history when snipping.
-    pub snip_keep_tail: usize,
+    /// Fraction of the window kept free for the chat template and the
+    /// tokenizer mismatch.
+    pub headroom_fraction: f64,
 }
 
 impl Default for ContextShaperSettings {
     fn default() -> Self {
         Self {
-            budget_reduction_tool_result_bytes: BUDGET_REDUCTION_TOOL_RESULT_BYTES,
-            snip_threshold_chars: SNIP_THRESHOLD_CHARS,
-            micro_compact_threshold_chars: MICRO_COMPACT_THRESHOLD_CHARS,
-            collapse_threshold_chars: COLLAPSE_THRESHOLD_CHARS,
-            auto_compact_threshold_chars: AUTO_COMPACT_THRESHOLD_CHARS,
-            snip_keep_head: SNIP_KEEP_HEAD,
-            snip_keep_tail: SNIP_KEEP_TAIL,
+            tool_result_cap_bytes: TOOL_RESULT_CAP_BYTES,
+            keep_head: KEEP_HEAD,
+            keep_tail: KEEP_TAIL,
+            assumed_context_window: ASSUMED_CONTEXT_WINDOW,
+            response_reserve: RESPONSE_RESERVE,
+            headroom_fraction: HEADROOM_FRACTION,
         }
     }
 }
 
-/// Result of a context-shaping pass.
+/// Result of a shaping pass that changed the history.
 #[derive(Debug, Clone)]
 pub struct ShapedContext {
-    /// The (possibly compressed) message history to pass to the LLM.
+    /// The shortened history to send for this request.
     pub messages: Vec<Message>,
 
-    /// Which stage was the last one applied, if any.  `None` means the history
-    /// fit within the first threshold and no transformation was performed.
-    pub stage_applied: Option<ContextShaperStage>,
+    /// The last stage applied.
+    pub stage_applied: ContextShaperStage,
 
-    /// Approximate number of characters freed by the shaping operation.
-    pub chars_freed: usize,
+    /// Tokens the history counted before shaping.
+    pub tokens_before: usize,
+
+    /// Tokens the shaped history counts.
+    pub tokens_after: usize,
 }
 
-/// Apply the context-shaping pipeline to `history`.
-///
-/// Stages are applied in order.  The pipeline stops as soon as `history` fits
-/// within the next stage's threshold.  Expensive stages (4–5) are only run
-/// when `agent` is provided.
-///
-/// This function is `async` because stages 4 and 5 make LLM calls.
-pub async fn shape_context(
-    history: Vec<Message>,
-    settings: &ContextShaperSettings,
-    agent: Option<&AgentClient>,
-) -> ShapedContext {
-    let original_chars = total_chars(&history);
-
-    // Stage 1: Budget reduction — trim oversized individual tool results.
-    let (history, s1_freed) = stage1_budget_reduction(history, settings);
-    let after_s1 = total_chars(&history);
-    if s1_freed > 0 {
-        debug!(
-            freed = s1_freed,
-            after = after_s1,
-            "context shaper stage1: budget reduction"
-        );
-    }
-    if after_s1 <= settings.snip_threshold_chars {
-        return shaped(
-            history,
-            if s1_freed > 0 {
-                Some(ContextShaperStage::BudgetReduction)
-            } else {
-                None
-            },
-            original_chars,
-        );
-    }
-
-    // Stage 2: Snip — drop oldest middle messages.
-    let (history, s2_freed) = stage2_snip(history, settings);
-    let after_s2 = total_chars(&history);
-    if s2_freed > 0 {
-        debug!(
-            freed = s2_freed,
-            after = after_s2,
-            "context shaper stage2: snip"
-        );
-    }
-    if after_s2 <= settings.micro_compact_threshold_chars {
-        let stage = if s2_freed > 0 {
-            ContextShaperStage::Snip
-        } else {
-            ContextShaperStage::BudgetReduction
-        };
-        return shaped(history, Some(stage), original_chars);
-    }
-
-    // Stage 3: Micro-compact — replace middle tool-result bodies with one-liners.
-    let (history, s3_freed) = stage3_micro_compact(history, settings);
-    let after_s3 = total_chars(&history);
-    if s3_freed > 0 {
-        debug!(
-            freed = s3_freed,
-            after = after_s3,
-            "context shaper stage3: micro-compact"
-        );
-    }
-    if after_s3 <= settings.collapse_threshold_chars || agent.is_none() {
-        let stage = pick_stage(s1_freed, s2_freed, s3_freed);
-        return shaped(history, stage, original_chars);
-    }
-
-    let agent = agent.unwrap();
-
-    // Stage 4: Context collapse — summarise middle half via LLM.
-    let (history, s4_freed) = stage4_collapse(history, settings, agent).await;
-    let after_s4 = total_chars(&history);
-    if s4_freed > 0 {
-        debug!(
-            freed = s4_freed,
-            after = after_s4,
-            "context shaper stage4: collapse"
-        );
-    }
-    if after_s4 <= settings.auto_compact_threshold_chars {
-        let stage = if s4_freed > 0 {
-            Some(ContextShaperStage::Collapse)
-        } else {
-            pick_stage(s1_freed, s2_freed, s3_freed)
-        };
-        return shaped(history, stage, original_chars);
-    }
-
-    // Stage 5: Auto-compact — full summarize pass.
-    let (history, s5_freed) = stage5_auto_compact(history, agent).await;
-    let after_s5 = total_chars(&history);
-    if s5_freed > 0 {
-        debug!(
-            freed = s5_freed,
-            after = after_s5,
-            "context shaper stage5: auto-compact"
-        );
-    }
-    let stage = if s5_freed > 0 {
-        Some(ContextShaperStage::AutoCompact)
-    } else {
-        pick_stage(s1_freed, s2_freed, s3_freed)
-    };
-    shaped(history, stage, original_chars)
+/// The guard itself: one per agent, shared between the hook rig calls and
+/// the factory that calibrates it after the agent is built.
+#[derive(Clone)]
+pub struct ContextShaper {
+    inner: Arc<Inner>,
 }
 
-// ── Stage implementations ─────────────────────────────────────────────────────
+struct Inner {
+    settings: ContextShaperSettings,
+    counter: TokenCounter,
+    context_window: Option<usize>,
+    /// Preamble plus tool schemas, in tokens. Zero until the factory measures
+    /// it, which only makes the guard more lenient, never wrong in the other
+    /// direction.
+    base_tokens: AtomicUsize,
+}
 
-/// Stage 1: Trim any individual tool-result payload exceeding the byte limit.
-///
-/// Replaces the oversized text with a stub: `"[tool result truncated — {n} chars]"`.
-/// Non-text content (images) is left untouched.
-fn stage1_budget_reduction(
-    history: Vec<Message>,
-    settings: &ContextShaperSettings,
-) -> (Vec<Message>, usize) {
-    let limit = settings.budget_reduction_tool_result_bytes;
-    let mut freed = 0usize;
+impl ContextShaper {
+    /// A guard for `model_config`: its `max_context_window` when it has one,
+    /// its `max_tokens` as the reply reserve when set, its tokenizer.
+    pub fn for_model(model_config: &ModelConfig) -> Self {
+        let mut settings = ContextShaperSettings::default();
+        if let Some(max_tokens) = model_config.max_tokens.filter(|n| *n > 0) {
+            settings.response_reserve = max_tokens as usize;
+        }
+        let context_window = model_config
+            .max_context_window
+            .filter(|n| *n > 0)
+            .map(|n| n as usize);
+        Self::new(
+            settings,
+            TokenCounter::for_model(&model_config.model_identifier),
+            context_window,
+        )
+    }
 
-    let history = history
-        .into_iter()
-        .map(|msg| match msg {
-            Message::User { content } => {
-                let content = content
-                    .into_iter()
-                    .map(|item| match item {
-                        UserContent::ToolResult(mut tr) => {
-                            tr.content = trim_tool_result_content(tr.content, limit, &mut freed);
-                            UserContent::ToolResult(tr)
-                        }
-                        other => other,
-                    })
-                    .collect::<Vec<_>>();
-                Message::User {
-                    content: to_user_content(content),
+    /// A guard with explicit settings, counter and window (tests, and any
+    /// caller that already knows the numbers).
+    pub fn new(
+        settings: ContextShaperSettings,
+        counter: TokenCounter,
+        context_window: Option<usize>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                settings,
+                counter,
+                context_window,
+                base_tokens: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    /// Record what every request carries before any history: the preamble
+    /// and the tool schemas, in tokens. Called once by the agent factory.
+    pub fn set_base_tokens(&self, tokens: usize) {
+        self.inner.base_tokens.store(tokens, Ordering::Relaxed);
+    }
+
+    /// The context window the guard shapes for.
+    pub fn context_window(&self) -> usize {
+        self.inner
+            .context_window
+            .unwrap_or(self.inner.settings.assumed_context_window)
+    }
+
+    /// Tokens available to the history once the headroom, the reply reserve,
+    /// the base and `prompt_tokens` are taken off the window.
+    pub fn history_budget(&self, prompt_tokens: usize) -> usize {
+        let window = self.context_window();
+        let headroom = (window as f64 * self.inner.settings.headroom_fraction) as usize;
+        window
+            .saturating_sub(headroom)
+            .saturating_sub(self.inner.settings.response_reserve)
+            .saturating_sub(self.inner.base_tokens.load(Ordering::Relaxed))
+            .saturating_sub(prompt_tokens)
+    }
+
+    /// The counter this guard measures with.
+    pub fn counter(&self) -> &TokenCounter {
+        &self.inner.counter
+    }
+
+    /// Tokens a single tool result may occupy when it is recorded: two
+    /// fifths of the history budget, so the newest two results fit together
+    /// with a fifth to spare for the calls around them, with a floor of
+    /// [`RECORDING_CAP_FLOOR_TOKENS`].
+    pub fn recording_cap(&self) -> usize {
+        (self.history_budget(0) * 2 / 5).max(RECORDING_CAP_FLOOR_TOKENS)
+    }
+
+    /// The presentation a tool result is recorded with: `output` itself when
+    /// it fits the recording cap, else its text cut down to the cap with a
+    /// header saying how much was kept. Image blocks are never touched.
+    pub fn record_tool_output(&self, output: &ToolOutput) -> Option<ToolOutput> {
+        let content = output.as_content();
+        if content
+            .iter()
+            .any(|block| matches!(block, ToolResultContent::Image(_)))
+        {
+            return None;
+        }
+        let text = content
+            .iter()
+            .map(|block| match block {
+                ToolResultContent::Text(text) => text.text.clone(),
+                ToolResultContent::Json { value } => value.to_string(),
+                ToolResultContent::Image(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tokens = self.inner.counter.count(&text);
+        let cap = self.recording_cap();
+        if tokens <= cap {
+            return None;
+        }
+        // Keep the share of the text the cap allows, at this result's own
+        // chars-per-token ratio, on a char boundary; the ratio of a prefix
+        // is only close to the whole's, so recount and cut again while the
+        // kept part plus its header is still over the cap.
+        let header = |kept: usize| {
+            format!(
+                "[tool result truncated — kept {kept} of {} chars; the rest did not fit the model's context window]\n",
+                text.len()
+            )
+        };
+        let budget = cap.saturating_sub(self.inner.counter.count(&header(text.len())));
+        let mut keep = text.len() * budget / tokens;
+        for _ in 0..4 {
+            let cut = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|i| *i <= keep)
+                .last()
+                .unwrap_or(0);
+            let kept = &text[..cut];
+            let kept_tokens = self.inner.counter.count(kept);
+            if kept_tokens <= budget || cut == 0 {
+                return Some(ToolOutput::text(format!("{}{kept}", header(cut))));
+            }
+            keep = cut * budget / kept_tokens;
+        }
+        Some(ToolOutput::text(header(0)))
+    }
+
+    /// Shape `history` for a request whose prompt costs `prompt_tokens`.
+    /// `None` when it already fits: the request goes out exactly as recorded.
+    pub fn shape(&self, history: &[Message], prompt_tokens: usize) -> Option<ShapedContext> {
+        let settings = &self.inner.settings;
+        let counter = &self.inner.counter;
+        let budget = self.history_budget(prompt_tokens);
+
+        let mut messages = history.to_vec();
+        let mut counts: Vec<usize> = messages.iter().map(|m| counter.count_message(m)).collect();
+        let tokens_before: usize = counts.iter().sum();
+        if tokens_before <= budget {
+            return None;
+        }
+
+        let len = messages.len();
+        let tail_start = len.saturating_sub(settings.keep_tail);
+        let fits = |counts: &[usize]| counts.iter().sum::<usize>() <= budget;
+        let mut stage = ContextShaperStage::Cap;
+
+        // Stage 1: cap oversized tool results outside the tail.
+        for i in 0..tail_start {
+            if cap_tool_results(&mut messages[i], settings.tool_result_cap_bytes) {
+                counts[i] = counter.count_message(&messages[i]);
+            }
+        }
+
+        // Stage 2: one-line every tool result outside the tail.
+        if !fits(&counts) {
+            stage = ContextShaperStage::Compact;
+            for i in 0..tail_start {
+                if compact_tool_results(&mut messages[i]) {
+                    counts[i] = counter.count_message(&messages[i]);
                 }
             }
-            other => other,
-        })
-        .collect();
+        }
 
-    (history, freed)
-}
+        // Stage 3: drop the middle.
+        if !fits(&counts) && len > settings.keep_head + settings.keep_tail + 1 {
+            stage = ContextShaperStage::Snip;
+            let head = settings.keep_head;
+            let dropped = tail_start - head;
+            let marker = Message::User {
+                content: vec![UserContent::Text(Text::new(format!(
+                    "[CONTEXT SHAPER: {dropped} messages snipped to reduce context size]"
+                )))],
+            };
+            let marker_tokens = counter.count_message(&marker);
+            let tail = messages.split_off(tail_start);
+            let tail_counts = counts.split_off(tail_start);
+            messages.truncate(head);
+            counts.truncate(head);
+            messages.push(marker);
+            counts.push(marker_tokens);
+            messages.extend(tail);
+            counts.extend(tail_counts);
+        }
 
-fn trim_tool_result_content(
-    content: Vec<ToolResultContent>,
-    limit: usize,
-    freed: &mut usize,
-) -> Vec<ToolResultContent> {
-    let items: Vec<ToolResultContent> = content
-        .into_iter()
-        .map(|item| match item {
-            ToolResultContent::Text(t) if t.text.len() > limit => {
-                let original_len = t.text.len();
-                // Preview is at most half the limit or 200 chars, whichever is smaller.
-                let preview_chars = (limit / 2).min(200);
-                let preview: String = t.text.chars().take(preview_chars).collect();
-                let stub_text =
-                    format!("[tool result truncated — {original_len} chars]\n{preview}…");
-                // freed = chars removed (original minus the stub we wrote).
-                *freed += original_len.saturating_sub(stub_text.len());
-                ToolResultContent::Text(Text::new(stub_text))
-            }
-            other => other,
-        })
-        .collect();
-    to_tool_result_content(items)
-}
-
-/// Stage 2: Snip — drop the oldest middle messages when total is too large.
-///
-/// Keeps `snip_keep_head` messages at the start and `snip_keep_tail` at the
-/// end, replacing the dropped block with a single marker message.
-fn stage2_snip(history: Vec<Message>, settings: &ContextShaperSettings) -> (Vec<Message>, usize) {
-    let head = settings.snip_keep_head;
-    let tail = settings.snip_keep_tail;
-
-    if history.len() <= head + tail + 1 {
-        return (history, 0);
-    }
-
-    let tail_start = history.len().saturating_sub(tail);
-    let drop_start = head;
-    let drop_end = tail_start;
-
-    if drop_start >= drop_end {
-        return (history, 0);
-    }
-
-    let dropped_chars: usize = history[drop_start..drop_end]
-        .iter()
-        .map(message_chars)
-        .sum();
-
-    let marker = Message::User {
-        content: vec![UserContent::Text(Text::new(format!(
-            "[CONTEXT SHAPER: {} messages snipped to reduce context size]",
-            drop_end - drop_start
-        )))],
-    };
-
-    let mut new_history = Vec::with_capacity(head + 1 + tail);
-    new_history.extend_from_slice(&history[..head]);
-    new_history.push(marker);
-    new_history.extend_from_slice(&history[tail_start..]);
-
-    (new_history, dropped_chars)
-}
-
-/// Stage 3: Micro-compact — replace middle tool-result text bodies with a
-/// one-line summary.  The first `head` and last `tail` messages are left
-/// intact so recent context is preserved.
-fn stage3_micro_compact(
-    history: Vec<Message>,
-    settings: &ContextShaperSettings,
-) -> (Vec<Message>, usize) {
-    let head = settings.snip_keep_head;
-    let tail = settings.snip_keep_tail;
-    let len = history.len();
-    let mut freed = 0usize;
-
-    if len <= head + tail {
-        return (history, 0);
-    }
-
-    let tail_start = len.saturating_sub(tail);
-
-    let history = history
-        .into_iter()
-        .enumerate()
-        .map(|(i, msg)| {
-            // Only compact the middle band.
-            if i < head || i >= tail_start {
-                return msg;
-            }
-            match msg {
-                Message::User { content } => {
-                    let content = content
-                        .into_iter()
-                        .map(|item| match item {
-                            UserContent::ToolResult(tr) => {
-                                let (compacted, delta) = micro_compact_tool_result(tr);
-                                freed += delta;
-                                UserContent::ToolResult(compacted)
-                            }
-                            other => other,
-                        })
-                        .collect::<Vec<_>>();
-                    Message::User {
-                        content: to_user_content(content),
+        // Stage 4: the tail itself, oldest first, never the message the
+        // model is answering.
+        if !fits(&counts) {
+            stage = ContextShaperStage::CapTail;
+            let len = messages.len();
+            let tail_start = len.saturating_sub(settings.keep_tail);
+            let last = len.saturating_sub(1);
+            let cap = settings.tool_result_cap_bytes;
+            let transforms: [&dyn Fn(&mut Message) -> bool; 2] =
+                [&|m| cap_tool_results(m, cap), &compact_tool_results];
+            'tail: for transform in transforms {
+                for i in tail_start..last {
+                    if transform(&mut messages[i]) {
+                        counts[i] = counter.count_message(&messages[i]);
+                        if fits(&counts) {
+                            break 'tail;
+                        }
                     }
                 }
-                other => other,
             }
+        }
+
+        let tokens_after = counts.iter().sum();
+        if tokens_after > budget {
+            warn!(
+                tokens = tokens_after,
+                budget,
+                "context shaper: history is still over budget after every stage; sending as is"
+            );
+        }
+        Some(ShapedContext {
+            messages,
+            stage_applied: stage,
+            tokens_before,
+            tokens_after,
         })
-        .collect();
-
-    (history, freed)
+    }
 }
 
-fn micro_compact_tool_result(mut tr: ToolResult) -> (ToolResult, usize) {
-    let mut freed = 0usize;
+impl AgentHook for ContextShaper {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        event: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        let prompt_tokens = self.inner.counter.count_message(event.prompt);
+        match self.shape(event.history, prompt_tokens) {
+            Some(shaped) => {
+                debug!(
+                    turn = event.turn,
+                    stage = ?shaped.stage_applied,
+                    tokens_before = shaped.tokens_before,
+                    tokens_after = shaped.tokens_after,
+                    budget = self.history_budget(prompt_tokens),
+                    "context shaper applied before model call"
+                );
+                CompletionCallAction::patch(RequestPatch::new().history(shaped.messages))
+            }
+            None => CompletionCallAction::Continue,
+        }
+    }
 
-    tr.content = {
-        let items: Vec<ToolResultContent> = tr
-            .content
-            .into_iter()
-            .map(|item| match item {
-                ToolResultContent::Text(t) if t.text.len() > 200 => {
-                    let original_len = t.text.len();
-                    // One-line summary: first 120 chars of trimmed text.
-                    let summary: String = t.text.trim().chars().take(120).collect();
-                    freed += original_len.saturating_sub(summary.len() + 30);
-                    ToolResultContent::Text(Text::new(format!("[compacted] {summary}…")))
-                }
-                other => other,
-            })
-            .collect();
-        to_tool_result_content(items)
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        match self.record_tool_output(event.presentation) {
+            Some(truncated) => {
+                warn!(
+                    tool = event.tool_name,
+                    cap_tokens = self.recording_cap(),
+                    "context shaper: tool result larger than the recording cap; recorded truncated"
+                );
+                ToolResultAction::Rewrite(truncated)
+            }
+            None => ToolResultAction::Keep,
+        }
+    }
+}
+
+// ── Transforms ────────────────────────────────────────────────────────────────
+
+/// Stub every tool result in `message` whose text is over `cap` bytes:
+/// `"[tool result truncated — {n} chars]"` plus a short preview. Returns
+/// whether anything changed.
+fn cap_tool_results(message: &mut Message, cap: usize) -> bool {
+    map_tool_result_text(message, |text| {
+        (text.len() > cap).then(|| {
+            let preview_chars = (cap / 2).min(200);
+            let preview: String = text.chars().take(preview_chars).collect();
+            format!("[tool result truncated — {} chars]\n{preview}…", text.len())
+        })
+    })
+}
+
+/// Replace every tool result body in `message` longer than the preview with
+/// a one-liner: `"[compacted] {first 120 chars}…"`. Returns whether anything
+/// changed.
+fn compact_tool_results(message: &mut Message) -> bool {
+    map_tool_result_text(message, |text| {
+        let trimmed = text.trim();
+        (trimmed.chars().count() > COMPACT_PREVIEW_CHARS).then(|| {
+            let summary: String = trimmed.chars().take(COMPACT_PREVIEW_CHARS).collect();
+            format!("[compacted] {summary}…")
+        })
+    })
+}
+
+/// Apply `rewrite` to the text of every tool-result block in `message` — a
+/// `Text` block's text, or a `Json` block's serialized value, which is what
+/// the provider sends. A block `rewrite` returns `Some` for becomes a `Text`
+/// block with the replacement; images are left alone.
+fn map_tool_result_text(message: &mut Message, rewrite: impl Fn(&str) -> Option<String>) -> bool {
+    let Message::User { content } = message else {
+        return false;
     };
-
-    (tr, freed)
-}
-
-/// Stage 4: Context collapse — LLM-summarise the middle portion of history.
-async fn stage4_collapse(
-    history: Vec<Message>,
-    settings: &ContextShaperSettings,
-    agent: &AgentClient,
-) -> (Vec<Message>, usize) {
-    let head = settings.snip_keep_head;
-    let tail = settings.snip_keep_tail;
-    let len = history.len();
-
-    if len <= head + tail + 2 {
-        return (history, 0);
-    }
-
-    let tail_start = len.saturating_sub(tail);
-    // Summarise the middle band only (not the most recent tail).
-    let middle = history[head..tail_start].to_vec();
-    let middle_chars: usize = middle.iter().map(message_chars).sum();
-
-    match summarize_oldest_half(agent, &middle).await {
-        Ok(result) => {
-            let saved = middle_chars
-                .saturating_sub(result.new_history.iter().map(message_chars).sum::<usize>());
-            let mut new_history = Vec::with_capacity(head + result.new_history.len() + tail);
-            new_history.extend_from_slice(&history[..head]);
-            new_history.extend(result.new_history);
-            new_history.extend_from_slice(&history[tail_start..]);
-            (new_history, saved)
-        }
-        Err(e) => {
-            debug!(error = %e, "context shaper stage4: collapse failed, skipping");
-            (history, 0)
+    let mut changed = false;
+    for item in content.iter_mut() {
+        let UserContent::ToolResult(ToolResult { content, .. }) = item else {
+            continue;
+        };
+        for block in content.iter_mut() {
+            let replacement = match block {
+                ToolResultContent::Text(text) => rewrite(&text.text),
+                ToolResultContent::Json { value } => rewrite(&value.to_string()),
+                ToolResultContent::Image(_) => None,
+            };
+            if let Some(replacement) = replacement {
+                *block = ToolResultContent::Text(Text::new(replacement));
+                changed = true;
+            }
         }
     }
-}
-
-/// Stage 5: Auto-compact — full `summarize_oldest_half` on the entire history.
-async fn stage5_auto_compact(history: Vec<Message>, agent: &AgentClient) -> (Vec<Message>, usize) {
-    let original_chars: usize = history.iter().map(message_chars).sum();
-
-    match summarize_oldest_half(agent, &history).await {
-        Ok(result) => {
-            let new_chars: usize = result.new_history.iter().map(message_chars).sum();
-            let saved = original_chars.saturating_sub(new_chars);
-            (result.new_history, saved)
-        }
-        Err(e) => {
-            debug!(error = %e, "context shaper stage5: auto-compact failed, skipping");
-            (history, 0)
-        }
-    }
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-fn total_chars(history: &[Message]) -> usize {
-    history.iter().map(message_chars).sum()
-}
-
-fn message_chars(msg: &Message) -> usize {
-    match msg {
-        Message::User { content } => content
-            .iter()
-            .map(|item| match item {
-                UserContent::Text(t) => t.text.len(),
-                UserContent::ToolResult(tr) => tr
-                    .content
-                    .iter()
-                    .map(|c| match c {
-                        ToolResultContent::Text(t) => t.text.len(),
-                        ToolResultContent::Image(_) => 256, // arbitrary placeholder
-                        ToolResultContent::Json { .. } => 256,
-                    })
-                    .sum::<usize>(),
-                UserContent::Image(_) => 256,
-                UserContent::Audio(_) => 256,
-                UserContent::Video(_) => 256,
-                UserContent::Document(_) => 256,
-            })
-            .sum(),
-        Message::Assistant { content, .. } => content
-            .iter()
-            .map(|item| match item {
-                AssistantContent::Text(t) => t.text.len(),
-                AssistantContent::ToolCall(tc) => {
-                    tc.function.arguments.to_string().len() + tc.function.name.len()
-                }
-                _ => 0,
-            })
-            .sum(),
-        Message::System { content } => content.len(),
-    }
-}
-
-/// Helper: ensure user content is non-empty (empty messages get a placeholder).
-fn to_user_content(items: Vec<UserContent>) -> Vec<UserContent> {
-    if items.is_empty() {
-        vec![UserContent::Text(Text::new(
-            "[CONTEXT SHAPER: empty user message omitted]",
-        ))]
-    } else {
-        items
-    }
-}
-
-/// Helper: ensure tool-result content is non-empty (empty results get a placeholder).
-fn to_tool_result_content(items: Vec<ToolResultContent>) -> Vec<ToolResultContent> {
-    if items.is_empty() {
-        vec![ToolResultContent::Text(Text::new(
-            "[CONTEXT SHAPER: empty tool result omitted]",
-        ))]
-    } else {
-        items
-    }
-}
-
-fn pick_stage(s1: usize, s2: usize, s3: usize) -> Option<ContextShaperStage> {
-    if s3 > 0 {
-        Some(ContextShaperStage::MicroCompact)
-    } else if s2 > 0 {
-        Some(ContextShaperStage::Snip)
-    } else if s1 > 0 {
-        Some(ContextShaperStage::BudgetReduction)
-    } else {
-        None
-    }
-}
-
-fn shaped(
-    messages: Vec<Message>,
-    stage_applied: Option<ContextShaperStage>,
-    original_chars: usize,
-) -> ShapedContext {
-    let new_chars = total_chars(&messages);
-    ShapedContext {
-        chars_freed: original_chars.saturating_sub(new_chars),
-        messages,
-        stage_applied,
-    }
+    changed
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -557,6 +518,7 @@ fn shaped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::completion::message::ToolCallId;
 
     fn user_text(s: &str) -> Message {
         Message::User {
@@ -564,138 +526,320 @@ mod tests {
         }
     }
 
-    fn tool_result_msg(id: &str, content: &str) -> Message {
-        use rig_core::completion::message::ToolCallId;
+    fn tool_result(id: &str, content: ToolResultContent) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: ToolCallId::new(id).unwrap(),
                 provider: None,
                 name: "test_tool".to_string(),
-                content: vec![ToolResultContent::Text(Text::new(content.to_string()))],
+                content: vec![content],
             })],
         }
     }
 
-    fn big_tool_result(id: &str, size: usize) -> Message {
-        tool_result_msg(id, &"x".repeat(size))
+    /// A tool result of `words` words of prose, so its token count is
+    /// predictable and its byte length is `words * 5 - 1`.
+    fn text_result(id: &str, words: usize) -> Message {
+        tool_result(
+            id,
+            ToolResultContent::Text(Text::new(vec!["word"; words].join(" "))),
+        )
     }
 
-    #[test]
-    fn empty_user_content_gets_placeholder() {
-        let content = to_user_content(Vec::new());
-        let items = content.into_iter().collect::<Vec<_>>();
+    fn json_result(id: &str, words: usize) -> Message {
+        tool_result(
+            id,
+            ToolResultContent::Json {
+                value: serde_json::json!({ "content": vec!["word"; words].join(" ") }),
+            },
+        )
+    }
 
-        assert_eq!(items.len(), 1);
-        match &items[0] {
-            UserContent::Text(text) => assert!(text.text.contains("empty user message omitted")),
-            other => panic!("expected placeholder text, got {other:?}"),
+    fn result_text(message: &Message) -> String {
+        let Message::User { content } = message else {
+            panic!("expected a user message");
+        };
+        match content.first() {
+            Some(UserContent::ToolResult(tr)) => match tr.content.first() {
+                Some(ToolResultContent::Text(t)) => t.text.clone(),
+                Some(ToolResultContent::Json { value }) => value.to_string(),
+                other => panic!("unexpected block {other:?}"),
+            },
+            Some(UserContent::Text(t)) => t.text.clone(),
+            other => panic!("unexpected content {other:?}"),
         }
     }
 
-    #[test]
-    fn empty_tool_result_content_gets_placeholder() {
-        let content = to_tool_result_content(Vec::new());
-        let items = content.into_iter().collect::<Vec<_>>();
-
-        assert_eq!(items.len(), 1);
-        match &items[0] {
-            ToolResultContent::Text(text) => {
-                assert!(text.text.contains("empty tool result omitted"))
-            }
-            other => panic!("expected placeholder text, got {other:?}"),
-        }
-    }
-
-    fn settings_low_thresholds() -> ContextShaperSettings {
+    fn settings(cap: usize) -> ContextShaperSettings {
         ContextShaperSettings {
-            budget_reduction_tool_result_bytes: 100,
-            snip_threshold_chars: 500,
-            micro_compact_threshold_chars: 300,
-            collapse_threshold_chars: 200,
-            auto_compact_threshold_chars: 100,
-            snip_keep_head: 1,
-            snip_keep_tail: 2,
+            tool_result_cap_bytes: cap,
+            keep_head: 1,
+            keep_tail: 2,
+            response_reserve: 0,
+            headroom_fraction: 0.0,
+            ..ContextShaperSettings::default()
         }
     }
 
+    fn counter() -> TokenCounter {
+        TokenCounter::for_model("test")
+    }
+
+    /// A guard whose budget is exactly `tokens(history) - 1`: over by one,
+    /// so the cheapest stage that frees anything is the one that fires.
+    fn shaper_just_over(history: &[Message], settings: ContextShaperSettings) -> ContextShaper {
+        let counter = counter();
+        let total: usize = history.iter().map(|m| counter.count_message(m)).sum();
+        ContextShaper::new(settings, counter, Some(total - 1))
+    }
+
     #[test]
-    fn stage1_trims_oversized_tool_result() {
-        let msg = big_tool_result("id1", 200);
-        let settings = settings_low_thresholds();
-        let (out, freed) = stage1_budget_reduction(vec![msg], &settings);
-        assert!(freed > 0);
-        // Content should be a stub now.
-        if let Message::User { content } = &out[0]
-            && let Some(UserContent::ToolResult(tr)) = content.first()
-            && let Some(ToolResultContent::Text(t)) = tr.content.first()
-        {
-            assert!(t.text.contains("truncated"));
+    fn budget_takes_reserve_base_and_prompt_off_the_window() {
+        let shaper = ContextShaper::new(
+            ContextShaperSettings {
+                response_reserve: 100,
+                headroom_fraction: 0.1,
+                ..ContextShaperSettings::default()
+            },
+            counter(),
+            Some(1_000),
+        );
+        shaper.set_base_tokens(300);
+        assert_eq!(
+            shaper.history_budget(50),
+            450,
+            "1000 − 100 headroom − 100 reserve − 300 base − 50 prompt"
+        );
+        assert_eq!(
+            shaper.history_budget(10_000),
+            0,
+            "saturates, never underflows"
+        );
+    }
+
+    #[test]
+    fn a_model_without_a_window_gets_the_assumed_one() {
+        let config = ModelConfig::new(
+            "id".into(),
+            "name".into(),
+            crate::settings::models::providers_store::ProviderType::Ollama,
+            "qwen3".into(),
+        );
+        let shaper = ContextShaper::for_model(&config);
+        assert_eq!(shaper.context_window(), ASSUMED_CONTEXT_WINDOW);
+        assert_eq!(
+            shaper.history_budget(0),
+            ASSUMED_CONTEXT_WINDOW - ASSUMED_CONTEXT_WINDOW / 10 - RESPONSE_RESERVE
+        );
+    }
+
+    #[test]
+    fn a_configured_window_and_max_tokens_win() {
+        let mut config = ModelConfig::new(
+            "id".into(),
+            "name".into(),
+            crate::settings::models::providers_store::ProviderType::OpenRouter,
+            "vendor/model".into(),
+        );
+        config.max_context_window = Some(200_000);
+        config.max_tokens = Some(8_000);
+        let shaper = ContextShaper::for_model(&config);
+        assert_eq!(shaper.history_budget(0), 200_000 - 20_000 - 8_000);
+    }
+
+    #[test]
+    fn a_history_that_fits_is_left_alone() {
+        let history = vec![user_text("hello"), text_result("t1", 50)];
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10_000));
+        assert!(shaper.shape(&history, 10).is_none());
+    }
+
+    /// The AGE-500 shape: the run is over budget, and there is old material
+    /// to give up before the tail is touched.
+    #[test]
+    fn caps_old_results_before_touching_the_tail() {
+        let history = vec![
+            user_text("task"),
+            text_result("old", 200),
+            user_text("ok"),
+            text_result("recent", 100),
+        ];
+        let shaper = shaper_just_over(&history, settings(100));
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Cap);
+        assert!(
+            result_text(&shaped.messages[1]).starts_with("[tool result truncated — 999 chars]")
+        );
+        assert_eq!(
+            result_text(&shaped.messages[3]),
+            result_text(&history[3]),
+            "the tail stays whole"
+        );
+        assert!(shaped.tokens_after <= shaper.history_budget(0));
+        assert!(shaped.tokens_after < shaped.tokens_before);
+    }
+
+    #[test]
+    fn json_results_count_and_cap_like_text() {
+        let history = vec![
+            user_text("task"),
+            json_result("old", 200),
+            user_text("ok"),
+            json_result("recent", 100),
+        ];
+        let shaper = shaper_just_over(&history, settings(100));
+        let shaped = shaper
+            .shape(&history, 0)
+            .expect("a JSON result is not invisible");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Cap);
+        assert!(result_text(&shaped.messages[1]).starts_with("[tool result truncated — "));
+        assert_eq!(result_text(&shaped.messages[3]), result_text(&history[3]));
+    }
+
+    #[test]
+    fn one_lines_before_snipping() {
+        let mut history = vec![user_text("task")];
+        for i in 0..4 {
+            history.push(text_result(&format!("t{i}"), 100));
         }
+        // Every result is under the 1 KB cap, so capping frees nothing;
+        // one-lining the two outside the tail does, and nothing is dropped.
+        let shaper = shaper_just_over(&history, settings(1_000));
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Compact);
+        assert_eq!(shaped.messages.len(), history.len());
+        assert!(result_text(&shaped.messages[1]).starts_with("[compacted] "));
+        assert!(result_text(&shaped.messages[2]).starts_with("[compacted] "));
+        assert_eq!(result_text(&shaped.messages[4]), result_text(&history[4]));
     }
 
     #[test]
-    fn stage1_leaves_small_tool_result_intact() {
-        let msg = tool_result_msg("id1", "small content");
-        let settings = settings_low_thresholds();
-        let (_, freed) = stage1_budget_reduction(vec![msg], &settings);
-        assert_eq!(freed, 0);
-    }
-
-    #[test]
-    fn stage2_snips_middle_messages() {
-        let history: Vec<Message> = (0..10).map(|i| user_text(&format!("msg {i}"))).collect();
-        let settings = ContextShaperSettings {
-            snip_keep_head: 1,
-            snip_keep_tail: 2,
-            ..settings_low_thresholds()
-        };
-        let (out, freed) = stage2_snip(history, &settings);
-        assert!(freed > 0);
-        // head (1) + marker (1) + tail (2) = 4
-        assert_eq!(out.len(), 4);
-        // The marker should mention "snipped".
-        if let Message::User { content } = &out[1]
-            && let Some(UserContent::Text(t)) = content.first()
-        {
-            assert!(t.text.contains("snipped"));
+    fn snips_when_capping_and_compacting_free_nothing() {
+        // Six results too short to cap or one-line: only dropping helps.
+        let mut history = vec![user_text("task")];
+        for i in 0..6 {
+            history.push(text_result(&format!("t{i}"), 20));
         }
+        let shaper = shaper_just_over(&history, settings(1_000));
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Snip);
+        assert_eq!(shaped.messages.len(), 1 + 1 + 2);
+        assert!(result_text(&shaped.messages[1]).contains("4 messages snipped"));
+        assert_eq!(result_text(&shaped.messages[3]), result_text(&history[6]));
+    }
+
+    /// Two fetches and nothing older — trial `2dfc4c37…` in AGE-500. The
+    /// older one is stubbed, the newest stays whole.
+    #[test]
+    fn caps_the_tail_oldest_first_and_never_the_last_message() {
+        let history = vec![
+            user_text("task"),
+            text_result("first-fetch", 300),
+            text_result("second-fetch", 200),
+        ];
+        let shaper = shaper_just_over(&history, settings(100));
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::CapTail);
+        assert!(
+            result_text(&shaped.messages[1]).starts_with("[tool result truncated — 1499 chars]")
+        );
+        assert_eq!(result_text(&shaped.messages[2]), result_text(&history[2]));
     }
 
     #[test]
-    fn stage2_leaves_small_history_alone() {
-        let history: Vec<Message> = (0..2).map(|i| user_text(&format!("msg {i}"))).collect();
-        let settings = settings_low_thresholds();
-        let (_, freed) = stage2_snip(history, &settings);
-        assert_eq!(freed, 0);
+    fn a_history_still_over_budget_is_sent_shaped_not_dropped() {
+        let history = vec![user_text("task"), text_result("only", 1_000)];
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10));
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+        assert_eq!(shaped.messages.len(), 2);
+        assert_eq!(
+            result_text(&shaped.messages[1]),
+            result_text(&history[1]),
+            "the last message is never touched"
+        );
+        assert!(shaped.tokens_after > shaper.history_budget(0));
     }
 
     #[test]
-    fn stage3_compacts_middle_only() {
-        // Build: head(1) + many middle tool results + tail(2)
-        let mut history = vec![user_text("system")];
-        for i in 0..8 {
-            history.push(tool_result_msg(&format!("t{i}"), &"y".repeat(300)));
-        }
-        history.push(user_text("recent1"));
-        history.push(user_text("recent2"));
-
-        let settings = ContextShaperSettings {
-            snip_keep_head: 1,
-            snip_keep_tail: 2,
-            ..settings_low_thresholds()
-        };
-        let (out, freed) = stage3_micro_compact(history, &settings);
-        assert!(freed > 0);
-        // Head and tail should be untouched.
-        assert_eq!(out.len(), 11);
+    fn the_prompt_counts_against_the_budget() {
+        let history = vec![user_text("task"), text_result("old", 100), user_text("ok")];
+        let counter = counter();
+        let total: usize = history.iter().map(|m| counter.count_message(m)).sum();
+        let shaper = ContextShaper::new(settings(100), counter, Some(total));
+        assert!(shaper.shape(&history, 0).is_none());
+        assert!(
+            shaper.shape(&history, 1).is_some(),
+            "a large prompt leaves less for the history"
+        );
     }
 
-    #[tokio::test]
-    async fn shape_context_no_change_when_small() {
-        let history = vec![user_text("short")];
-        let settings = ContextShaperSettings::default();
-        let shaped = shape_context(history.clone(), &settings, None).await;
-        assert!(shaped.stage_applied.is_none());
-        assert_eq!(shaped.chars_freed, 0);
+    #[test]
+    fn images_are_left_alone() {
+        use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
+        let mut message = tool_result(
+            "img",
+            ToolResultContent::Image(Image {
+                data: DocumentSourceKind::base64("AAAA"),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                additional_params: None,
+            }),
+        );
+        assert!(!cap_tool_results(&mut message, 1));
+        assert!(!compact_tool_results(&mut message));
+    }
+
+    #[test]
+    fn a_result_under_the_recording_cap_is_recorded_whole() {
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10_000));
+        let output =
+            ToolOutput::json(serde_json::json!({ "content": vec!["word"; 200].join(" ") }));
+        assert!(shaper.record_tool_output(&output).is_none());
+    }
+
+    #[test]
+    fn a_result_over_the_recording_cap_is_cut_to_the_cap_once() {
+        // Budget 2 000 → cap 800 tokens; 3 000 words are ~3 000 tokens.
+        let shaper = ContextShaper::new(settings(100), counter(), Some(2_000));
+        let words = vec!["word"; 3_000].join(" ");
+        let output = ToolOutput::json(serde_json::json!({ "content": words }));
+        let recorded = shaper.record_tool_output(&output).expect("over the cap");
+        let text = recorded.as_text().expect("recorded as text");
+        assert!(text.starts_with("[tool result truncated — kept "));
+        let kept = shaper.counter().count(text);
+        assert!(
+            kept <= shaper.recording_cap() + 40,
+            "kept {kept} tokens against a cap of {}",
+            shaper.recording_cap()
+        );
+        assert!(
+            kept > shaper.recording_cap() / 2,
+            "keeps most of what fits, not a stub"
+        );
+        // Recording again is a no-op: the truncated form fits.
+        assert!(shaper.record_tool_output(&recorded).is_none());
+    }
+
+    #[test]
+    fn the_recording_cap_has_a_floor() {
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10));
+        assert_eq!(shaper.recording_cap(), RECORDING_CAP_FLOOR_TOKENS);
+    }
+
+    #[test]
+    fn a_result_with_an_image_is_recorded_whole() {
+        use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
+        let shaper = ContextShaper::new(settings(100), counter(), Some(10));
+        let output = ToolOutput::content(vec![
+            ToolResultContent::Text(Text::new(vec!["word"; 3_000].join(" "))),
+            ToolResultContent::Image(Image {
+                data: DocumentSourceKind::base64("AAAA"),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                additional_params: None,
+            }),
+        ])
+        .unwrap();
+        assert!(shaper.record_tool_output(&output).is_none());
     }
 }
