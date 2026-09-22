@@ -46,6 +46,13 @@
 //! | 3 | Snip | Keep the first `keep_head` and last `keep_tail` messages, drop the middle |
 //! | 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first, never the last message |
 //!
+//! Stage 3's cut steps off a tool round-trip before it fires: the kept tail
+//! starts no later than the assistant message issuing the calls it answers,
+//! and the kept head ends no later than the last call the snip still answers.
+//! Dropping half a round-trip is a 400 from every OpenAI-compatible provider,
+//! and since the guard runs inside a live tool loop that is the cut's usual
+//! shape, not an edge case (AGE-512).
+//!
 //! A history that is still over budget after stage 4 is sent as is: without
 //! summarising there is nothing left to take.
 //!
@@ -60,6 +67,7 @@
 //! sees as much of it as the window allows. Everything under that cap is
 //! recorded whole.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -68,7 +76,9 @@ use rig_agent::agent::{
     ToolResultAction, ToolResultEvent,
 };
 use rig_core::completion::Message;
-use rig_core::completion::message::{Text, ToolResult, ToolResultContent};
+use rig_core::completion::message::{
+    AssistantContent, Text, ToolCallId, ToolResult, ToolResultContent,
+};
 use rig_core::message::UserContent;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
@@ -355,25 +365,30 @@ impl ContextShaper {
             }
         }
 
-        // Stage 3: drop the middle.
+        // Stage 3: drop the middle. Both ends of the cut step off a tool
+        // round-trip first, so neither half of one is ever dropped without
+        // the other (AGE-512).
         if !fits(&counts) && len > settings.keep_head + settings.keep_tail + 1 {
-            stage = ContextShaperStage::Snip;
-            let head = settings.keep_head;
-            let dropped = tail_start - head;
-            let marker = Message::User {
-                content: vec![UserContent::Text(Text::new(format!(
-                    "[CONTEXT SHAPER: {dropped} messages snipped to reduce context size]"
-                )))],
-            };
-            let marker_tokens = counter.count_message(&marker);
-            let tail = messages.split_off(tail_start);
-            let tail_counts = counts.split_off(tail_start);
-            messages.truncate(head);
-            counts.truncate(head);
-            messages.push(marker);
-            counts.push(marker_tokens);
-            messages.extend(tail);
-            counts.extend(tail_counts);
+            let head = round_trip_safe_head(&messages, settings.keep_head);
+            let snip_end = round_trip_safe_tail_start(&messages, head, tail_start);
+            if snip_end > head {
+                stage = ContextShaperStage::Snip;
+                let dropped = snip_end - head;
+                let marker = Message::User {
+                    content: vec![UserContent::Text(Text::new(format!(
+                        "[CONTEXT SHAPER: {dropped} messages snipped to reduce context size]"
+                    )))],
+                };
+                let marker_tokens = counter.count_message(&marker);
+                let tail = messages.split_off(snip_end);
+                let tail_counts = counts.split_off(snip_end);
+                messages.truncate(head);
+                counts.truncate(head);
+                messages.push(marker);
+                counts.push(marker_tokens);
+                messages.extend(tail);
+                counts.extend(tail_counts);
+            }
         }
 
         // Stage 4: the tail itself, oldest first, never the message the
@@ -455,6 +470,85 @@ impl AgentHook for ContextShaper {
             None => ToolResultAction::Keep,
         }
     }
+}
+
+// ── Round trips ───────────────────────────────────────────────────────────────
+
+/// The ids of the tool calls `message` makes.
+fn call_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
+    let content = match message {
+        Message::Assistant { content, .. } => Some(content.iter()),
+        _ => None,
+    };
+    content.into_iter().flatten().filter_map(|item| match item {
+        AssistantContent::ToolCall(call) => Some(&call.id),
+        _ => None,
+    })
+}
+
+/// The ids of the tool calls `message` answers.
+fn result_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
+    let content = match message {
+        Message::User { content } => Some(content.iter()),
+        _ => None,
+    };
+    content.into_iter().flatten().filter_map(|item| match item {
+        UserContent::ToolResult(result) => Some(&result.call),
+        _ => None,
+    })
+}
+
+/// Pull the head of the snip back off an assistant `tool_calls` message whose
+/// results the snip would drop: a call nothing answers is a 400 from every
+/// OpenAI-compatible provider, the same one AGE-485 repaired at the other end.
+fn round_trip_safe_head(messages: &[Message], mut head: usize) -> usize {
+    while head > 0 {
+        let answered: HashSet<&ToolCallId> = messages[..head].iter().flat_map(result_ids).collect();
+        if messages[..head]
+            .iter()
+            .flat_map(call_ids)
+            .all(|id| answered.contains(id))
+        {
+            break;
+        }
+        head -= 1;
+    }
+    head
+}
+
+/// Pull the start of the kept tail back to the assistant message that issued
+/// the calls the tail answers. A tool result whose `tool_calls` message was
+/// snipped away is rejected with "messages with role 'tool' must be a
+/// response to a preceding message with 'tool_calls'" (AGE-512) — and since
+/// the guard runs on every model call of a run, the cut lands inside a live
+/// tool loop, where that shape is the common one rather than the rare one.
+///
+/// A result whose call is nowhere in the history is left where it is: that
+/// history was already malformed, and moving the cut cannot repair it.
+fn round_trip_safe_tail_start(messages: &[Message], head: usize, tail_start: usize) -> usize {
+    let mut start = tail_start;
+    while start > head {
+        let called: HashSet<&ToolCallId> = messages[..head]
+            .iter()
+            .chain(&messages[start..])
+            .flat_map(call_ids)
+            .collect();
+        let orphan = messages[start..]
+            .iter()
+            .flat_map(result_ids)
+            .find(|id| !called.contains(*id))
+            .cloned();
+        let Some(orphan) = orphan else { break };
+        let Some(call_index) = messages[head..start]
+            .iter()
+            .rposition(|message| call_ids(message).any(|id| *id == orphan))
+            .map(|index| index + head)
+        else {
+            break;
+        };
+        start = call_index;
+    }
+    start
 }
 
 // ── Transforms ────────────────────────────────────────────────────────────────
@@ -726,6 +820,102 @@ mod tests {
         assert_eq!(shaped.messages.len(), 1 + 1 + 2);
         assert!(result_text(&shaped.messages[1]).contains("4 messages snipped"));
         assert_eq!(result_text(&shaped.messages[3]), result_text(&history[6]));
+    }
+
+    /// Every tool result in `messages` is answered by a call before it, and
+    /// every call is answered after it — what the providers check.
+    fn assert_round_trips_intact(messages: &[Message]) {
+        let mut called: HashSet<ToolCallId> = HashSet::new();
+        for (index, message) in messages.iter().enumerate() {
+            for id in result_ids(message) {
+                assert!(
+                    called.contains(id),
+                    "message {index} answers {id:?}, which nothing before it called"
+                );
+            }
+            called.extend(call_ids(message).cloned());
+        }
+        let answered: HashSet<&ToolCallId> = messages.iter().flat_map(result_ids).collect();
+        for (index, message) in messages.iter().enumerate() {
+            for id in call_ids(message) {
+                assert!(
+                    answered.contains(id),
+                    "message {index} calls {id:?}, which nothing answers"
+                );
+            }
+        }
+    }
+
+    fn tool_call(id: &str) -> Message {
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::tool_call(
+                id,
+                "test_tool",
+                serde_json::json!({}),
+            )],
+        }
+    }
+
+    /// `n` tool round-trips after a user message: the shape every step of a
+    /// live tool loop has, and the one the in-loop guard shapes.
+    fn tool_loop(n: usize) -> Vec<Message> {
+        let mut history = vec![user_text("task")];
+        for i in 0..n {
+            history.push(tool_call(&format!("t{i}")));
+            history.push(text_result(&format!("t{i}"), 20));
+        }
+        history
+    }
+
+    /// The AGE-512 400: the cut fell between an assistant `tool_calls`
+    /// message and the result answering it, and the provider rejected the
+    /// next request with "messages with role 'tool' must be a response to a
+    /// preceding message with 'tool_calls'".
+    #[test]
+    fn snip_keeps_the_call_the_tail_answers() {
+        let history = tool_loop(3);
+        let settings = ContextShaperSettings {
+            keep_head: 1,
+            keep_tail: 3,
+            ..settings(1_000)
+        };
+        // Unadjusted, the tail would start on `t1`'s result, whose call is
+        // the message before it.
+        assert!(matches!(history[history.len() - 3], Message::User { .. }));
+
+        let shaper = shaper_just_over(&history, settings);
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Snip);
+        assert_round_trips_intact(&shaped.messages);
+        assert!(result_text(&shaped.messages[1]).contains("2 messages snipped"));
+        assert!(
+            call_ids(&shaped.messages[2]).any(|id| id.as_ref() == "t1"),
+            "the kept tail opens with the call it answers"
+        );
+    }
+
+    /// The other end of the same cut: the kept head must not end on a call
+    /// whose result the snip drops.
+    #[test]
+    fn snip_never_keeps_a_head_call_it_drops_the_result_of() {
+        let history = tool_loop(3);
+        let settings = ContextShaperSettings {
+            keep_head: 2,
+            keep_tail: 2,
+            ..settings(1_000)
+        };
+        // Unadjusted, the head would end on `t0`'s call, whose result is the
+        // first message the snip drops.
+        assert!(call_ids(&history[1]).any(|id| id.as_ref() == "t0"));
+
+        let shaper = shaper_just_over(&history, settings);
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Snip);
+        assert_round_trips_intact(&shaped.messages);
+        assert_eq!(shaped.messages.len(), 1 + 1 + 2);
     }
 
     /// Two fetches and nothing older — trial `2dfc4c37…` in AGE-500. The
