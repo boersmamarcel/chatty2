@@ -16,7 +16,7 @@ use crate::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsag
 use crate::repositories::ConversationData;
 use crate::services::AgentTaskSnapshot;
 use crate::services::shell_service::ShellSession;
-use crate::services::{is_tool_result_message, repair_dangling_tool_calls};
+use crate::services::{enforce_tool_round_trips, is_tool_result_message};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::PendingArtifacts;
@@ -1133,7 +1133,7 @@ fn finalize_response_state(
     // OpenAI-compatible provider rejects the mismatch on the *next* request.
     let tool_messages = turn_messages
         .map(turn_tool_messages)
-        .map(repair_dangling_tool_calls)
+        .map(|messages| enforce_tool_round_trips(messages, &[]))
         .unwrap_or_default();
     entries.extend(tool_messages.into_iter().map(|message| MessageEntry {
         message,
