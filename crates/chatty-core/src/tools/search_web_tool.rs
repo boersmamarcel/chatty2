@@ -1,3 +1,4 @@
+use base64::Engine as _;
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
@@ -6,6 +7,7 @@ use tracing::{info, warn};
 
 use crate::settings::models::search_settings::SearchProvider;
 use crate::tools::ToolError;
+use crate::tools::html_entities::decode_html_entities;
 
 /// Request timeout for search API calls
 const SEARCH_TIMEOUT_SECS: u64 = 15;
@@ -256,7 +258,7 @@ impl SearchWebTool {
         let response = self
             .client
             .get("https://www.bing.com/search")
-            .query(&[("q", query)])
+            .query(&bing_query_params(query))
             .send()
             .await
             .map_err(|e| ToolError::OperationFailed(format!("Bing request failed: {}", e)))?;
@@ -272,7 +274,20 @@ impl SearchWebTool {
             ToolError::OperationFailed(format!("Failed to read Bing response: {}", e))
         })?;
 
-        Ok(parse_bing_results(&html, max_results))
+        let results = parse_bing_results(&html, max_results);
+        // Bing answers some clients with decoy results — well-formed `b_algo`
+        // blocks about something else entirely, re-rolled on every request
+        // (AGE-506). Like the DDG challenge page below, that is an
+        // unavailable backend, not an answer, so say so instead of handing
+        // the model a confident-looking list of unrelated links.
+        if !results.is_empty() && !results_match_query(query, &results) {
+            return Err(ToolError::OperationFailed(
+                "Bing returned results unrelated to the query (anti-scraping decoy page); \
+                 web search is unavailable"
+                    .to_string(),
+            ));
+        }
+        Ok(results)
     }
 
     /// Fallback search using DuckDuckGo lite (no API key required).
@@ -504,6 +519,16 @@ fn looks_like_ddg_challenge_page(html: &str) -> bool {
     lower.contains("anomaly") || lower.contains("challenge")
 }
 
+/// Query parameters for a Bing search request.
+///
+/// `setlang`/`cc` ask Bing for English results/UI and US ranking instead of
+/// guessing locale from the requester's IP (AGE-508); complementary to the
+/// `Accept-Language` header the shared HTTP client builders now send
+/// (`services::http_client`).
+fn bing_query_params(query: &str) -> [(&str, &str); 3] {
+    [("q", query), ("setlang", "en"), ("cc", "US")]
+}
+
 /// Parse search results from a Bing HTML results page.
 ///
 /// Each organic result is a `<li class="b_algo">` block containing a
@@ -540,7 +565,7 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
         let Some(href_end) = after_h2[href_value_start..].find('"') else {
             continue;
         };
-        let url = after_h2[href_value_start..href_value_start + href_end].to_string();
+        let url = decode_bing_redirect(&after_h2[href_value_start..href_value_start + href_end]);
         if !url.starts_with("http") {
             continue;
         }
@@ -558,6 +583,71 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     }
 
     results
+}
+
+/// Resolve a Bing result href to the page it actually points at.
+///
+/// Bing wraps every organic result in a tracking redirect shaped
+/// `https://www.bing.com/ck/a?...&u=a1<base64url of the real URL>&ntb=1`, and
+/// the source page carries it HTML-escaped (`&amp;`). Without this the model
+/// only ever sees the redirect and has to guess URLs from titles (AGE-506).
+///
+/// Best effort: anything that is not that exact shape — a direct link, a
+/// changed redirect format, a payload that is not base64url of a URL — falls
+/// back to the href as found rather than failing the search.
+fn decode_bing_redirect(href: &str) -> String {
+    decode_bing_redirect_inner(href).unwrap_or_else(|| href.to_string())
+}
+
+fn decode_bing_redirect_inner(href: &str) -> Option<String> {
+    let unescaped = decode_html_entities(href);
+    if !unescaped.contains("bing.com/ck/a") {
+        return None;
+    }
+    let query = unescaped.split_once('?')?.1;
+    let u = query
+        .split('&')
+        .find_map(|param| param.strip_prefix("u="))?;
+    // Bing prefixes the base64url payload with a two-character scheme tag.
+    let payload = u.strip_prefix("a1").unwrap_or(u);
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let url = String::from_utf8(bytes).ok()?;
+    url.starts_with("http").then_some(url)
+}
+
+/// Common English stopwords long enough (4+ characters) to otherwise pass
+/// the length filter in `results_match_query` despite carrying no real
+/// search-relevance signal (AGE-511). A Bing decoy page's boilerplate is
+/// likely to contain one of these purely by chance, which is how "what is
+/// the capital of France" got waved through on the word "what" alone.
+const STOPWORDS: &[&str] = &[
+    "this", "that", "these", "those", "what", "which", "when", "where", "while", "have", "will",
+    "does", "were", "from", "with", "into", "about", "your", "their", "they", "them", "then",
+    "than", "also", "been", "being", "would", "could", "should", "there", "here", "some", "such",
+    "only", "just", "very", "much", "many", "most", "more", "over", "under", "between", "during",
+    "after", "before", "through", "both", "each",
+];
+
+/// Whether any parsed result plausibly belongs to `query`: one content term
+/// (a word of 4+ characters, excluding common stopwords) of the query
+/// occurring in some result's title, snippet or URL is enough. A query with
+/// no such term left (e.g. "who won", or a query that is entirely stopwords)
+/// can't be judged this way and passes.
+fn results_match_query(query: &str, results: &[SearchResult]) -> bool {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|word| word.chars().count() >= 4 && !STOPWORDS.contains(&word.as_str()))
+        .collect();
+    if terms.is_empty() {
+        return true;
+    }
+    results.iter().any(|result| {
+        let haystack = format!("{} {} {}", result.title, result.snippet, result.url).to_lowercase();
+        terms.iter().any(|term| haystack.contains(term))
+    })
 }
 
 /// Extract the anchor text of the first `<a ...>...</a>` in `html`, with
@@ -599,14 +689,7 @@ fn strip_html_tags(html: &str) -> String {
             _ => {}
         }
     }
-    // Decode common HTML entities
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&nbsp;", " ")
+    decode_html_entities(&result)
 }
 
 /// Truncate a snippet to a maximum length at a word boundary
@@ -722,6 +805,33 @@ mod tests {
         assert!(!looks_like_ddg_challenge_page(no_results_page));
     }
 
+    /// AGE-508: the Bing request asks for English results / US ranking
+    /// (`setlang`/`cc`) instead of letting Bing guess locale from IP, and
+    /// still carries the query text — checked on the actual built request
+    /// URL, not just the parameter tuple, since `RequestBuilder::query`
+    /// could in principle be wired up wrong.
+    #[test]
+    fn test_bing_request_includes_setlang_and_cc() {
+        assert_eq!(
+            bing_query_params("rust lang"),
+            [("q", "rust lang"), ("setlang", "en"), ("cc", "US")]
+        );
+
+        let client = crate::services::http_client::browser_client(1);
+        let request = client
+            .get("https://www.bing.com/search")
+            .query(&bing_query_params("rust lang"))
+            .build()
+            .unwrap();
+        let query = request.url().query().unwrap_or("");
+        assert!(
+            query.contains("q=rust+lang") || query.contains("q=rust%20lang"),
+            "got {query}"
+        );
+        assert!(query.contains("setlang=en"), "got {query}");
+        assert!(query.contains("cc=US"), "got {query}");
+    }
+
     /// AGE-495: Bing HTML fallback, kept working when DDG serves a challenge.
     #[test]
     fn test_parse_bing_results_basic() {
@@ -744,6 +854,158 @@ mod tests {
         assert_eq!(results[0].snippet, "First snippet text.");
         assert_eq!(results[1].url, "https://example.com/two");
         assert_eq!(results[1].title, "Second Result");
+    }
+
+    /// AGE-506 (1): every real Bing href is an HTML-escaped `ck/a` tracking
+    /// redirect; the model needs the destination, not the redirect.
+    #[test]
+    fn test_parse_bing_results_decodes_redirect_href() {
+        let html = r#"<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc123&amp;u=a1aHR0cHM6Ly93d3cuYnJpdGlzaG11c2V1bS5vcmcvY29sbGVjdGlvbg&amp;ntb=1">The British Museum</a></h2>
+            <div class="b_caption"><p>Collection of the British Museum.</p></div></li>"#;
+        let results = parse_bing_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://www.britishmuseum.org/collection");
+    }
+
+    /// The exact payload shape observed in the wild (AGE-506 evidence).
+    #[test]
+    fn test_decode_bing_redirect_matches_observed_payload() {
+        let href =
+            "https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvVGhl&ntb=1";
+        assert_eq!(
+            decode_bing_redirect(href),
+            "https://en.wikipedia.org/wiki/The"
+        );
+    }
+
+    #[test]
+    fn test_decode_bing_redirect_leaves_direct_links_alone() {
+        let href = "https://example.com/one";
+        assert_eq!(decode_bing_redirect(href), href);
+    }
+
+    /// Best effort: a redirect we can't decode must degrade to the raw href,
+    /// never fail the whole search.
+    #[test]
+    fn test_decode_bing_redirect_falls_back_on_malformed_payload() {
+        for href in [
+            "https://www.bing.com/ck/a?p=abc&ntb=1", // no u= at all
+            "https://www.bing.com/ck/a?u=a1!!!not-base64!!!", // undecodable
+            "https://www.bing.com/ck/a?u=a1bm90IGEgdXJs", // decodes to "not a url"
+            "https://www.bing.com/ck/a",             // no query string
+        ] {
+            assert_eq!(decode_bing_redirect(href), href, "href: {href}");
+        }
+    }
+
+    /// AGE-506 (2): decoy results parse perfectly but have nothing to do with
+    /// the query, the same way the DDG challenge page parses to nothing.
+    #[test]
+    fn test_bing_decoy_results_are_detected() {
+        let decoys = vec![
+            SearchResult {
+                title: "British Airways | Book flights".to_string(),
+                url: "https://www.britishairways.com/".to_string(),
+                snippet: "Find cheap flights and book online.".to_string(),
+            },
+            SearchResult {
+                title: "Quiz Widget".to_string(),
+                url: "https://quizwidget.example/".to_string(),
+                snippet: "Add a quiz to your page.".to_string(),
+            },
+        ];
+        assert!(!results_match_query("Virtue restaurant Chicago", &decoys));
+    }
+
+    #[test]
+    fn test_bing_relevant_results_pass_the_guard() {
+        let real = vec![SearchResult {
+            title: "The British Museum".to_string(),
+            url: "https://www.britishmuseum.org/collection".to_string(),
+            snippet: "Explore the collection.".to_string(),
+        }];
+        assert!(results_match_query("British Museum opening hours", &real));
+        // A term may match through the decoded URL or the snippet alone.
+        assert!(results_match_query("britishmuseum collection", &real));
+    }
+
+    #[test]
+    fn test_query_without_content_terms_is_not_judged() {
+        let results = vec![SearchResult {
+            title: "Quiz Widget".to_string(),
+            url: "https://quizwidget.example/".to_string(),
+            snippet: "Add a quiz to your page.".to_string(),
+        }];
+        assert!(results_match_query("who won", &results));
+    }
+
+    /// AGE-511: a decoy page that happens to contain the stopword "what"
+    /// (which is 4+ characters and previously counted as a content term)
+    /// must not be waved through — "what" carries no search-relevance
+    /// signal, unlike "capital" or "france".
+    #[test]
+    fn test_stopword_only_overlap_is_rejected_as_decoy() {
+        let decoys = vec![SearchResult {
+            title: "BTS World Tour Tickets".to_string(),
+            url: "https://tickets.example/bts".to_string(),
+            snippet: "See what fans are saying about the tour.".to_string(),
+        }];
+        assert!(!results_match_query(
+            "what is the capital of France",
+            &decoys
+        ));
+    }
+
+    /// Same query as above, but a result that actually shares a real
+    /// content term ("france"/"capital") with the query must still pass.
+    #[test]
+    fn test_real_content_term_still_passes_alongside_stopwords() {
+        let real = vec![SearchResult {
+            title: "Paris - Wikipedia".to_string(),
+            url: "https://en.wikipedia.org/wiki/Paris".to_string(),
+            snippet: "Paris is the capital and most populous city of France.".to_string(),
+        }];
+        assert!(results_match_query("what is the capital of France", &real));
+    }
+
+    /// A query built entirely from stopwords has no content terms left,
+    /// so it can't be judged and passes unjudged, same as a too-short query.
+    #[test]
+    fn test_query_of_only_stopwords_is_not_judged() {
+        let results = vec![SearchResult {
+            title: "Quiz Widget".to_string(),
+            url: "https://quizwidget.example/".to_string(),
+            snippet: "Add a quiz to your page.".to_string(),
+        }];
+        assert!(results_match_query("what should this have been", &results));
+    }
+
+    /// AGE-506 (3): real Bing output carries numeric references and accented
+    /// Latin entities the old six-entry table passed through unrendered.
+    #[test]
+    fn test_strip_html_tags_decodes_numeric_and_named_entities() {
+        assert_eq!(
+            strip_html_tags("caf&#233; &#0183; r&eacute;sum&eacute;"),
+            "café · résumé"
+        );
+        assert_eq!(strip_html_tags("&#x27;quoted&#x27;"), "'quoted'");
+        assert_eq!(
+            strip_html_tags("2024 &ndash; 2025 &hellip;"),
+            "2024 – 2025 …"
+        );
+        assert_eq!(
+            strip_html_tags("&copy; M&uuml;ller &amp; S&oslash;n"),
+            "© Müller & Søn"
+        );
+        assert_eq!(strip_html_tags("a&nbsp;b"), "a b");
+    }
+
+    #[test]
+    fn test_decode_html_entities_leaves_unknown_and_bare_ampersands() {
+        assert_eq!(decode_html_entities("AT&T and Q&A"), "AT&T and Q&A");
+        assert_eq!(decode_html_entities("&notareal;"), "&notareal;");
+        // Single pass: an escaped entity stays escaped text.
+        assert_eq!(decode_html_entities("&amp;lt;"), "&lt;");
     }
 
     #[test]

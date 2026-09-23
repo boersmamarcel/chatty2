@@ -177,6 +177,7 @@ pub mod file_structure_tool;
 pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod git_tool;
+mod html_entities;
 pub mod invoke_agent_tool;
 pub mod list_agents_tool;
 pub mod list_mcp_tool;

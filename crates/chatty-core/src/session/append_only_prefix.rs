@@ -26,13 +26,12 @@
 //! measurement AGE-291 owes; `factories::agent_factory::cache_breakpoint_probe`
 //! is the harness for it.
 //!
-//! Two variants — a small tool result and one over the context shaper's 8 KB
-//! per-tool cap. Both hold on `main` today. AGE-277 expected the second to
-//! fail; it does not, and the reason is worth knowing before AGE-279 touches
-//! the shaper: stage 1's cap only ever sees `ToolResultContent::Text`, and rig
-//! records a typed tool's output as `ToolResultContent::Json`, so the cap is
-//! inert for every native chatty tool. See
-//! [`shaper_trims_text_tool_results_but_not_json_ones`].
+//! Two variants — a small tool result and one over the context guard's 8 KB
+//! per-tool cap. Both hold: the guard (`services::context_shaper`, AGE-504)
+//! only rewrites a request that would not fit the model's window, and these
+//! fixtures fit, so what rig sends is the recorded history byte for byte.
+//! What the guard does to a request that does not fit is
+//! [`the_context_guard_shapes_inside_the_tool_loop`]'s subject.
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -516,24 +515,16 @@ async fn append_only_prefix_holds_for_a_small_tool_result() {
     assert_append_only(&bodies[1], &bodies[2]);
 }
 
-/// The same two turns with a tool result over the context shaper's 8 KB
+/// The same two turns with a tool result over the context guard's 8 KB
 /// per-tool cap.
 ///
-/// AGE-277 expected this to fail on `main`: stage 1 of the shaper
-/// (`services/context_shaper.rs`, `stage1_budget_reduction`) runs over the
-/// whole history before *every* stream, so turn 2 should replace turn 1's
-/// already-sent tool result with a `[tool result truncated — N chars]` stub and
-/// break the prefix. It passes instead, and the reason is a second gap rather
-/// than the absence of the first: `trim_tool_result_content` matches only
-/// `ToolResultContent::Text`, and rig records a typed tool's output as
-/// `ToolResultContent::Json`. Every native chatty tool is typed, so the 8 KB cap
-/// currently applies to almost nothing — see
-/// [`the shaper leaves a JSON tool result alone`](shaper_trims_text_tool_results_but_not_json_ones).
-///
-/// So this is a live regression test, not an aspiration. When AGE-279 makes the
-/// shaper trim JSON results too, it must trim them **once, where the result is
-/// recorded** — trimming again per turn breaks this test, and with it every
-/// cache block after the first oversized tool call.
+/// The guard sees the oversized result on turn 2 (it is history by then) and
+/// leaves it alone, because the request fits the model's window: the cap is a
+/// pressure measure, not a per-message rule. That is what keeps turn 2's
+/// prefix identical to turn 1's. A guard that trimmed every oversized result
+/// on sight would break this test, and with it every cache block after the
+/// first big tool call — which is why capping under budget stays off the
+/// table until AGE-279 trims once, where the result is recorded.
 #[tokio::test]
 async fn append_only_prefix_survives_a_large_tool_result() {
     let workspace = workspace_with_payload(150);
@@ -629,56 +620,158 @@ async fn openrouter_moving_breakpoint_rewrites_the_previously_last_message() {
     );
 }
 
-/// Why the test above passes today, in the shaper's own terms.
+/// A session against the Ollama daemon whose model has `window` tokens and a
+/// 64-token reply reserve, for the guard tests below.
+async fn session_with_window(daemon: &FakeDaemon, workspace: &Path, window: i32) -> AgentSession {
+    let mut model_config = ModelConfig::new(
+        "age-504".to_string(),
+        "Guard Fixture".to_string(),
+        ProviderType::Ollama,
+        "llama3.2".to_string(),
+    );
+    model_config.max_context_window = Some(window);
+    model_config.max_tokens = Some(64);
+    let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
+        .with_base_url(daemon.base_url());
+    session_with(&model_config, &provider_config, workspace).await
+}
+
+fn guard_of(session: &AgentSession) -> crate::services::ContextShaper {
+    session
+        .conversation()
+        .expect("the fixture conversation")
+        .agent()
+        .context_shaper()
+        .clone()
+}
+
+/// The guard's job (AGE-504), part one: results that fit the recording cap
+/// but together outgrow the window get a shorter history on the next model
+/// call, inside the tool loop, with the message the model is answering — the
+/// newest result — sent exactly as recorded.
 ///
-/// Stage 1 caps a tool result at 8 KB, but only when the result arrived as
-/// `ToolResultContent::Text`. rig records a typed tool's output as
-/// `ToolResultContent::Json`, and every native chatty tool is typed, so the cap
-/// is inert for them and only bites MCP results, which are text.
-///
-/// Recorded here rather than fixed: the shaper is AGE-279's to change, and the
-/// fix has to be "trim once, at the point the result is recorded", or the
-/// append-only property above goes with it.
+/// The daemon scripts six identical tool calls. Each 15 KB listing is under
+/// the recording cap (the window is chosen so), so every result is recorded
+/// whole; by the last request five of them are history and do not fit, so
+/// the guard shapes them while the sixth — the prompt — goes out untouched.
 #[tokio::test]
-async fn shaper_trims_text_tool_results_but_not_json_ones() {
-    use rig_core::completion::message::{Text, ToolCallId, ToolResult, ToolResultContent};
+async fn the_context_guard_shapes_inside_the_tool_loop() {
+    let workspace = workspace_with_payload(150);
+    let daemon = FakeDaemon::ollama(vec![
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        text_response("A lot of files, six times."),
+    ]);
+    let mut session = session_with_window(&daemon, workspace.path(), 30_000).await;
 
-    let payload = "x".repeat(20_000);
-    let tool_result = |id: &str, content: ToolResultContent| Message::User {
-        content: vec![UserContent::ToolResult(ToolResult {
-            call: ToolCallId::new(id).unwrap(),
-            provider: None,
-            name: "list_directory".to_string(),
-            content: vec![content],
-        })],
-    };
+    let events = run_and_commit_turn(&mut session, "what is in payload?").await;
+    assert_no_stream_error(&events, "the turn");
 
-    let history = vec![
-        tool_result("text-result", ToolResultContent::Text(Text::new(&payload))),
-        tool_result(
-            "json-result",
-            ToolResultContent::Json {
-                value: serde_json::json!({ "content": payload }),
-            },
-        ),
-    ];
+    let bodies = daemon.bodies();
+    assert_eq!(bodies.len(), 7, "six tool calls, then the answer");
 
-    let shaped = shape_context(history, &ContextShaperSettings::default(), None).await;
-
-    let sizes: Vec<usize> = shaped
-        .messages
+    // Guard the premise: the result is over the 8 KB cap the shaping stages
+    // use and under the recording cap, so it is recorded whole.
+    let raw = message_elements(&bodies[1]);
+    let result = raw
         .iter()
-        .map(|message| serde_json::to_string(message).unwrap().len())
-        .collect();
+        .find(|m| m.contains("\"role\":\"tool\""))
+        .expect("request 2 carries the tool result");
     assert!(
-        sizes[0] < 1_000,
-        "a text tool result over the cap is trimmed, and was {} bytes",
-        sizes[0]
+        result.len() > 8_192,
+        "the fixture's tool result exceeds 8 KB"
     );
     assert!(
-        sizes[1] > 20_000,
-        "a JSON tool result over the cap is left whole — the cap does not \
-         reach typed tool output (AGE-279); it was {} bytes",
-        sizes[1]
+        !result.contains("[tool result truncated"),
+        "recorded whole: {}…",
+        &result[..200]
+    );
+    let guard = guard_of(&session);
+    assert!(
+        guard.counter().count(result) <= guard.recording_cap(),
+        "fixture: the result must be under the recording cap {}",
+        guard.recording_cap()
+    );
+
+    let last_request = message_elements(&bodies[6]);
+    let shaped_at: Vec<usize> = last_request
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.contains("[tool result truncated")
+                || m.contains("[compacted]")
+                || m.contains("snipped")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !shaped_at.is_empty(),
+        "five results in history do not fit a {}-token budget, so the guard shaped the request; sizes: {:?}",
+        guard.history_budget(0),
+        last_request.iter().map(|m| m.len()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        last_request.last().map(String::len),
+        Some(result.len()),
+        "the newest result is the prompt and goes out as recorded"
+    );
+}
+
+/// The guard's job, part two: a result larger than the recording cap is cut
+/// down once, where it is recorded, so it is the same bytes on every later
+/// request — the append-only property holds for it — and the conversation
+/// persists the recorded form.
+///
+/// The fixture window leaves a budget the 12 KB listing exceeds half of, so
+/// it is cut at recording; the cut form then fits the budget, so request 3
+/// is not shaped and carries it unchanged.
+#[tokio::test]
+async fn a_result_over_the_recording_cap_is_recorded_truncated_once() {
+    let workspace = workspace_with_payload(150);
+    let daemon = FakeDaemon::ollama(vec![
+        tool_call_response("payload"),
+        tool_call_response("payload"),
+        text_response("A lot of files, twice."),
+    ]);
+    let mut session = session_with_window(&daemon, workspace.path(), 16_000).await;
+
+    let events = run_and_commit_turn(&mut session, "what is in payload?").await;
+    assert_no_stream_error(&events, "the turn");
+
+    let bodies = daemon.bodies();
+    assert_eq!(bodies.len(), 3, "two tool calls, then the answer");
+    let header = "[tool result truncated — kept ";
+    let guard = guard_of(&session);
+    assert!(
+        guard.recording_cap() > crate::services::context_shaper::RECORDING_CAP_FLOOR_TOKENS
+            && guard.recording_cap() <= guard.history_budget(0),
+        "fixture: the cap ({}) sits inside the budget ({})",
+        guard.recording_cap(),
+        guard.history_budget(0)
+    );
+
+    let second = message_elements(&bodies[1]);
+    let recorded = second
+        .iter()
+        .find(|m| m.contains(header))
+        .expect("request 2 carries the first result cut to the recording cap");
+    assert!(recorded.len() < 8_192, "cut well under the raw 12 KB");
+    let third = message_elements(&bodies[2]);
+    assert_eq!(
+        third.get(second.len() - 1),
+        Some(recorded),
+        "request 3 carries the same bytes: cut once, at recording"
+    );
+
+    let persisted = session.conversation().expect("conversation").messages();
+    assert!(
+        persisted
+            .iter()
+            .any(|m| serde_json::to_string(m).unwrap().contains(header)),
+        "the conversation persists the recorded form"
     );
 }

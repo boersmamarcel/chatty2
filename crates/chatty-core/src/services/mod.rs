@@ -84,7 +84,7 @@ pub use agent_task_controller::{
     AgentTaskController, AgentTaskResponse, AgentTaskSnapshot, AgentTodo, AgentTodoStatus,
     is_agent_todo_tool, is_protocol_follow_up_text, snapshot_from_tool_output,
 };
-pub use context_shaper::{ContextShaperSettings, ShapedContext, shape_context};
+pub use context_shaper::{ContextShaper, ContextShaperSettings, ContextShaperStage, ShapedContext};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
 pub use llm_service::{StreamChunk, stream_prompt};
@@ -96,9 +96,9 @@ pub use memory_service::MemoryService;
 #[cfg(feature = "mermaid")]
 pub use mermaid_renderer_service::MermaidRendererService;
 pub use message_helpers::{
-    exchange_count, extract_user_text, extract_user_text_lines, gather_mcp_tools,
-    is_persisted_tool_round_trip, is_tool_call_message, is_tool_message, is_tool_result_message,
-    repair_dangling_tool_calls,
+    call_ids, enforce_tool_round_trips, exchange_count, extract_user_text, extract_user_text_lines,
+    gather_mcp_tools, is_persisted_tool_round_trip, is_tool_call_message, is_tool_message,
+    is_tool_result_message, result_ids, tool_round_trips_intact,
 };
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;

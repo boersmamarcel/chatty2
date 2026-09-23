@@ -441,7 +441,7 @@ impl ChatView {
                 old_state,
                 new_state,
             } => {
-                warn!(
+                debug!(
                     "Tool call {} changed: {:?} → {:?}",
                     tool_id, old_state, new_state
                 );
