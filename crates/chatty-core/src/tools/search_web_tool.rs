@@ -28,7 +28,14 @@ const WIKIPEDIA_USER_AGENT: &str = concat!(
 /// Wikipedia's search API caps `srsearch` length; stay well under it.
 const MAX_WIKIPEDIA_QUERY_CHARS: usize = 250;
 
-/// Pages fetched per search for passage selection (the top results only).
+/// With a cross-encoder configured, each keyless backend is asked for this
+/// many results and the reranked pool's top `max_results` are returned. A
+/// BM25-only rerank of the same pool lost to no rerank on the eval (AGE-517
+/// iteration 5), so without a reranker the pool is just `max_results`.
+const RERANK_POOL: usize = 10;
+
+/// Pages fetched for passage selection: the whole pool when reranking,
+/// otherwise the top results only.
 const MAX_PASSAGE_PAGES: usize = 5;
 
 /// Time budget for fetching one page for passage selection; a page that
@@ -163,6 +170,34 @@ pub struct SearchWebTool {
     /// Record/replay of raw backend responses for the retrieval eval
     /// (AGE-515); `None` in the product.
     cache: Option<Arc<ResponseCache>>,
+    /// Optional cross-encoder behind a Cohere/Jina-style `/rerank` endpoint
+    /// (vLLM, llama.cpp server, …) that orders the keyless candidate pool
+    /// instead of BM25. `None` = BM25 order.
+    reranker: Option<Reranker>,
+}
+
+#[derive(Clone)]
+struct Reranker {
+    url: String,
+    model: String,
+}
+
+#[derive(Serialize)]
+struct RerankRequest<'a> {
+    model: &'a str,
+    query: &'a str,
+    documents: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RerankResponse {
+    results: Vec<RerankHit>,
+}
+
+#[derive(Deserialize)]
+struct RerankHit {
+    index: usize,
+    relevance_score: f64,
 }
 
 impl SearchWebTool {
@@ -176,6 +211,7 @@ impl SearchWebTool {
             api_key: Some(api_key),
             default_max_results,
             cache: None,
+            reranker: None,
         }
     }
 
@@ -190,7 +226,56 @@ impl SearchWebTool {
             api_key: None,
             default_max_results,
             cache: None,
+            reranker: None,
         }
+    }
+
+    /// Order the keyless candidate pool with a cross-encoder served at `url`
+    /// (a Cohere/Jina-style `/rerank` endpoint) instead of by BM25 score.
+    pub fn with_reranker(mut self, url: impl Into<String>, model: impl Into<String>) -> Self {
+        self.reranker = Some(Reranker {
+            url: url.into(),
+            model: model.into(),
+        });
+        self
+    }
+
+    /// Cross-encoder relevance of each document to `query`, in input order;
+    /// `None` when the endpoint fails (callers keep the BM25 order).
+    async fn rerank_scores(
+        &self,
+        reranker: &Reranker,
+        query: &str,
+        documents: Vec<String>,
+    ) -> Option<Vec<f64>> {
+        let n = documents.len();
+        let request = RerankRequest {
+            model: &reranker.model,
+            query,
+            documents,
+        };
+        let body = serde_json::to_string(&request).ok()?;
+        let builder = self
+            .api_client
+            .post(&reranker.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone());
+        let response = self.send("rerank", body, "Reranker", builder).await.ok()?;
+        if !is_success(response.status) {
+            warn!(
+                status = response.status,
+                "reranker returned an error; keeping BM25 order"
+            );
+            return None;
+        }
+        let parsed: RerankResponse = serde_json::from_str(&response.body).ok()?;
+        let mut scores = vec![f64::NEG_INFINITY; n];
+        for hit in parsed.results {
+            if let Some(slot) = scores.get_mut(hit.index) {
+                *slot = hit.relevance_score;
+            }
+        }
+        Some(scores)
     }
 
     /// Route every backend request through `cache` (eval harness only).
@@ -331,9 +416,14 @@ impl SearchWebTool {
         query: &str,
         max_results: usize,
     ) -> Result<(Vec<SearchResult>, Vec<SearchResult>), ToolError> {
+        let pool = if self.reranker.is_some() {
+            max_results.max(RERANK_POOL)
+        } else {
+            max_results
+        };
         let (wiki, web) = tokio::join!(
-            self.search_wikipedia(query, max_results),
-            self.search_web_fallback(query, max_results)
+            self.search_wikipedia(query, pool),
+            self.search_web_fallback(query, pool)
         );
         let lists = match (wiki, web) {
             (Ok(wiki), Ok(web)) => vec![wiki, web],
@@ -356,7 +446,7 @@ impl SearchWebTool {
                 )));
             }
         };
-        let candidates = interleave(&lists);
+        let candidates = self.rerank_by_passages(query, interleave(&lists)).await;
         let merged = candidates.iter().take(max_results).cloned().collect();
         Ok((merged, candidates))
     }
@@ -414,18 +504,28 @@ impl SearchWebTool {
             .collect())
     }
 
-    /// Passage stage (AGE-517): fetch the top results' pages in parallel,
-    /// split them into passages, BM25-rank the passages against the query
-    /// over this query's own passages, and put each page's best passage in
-    /// front of its snippet. Best effort: a page that fails, times out, or has
-    /// no matching passage keeps the engine's snippet. Result order is not
-    /// changed here.
-    async fn add_best_passages(&self, query: &str, results: &mut [SearchResult]) {
-        let n = results.len().min(MAX_PASSAGE_PAGES);
-        if n == 0 {
-            return;
-        }
-        let texts = futures::future::join_all(results[..n].iter().map(|r| async {
+    /// Passage stage (AGE-517), keyless only: Wikipedia and scrape snippets
+    /// are ~150 chars and often miss the answer, while Tavily/Brave already
+    /// return page chunks (there, passages added +2.5 points hit@5, n.s., for
+    /// ~2x p95). Fetch the pool's top pages in parallel, split them into
+    /// passages, BM25-rank the passages against the query over this query's
+    /// passages, and prefix each result's snippet with its best page passage.
+    /// With a cross-encoder configured, the pool is then reordered by its
+    /// score on (title + best passage or snippet); otherwise, or if it fails,
+    /// the engines' order stands. Best effort: a page that fails or times out
+    /// keeps its snippet.
+    async fn rerank_by_passages(
+        &self,
+        query: &str,
+        mut pool: Vec<SearchResult>,
+    ) -> Vec<SearchResult> {
+        let pages = if self.reranker.is_some() {
+            RERANK_POOL
+        } else {
+            MAX_PASSAGE_PAGES
+        };
+        let n = pool.len().min(pages);
+        let texts = futures::future::join_all(pool[..n].iter().map(|r| async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(PAGE_FETCH_BUDGET_SECS),
                 self.page_text(r),
@@ -440,32 +540,75 @@ impl SearchWebTool {
             .into_iter()
             .filter(|t| !QUERY_STOPWORDS.contains(&t.as_str()))
             .collect();
-        // (result index, passage text, tokens) over every fetched page.
+        // (owning result, passage text, from a fetched page?) over the pool.
         let mut owners = Vec::new();
-        let mut passages = Vec::new();
-        let mut tokens = Vec::new();
-        for (i, text) in texts.iter().enumerate() {
-            let Some(text) = text else { continue };
+        let mut passages: Vec<(String, bool)> = Vec::new();
+        for (i, result) in pool.iter().enumerate() {
+            // As measured (AGE-517 it6): with a reranker the snippets join the
+            // BM25 statistics; without one this matches it4 exactly.
+            if self.reranker.is_some() {
+                owners.push(i);
+                passages.push((format!("{} {}", result.title, result.snippet), false));
+            }
+            let Some(Some(text)) = texts.get(i) else {
+                continue;
+            };
             for p in crate::tools::passages::split_passages(
                 text,
                 crate::tools::passages::PASSAGE_WORDS,
                 crate::tools::passages::PASSAGE_STRIDE,
             ) {
-                tokens.push(crate::tools::passages::tokenize(&p));
                 owners.push(i);
-                passages.push(p);
+                passages.push((p, true));
             }
         }
+        let tokens: Vec<Vec<String>> = passages
+            .iter()
+            .map(|(p, _)| crate::tools::passages::tokenize(p))
+            .collect();
         let scores = crate::tools::passages::score_passages(&query_terms, &tokens);
-        for (i, result) in results[..n].iter_mut().enumerate() {
-            let best = (0..passages.len())
-                .filter(|&j| owners[j] == i && scores[j] > 0.0)
-                .max_by(|&a, &b| scores[a].total_cmp(&scores[b]));
-            if let Some(j) = best {
-                let passage: String = passages[j].chars().take(PASSAGE_CHARS).collect();
+
+        let mut best_page_passage: Vec<Option<usize>> = vec![None; pool.len()];
+        for j in 0..passages.len() {
+            let i = owners[j];
+            if passages[j].1
+                && scores[j] > 0.0
+                && best_page_passage[i].is_none_or(|k| scores[j] > scores[k])
+            {
+                best_page_passage[i] = Some(j);
+            }
+        }
+        for (i, result) in pool.iter_mut().enumerate() {
+            if let Some(j) = best_page_passage[i] {
+                let passage: String = passages[j].0.chars().take(PASSAGE_CHARS).collect();
                 result.snippet = truncate_snippet(&format!("{passage} … {}", result.snippet));
             }
         }
+        // Cross-encoder over (title + best passage or snippet) when configured.
+        if let Some(reranker) = &self.reranker {
+            let documents: Vec<String> = pool
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let text = best_page_passage[i]
+                        .map(|j| passages[j].0.as_str())
+                        .unwrap_or(r.snippet.as_str());
+                    format!(
+                        "{}\n{}",
+                        r.title,
+                        text.chars().take(PASSAGE_CHARS).collect::<String>()
+                    )
+                })
+                .collect();
+            if let Some(scores) = self.rerank_scores(reranker, query, documents).await {
+                let mut order: Vec<usize> = (0..pool.len()).collect();
+                order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+                let mut slots: Vec<Option<SearchResult>> = pool.into_iter().map(Some).collect();
+                return order.into_iter().filter_map(|i| slots[i].take()).collect();
+            }
+        }
+        // No reranker (or it failed): keep the engines' order.
+        pool
     }
 
     /// Plain text of a result's page: Wikipedia articles through the API
@@ -693,13 +836,6 @@ impl Tool for SearchWebTool {
                 self.search_keyless(&query, max_results).await?
             }
         };
-        let mut results = results;
-        // Keyless only: Wikipedia/scrape snippets are ~150 chars and often
-        // miss the answer; Tavily/Brave already return page chunks, and on
-        // the eval passages added +2.5 points hit@5 (n.s.) there for ~2x p95.
-        if self.provider.is_none() {
-            self.add_best_passages(&query, &mut results).await;
-        }
         let result_count = results.len();
         if result_count == 0 {
             warn!(query = %query, "Web search returned no results");

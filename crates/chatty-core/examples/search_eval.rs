@@ -60,6 +60,8 @@ struct RunArgs {
     replay: bool,
     replay_latency: bool,
     replay_only: Vec<String>,
+    reranker: Option<String>,
+    reranker_model: Option<String>,
     exclude: Vec<String>,
     limit: Option<usize>,
 }
@@ -68,7 +70,7 @@ fn usage() -> ! {
     eprintln!(
         "usage:\n  search_eval run --dataset simpleqa|frames --data FILE [--ids FILE] \
          --provider tavily|brave|fallback|keyless [--mode single|fanout --queries FILE] \
-         [--k N] [--concurrency N] [--delay-ms N] [--cache DIR] [--replay] [--replay-latency] [--replay-only SOURCE]... \
+         [--k N] [--concurrency N] [--delay-ms N] [--cache DIR] [--replay] [--replay-latency] [--replay-only SOURCE]... [--reranker URL [--reranker-model M]] \
          [--exclude-source S]... [--limit N] --out FILE\n  \
          search_eval rescore RUN.jsonl [--exclude-source S]...\n  \
          search_eval paired A.jsonl B.jsonl --metric hit1|hit5|all_sources5|all_sources10|ok \
@@ -113,6 +115,8 @@ fn parse_run(args: &[String]) -> RunArgs {
             "--replay" => r.replay = true,
             "--replay-latency" => r.replay_latency = true,
             "--replay-only" => r.replay_only.push(val()),
+            "--reranker" => r.reranker = Some(val()),
+            "--reranker-model" => r.reranker_model = Some(val()),
             "--exclude-source" => r.exclude.push(val()),
             "--limit" => r.limit = Some(val().parse().unwrap_or_else(|_| usage())),
             _ => usage(),
@@ -213,6 +217,13 @@ async fn run(r: RunArgs) {
         None
     };
     let mut tool = build_tool(&r.provider, r.k);
+    if let Some(url) = &r.reranker {
+        let model = r
+            .reranker_model
+            .clone()
+            .unwrap_or_else(|| "BAAI/bge-reranker-v2-m3".to_string());
+        tool = tool.with_reranker(url, model);
+    }
     if let Some(dir) = &r.cache {
         let mode = if r.replay {
             CacheMode::Replay
