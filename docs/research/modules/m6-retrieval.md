@@ -9,7 +9,9 @@ the paper itself (arXiv, ACL Anthology, OpenReview or the publisher). The
 **Linear:** [AGE-515](https://linear.app/agents-research/issue/AGE-515) (SimpleQA eval),
 [AGE-516](https://linear.app/agents-research/issue/AGE-516) (FRAMES eval),
 [AGE-517](https://linear.app/agents-research/issue/AGE-517) (keyless tier) · **Crates:**
-`chatty-core` (tools), `chatty-optimize` (eval scoring) · **Promotion:** pending
+`chatty-core` (tools), `chatty-optimize` (eval scoring) · **Promotion:** keyless tier
+changes shipped as the default, cross-encoder rerank opt-in
+([AGE-521](https://linear.app/agents-research/issue/AGE-521))
 
 M5 is DGM, which lives outside this repo, so this module is M6.
 
@@ -25,13 +27,15 @@ flowchart LR
   R --> P[Context packing]
 ```
 
+State after this module (keyless = no search API key):
+
 | Stage | Question it answers | Part A: open web | Part B: memory |
 |---|---|---|---|
-| Query formulation | What string do we search for? | The model writes a `search_web` query | The model writes a `search_memory` query |
-| Candidate retrieval | Which items could be relevant? | Tavily / Brave API, or keyless Bing → DuckDuckGo scrape | memvid BM25 (always), memvid vector search (opt-in) |
-| Fusion | How do several ranked lists become one? | None today: one backend answers | Raw max-score merge of the BM25 and vector lists |
-| Reranking | Which few candidates are best? | None: the backend's order | None |
-| Context packing | What goes into the prompt, in what order? | Up to `max_results` (default 5) title+URL+snippet, snippet ≤ 1,000 chars | Up to `top_k` (default 5) hits; facts first, then skills |
+| Query formulation | What string do we search for? | The model writes a `search_web` query; the Wikipedia backend reduces it to content words joined with `OR` | The model writes a `search_memory` query |
+| Candidate retrieval | Which items could be relevant? | Keyed: Tavily / Brave API. Keyless: Wikipedia search API **in parallel with** a Bing → DuckDuckGo scrape | memvid BM25 (always), memvid vector search (opt-in) |
+| Fusion | How do several ranked lists become one? | Keyless: Wikipedia and web lists interleaved (RRF tried, reverted) | Raw max-score merge of the BM25 and vector lists |
+| Reranking | Which few candidates are best? | Keyless: BM25 over passages of the fetched pages; with a reranker configured, a cross-encoder orders a 10-candidate pool | None |
+| Context packing | What goes into the prompt, in what order? | Up to `max_results` results; keyless snippets lead with the page's best passage (≤ 1,000 chars total) | Up to `top_k` (default 5) hits; facts first, then skills |
 
 The rest of this page explains why each stage exists (the papers), what Chatty does at
 each stage today (the code), and what we measured.
@@ -342,9 +346,11 @@ in, how long each is, and in what order all change the answer.
 
 ## Part A — open-web retrieval
 
-### How it works today
+### How it worked before this module
 
-`crates/chatty-core/src/tools/search_web_tool.rs`:
+`crates/chatty-core/src/tools/search_web_tool.rs`, as of `main` on 2026-09-23 (for the
+state after this module see the pipeline table above and
+[Where it ended](#where-it-ended)):
 
 - **Keyed:**
   - A Tavily key calls `api.tavily.com/search` with `search_depth: basic`.
@@ -546,6 +552,83 @@ measured Y; because Z". Predictions and results were posted on
   - This is the clearest case in this module of a paper's mechanism being right, but for
     a different objective.
 
+**9. Widen the cross-encoder pool from 10 to 20. Reverted. The loop stops here.**
+- **Says:** rerankers in the literature work over the BM25 top 100 to 1,000 (monoBERT,
+  RankGPT), so a 10-deep first stage is shallow.
+- **Measured:**
+  - SimpleQA hit@5 57% → 59% (6/2, p = 0.29), but p95 3.2 s → 7.2 s.
+  - FRAMES fan-out all-sources@10 21% → 18%.
+- **Because:** 20 page fetches mean the slowest of 20 sets the latency. The extra depth
+  adds near-duplicate distractors for multi-hop.
+- Iterations 8 and 9 were reverted back to back, which is the stop condition.
+
+### Where it ended
+
+The final configuration is iteration 7: DDG parser fix, Wikipedia API, BM25 passages and,
+with a reranker endpoint configured, a cross-encoder over a 10-candidate pool. Keyless
+numbers are **with the reranker** (`bge-reranker-v2-m3`); without one the keyless tool is the
+iteration 4 pipeline. Keyed (Tavily) code is unchanged by this module.
+
+**DEV, baseline → final**
+
+| Config | Set | error+empty | hit@1 | hit@5 | hit@5 without Wikipedia | recall@10 | all-sources@10 | p50 / p95 |
+|---|---|---|---|---|---|---|---|---|
+| Keyless | SimpleQA (200) | 93% → **0%** | 0% → 49% | 0% → **57%** | 0% → 27% | — | — | 0.7/1.3 s → 1.4/3.2 s |
+| Keyless | FRAMES single (100) | 72% → 0% | 0% → 7% | 0% → 18% | 0% → 0% | 0% → 33.7% | 0% → 8% | 0.2/0.8 s → 1.4/2.4 s |
+| Keyless | FRAMES fan-out (100) | 55% → 0% | 0% → 4% | 0% → 19% | 0% → 2% | 0.5% → **48.8%** | 0% → **21%** | 1.5/2.2 s → 3.8/6.1 s |
+| Keyed (Tavily) | SimpleQA (200) | 10.5%¹ | 59.5% | **70.0%** | — | — | — | 1.2/3.5 s (live) |
+
+**HOLDOUT, baseline → final** (run once per two kept changes, and once at the end)
+
+| Config | Set | error+empty | hit@1 | hit@5 | hit@5 without Wikipedia | recall@10 | all-sources@10 |
+|---|---|---|---|---|---|---|---|
+| Keyless | SimpleQA (100) | 89% → **0%** | 0% → 40% | 0% → **43%** | 0% → 0% | — | — |
+| Keyless | FRAMES single (50) | 76% → 0% | 0% → 4% | 0% → 12% | 0% → 2% | 0% → 38.3% | 0% → 12% |
+| Keyless | FRAMES fan-out (50) | 52% → 0% | 0% → 2% | 0% → 18% | 0% → 4% | 0% → 43.3% | 0% → 14% |
+
+¹ Replay misses, not errors: Tavily had 0 errors on the 179 recorded items (hit@5 ≈ 78%
+there). The keyed HOLDOUT was not run, to protect the credit budget.
+
+**FreshQA check** (100 valid-premise questions, 2026-04-21 release, hit@5; one-off, not
+tuned on)
+
+| | Tavily | Keyless (final) | Keyless without Wikipedia |
+|---|---|---|---|
+| All | **78%** | **48%** | 14% |
+| Never-changing (33) | 91% | 55% | 21% |
+| Slow-changing (32) | 91% | 62.5% | 16% |
+| Fast-changing (35) | 54% | **29%** | 6% |
+| error+empty | 0% | 0% | 69% |
+
+**Targets**
+
+| Target | Result |
+|---|---|
+| Keyless error+empty < 5% | **Met** (0% on DEV and HOLDOUT) |
+| Keyless SimpleQA hit@5 within 10 points of Tavily | **Not met**: DEV 57% vs 70% (−13). HOLDOUT 43%. FreshQA 48% vs 78% (−30). |
+| Keyed error+empty < 3% | Met on DEV at concurrency 1. A Tavily *dev* key gets `429`-blocked at concurrency 4. Retry/failover was not built, because the decision rule did not select it at 0% errors. |
+
+**What the numbers say.** The keyless tier went from worse than nothing (93% error or
+empty, plus decoys returned as results) to reliable, and to good on encyclopedic
+questions. Almost all of its accuracy comes from Wikipedia:
+- Without Wikipedia, SimpleQA HOLDOUT is 0% and FreshQA 14%.
+- On fast-changing facts it finds the answer only 29% of the time.
+
+From this workstation the general-web side is blocked (Bing decoys, DDG blocks), and a
+real browser did not get past that. Keyless search should be presented as
+"encyclopedic, not current", and a keyed provider remains the recommendation for current
+events.
+
+**What did not work, and why**
+
+| Change | Paper's promise | What happened | Why |
+|---|---|---|---|
+| Browser escalation | a real browser passes bot checks | 0 gains, slower | blocking is per IP, not per client |
+| BM25 rerank of a wider pool | two-stage retrieval | 11 gained / 14 lost | lexical overlap cannot separate the answer page from pages that repeat the question |
+| Multi-query + RRF | fusion by agreement | all-sources@10 21% → 14% | multi-hop needs coverage, and RRF rewards agreement |
+| Pool of 20 | deeper first stage | +2 n.s., p95 ×2.3 | the slowest page fetch decides; distractors grow with depth |
+| Passages on the keyed path | select what the model reads | +2.5 n.s., p95 ×2 | Tavily's snippets are already query-focused extracts |
+
 ## Part B — internal memory retrieval
 
 How it works today, from the code (`crates/chatty-core/src`) and
@@ -609,14 +692,23 @@ enters the context.
 
 ## Part C — what transfers
 
-Proposals only, filed as a follow-up issue (linked from the PR); none is built here.
+Proposals only, filed as
+[AGE-520](https://linear.app/agents-research/issue/AGE-520); none is built here. Two
+measured lessons from Part A change the proposals:
+- **RRF fits memory, not multi-hop.** Memory's lexical and vector lists are two views of
+  the *same* need, so agreement is the right signal. That is unlike web sub-queries,
+  where each hop needs its own page.
+- **The shared reranker is the bigger win.** A cross-encoder puts both lists on one
+  scale, which fixes the max-score merge bug as a side effect. The concrete proposal is on
+  AGE-520: one `/rerank` endpoint for web and memory, and BGE-M3 as the matching
+  embedder, which needs a re-embedding migration.
 
 | Stage | Share between A and B? | Why / why not |
 |---|---|---|
 | Query formulation | **Partly.** A shared "sub-query" prompt pattern (Self-Ask / RAG-Fusion) | Memory queries are short and personal; web queries need entity names. The decomposition idea transfers, the prompt does not. |
 | Candidate retrieval | **No** | Different indexes: a remote engine vs. a local Tantivy + vector store. Different failure modes: rate limits and bot detection vs. empty stores. |
-| Fusion | **Yes: one `rrf_fuse`** | Both merge lists whose scores are incomparable: engines/queries in A, lexical/vector in B. RRF needs only ranks, so one function serves both. |
-| Reranking | **Yes: one BM25 passage scorer**, later an optional cross-encoder | `doc_retriever::bm25_rank` already scores chunks. Web passage ranking needs the same over fetched pages. Different corpus statistics: a few pages per query vs. a stable local collection. |
+| Fusion | **Only for B.** RRF for memory's lexical + vector lists | Both merge incomparable scores. In A, RRF across sub-queries was measured to hurt multi-hop (iteration 8), so A keeps interleaving. |
+| Reranking | **Yes: one cross-encoder endpoint**, plus the BM25 passage scorer (`tools/passages.rs`) | The cross-encoder was the largest precision gain in A (hit@1 27% → 49%). `doc_retriever::bm25_rank` and `passages::score_passages` are the same formula over different corpus statistics. |
 | Context packing | **Yes: one packer** (budget, edge ordering, allow empty) | Lost in the Middle and RECOMP apply to both. Trust differs, so web and memory need separate delimiters and labels. |
 
 What differs, and why it matters:
@@ -649,27 +741,27 @@ What differs, and why it matters:
 
 ## Production landing
 
-| Mechanism | Likely promotion |
+| Mechanism | Outcome |
 |---|---|
-| Keyed provider with retry + keyless failover | **Default**: invisible to the user, no new setting |
-| Keyless chain (Wikipedia/Wikidata APIs + scrape + browser escalation) | **Default** when no key is set |
-| Multi-query + RRF, fetch + BM25 passages | Default if the eval shows gains without p95 regression; otherwise a setting |
-| Cross-encoder rerank | Setting (it needs a local model) |
+| DDG parser fix, Wikipedia API in parallel, loud failures | **Default** for keyless (shipped with this module) |
+| Fetch + BM25 best passage in snippets | **Default** for keyless; not used with Tavily/Brave (no significant gain, twice the p95) |
+| Cross-encoder rerank of a 10-candidate pool | **Setting**: needs a local `/rerank` server ([AGE-521](https://linear.app/agents-research/issue/AGE-521)) |
+| Browser escalation, multi-query + RRF, pool of 20 | Rejected on measurement; patches kept outside the repo for a re-test |
+| Keyed retry + keyless failover | Not built: 0% keyed errors at a human pace. The dev-key `429` risk is real for parallel agents. |
 
 ## Reserved-function candidates
 
-The functions below hold the core ideas of this module. The human decides whether any go
-into [`RESERVED.md`](../../../RESERVED.md). **None is added there by this module**, and
-none of them exists yet.
+These functions hold the core ideas of this module. On 2026-09-23 the human chose to
+reserve **none** of them (and lifted the M6 reflection gate,
+[AGE-518](https://linear.app/agents-research/issue/AGE-518), for this loop). Nothing was
+added to [`RESERVED.md`](../../../RESERVED.md).
 
-1. **`rrf_fuse`**: merge N ranked lists into one by reciprocal rank (fusion stage, shared
-   by A and B). This is where the argument about score scales lives.
-2. **BM25 passage scoring over fetched pages**: `score_passages(query, passages)`, BM25
-   with statistics from a tiny, per-query collection (reranking stage, Part A). It
-   decides what the model actually reads.
-3. **`pack_context`**: choose how many passages go in, how long each is, and in what
-   order, under a token budget, allowing an empty result (packing stage, Lost in the
-   Middle / RECOMP).
+1. **`rrf_fuse`**: built in iteration 8 and reverted with it. The patch is kept outside the
+   repo. It is the right function for memory (Part C) but not for multi-hop web.
+2. **BM25 passage scoring**: `tools/passages.rs::score_passages`, shipped (iteration 4).
+   Its statistics come from a tiny, per-query collection.
+3. **`pack_context`**: not built as a function. Packing is currently "the best passage
+   leads the snippet"; a budgeted, order-aware packer remains a Part C proposal.
 
 ## Depends on
 
