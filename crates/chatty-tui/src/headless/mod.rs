@@ -48,8 +48,12 @@ const TEXT_HARD_STOP_BYTES: usize = 20_000;
 const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
 /// Sent on the same history after the stall watchdog ended a turn: the
 /// provider went quiet, not the task, so the model picks up where it was.
-const STALL_RESUME_PROMPT: &str =
-    "The previous response was interrupted by a stall. Continue from where you left off.";
+/// rig hands back a turn's tool round-trips only when the turn finishes,
+/// so a stalled turn keeps its text but not its tool calls and results;
+/// the prompt says so, or the model trusts results it can no longer see.
+const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. Its tool \
+     calls and their results are not in the history, but files it wrote are still on disk. \
+     Continue the task from where you left off: check the current state before redoing work.";
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
 
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is

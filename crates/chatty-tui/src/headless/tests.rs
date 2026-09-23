@@ -911,6 +911,50 @@ mod runner {
         );
     }
 
+    /// What the resume prompt tells the model: a stalled turn keeps its
+    /// text, but rig hands back its tool round-trips only when a turn
+    /// finishes, so they are not in the history the resume runs on.
+    #[tokio::test]
+    async fn a_stalled_turn_keeps_its_text_but_not_its_tool_results() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![Scenario {
+            name: "stall_after_a_tool",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Listing files.".into())),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: "list_directory".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_1".into(),
+                    arguments: "{}".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_1".into(),
+                    result: "UNIQUE-TOOL-OUTPUT".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Stalled,
+                    stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+                ))),
+            ],
+        }]
+        .into();
+
+        runner.send_message("the task".to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(history.contains("the task"), "{history}");
+        assert!(history.contains("Listing files."), "{history}");
+        assert!(!history.contains("UNIQUE-TOOL-OUTPUT"), "{history}");
+        assert!(STALL_RESUME_PROMPT.contains("not in the history"));
+    }
+
     /// A stall before the model said anything: the empty turn is rolled
     /// back (AGE-243), taking the task's own message with it, so a
     /// "continue" on that history would ask the model to continue nothing.
