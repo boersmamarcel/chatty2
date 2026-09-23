@@ -70,11 +70,14 @@ impl FileSystemService {
     /// `read_file` calls asking for >30 lines were cut to 30, driving up to
     /// 31 sequential reads or a `sed -n`/`cat` fallback in the shell).
     const DEFAULT_READ_FILE_LINES: usize = 2_000;
-    /// Character cap applied to every read, explicit range or not. Matches
-    /// `ExecutionSettings::max_output_bytes`'s default of 51_200 (50KB) so a
-    /// `read_file` result can't blow the context budget any harder than a
-    /// shell command's output already can.
-    const MAX_READ_FILE_CHARS: usize = 51_200;
+    /// Character cap applied to every read, explicit range or not, cut on a
+    /// line boundary. Sized for the 32k-token windows chatty's local models
+    /// run with: 20k characters of source is ~5-6k tokens, under the context
+    /// shaper's recording cap (two fifths of the history budget, ~7k tokens
+    /// at 32k), so a read is never cut again at record time, which would
+    /// drop its line numbers and `next_start_line` and leave the model
+    /// paging blind. Two such reads still fit a 32k history together.
+    const MAX_READ_FILE_CHARS: usize = 20_000;
 
     fn slice_lines(
         content: &str,
@@ -126,8 +129,33 @@ impl FileSystemService {
             requested_end_line
                 .min(start_line.saturating_add(Self::DEFAULT_READ_FILE_LINES.saturating_sub(1)))
         };
-        let selected = lines[start_line - 1..returned_end_line].concat();
-        let (selected, char_truncated) = truncate_text_chars(&selected, Self::MAX_READ_FILE_CHARS);
+        // Whole lines up to the character cap, so `returned_end_line` and
+        // `next_start_line` describe exactly what was returned: cutting
+        // mid-window and still reporting the window's end made the next
+        // ranged read skip every line between the cut and that end.
+        let window = &lines[start_line - 1..returned_end_line];
+        let mut kept_lines = 0;
+        let mut kept_chars = 0;
+        for line in window {
+            let chars = line.chars().count();
+            if kept_chars + chars > Self::MAX_READ_FILE_CHARS {
+                break;
+            }
+            kept_chars += chars;
+            kept_lines += 1;
+        }
+        let (selected, returned_end_line, char_truncated) = if kept_lines == window.len() {
+            (window.concat(), returned_end_line, false)
+        } else if kept_lines > 0 {
+            let mut selected = window[..kept_lines].concat();
+            selected.push_str(READ_FILE_TRUNCATED_NOTE);
+            (selected, start_line + kept_lines - 1, true)
+        } else {
+            // A single line longer than the cap: return its head. Paging
+            // cannot split a line, so the next read starts at the next one.
+            let (selected, _) = truncate_text_chars(window[0], Self::MAX_READ_FILE_CHARS);
+            (selected, start_line, true)
+        };
         let line_truncated = returned_end_line < requested_end_line;
         let truncated = line_truncated || char_truncated;
 
@@ -137,7 +165,8 @@ impl FileSystemService {
             returned_start_line: Some(start_line),
             returned_end_line: Some(returned_end_line),
             truncated,
-            next_start_line: truncated.then_some(returned_end_line + 1),
+            next_start_line: (truncated && returned_end_line < total_lines)
+                .then_some(returned_end_line + 1),
         })
     }
 
@@ -473,14 +502,15 @@ impl FileSystemService {
     }
 }
 
+/// Appended to a read cut short by the character cap.
+const READ_FILE_TRUNCATED_NOTE: &str = "\n... [read_file output truncated; use targeted ranges, profile_data, describe_data, or query_data for large docs/data] ...\n";
+
 fn truncate_text_chars(text: &str, max_chars: usize) -> (String, bool) {
     if text.chars().count() <= max_chars {
         return (text.to_string(), false);
     }
     let mut truncated: String = text.chars().take(max_chars).collect();
-    truncated.push_str(
-        "\n... [read_file output truncated; use targeted ranges, profile_data, describe_data, or query_data for large docs/data] ...\n",
-    );
+    truncated.push_str(READ_FILE_TRUNCATED_NOTE);
     (truncated, true)
 }
 
@@ -592,19 +622,20 @@ mod tests {
             .await
             .unwrap();
         // Explicit range spans more than DEFAULT_READ_FILE_LINES (2000); it
-        // should be honored in full since an end_line was given.
+        // should be honored in full since an end_line was given (2100 short
+        // lines stay under the character cap).
         let result = service
-            .read_file_range("test.txt", Some(1), Some(2_500))
+            .read_file_range("test.txt", Some(1), Some(2_100))
             .await
             .unwrap();
 
         assert_eq!(result.total_lines, 3_000);
         assert_eq!(result.returned_start_line, Some(1));
-        assert_eq!(result.returned_end_line, Some(2_500));
+        assert_eq!(result.returned_end_line, Some(2_100));
         assert!(!result.truncated);
         assert_eq!(result.next_start_line, None);
         assert!(result.content.starts_with("line 1\n"));
-        assert!(result.content.ends_with("line 2500\n"));
+        assert!(result.content.ends_with("line 2100\n"));
     }
 
     #[tokio::test]
@@ -622,16 +653,19 @@ mod tests {
             .unwrap();
 
         assert!(result.truncated);
-        assert!(result.content.chars().count() < 51_400);
+        assert!(result.content.chars().count() < 20_200);
         assert!(result.content.contains("read_file output truncated"));
+        // One line, cut: nothing further to page to.
+        assert_eq!(result.returned_end_line, Some(1));
+        assert_eq!(result.next_start_line, None);
     }
 
     #[tokio::test]
     async fn test_read_file_range_char_cap_truncates_explicit_range_and_sets_next_start_line() {
         let tmp = tempfile::tempdir().unwrap();
         let test_file = tmp.path().join("wide.txt");
-        // Each line is ~5010 bytes; 12 lines comfortably exceed the 51_200
-        // char cap so the explicit range gets cut by chars, not lines.
+        // Each line is ~5010 chars; 12 lines exceed the 20_000 char cap so
+        // the explicit range gets cut by chars, on a line boundary.
         let content = (1..=25)
             .map(|n| format!("line {n} {}\n", "x".repeat(5_000)))
             .collect::<String>();
@@ -647,9 +681,58 @@ mod tests {
 
         assert!(result.truncated);
         assert_eq!(result.returned_start_line, Some(1));
-        assert_eq!(result.returned_end_line, Some(12));
-        assert_eq!(result.next_start_line, Some(13));
+        // Three whole lines fit (15_030 chars); a fourth would not. The
+        // reported end and the next start follow what was returned, so no
+        // line is skipped by the next ranged read.
+        assert_eq!(result.returned_end_line, Some(3));
+        assert_eq!(result.next_start_line, Some(4));
+        assert!(result.content.starts_with("line 1 "));
+        assert!(result.content.contains("line 3 "));
+        assert!(!result.content.contains("line 4 "));
         assert!(result.content.contains("read_file output truncated"));
+    }
+
+    /// Paging a file bigger than the character cap with `next_start_line`
+    /// returns every line exactly once.
+    #[tokio::test]
+    async fn test_read_file_range_paging_by_next_start_line_skips_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("big.py");
+        let content = (1..=3_000)
+            .map(|n| format!("value_{n} = compute({n})  # a typical line of code\n"))
+            .collect::<String>();
+        fs::write(&test_file, &content).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let mut start = 1;
+        let mut reads = 0;
+        let mut seen = String::new();
+        loop {
+            let result = service
+                .read_file_range("big.py", Some(start), None)
+                .await
+                .unwrap();
+            reads += 1;
+            assert!(result.content.chars().count() <= 20_000 + 200);
+            let body = result
+                .content
+                .split(READ_FILE_TRUNCATED_NOTE)
+                .next()
+                .unwrap();
+            seen.push_str(body);
+            match result.next_start_line {
+                Some(next) => {
+                    assert_eq!(Some(next - 1), result.returned_end_line);
+                    start = next;
+                }
+                None => break,
+            }
+            assert!(reads < 50, "paging did not terminate");
+        }
+        assert_eq!(seen, content);
+        assert!(reads > 1);
     }
 
     #[tokio::test]

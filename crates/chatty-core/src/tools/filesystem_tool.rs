@@ -50,8 +50,8 @@ impl Tool for ReadFileTool {
                           Returns the file contents as a string. \
                           Files must be within the workspace directory and under 10MB. \
                           Optionally provide start_line and end_line (1-based, inclusive) to read \
-                          a specific range; an explicit range is honored in full. Without one, up \
-                          to 2000 lines are returned. Every read is also capped at ~50,000 characters; \
+                          a specific range. Without an end_line, up to 2000 lines are returned. Every \
+                          read is capped at ~20,000 characters, cut on a line boundary; \
                           when a read is truncated, the output includes returned_start_line / \
                           returned_end_line plus next_start_line so you can continue with another \
                           ranged read. \
