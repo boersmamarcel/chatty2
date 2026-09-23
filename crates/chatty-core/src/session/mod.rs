@@ -356,6 +356,12 @@ impl AgentSession {
         action
     }
 
+    /// How many recovery attempts [`recovery_action`](Self::recovery_action)
+    /// has handed out for `kind` since the last human turn.
+    pub fn recovery_attempts(&self, kind: StreamErrorKind) -> usize {
+        self.recovery_attempts.get(&kind).copied().unwrap_or(0)
+    }
+
     /// Whether the conversation is ready for its generated title: still
     /// untitled after exactly one exchange. Counted on persisted history, so
     /// a turn's tool round-trips don't make one exchange look like several

@@ -103,6 +103,13 @@ pub enum RecoveryAction {
 pub const HEADLESS_TRANSPORT_RETRY_ATTEMPTS: usize = 5;
 pub const HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS: usize = 2;
 
+/// How many times headless resumes a turn the stall watchdog ended before it
+/// gives up. A briefly overloaded local server (vLLM, Ollama) goes quiet for
+/// minutes and then recovers; with nobody there to "send a message to
+/// continue", the run would otherwise end and lose its work. Each resume
+/// already cost a full [`STALL_TIMEOUT`] of silence, so the budget is small.
+pub const HEADLESS_STALL_RESUME_ATTEMPTS: usize = 2;
+
 /// Decide what to do about a stream-ending error, per the D5 policy table.
 ///
 /// `attempt` is how many recovery attempts have already been made for this
@@ -148,14 +155,24 @@ pub fn decide_recovery(
                 RecoveryAction::Stop
             }
         }
-        // Stalled: end the turn with the stall message (today). Cancelled:
-        // finalize per D4, handled outside this path. EmptyCompletion: the
-        // nudge already happened inside the turn (AGE-401); a second empty
-        // answer is the error. Other: surface as today.
-        StreamErrorKind::Stalled
-        | StreamErrorKind::Cancelled
-        | StreamErrorKind::EmptyCompletion
-        | StreamErrorKind::Other => RecoveryAction::Stop,
+        // Headless resumes a stalled turn right away (the silence was the
+        // wait); interactive surfaces show the stall message and a human
+        // decides whether to send "continue".
+        StreamErrorKind::Stalled => match surface {
+            StreamSurface::Headless if attempt < HEADLESS_STALL_RESUME_ATTEMPTS => {
+                RecoveryAction::Retry {
+                    after: std::time::Duration::ZERO,
+                }
+            }
+            _ => RecoveryAction::Stop,
+        },
+        // Cancelled: finalize per D4, handled outside this path.
+        // EmptyCompletion: the nudge already happened inside the turn
+        // (AGE-401); a second empty answer is the error. Other: surface as
+        // today.
+        StreamErrorKind::Cancelled | StreamErrorKind::EmptyCompletion | StreamErrorKind::Other => {
+            RecoveryAction::Stop
+        }
     }
 }
 
@@ -251,9 +268,28 @@ fn tool_running_after(chunk: &StreamChunk) -> Option<bool> {
     }
 }
 
-/// Reported as a stream error when the watchdog above fires.
-pub const STALLED_STREAM_MESSAGE: &str = "The model stopped responding (no output for 3 minutes). The turn was ended \
-     — send a message to continue.";
+/// Reported as a stream error when the watchdog above fires; `timeout` is
+/// the one that fired ([`STALL_TIMEOUT`], or [`TOOL_STALL_TIMEOUT`] while a
+/// tool call was running).
+pub fn stalled_stream_message(timeout: std::time::Duration) -> String {
+    format!(
+        "The model stopped responding (no output for {}). The turn was ended \
+         — send a message to continue.",
+        describe_duration(timeout)
+    )
+}
+
+/// "3 minutes", "13 minutes", "90 seconds": whole minutes when it divides.
+fn describe_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    let (n, unit) = if secs >= 60 && secs.is_multiple_of(60) {
+        (secs / 60, "minute")
+    } else {
+        (secs, "second")
+    };
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{n} {unit}{plural}")
+}
 
 /// Install a fresh progress sender into the shared slot, returning the receiver.
 ///
@@ -341,7 +377,7 @@ async fn run_stream_loop_with(
                     // `on_stream_ended` on this exit path (AGE-213).
                     if let Err(e) = handler.on_chunk(Ok(StreamChunk::Error(StreamError::new(
                         StreamErrorKind::Stalled,
-                        STALLED_STREAM_MESSAGE,
+                        stalled_stream_message(timeout),
                     )))) {
                         loop_result = Err(e);
                     }
@@ -414,8 +450,10 @@ mod tests {
 
     #[test]
     fn stalled_stream_message_says_what_happened_and_what_to_do() {
-        assert!(STALLED_STREAM_MESSAGE.contains("stopped responding"));
-        assert!(STALLED_STREAM_MESSAGE.contains("send a message"));
+        let message = stalled_stream_message(STALL_TIMEOUT);
+        assert!(message.contains("stopped responding"));
+        assert!(message.contains("(no output for 3 minutes)"));
+        assert!(message.contains("send a message"));
     }
 
     struct TestHandler {
@@ -676,6 +714,59 @@ mod tests {
             handler.chunks.last(),
             Some(StreamChunk::Error(e)) if e.kind == StreamErrorKind::Stalled
         ));
+    }
+
+    /// The message names the timeout that fired: a stall inside the
+    /// extended tool-call window used to say "3 minutes" after thirteen.
+    #[test]
+    fn stalled_stream_message_names_the_tool_timeout() {
+        let message = stalled_stream_message(TOOL_STALL_TIMEOUT);
+        assert!(message.contains("(no output for 13 minutes)"), "{message}");
+        assert!(stalled_stream_message(std::time::Duration::from_secs(90)).contains("90 seconds"));
+        assert!(stalled_stream_message(std::time::Duration::from_secs(60)).contains("1 minute)"));
+    }
+
+    /// A tool that never answers stalls on the tool timeout, and the error
+    /// says so rather than quoting the plain one.
+    #[tokio::test]
+    async fn a_stall_during_a_tool_call_reports_the_tool_timeout() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_secs(1),
+        };
+        let chunks = futures::stream::iter(vec![Ok(StreamChunk::ToolCallStarted {
+            id: "call_1".into(),
+            name: "shell_execute".into(),
+        })])
+        .chain(futures::stream::pending());
+        let mut stream: ResponseStream = Box::pin(chunks);
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_stream_loop_with(
+                &mut stream,
+                &mut progress_rx,
+                &cancel_flag,
+                &mut handler,
+                stall,
+            ),
+        )
+        .await
+        .expect("the watchdog fires on the tool timeout")
+        .unwrap();
+
+        match handler.chunks.last() {
+            Some(StreamChunk::Error(e)) => {
+                assert_eq!(e.kind, StreamErrorKind::Stalled);
+                assert_eq!(e.message, stalled_stream_message(stall.tool_timeout));
+                assert!(e.message.contains("1 second"), "{}", e.message);
+            }
+            other => panic!("expected a stall error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1068,6 +1159,34 @@ mod tests {
         }
     }
 
+    /// A stall resumes the turn only where nobody is there to type
+    /// "continue", and only a bounded number of times.
+    #[test]
+    fn stall_resumes_only_on_headless_and_only_within_its_budget() {
+        for surface in [StreamSurface::Desktop, StreamSurface::InteractiveTui] {
+            assert_eq!(
+                decide_recovery(StreamErrorKind::Stalled, surface, 0),
+                RecoveryAction::Stop
+            );
+        }
+        for attempt in 0..HEADLESS_STALL_RESUME_ATTEMPTS {
+            assert_eq!(
+                decide_recovery(StreamErrorKind::Stalled, StreamSurface::Headless, attempt),
+                RecoveryAction::Retry {
+                    after: std::time::Duration::ZERO
+                }
+            );
+        }
+        assert_eq!(
+            decide_recovery(
+                StreamErrorKind::Stalled,
+                StreamSurface::Headless,
+                HEADLESS_STALL_RESUME_ATTEMPTS
+            ),
+            RecoveryAction::Stop
+        );
+    }
+
     /// AGE-497: an unknown-tool call used to fall into `Other` (always
     /// `Stop`), ending the run outright on a one-token tool-name mistake.
     #[test]
@@ -1079,9 +1198,8 @@ mod tests {
     }
 
     #[test]
-    fn stalled_cancelled_empty_and_other_always_stop() {
+    fn cancelled_empty_and_other_always_stop() {
         for kind in [
-            StreamErrorKind::Stalled,
             StreamErrorKind::Cancelled,
             StreamErrorKind::EmptyCompletion,
             StreamErrorKind::Other,

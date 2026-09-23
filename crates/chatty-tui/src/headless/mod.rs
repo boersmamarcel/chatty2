@@ -25,7 +25,8 @@
 
 use anyhow::Result;
 use chatty_core::services::{
-    AgentLoopGuard, RecoveryAction, StreamError, StreamErrorKind, is_agent_todo_tool,
+    AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
+    is_agent_todo_tool,
 };
 use tokio::sync::mpsc;
 
@@ -45,6 +46,10 @@ const FINALIZATION_EVIDENCE_CHARS: usize = 16_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 4_000;
 const TEXT_HARD_STOP_BYTES: usize = 20_000;
 const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
+/// Sent on the same history after the stall watchdog ended a turn: the
+/// provider went quiet, not the task, so the model picks up where it was.
+const STALL_RESUME_PROMPT: &str =
+    "The previous response was interrupted by a stall. Continue from where you left off.";
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
 
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is
@@ -91,12 +96,9 @@ pub async fn run_headless(
     let mut pending_loop_pivot_prompt: Option<String> = None;
     let mut finalization_pending_after_cancel = false;
     // The session decides whether a stream error is retried and after how
-    // long (AGE-273); the delay is held here until the turn has ended.
-    let mut recovery_pending_after_error: Option<std::time::Duration> = None;
-    // AGE-497: rig's own `UnknownToolCall` message already lists the
-    // available/allowed tool names, so it is worth re-sending verbatim
-    // instead of the generic recovery prompt below.
-    let mut pending_unknown_tool_call_message: Option<String> = None;
+    // long (AGE-273); the delay and the error that earned it are held here
+    // until the turn has ended.
+    let mut recovery_pending_after_error: Option<(std::time::Duration, StreamError)> = None;
     // A stream error the session would not retry ends the run as a failure
     // (AGE-401): the exit code says so, not an empty stdout.
     let mut unrecovered_error: Option<StreamError> = None;
@@ -333,19 +335,26 @@ pub async fn run_headless(
                     engine.send_message(pivot);
                     continue;
                 }
-                if let Some(delay) = recovery_pending_after_error.take() {
+                if let Some((delay, error)) = recovery_pending_after_error.take() {
                     tool_results_since_finalization = 0;
                     failed_tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
                     failure_budget_stop_requested = false;
-                    eprintln!(
-                        "Retrying after stream error in {}s with a compact continuation prompt.",
-                        delay.as_secs()
-                    );
+                    if error.kind != StreamErrorKind::Stalled {
+                        eprintln!(
+                            "Retrying after stream error in {}s with a compact continuation prompt.",
+                            delay.as_secs()
+                        );
+                    }
                     tokio::time::sleep(delay).await;
-                    if let Some(error_message) = pending_unknown_tool_call_message.take() {
+                    if error.kind == StreamErrorKind::Stalled {
+                        engine.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+                    } else if error.kind == StreamErrorKind::UnknownToolCall {
+                        // AGE-497: rig's own message already lists the
+                        // available/allowed tool names, so it is worth
+                        // re-sending verbatim instead of the generic prompt.
                         engine.send_recovery_prompt(unknown_tool_call_recovery_prompt(
-                            &error_message,
+                            &error.message,
                         ));
                     } else if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
                         engine.send_recovery_prompt(build_compact_file_recovery_prompt(
@@ -453,10 +462,17 @@ pub async fn run_headless(
                     RecoveryAction::Stop => None,
                 };
                 if let Some(after) = retry_after {
-                    if error.kind == StreamErrorKind::UnknownToolCall {
-                        pending_unknown_tool_call_message = Some(error.message.clone());
+                    if error.kind == StreamErrorKind::Stalled {
+                        // Nobody is here to "send a message to continue", so
+                        // this run sends it: the same history, one short
+                        // prompt, a bounded number of times per task.
+                        eprintln!(
+                            "Auto-resuming the stalled turn ({}/{}).",
+                            engine.session.recovery_attempts(error.kind),
+                            HEADLESS_STALL_RESUME_ATTEMPTS
+                        );
                     }
-                    recovery_pending_after_error = Some(after);
+                    recovery_pending_after_error = Some((after, error));
                     continue;
                 }
 

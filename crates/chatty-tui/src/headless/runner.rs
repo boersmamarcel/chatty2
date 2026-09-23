@@ -58,6 +58,10 @@ pub struct HeadlessRunner {
     /// "read_skill <skill> and follow it", prepended to the first human turn
     /// of a `--team` run and then gone (AGE-407).
     pending_first_turn: Option<String>,
+    /// Tests only: each turn plays the next of these instead of calling the
+    /// provider, so `run_headless` can be driven end to end offline.
+    #[cfg(test)]
+    pub(super) scripted_turns: std::collections::VecDeque<chatty_core::services::Scenario>,
 }
 
 impl HeadlessRunner {
@@ -84,6 +88,8 @@ impl HeadlessRunner {
             event_observer: None,
             mailbox: Mailbox::new(),
             pending_first_turn,
+            #[cfg(test)]
+            scripted_turns: Default::default(),
         }
     }
 
@@ -222,6 +228,15 @@ impl HeadlessRunner {
     }
 
     fn spawn_turn(&mut self, input: TurnInput) {
+        #[cfg(test)]
+        if let Some(scenario) = self.scripted_turns.pop_front() {
+            let turn = self
+                .session
+                .begin_scripted_turn(input, scenario, self.event_sink())
+                .expect("scripted turn starts");
+            tokio::spawn(turn);
+            return;
+        }
         match self.session.begin_turn(input, self.event_sink()) {
             Ok(turn) => {
                 tokio::spawn(turn);

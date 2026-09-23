@@ -780,4 +780,157 @@ mod runner {
             FINALIZATION_MAX_AGENT_TURNS
         );
     }
+
+    // -------------------------------------------------------------------
+    // Stall auto-resume: `run_headless` end to end on scripted turns.
+    // -------------------------------------------------------------------
+
+    use chatty_core::services::{
+        HEADLESS_STALL_RESUME_ATTEMPTS, Scenario, ScriptedItem, StreamChunk, stalled_stream_message,
+    };
+
+    fn stalled_turn() -> Scenario {
+        Scenario {
+            name: "stalled",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Working on it".into())),
+                // What the watchdog hands the handler when it fires.
+                ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Stalled,
+                    stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+                ))),
+            ],
+        }
+    }
+
+    fn answer_turn(text: &str) -> Scenario {
+        Scenario {
+            name: "answer",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text(text.to_string())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    /// A runner that plays `turns` in order, in a scratch workspace (so no
+    /// stray answer.txt ends the run), counting the turns that start.
+    async fn scripted_runner(
+        turns: Vec<Scenario>,
+    ) -> (
+        HeadlessRunner,
+        mpsc::UnboundedReceiver<AppEvent>,
+        Arc<Mutex<usize>>,
+        tempfile::TempDir,
+    ) {
+        let (mut runner, event_rx) = test_runner().await;
+        let workspace = tempfile::tempdir().unwrap();
+        runner.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        runner.scripted_turns = turns.into();
+        let started: Arc<Mutex<usize>> = Arc::default();
+        let counter = started.clone();
+        runner.set_event_observer(Arc::new(move |event| {
+            if matches!(event, chatty_core::session::SessionEvent::TurnStarted) {
+                *counter.lock().unwrap() += 1;
+            }
+        }));
+        (runner, event_rx, started, workspace)
+    }
+
+    /// A local server that goes quiet for longer than the stall timeout and
+    /// then recovers: headless sends the continuation itself and the run
+    /// succeeds, instead of exiting non-zero with the work lost.
+    #[tokio::test]
+    async fn a_stalled_turn_is_resumed_and_the_run_succeeds() {
+        let (runner, event_rx, started, _workspace) =
+            scripted_runner(vec![stalled_turn(), answer_turn("Resumed and done.")]).await;
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect("the resumed run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2, "one stalled turn, one resume");
+    }
+
+    /// The resume prompt goes on the same history as a protocol follow-up,
+    /// not a human turn, so it cannot refill its own budget.
+    #[tokio::test]
+    async fn the_resume_prompt_continues_the_same_conversation() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![answer_turn("ok")].into();
+        let attempts_before = runner.session.recovery_attempts(StreamErrorKind::Stalled);
+        let error = StreamError::new(StreamErrorKind::Stalled, "stalled");
+        assert!(matches!(
+            runner.session.recovery_action(&error),
+            RecoveryAction::Retry { .. }
+        ));
+
+        runner.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let conversation = runner.session.conversation().unwrap();
+        assert!(
+            conversation
+                .messages()
+                .iter()
+                .any(|m| format!("{m:?}").contains("interrupted by a stall")),
+            "the continuation is part of the history the model sees"
+        );
+        assert_eq!(
+            runner.session.recovery_attempts(StreamErrorKind::Stalled),
+            attempts_before + 1,
+            "a protocol follow-up keeps the stall budget it spent"
+        );
+    }
+
+    /// A server that never recovers: the run resumes a bounded number of
+    /// times, then fails as before.
+    #[tokio::test]
+    async fn stall_resumes_are_bounded() {
+        let mut turns: Vec<Scenario> = (0..=HEADLESS_STALL_RESUME_ATTEMPTS + 2)
+            .map(|_| stalled_turn())
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+
+        let error = run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect_err("a server that never recovers still fails the run");
+
+        assert!(error.to_string().contains("stopped responding"), "{error}");
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + HEADLESS_STALL_RESUME_ATTEMPTS,
+            "the first turn plus the bounded resumes"
+        );
+    }
+
+    /// Other errors keep their behaviour: one that is not retried ends the
+    /// run on the spot, with no resume.
+    #[tokio::test]
+    async fn a_non_stall_error_is_not_resumed() {
+        let other = Scenario {
+            name: "other_error",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Other,
+                "max turns reached",
+            )))],
+        };
+        let (runner, event_rx, started, _workspace) =
+            scripted_runner(vec![other, answer_turn("never reached")]).await;
+
+        let error = run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect_err("an unrecovered error fails the run");
+
+        assert!(error.to_string().contains("max turns reached"), "{error}");
+        assert_eq!(*started.lock().unwrap(), 1);
+    }
 }

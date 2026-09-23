@@ -112,9 +112,9 @@ pub use stream_fixtures::{
     Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
 };
 pub use stream_processor::{
-    ChunkAction, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_TRANSPORT_RETRY_ATTEMPTS,
-    RecoveryAction, STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE, StreamChunkHandler,
-    StreamError, StreamErrorKind, StreamSurface, decide_recovery, install_progress_channel,
-    run_stream_loop,
+    ChunkAction, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_STALL_RESUME_ATTEMPTS,
+    HEADLESS_TRANSPORT_RETRY_ATTEMPTS, RecoveryAction, STALL_TICK, STALL_TIMEOUT,
+    StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+    install_progress_channel, run_stream_loop, stalled_stream_message,
 };
 pub use title_generator::generate_title;
