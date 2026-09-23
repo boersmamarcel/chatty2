@@ -1,10 +1,13 @@
+use crate::settings::controllers::search_settings_controller::RerankTestStatus;
 use crate::settings::controllers::{execution_settings_controller, search_settings_controller};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::search_settings::{SearchProvider, SearchSettingsModel};
 use crate::settings::views::providers_view::masked_api_key_field;
-use gpui::{App, IntoElement, SharedString, Styled};
+use gpui::{App, IntoElement, ParentElement, SharedString, Styled, div};
 use gpui_component::{
+    ActiveTheme, Sizable,
     button::Button,
+    h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage},
 };
@@ -157,6 +160,82 @@ pub fn search_settings_page() -> SettingPage {
                         .default_value(5.0),
                     )
                     .description("Maximum number of search results to return per query (1-20)."),
+                ]),
+            // ── Keyless Search ───────────────────────────────────────────
+            SettingGroup::new()
+                .title("Keyless search")
+                .description(
+                    "Without an API key, results can be reordered by a local cross-encoder \
+                     (e.g. bge-reranker-v2-m3 behind a /rerank endpoint): better top \
+                     results for about one second more per search. Leave empty to skip.",
+                )
+                .items(vec![
+                    SettingItem::new(
+                        "Rerank Endpoint",
+                        SettingField::input(
+                            |cx: &App| {
+                                cx.global::<SearchSettingsModel>()
+                                    .rerank_url
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into()
+                            },
+                            |val: SharedString, cx: &mut App| {
+                                search_settings_controller::set_rerank_url(val.to_string(), cx);
+                            },
+                        ),
+                    )
+                    .description("Full URL, e.g. http://127.0.0.1:8001/rerank (vLLM or llama.cpp server)."),
+                    SettingItem::new(
+                        "Rerank Model",
+                        SettingField::input(
+                            |cx: &App| {
+                                cx.global::<SearchSettingsModel>()
+                                    .rerank_model
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into()
+                            },
+                            |val: SharedString, cx: &mut App| {
+                                search_settings_controller::set_rerank_model(val.to_string(), cx);
+                            },
+                        ),
+                    )
+                    .description("Model name the server expects, e.g. BAAI/bge-reranker-v2-m3."),
+                    SettingItem::new(
+                        "Test Reranker",
+                        SettingField::render(|_options, _window, cx| {
+                            let (color, message) = match cx.try_global::<RerankTestStatus>() {
+                                Some(RerankTestStatus::Testing) => {
+                                    (cx.theme().muted_foreground, "Testing…".to_string())
+                                }
+                                Some(RerankTestStatus::Done(Ok(msg))) => {
+                                    (cx.theme().success, msg.clone())
+                                }
+                                Some(RerankTestStatus::Done(Err(msg))) => {
+                                    (cx.theme().danger, msg.clone())
+                                }
+                                Some(RerankTestStatus::Idle) | None => {
+                                    (cx.theme().muted_foreground, String::new())
+                                }
+                            };
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_xs().text_color(color).child(message))
+                                .child(
+                                    Button::new("test-reranker")
+                                        .label("Test")
+                                        .small()
+                                        .outline()
+                                        .on_click(|_, _, cx| {
+                                            search_settings_controller::test_reranker(cx);
+                                        }),
+                                )
+                                .into_any_element()
+                        }),
+                    )
+                    .description("Sends one /rerank request to the endpoint above."),
                 ]),
             // ── Browser Automation ───────────────────────────────────────
             SettingGroup::new()

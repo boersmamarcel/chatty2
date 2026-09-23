@@ -281,6 +281,49 @@ impl SearchWebTool {
         Some(scores)
     }
 
+    /// Send one two-document request to a `/rerank` endpoint, for the
+    /// settings page's Test button. `Ok` names the round-trip time.
+    pub async fn probe_reranker(url: &str, model: &str) -> anyhow::Result<String> {
+        let started = std::time::Instant::now();
+        let request = RerankRequest {
+            model,
+            query: "capital of France",
+            documents: vec![
+                "Paris is the capital of France.".to_string(),
+                "Bananas are yellow.".to_string(),
+            ],
+        };
+        let response = crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS)
+            .post(url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    anyhow::anyhow!("Nothing answers at {url}")
+                } else if e.is_timeout() {
+                    anyhow::anyhow!("No answer from {url} within {SEARCH_TIMEOUT_SECS} s")
+                } else {
+                    anyhow::anyhow!("Request to {url} failed: {e}")
+                }
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("reranker returned HTTP {status}");
+        }
+        let parsed: RerankResponse = response
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("not a /rerank response: {e}"))?;
+        if parsed.results.len() != 2 {
+            anyhow::bail!("expected 2 scores, got {}", parsed.results.len());
+        }
+        Ok(format!(
+            "Reranker answered in {} ms",
+            started.elapsed().as_millis()
+        ))
+    }
+
     /// Route every backend request through `cache` (eval harness only).
     pub fn with_response_cache(mut self, cache: Arc<ResponseCache>) -> Self {
         self.cache = Some(cache);
@@ -1335,6 +1378,87 @@ mod tests {
         let tool = SearchWebTool::new_fallback(5);
         let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
+    }
+
+    /// Serve one HTTP request on a loopback port with `body` as a 200 JSON
+    /// response; returns the endpoint URL.
+    async fn one_shot_rerank_server(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}/rerank")
+    }
+
+    /// A loopback URL nothing listens on.
+    async fn dead_rerank_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}/rerank")
+    }
+
+    #[tokio::test]
+    async fn probe_reranker_accepts_a_rerank_response() {
+        let url = one_shot_rerank_server(
+            r#"{"results":[{"index":0,"relevance_score":0.9},{"index":1,"relevance_score":0.01}]}"#,
+        )
+        .await;
+        let msg = SearchWebTool::probe_reranker(&url, "bge").await.unwrap();
+        assert!(msg.starts_with("Reranker answered"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn probe_reranker_rejects_a_non_rerank_response() {
+        let url = one_shot_rerank_server(r#"{"object":"list","data":[]}"#).await;
+        assert!(SearchWebTool::probe_reranker(&url, "bge").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn probe_reranker_reports_a_dead_endpoint() {
+        let url = dead_rerank_url().await;
+        let err = SearchWebTool::probe_reranker(&url, "bge")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, format!("Nothing answers at {url}"));
+    }
+
+    /// With the endpoint down, rerank_scores yields `None` and the caller
+    /// keeps the engines' order instead of failing the search (AGE-521).
+    #[tokio::test]
+    async fn dead_reranker_falls_back_without_error() {
+        let url = dead_rerank_url().await;
+        let tool = SearchWebTool::new_fallback(5).with_reranker(url.clone(), "bge");
+        let reranker = tool.reranker.clone().unwrap();
+        let scores = tool
+            .rerank_scores(&reranker, "q", vec!["a".to_string(), "b".to_string()])
+            .await;
+        assert!(scores.is_none());
+    }
+
+    #[tokio::test]
+    async fn rerank_scores_map_back_to_input_order() {
+        let url = one_shot_rerank_server(
+            r#"{"results":[{"index":1,"relevance_score":0.8},{"index":0,"relevance_score":0.2}]}"#,
+        )
+        .await;
+        let tool = SearchWebTool::new_fallback(5).with_reranker(url, "bge");
+        let reranker = tool.reranker.clone().unwrap();
+        let scores = tool
+            .rerank_scores(&reranker, "q", vec!["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(scores, vec![0.2, 0.8]);
     }
 
     #[test]
