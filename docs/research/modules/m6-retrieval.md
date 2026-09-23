@@ -489,6 +489,35 @@ measured Y; because Z". Predictions and results were posted on
   smaller than BM25 assumes. It still works, because the rare entity names in a question
   are rare in almost any collection.
 
+**5. Widen the pool to 10 and rerank it by best BM25 passage. Reverted.**
+- **Says:** two-stage retrieval (monoBERT): a cheap stage for recall, then a precise
+  stage over a small pool.
+- **Measured:**
+  - SimpleQA hit@5 48% → 46.5% (11 gained, 14 lost, p = 0.69); hit@1 27% → 30.5%.
+  - FRAMES fan-out recall@10 44% → 40%.
+  - p95 rose by about 1.5 s.
+- **Because:** here the second stage was still lexical. A page that repeats the question's
+  rare words, such as a list or an overview page, outscores the page that answers it. A
+  bigger pool adds as many near-misses as answers.
+- **Confound:** 10 page fetches per search made each search cost 11 Wikipedia calls, and
+  763 of them hit the rate limit.
+
+**6. The same pool, ordered by a cross-encoder. Kept, optional.**
+- **Setup:** `bge-reranker-v2-m3` on the local GPU behind a `/rerank` endpoint.
+- **Says:**
+  - monoBERT/monoT5: reading question and passage together judges relevance, not just
+    overlap.
+  - BEIR: rerankers are the strongest zero-shot systems.
+- **Measured:**
+  - SimpleQA hit@5 48% → 54% (17/5, p = 0.019); hit@1 27% → 43%.
+  - FRAMES fan-out all-sources@10 13% → 20% (8/1, p = 0.046).
+  - p95 2.3 s → 3.5 s.
+- **Because:** the pool from iteration 5 was fine; its ranking was not. With a
+  cross-encoder the same candidates give 17 wins against 5 losses, where BM25 gave 11
+  against 14.
+- **Without a reranker configured, the pool is not widened.** A BM25 rerank of a larger
+  pool was measured to be worse.
+
 ## Part B — internal memory retrieval
 
 How it works today, from the code (`crates/chatty-core/src`) and
