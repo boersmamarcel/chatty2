@@ -64,8 +64,14 @@ pub struct DefinitionResult {
 /// ripgrep's own type name (e.g. "py"), which ripgrep rejects with
 /// "unrecognized file type". Unrecognized names are passed through
 /// unchanged so ripgrep's own error still surfaces if the mapping misses.
-fn normalize_ripgrep_file_type(file_type: &str) -> &str {
-    match file_type {
+fn normalize_ripgrep_file_type(file_type: &str) -> String {
+    // ripgrep's type names are lowercase and have no leading dot; models
+    // also write "Python" or ".py".
+    let file_type = file_type
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    match file_type.as_str() {
         "python" => "py",
         "javascript" => "js",
         "typescript" => "ts",
@@ -75,6 +81,7 @@ fn normalize_ripgrep_file_type(file_type: &str) -> &str {
         "shell" | "bash" => "sh",
         other => other,
     }
+    .to_string()
 }
 
 /// Service for code search and navigation operations.
@@ -123,7 +130,7 @@ impl CodeSearchService {
 
         if let Some(ft) = file_type {
             args.push("--type".to_string());
-            args.push(normalize_ripgrep_file_type(ft).to_string());
+            args.push(normalize_ripgrep_file_type(ft));
         }
 
         args.push(pattern.to_string());
@@ -601,6 +608,10 @@ type UserId = string;
         assert_eq!(normalize_ripgrep_file_type("yaml"), "yaml");
         // Unknown names pass through so ripgrep's own error still surfaces.
         assert_eq!(normalize_ripgrep_file_type("cobol"), "cobol");
+        // Case and a leading dot are not ripgrep's.
+        assert_eq!(normalize_ripgrep_file_type("Python"), "py");
+        assert_eq!(normalize_ripgrep_file_type(".py"), "py");
+        assert_eq!(normalize_ripgrep_file_type(" Rust "), "rust");
     }
 
     /// parse_ripgrep_json: verifies truncation flag and exact result count.
