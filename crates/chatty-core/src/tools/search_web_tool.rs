@@ -297,7 +297,16 @@ impl SearchWebTool {
             .post(url)
             .json(&request)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                if e.is_connect() {
+                    anyhow::anyhow!("Nothing answers at {url}")
+                } else if e.is_timeout() {
+                    anyhow::anyhow!("No answer from {url} within {SEARCH_TIMEOUT_SECS} s")
+                } else {
+                    anyhow::anyhow!("Request to {url} failed: {e}")
+                }
+            })?;
         let status = response.status();
         if !status.is_success() {
             anyhow::bail!("reranker returned HTTP {status}");
@@ -1417,7 +1426,11 @@ mod tests {
     #[tokio::test]
     async fn probe_reranker_reports_a_dead_endpoint() {
         let url = dead_rerank_url().await;
-        assert!(SearchWebTool::probe_reranker(&url, "bge").await.is_err());
+        let err = SearchWebTool::probe_reranker(&url, "bge")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, format!("Nothing answers at {url}"));
     }
 
     /// With the endpoint down, rerank_scores yields `None` and the caller
