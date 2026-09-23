@@ -127,12 +127,69 @@ async fn test_per_call_timeout_override() {
     assert!(result.timed_out);
 }
 
+/// A timeout kills the command, not just the shell running it: an orphaned
+/// test suite would otherwise keep running (and writing) behind the model's
+/// next commands.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_timeout_kills_the_running_command() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    if session.is_sandboxed().await {
+        // The sandbox's PID namespace hides the pid; bubblewrap's
+        // --die-with-parent covers this case.
+        return;
+    }
+
+    let result = session
+        .execute_with_timeout("sleep 30 & echo \"pid=$!\"; wait", Some(1))
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+    let pid: i32 = result
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|pid| pid.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no pid in output: {}", result.stdout));
+
+    // Gone, or a zombie waiting for a reaper (the test binary may be PID 1
+    // in a container) — either way no longer running.
+    let mut alive = true;
+    for _ in 0..50 {
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.trim_start().chars().next())
+            });
+        if matches!(state, None | Some('Z') | Some('X')) {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if alive && std::path::Path::new("/proc").exists() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("the timed-out command (pid {pid}) is still running");
+    }
+
+    // The session respawns and works after the kill.
+    let after = session.execute("echo still-here").await.unwrap();
+    assert!(!after.timed_out);
+    assert_eq!(after.stdout, "still-here");
+}
+
 #[test]
 fn test_resolve_call_timeout_seconds_bounds_override() {
     // No override: falls back to the session's configured default.
     assert_eq!(resolve_call_timeout_seconds(30, None), 30);
     // A reasonable override is used as-is.
     assert_eq!(resolve_call_timeout_seconds(30, Some(120)), 120);
+    // 0 is not "kill immediately": it falls back to the default.
+    assert_eq!(resolve_call_timeout_seconds(30, Some(0)), 30);
     // A caller asking for more than the max is clamped down to it, rather
     // than allowed to block a turn indefinitely.
     assert_eq!(

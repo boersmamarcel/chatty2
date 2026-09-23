@@ -290,6 +290,11 @@ impl ShellSession {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Its own process group, so a timed-out command can be killed along
+        // with the shell: SIGKILL on bash alone leaves the command it was
+        // running (a test suite, a build) orphaned and still going.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if let Some(dir) = workspace_dir {
             cmd.current_dir(dir);
@@ -691,6 +696,14 @@ impl ShellSession {
                     "Shell command timed out, killing session"
                 );
                 if let Some(mut proc) = process.take() {
+                    // An unsandboxed shell leads its own process group (see
+                    // `spawn_unsandboxed`); take the command down with it.
+                    // bubblewrap's `--die-with-parent` and PID namespace do
+                    // the same for a sandboxed one.
+                    #[cfg(unix)]
+                    if !proc.is_sandboxed {
+                        kill_process_group(proc.child.id());
+                    }
                     let _ = proc.child.kill().await;
                 }
 
@@ -704,7 +717,8 @@ impl ShellSession {
                 }
                 stdout.push_str(&format!(
                     "[shell_execute: command timed out after {} seconds and was killed; \
-                     output above is partial. The shell session was restarted.]",
+                     output above is partial. The shell session was restarted: the working \
+                     directory and any exported variables are back to their defaults.]",
                     effective_timeout_seconds
                 ));
 
@@ -865,8 +879,27 @@ fn resolve_call_timeout_seconds(
     timeout_override: Option<u32>,
 ) -> u32 {
     timeout_override
+        // 0 reads as "no particular limit" to a model; as a Duration it would
+        // kill the command before it produced anything.
+        .filter(|t| *t > 0)
         .map(|t| t.min(MAX_SHELL_CALL_TIMEOUT_SECONDS))
         .unwrap_or(default_timeout_seconds)
+}
+
+/// SIGKILL the process group `group` leads. `ESRCH` means nothing is left.
+#[cfg(unix)]
+fn kill_process_group(group: Option<u32>) {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    let Some(group) = group.and_then(|g| i32::try_from(g).ok()) else {
+        return;
+    };
+    match killpg(Pid::from_raw(group), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(e) => warn!(group, error = %e, "Could not kill the timed-out shell's process group"),
+    }
 }
 
 /// Escape a string for safe use in a shell command.
