@@ -911,6 +911,34 @@ mod runner {
         );
     }
 
+    /// A stall before the model said anything: the empty turn is rolled
+    /// back (AGE-243), taking the task's own message with it, so a
+    /// "continue" on that history would ask the model to continue nothing.
+    /// The retry re-sends the rolled-back message instead.
+    #[tokio::test]
+    async fn a_turn_that_stalls_before_any_output_is_retried_with_its_own_message() {
+        let silent_stall = Scenario {
+            name: "silent_stall",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Stalled,
+                stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+            )))],
+        };
+        let (runner, event_rx, started, _workspace) =
+            scripted_runner(vec![silent_stall, answer_turn("Done.")]).await;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, "Count the files in /data".to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1], "Count the files in /data", "got {sent:?}");
+    }
+
     /// Other errors keep their behaviour: one that is not retried ends the
     /// run on the spot, with no resume.
     #[tokio::test]

@@ -347,7 +347,11 @@ pub async fn run_headless(
                         );
                     }
                     tokio::time::sleep(delay).await;
-                    if error.kind == StreamErrorKind::Stalled {
+                    if let Some(message) = engine.take_rolled_back_message() {
+                        // The turn failed before the model said anything, so
+                        // it was rolled back with its prompt: send that again.
+                        engine.send_recovery_prompt(message);
+                    } else if error.kind == StreamErrorKind::Stalled {
                         engine.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
                     } else if error.kind == StreamErrorKind::UnknownToolCall {
                         // AGE-497: rig's own message already lists the

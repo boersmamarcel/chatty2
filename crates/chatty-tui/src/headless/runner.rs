@@ -58,10 +58,16 @@ pub struct HeadlessRunner {
     /// "read_skill <skill> and follow it", prepended to the first human turn
     /// of a `--team` run and then gone (AGE-407).
     pending_first_turn: Option<String>,
+    /// The message of the last turn when it ended with nothing to keep and
+    /// was rolled back off the history (AGE-243), for a retry to re-send.
+    rolled_back_message: Option<String>,
     /// Tests only: each turn plays the next of these instead of calling the
     /// provider, so `run_headless` can be driven end to end offline.
     #[cfg(test)]
     pub(super) scripted_turns: std::collections::VecDeque<chatty_core::services::Scenario>,
+    /// Tests only: the text of every turn started, in order.
+    #[cfg(test)]
+    pub(super) scripted_inputs: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl HeadlessRunner {
@@ -88,8 +94,11 @@ impl HeadlessRunner {
             event_observer: None,
             mailbox: Mailbox::new(),
             pending_first_turn,
+            rolled_back_message: None,
             #[cfg(test)]
             scripted_turns: Default::default(),
+            #[cfg(test)]
+            scripted_inputs: Default::default(),
         }
     }
 
@@ -167,6 +176,16 @@ impl HeadlessRunner {
         self.spawn_turn(input);
     }
 
+    /// The message of the last turn if it ended empty and was rolled back
+    /// off the history: a stream error before the model said anything
+    /// takes the prompt with it, so a retry must send it again rather than
+    /// ask the model to continue.
+    pub fn take_rolled_back_message(&mut self) -> Option<String> {
+        self.rolled_back_message
+            .take()
+            .filter(|message| !message.trim().is_empty())
+    }
+
     /// Re-prompt after a stream error. Shown like a user turn but not a
     /// human one: the session's recovery budget resets only on those
     /// (AGE-273).
@@ -230,6 +249,18 @@ impl HeadlessRunner {
     fn spawn_turn(&mut self, input: TurnInput) {
         #[cfg(test)]
         if let Some(scenario) = self.scripted_turns.pop_front() {
+            let text = input
+                .contents
+                .iter()
+                .filter_map(|content| match content {
+                    rig_core::completion::message::UserContent::Text(text) => {
+                        Some(text.text.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.scripted_inputs.lock().unwrap().push(text);
             let turn = self
                 .session
                 .begin_scripted_turn(input, scenario, self.event_sink())
@@ -399,9 +430,14 @@ impl HeadlessRunner {
     /// Commit the turn (no trace, no artifacts in headless mode) and reset.
     /// A second call for the same turn is a no-op inside the session.
     fn finish_turn(&mut self) {
-        if let Some(TurnOutcome::DroppedAndRolledBack(_)) = self.session.finish_turn(None, vec![]) {
-            // Headless has no composer to restore into; the text is in the
-            // transcript already.
+        // Headless has no composer to restore a rolled-back message into;
+        // it is kept for `take_rolled_back_message` instead.
+        match self.session.finish_turn(None, vec![]) {
+            Some(TurnOutcome::DroppedAndRolledBack(message)) => {
+                self.rolled_back_message = Some(message);
+            }
+            Some(TurnOutcome::Persisted) => self.rolled_back_message = None,
+            None => {}
         }
         self.is_streaming = false;
         self.session.clarifications().cancel_all();
