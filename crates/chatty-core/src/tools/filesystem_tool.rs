@@ -50,10 +50,11 @@ impl Tool for ReadFileTool {
                           Returns the file contents as a string. \
                           Files must be within the workspace directory and under 10MB. \
                           Optionally provide start_line and end_line (1-based, inclusive) to read \
-                          only part of a file, which is useful for large files. Large reads are \
-                          automatically chunked to at most 30 lines and 6000 characters per call; when that happens, \
-                           the output includes returned_start_line / returned_end_line plus \
-                           next_start_line so you can continue with another ranged read. \
+                          a specific range; an explicit range is honored in full. Without one, up \
+                          to 2000 lines are returned. Every read is also capped at ~50,000 characters; \
+                          when a read is truncated, the output includes returned_start_line / \
+                          returned_end_line plus next_start_line so you can continue with another \
+                          ranged read. \
                            For large documentation or data tasks, prefer targeted ranges, search, \
                            profile_data, describe_data, or query_data instead of reading whole files. \
                           For binary files (images, PDFs), use read_binary instead.\n\

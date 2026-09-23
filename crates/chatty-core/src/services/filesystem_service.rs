@@ -64,8 +64,17 @@ pub struct FileSystemService {
 }
 
 impl FileSystemService {
-    const MAX_READ_FILE_LINES: usize = 30;
-    const MAX_READ_FILE_CHARS: usize = 6_000;
+    /// Lines returned when no `end_line` is given. Large enough that a model
+    /// reading a typical source file gets it in one call instead of paging
+    /// 30 lines at a time (AGE benchmark evidence: 203/269 SWE-bench
+    /// `read_file` calls asking for >30 lines were cut to 30, driving up to
+    /// 31 sequential reads or a `sed -n`/`cat` fallback in the shell).
+    const DEFAULT_READ_FILE_LINES: usize = 2_000;
+    /// Character cap applied to every read, explicit range or not. Matches
+    /// `ExecutionSettings::max_output_bytes`'s default of 51_200 (50KB) so a
+    /// `read_file` result can't blow the context budget any harder than a
+    /// shell command's output already can.
+    const MAX_READ_FILE_CHARS: usize = 51_200;
 
     fn slice_lines(
         content: &str,
@@ -108,8 +117,15 @@ impl FileSystemService {
         }
 
         let requested_end_line = end_line.unwrap_or(total_lines).min(total_lines);
-        let returned_end_line = requested_end_line
-            .min(start_line.saturating_add(Self::MAX_READ_FILE_LINES.saturating_sub(1)));
+        // An explicit end_line is honored in full; only the absence of one
+        // falls back to the default window, so a model that asks for a
+        // large range gets it in one call.
+        let returned_end_line = if end_line.is_some() {
+            requested_end_line
+        } else {
+            requested_end_line
+                .min(start_line.saturating_add(Self::DEFAULT_READ_FILE_LINES.saturating_sub(1)))
+        };
         let selected = lines[start_line - 1..returned_end_line].concat();
         let (selected, char_truncated) = truncate_text_chars(&selected, Self::MAX_READ_FILE_CHARS);
         let line_truncated = returned_end_line < requested_end_line;
@@ -538,10 +554,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_file_range_chunks_large_requests() {
+    async fn test_read_file_range_chunks_large_requests_to_default_window() {
         let tmp = tempfile::tempdir().unwrap();
         let test_file = tmp.path().join("test.txt");
-        let content = (1..=250).map(|n| format!("line {n}\n")).collect::<String>();
+        let content = (1..=2_500)
+            .map(|n| format!("line {n}\n"))
+            .collect::<String>();
         fs::write(&test_file, content).unwrap();
 
         let service = FileSystemService::new(tmp.path().to_str().unwrap())
@@ -552,20 +570,48 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.total_lines, 250);
+        assert_eq!(result.total_lines, 2_500);
         assert_eq!(result.returned_start_line, Some(1));
-        assert_eq!(result.returned_end_line, Some(30));
+        assert_eq!(result.returned_end_line, Some(2_000));
         assert!(result.truncated);
-        assert_eq!(result.next_start_line, Some(31));
+        assert_eq!(result.next_start_line, Some(2_001));
         assert!(result.content.starts_with("line 1\n"));
-        assert!(result.content.ends_with("line 30\n"));
+        assert!(result.content.ends_with("line 2000\n"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_range_honors_explicit_range_beyond_default_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("test.txt");
+        let content = (1..=3_000)
+            .map(|n| format!("line {n}\n"))
+            .collect::<String>();
+        fs::write(&test_file, content).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        // Explicit range spans more than DEFAULT_READ_FILE_LINES (2000); it
+        // should be honored in full since an end_line was given.
+        let result = service
+            .read_file_range("test.txt", Some(1), Some(2_500))
+            .await
+            .unwrap();
+
+        assert_eq!(result.total_lines, 3_000);
+        assert_eq!(result.returned_start_line, Some(1));
+        assert_eq!(result.returned_end_line, Some(2_500));
+        assert!(!result.truncated);
+        assert_eq!(result.next_start_line, None);
+        assert!(result.content.starts_with("line 1\n"));
+        assert!(result.content.ends_with("line 2500\n"));
     }
 
     #[tokio::test]
     async fn test_read_file_range_caps_large_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let test_file = tmp.path().join("large.json");
-        fs::write(&test_file, format!("{}\n", "x".repeat(10_000))).unwrap();
+        fs::write(&test_file, format!("{}\n", "x".repeat(100_000))).unwrap();
 
         let service = FileSystemService::new(tmp.path().to_str().unwrap())
             .await
@@ -576,16 +622,18 @@ mod tests {
             .unwrap();
 
         assert!(result.truncated);
-        assert!(result.content.chars().count() < 6_200);
+        assert!(result.content.chars().count() < 51_400);
         assert!(result.content.contains("read_file output truncated"));
     }
 
     #[tokio::test]
-    async fn test_read_file_range_char_only_truncation_sets_next_start_line() {
+    async fn test_read_file_range_char_cap_truncates_explicit_range_and_sets_next_start_line() {
         let tmp = tempfile::tempdir().unwrap();
         let test_file = tmp.path().join("wide.txt");
+        // Each line is ~5010 bytes; 12 lines comfortably exceed the 51_200
+        // char cap so the explicit range gets cut by chars, not lines.
         let content = (1..=25)
-            .map(|n| format!("line {n} {}\n", "x".repeat(500)))
+            .map(|n| format!("line {n} {}\n", "x".repeat(5_000)))
             .collect::<String>();
         fs::write(&test_file, content).unwrap();
 
