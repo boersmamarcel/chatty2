@@ -268,6 +268,8 @@ Daytona keys (not only web search).
 | **`browser_use_api_key`** | `Option<String>` | `null` | Secret |
 | `daytona_enabled` | `bool` | `true` | Same pattern as browser-use |
 | **`daytona_api_key`** | `Option<String>` | `null` | Secret |
+| `rerank_url` | `Option<String>` | `null` | Cohere/Jina-style `/rerank` endpoint; keyless search only, needs `rerank_model` too |
+| `rerank_model` | `Option<String>` | `null` | Model name sent to `rerank_url` |
 
 ```json
 {

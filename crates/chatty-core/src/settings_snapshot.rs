@@ -529,6 +529,8 @@ mod tests {
                 browser_use_api_key: Some("bu-key".to_string()),
                 daytona_enabled: false,
                 daytona_api_key: Some("dt-key".to_string()),
+                rerank_url: Some("http://127.0.0.1:8001/rerank".to_string()),
+                rerank_model: Some("BAAI/bge-reranker-v2-m3".to_string()),
             },
             token_tracking: TokenTrackingSettings {
                 enabled: false,

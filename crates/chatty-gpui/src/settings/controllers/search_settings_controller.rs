@@ -1,6 +1,6 @@
 use crate::settings::models::search_settings::{SearchProvider, SearchSettingsModel};
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
-use gpui::{App, AsyncApp};
+use gpui::{App, AsyncApp, Global};
 use tracing::{debug, error, info};
 
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
@@ -124,4 +124,66 @@ pub fn set_daytona_api_key(key: String, cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
     save_async(cx);
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Set the keyless-search reranker endpoint and persist to disk
+pub fn set_rerank_url(url: String, cx: &mut App) {
+    cx.global_mut::<SearchSettingsModel>().rerank_url = non_empty(url);
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}
+
+/// Set the model name sent to the reranker endpoint and persist to disk
+pub fn set_rerank_model(model: String, cx: &mut App) {
+    cx.global_mut::<SearchSettingsModel>().rerank_model = non_empty(model);
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}
+
+/// The outcome of the reranker Test button.
+#[derive(Default)]
+pub enum RerankTestStatus {
+    #[default]
+    Idle,
+    Testing,
+    Done(Result<String, String>),
+}
+
+impl Global for RerankTestStatus {}
+
+/// Send one request to the configured reranker and record the outcome.
+pub fn test_reranker(cx: &mut App) {
+    let settings = cx.global::<SearchSettingsModel>();
+    let Some((url, model)) = settings
+        .reranker()
+        .map(|(url, model)| (url.to_string(), model.to_string()))
+    else {
+        cx.set_global(RerankTestStatus::Done(Err(
+            "Set both the endpoint and the model first".to_string(),
+        )));
+        cx.refresh_windows();
+        return;
+    };
+    cx.set_global(RerankTestStatus::Testing);
+    cx.refresh_windows();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let result = chatty_core::tools::SearchWebTool::probe_reranker(&url, &model)
+            .await
+            .map_err(|e| e.to_string());
+        cx.update(|cx| {
+            cx.set_global(RerankTestStatus::Done(result));
+            cx.refresh_windows();
+        })
+        .ok();
+    })
+    .detach();
 }

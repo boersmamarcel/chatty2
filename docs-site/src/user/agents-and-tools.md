@@ -74,6 +74,20 @@ Reading and querying never ask. Writing spreadsheets and other files follows you
 
 With **Settings → Internet** on, the agent can search the web (Tavily or Brave if you add a key, a basic fallback otherwise) and fetch any public page as readable text. The same page also holds optional cloud services — a hosted browser agent and a cloud code sandbox — which need their own API keys and stay off until you add one.
 
+**Better keyless results with a local reranker.** Without a search API key, you can have the results reordered by a small cross-encoder model on your own machine. Fill in **Rerank Endpoint** and **Rerank Model** under **Settings → Internet → Keyless search**, then press **Test**. In our evaluation this took the right page in the top five from 48 % to 57 % of questions, and the right page at the very top from 27 % to 49 %. The cost is about one second per search (p95 went from ~2.3 s to ~3.2 s). If the endpoint is down, search keeps working and returns results in their normal order. The reranker is not used when a Tavily or Brave key is set.
+
+Any server with a Cohere/Jina-style `/rerank` endpoint works. For `BAAI/bge-reranker-v2-m3` (about 1.1 GB of GPU memory at fp16, or ~600 MB as a GGUF on CPU), use one of:
+
+```bash
+# vLLM (GPU); vLLM recognises the model as a reranker by itself
+vllm serve BAAI/bge-reranker-v2-m3 --port 8001 --max-model-len 1024
+# endpoint: http://127.0.0.1:8001/rerank   model: BAAI/bge-reranker-v2-m3
+
+# llama.cpp (CPU or GPU), with a GGUF build of the same model
+llama-server -m bge-reranker-v2-m3-Q8_0.gguf --reranking --port 8001
+# endpoint: http://127.0.0.1:8001/v1/rerank   model: bge-reranker-v2-m3
+```
+
 ![Web fetch](../assets/animations/webfetch.gif)
 
 The browser tools drive a real Chrome on your machine, so the agent can look at what it just built instead of guessing: it renders the page, screenshots it, spots the problem, fixes it, and re-checks. It can also click — a button, a link, a menu item — and fill in text fields, by picking an element out of its own snapshot of the page rather than guessing coordinates or positions; the click or typing is refused if the element moved, is covered by something else, or is off screen. Typing replaces a field's contents and never submits it — that's a separate click the agent makes on its own. The agent never types into a password or card-number field; those are always refused, so sign in yourself after taking control. While it works, a live view of the page docks beside the chat; you can click and type in it, and take control at any moment. **Hand back & continue** gives the browser back to the agent and tells it to take a fresh look at the page and carry on from there.

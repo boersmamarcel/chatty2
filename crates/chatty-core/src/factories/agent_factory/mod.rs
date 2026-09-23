@@ -662,7 +662,16 @@ impl AgentClient {
                 tracing::info!(
                     "Search web tool enabled with DuckDuckGo fallback (no API key configured)"
                 );
-                SearchWebTool::new_fallback(max_results)
+                let tool = SearchWebTool::new_fallback(max_results);
+                // Keyless only: with a keyed provider the cross-encoder gave
+                // +2.5 points hit@5 (n.s.) for ~2x p95 (AGE-517).
+                match search_settings.as_ref().and_then(|s| s.reranker()) {
+                    Some((url, model)) => {
+                        tracing::info!(url, model, "Keyless search reranks with a cross-encoder");
+                        tool.with_reranker(url, model)
+                    }
+                    None => tool,
+                }
             }))
         } else {
             tracing::info!("Search web tool disabled (internet access is off)");
