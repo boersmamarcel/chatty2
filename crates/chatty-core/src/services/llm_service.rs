@@ -15,6 +15,7 @@ use crate::models::clarification_store::{ClarificationNotification, ClarifyingQu
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::ApiCallUsage;
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
+use crate::services::turn_budget::TurnBudget;
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
@@ -374,11 +375,10 @@ pub async fn stream_prompt(
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
 
-    let mut agent_stream = agent
-        .agent
-        .stream_prompt(user_message)
-        .history(history)
-        .max_turns(max_agent_turns)
+    // The turn budget sets rig's call cap (the tool turns plus one tool-free
+    // wrap-up call) and tells the model how many tool turns it has left.
+    let mut agent_stream = TurnBudget::new(max_agent_turns)
+        .apply(agent.agent.stream_prompt(user_message).history(history))
         .await;
 
     // A caller that does not wire a channel is treated the same as one whose

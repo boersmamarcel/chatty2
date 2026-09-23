@@ -777,7 +777,12 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
 }
 
 pub async fn stream_prompt(agent: &AgentClient, history: Vec<Message>, /* .. */) -> Result<ResponseStream> {
-    let mut agent_stream = agent.agent.stream_prompt(user_message).history(history).max_turns(max_agent_turns).await;
+    // TurnBudget (services/turn_budget.rs) sets rig's cap to max_agent_turns + 1:
+    // late tool results say how many tool turns are left, and the extra call has
+    // no tools, so an exhausted budget ends in a text answer, not MaxTurnsError.
+    let mut agent_stream = TurnBudget::new(max_agent_turns)
+        .apply(agent.agent.stream_prompt(user_message).history(history))
+        .await;
 
     Ok(Box::pin(async_stream::stream! {
         loop {

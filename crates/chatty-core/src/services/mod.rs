@@ -67,6 +67,9 @@ pub mod stream_processor;
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
 pub mod title_generator;
+/// The model's view of its tool-turn budget and the tool-free wrap-up call
+/// that replaces `MaxTurnsError`.
+pub mod turn_budget;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;
 /// The broker's named virtual agents — each worker's argv and endpoint —
