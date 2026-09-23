@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::models::message_types::ExecutionEngine;
-use crate::services::shell_service::{ShellOutput, ShellSession, ShellStatus};
+use crate::services::shell_service::{
+    MAX_SHELL_CALL_TIMEOUT_SECONDS, ShellOutput, ShellSession, ShellStatus,
+};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::tools::ToolError;
 
@@ -13,6 +15,10 @@ use crate::tools::ToolError;
 #[derive(Deserialize, Serialize)]
 pub struct ShellExecuteArgs {
     pub command: String,
+    /// Optional per-call timeout override in seconds, bounded by
+    /// [`MAX_SHELL_CALL_TIMEOUT_SECONDS`]. Defaults to the configured
+    /// execution timeout when omitted.
+    pub timeout_seconds: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -20,6 +26,7 @@ pub struct ShellExecuteOutput {
     pub stdout: String,
     pub exit_code: i32,
     pub truncated: bool,
+    pub timed_out: bool,
     pub execution_engine: ExecutionEngine,
 }
 
@@ -29,6 +36,7 @@ impl From<ShellOutput> for ShellExecuteOutput {
             stdout: o.stdout,
             exit_code: o.exit_code,
             truncated: o.truncated,
+            timed_out: o.timed_out,
             execution_engine: ExecutionEngine::Shell,
         }
     }
@@ -93,7 +101,12 @@ impl Tool for ShellExecuteTool {
                          - Run commands that depend on previous shell state\n\
                          - Work in a specific directory across multiple operations\n\
                          \
-                         The session is per-conversation and automatically cleaned up when the conversation ends."
+                         The session is per-conversation and automatically cleaned up when the conversation ends. \
+                         \
+                         For a command you expect to run long (a test suite, a data script, a build), pass \
+                         `timeout_seconds` instead of wrapping the command in your own `timeout ... &` — a \
+                         command that still times out returns whatever output it produced so far instead of \
+                         discarding it."
                 .to_string()
     }
 
@@ -104,6 +117,14 @@ impl Tool for ShellExecuteTool {
                 "command": {
                     "type": "string",
                     "description": "The command to execute in the persistent shell session"
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": format!(
+                        "Optional timeout for this command in seconds, overriding the configured default. \
+                         Capped at {} seconds.",
+                        MAX_SHELL_CALL_TIMEOUT_SECONDS
+                    )
                 }
             },
             "required": ["command"]
@@ -134,8 +155,15 @@ impl Tool for ShellExecuteTool {
             ));
         }
 
-        tracing::debug!(command = %args.command, "Executing in shell session");
-        let output = self.session.execute(&args.command).await?;
+        tracing::debug!(
+            command = %args.command,
+            timeout_seconds = ?args.timeout_seconds,
+            "Executing in shell session"
+        );
+        let output = self
+            .session
+            .execute_with_timeout(&args.command, args.timeout_seconds)
+            .await?;
         Ok(output.into())
     }
 }

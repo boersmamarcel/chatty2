@@ -87,9 +87,62 @@ async fn test_command_sequence() {
 async fn test_timeout_enforcement() {
     let session = ShellSession::with_secrets(None, 1, 51200, false, vec![]); // 1 second timeout
 
+    // A timeout is not an error any more: the caller gets back whatever
+    // output was captured before the kill, plus a note, instead of losing it
+    // (AGE evidence: models were retrying with hand-written `timeout N ...
+    // &` wrappers because the old error swallowed all prior output).
     let result = session.execute("sleep 10").await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("timed out"));
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    assert!(output.timed_out);
+    assert!(output.stdout.contains("timed out"));
+}
+
+#[tokio::test]
+async fn test_timeout_preserves_partial_output() {
+    let session = ShellSession::with_secrets(None, 1, 51200, false, vec![]); // 1 second timeout
+
+    let result = session
+        .execute("echo before-timeout; sleep 10")
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+    assert!(
+        result.stdout.contains("before-timeout"),
+        "expected partial output to be preserved, got: {}",
+        result.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_per_call_timeout_override() {
+    // The session's configured default is generous; a short per-call
+    // override should still fire.
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+
+    let result = session
+        .execute_with_timeout("sleep 10", Some(1))
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+}
+
+#[test]
+fn test_resolve_call_timeout_seconds_bounds_override() {
+    // No override: falls back to the session's configured default.
+    assert_eq!(resolve_call_timeout_seconds(30, None), 30);
+    // A reasonable override is used as-is.
+    assert_eq!(resolve_call_timeout_seconds(30, Some(120)), 120);
+    // A caller asking for more than the max is clamped down to it, rather
+    // than allowed to block a turn indefinitely.
+    assert_eq!(
+        resolve_call_timeout_seconds(30, Some(u32::MAX)),
+        MAX_SHELL_CALL_TIMEOUT_SECONDS
+    );
+    assert_eq!(
+        resolve_call_timeout_seconds(30, Some(MAX_SHELL_CALL_TIMEOUT_SECONDS + 1)),
+        MAX_SHELL_CALL_TIMEOUT_SECONDS
+    );
 }
 
 #[tokio::test]
