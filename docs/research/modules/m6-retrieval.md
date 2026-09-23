@@ -518,6 +518,34 @@ measured Y; because Z". Predictions and results were posted on
 - **Without a reranker configured, the pool is not widened.** A BM25 rerank of a larger
   pool was measured to be worse.
 
+**7. The cross-encoder chooses the passage, not only the page. Kept (small).**
+- **Change:** each candidate's top 3 BM25 passages go to the cross-encoder. The best one
+  ranks the page and leads its snippet.
+- **Says:** monoBERT's rerank-a-shortlist applied inside the page; RECOMP on selecting what
+  text reaches the model.
+- **Measured:**
+  - SimpleQA hit@5 54% → 57% (11/5, p = 0.21, not significant); hit@1 43% → 49%.
+  - FRAMES answer hit@5 +3 points on both modes.
+  - Latency unchanged.
+- **Because:** BM25 picks the passage that repeats the question's words, while the
+  cross-encoder picks the one that answers it. Recall is now the limit: the answer has to
+  be in one of 10 pages' top 3 passages.
+
+**8. Multi-query `queries` argument with RRF. Reverted.**
+- **Says:** RRF (Cormack et al.) fuses rankings by rank alone. RAG-Fusion and Self-Ask
+  support searching sub-questions together.
+- **Measured:**
+  - FRAMES, one call with sub-queries vs. iteration 7's three-call fan-out:
+    all-sources@10 21% → 14% (1/8, p = 0.046). The only win was p95, 6.1 s → 2.7 s.
+  - The single-query RRF swap cost SimpleQA 1.5 points.
+- **Because:** RRF rewards *agreement*, but multi-hop recall needs *coverage*. Each hop
+  has its own gold page, which only its own sub-query retrieves. Fused into one 10-slot
+  pool and judged against the whole question, those pages rank out.
+  - Fan-out keeps coverage by construction: each sub-query's results are ranked against
+    that sub-query, and each gets its own slots.
+  - This is the clearest case in this module of a paper's mechanism being right, but for
+    a different objective.
+
 ## Part B — internal memory retrieval
 
 How it works today, from the code (`crates/chatty-core/src`) and
