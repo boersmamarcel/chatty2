@@ -194,6 +194,7 @@ pub mod pptx_tool;
 pub mod publish_module_tool;
 pub mod read_skill_tool;
 pub mod remember_tool;
+pub mod response_cache;
 pub mod save_skill_tool;
 pub mod search_memory_tool;
 pub mod search_tool;

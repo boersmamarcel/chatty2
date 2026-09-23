@@ -110,6 +110,11 @@ gpui = { workspace = true, optional = true }
 [target."cfg(unix)".dependencies]
 nix.workspace = true
 
+[dev-dependencies]
+# Retrieval eval runner (examples/search_eval.rs): datasets + pure scoring.
+# chatty-optimize does not depend on chatty-core, so this is not a cycle.
+chatty-optimize = { path = "../chatty-optimize" }
+
 [build-dependencies]
 # Pdfium library download
 reqwest = { version = "0.13.2", features = ["blocking", "rustls"] }

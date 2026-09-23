@@ -8,6 +8,8 @@ use tracing::{info, warn};
 use crate::settings::models::search_settings::SearchProvider;
 use crate::tools::ToolError;
 use crate::tools::html_entities::decode_html_entities;
+use crate::tools::response_cache::{CachedResponse, ResponseCache, capture};
+use std::sync::Arc;
 
 /// Request timeout for search API calls
 const SEARCH_TIMEOUT_SECS: u64 = 15;
@@ -36,6 +38,9 @@ pub struct SearchResult {
     pub url: String,
     /// Text snippet / description
     pub snippet: String,
+    /// Backend that produced the result (`tavily`, `brave`, `bing`,
+    /// `duckduckgo`), so the model and the retrieval eval can tell them apart.
+    pub source: String,
 }
 
 /// Output from the search_web tool
@@ -101,6 +106,9 @@ pub struct SearchWebTool {
     /// None means fallback mode (no API key configured)
     api_key: Option<String>,
     default_max_results: usize,
+    /// Record/replay of raw backend responses for the retrieval eval
+    /// (AGE-515); `None` in the product.
+    cache: Option<Arc<ResponseCache>>,
 }
 
 impl SearchWebTool {
@@ -112,6 +120,7 @@ impl SearchWebTool {
             provider: Some(provider),
             api_key: Some(api_key),
             default_max_results,
+            cache: None,
         }
     }
 
@@ -124,7 +133,40 @@ impl SearchWebTool {
             provider: None,
             api_key: None,
             default_max_results,
+            cache: None,
         }
+    }
+
+    /// Route every backend request through `cache` (eval harness only).
+    pub fn with_response_cache(mut self, cache: Arc<ResponseCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Send `request` (or serve it from the eval cache under `source`/`key`)
+    /// and return status + body. Transport failures become
+    /// `"<label> request failed: …"`.
+    async fn send(
+        &self,
+        source: &str,
+        key: String,
+        label: &str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<CachedResponse, ToolError> {
+        let response = match &self.cache {
+            Some(cache) => {
+                cache
+                    .get_or_fetch(source, &key, || capture(request))
+                    .await?
+            }
+            None => capture(request).await,
+        };
+        if let Some(e) = &response.transport_error {
+            return Err(ToolError::OperationFailed(format!(
+                "{label} request failed: {e}"
+            )));
+        }
+        Ok(response)
     }
 
     async fn search_tavily(
@@ -139,30 +181,29 @@ impl SearchWebTool {
             search_depth: "basic".to_string(),
         };
 
-        let response = self
+        let key = format!(
+            "{}|{}|{}",
+            request.search_depth, request.max_results, request.query
+        );
+        let builder = self
             .client
             .post("https://api.tavily.com/search")
             .header("Authorization", format!("Bearer {}", api_key))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| ToolError::OperationFailed(format!("Tavily request failed: {}", e)))?;
+            .json(&request);
+        let response = self.send("tavily", key, "Tavily", builder).await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "(failed to read body)".to_string());
+        if !is_success(response.status) {
             return Err(ToolError::OperationFailed(format!(
                 "Tavily API returned {}: {}",
-                status, body
+                status_text(response.status),
+                response.body
             )));
         }
 
-        let tavily_response: TavilySearchResponse = response.json().await.map_err(|e| {
-            ToolError::OperationFailed(format!("Failed to parse Tavily response: {}", e))
-        })?;
+        let tavily_response: TavilySearchResponse =
+            serde_json::from_str(&response.body).map_err(|e| {
+                ToolError::OperationFailed(format!("Failed to parse Tavily response: {}", e))
+            })?;
 
         Ok(tavily_response
             .results
@@ -171,6 +212,7 @@ impl SearchWebTool {
                 title: r.title,
                 url: r.url,
                 snippet: truncate_snippet(&r.content),
+                source: "tavily".to_string(),
             })
             .collect())
     }
@@ -181,31 +223,27 @@ impl SearchWebTool {
         max_results: usize,
         api_key: &str,
     ) -> Result<Vec<SearchResult>, ToolError> {
-        let response = self
+        let builder = self
             .client
             .get("https://api.search.brave.com/res/v1/web/search")
             .header("X-Subscription-Token", api_key)
             .header("Accept", "application/json")
-            .query(&[("q", query), ("count", &max_results.to_string() as &str)])
-            .send()
-            .await
-            .map_err(|e| ToolError::OperationFailed(format!("Brave request failed: {}", e)))?;
+            .query(&[("q", query), ("count", &max_results.to_string() as &str)]);
+        let key = format!("{max_results}|{query}");
+        let response = self.send("brave", key, "Brave", builder).await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "(failed to read body)".to_string());
+        if !is_success(response.status) {
             return Err(ToolError::OperationFailed(format!(
                 "Brave Search API returned {}: {}",
-                status, body
+                status_text(response.status),
+                response.body
             )));
         }
 
-        let brave_response: BraveSearchResponse = response.json().await.map_err(|e| {
-            ToolError::OperationFailed(format!("Failed to parse Brave response: {}", e))
-        })?;
+        let brave_response: BraveSearchResponse =
+            serde_json::from_str(&response.body).map_err(|e| {
+                ToolError::OperationFailed(format!("Failed to parse Brave response: {}", e))
+            })?;
 
         let results = brave_response
             .web
@@ -216,6 +254,7 @@ impl SearchWebTool {
                         title: r.title,
                         url: r.url,
                         snippet: truncate_snippet(&r.description),
+                        source: "brave".to_string(),
                     })
                     .collect()
             })
@@ -255,26 +294,22 @@ impl SearchWebTool {
         query: &str,
         max_results: usize,
     ) -> Result<Vec<SearchResult>, ToolError> {
-        let response = self
+        let builder = self
             .client
             .get("https://www.bing.com/search")
-            .query(&bing_query_params(query))
-            .send()
-            .await
-            .map_err(|e| ToolError::OperationFailed(format!("Bing request failed: {}", e)))?;
+            .query(&bing_query_params(query));
+        let response = self
+            .send("bing", query.to_string(), "Bing", builder)
+            .await?;
 
-        if response.status() != reqwest::StatusCode::OK {
+        if response.status != 200 {
             return Err(ToolError::OperationFailed(format!(
                 "Bing returned HTTP {}",
-                response.status()
+                status_text(response.status)
             )));
         }
 
-        let html = response.text().await.map_err(|e| {
-            ToolError::OperationFailed(format!("Failed to read Bing response: {}", e))
-        })?;
-
-        let results = parse_bing_results(&html, max_results);
+        let results = parse_bing_results(&response.body, max_results);
         // Bing answers some clients with decoy results — well-formed `b_algo`
         // blocks about something else entirely, re-rolled on every request
         // (AGE-506). Like the DDG challenge page below, that is an
@@ -297,28 +332,25 @@ impl SearchWebTool {
         query: &str,
         max_results: usize,
     ) -> Result<Vec<SearchResult>, ToolError> {
-        let response = self
+        let builder = self
             .client
             .get("https://lite.duckduckgo.com/lite/")
-            .query(&[("q", query)])
-            .send()
-            .await
-            .map_err(|e| ToolError::OperationFailed(format!("DuckDuckGo request failed: {}", e)))?;
+            .query(&[("q", query)]);
+        let response = self
+            .send("duckduckgo", query.to_string(), "DuckDuckGo", builder)
+            .await?;
 
         // DDG now answers most queries with a 202 "anomaly" bot-challenge
         // page rather than the 200 the lite HTML scraper expects; treat
         // anything but a plain 200 as unavailable rather than parsing it as
         // an (empty) result page (AGE-495).
-        if response.status() != reqwest::StatusCode::OK {
+        if response.status != 200 {
             return Err(ToolError::OperationFailed(format!(
                 "DuckDuckGo returned HTTP {} (bot challenge or block); web search is unavailable",
-                response.status()
+                status_text(response.status)
             )));
         }
-
-        let html = response.text().await.map_err(|e| {
-            ToolError::OperationFailed(format!("Failed to read DuckDuckGo response: {}", e))
-        })?;
+        let html = response.body;
 
         let results = parse_ddg_lite_results(&html, max_results);
         if results.is_empty() && looks_like_ddg_challenge_page(&html) {
@@ -502,6 +534,7 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
                 title,
                 url,
                 snippet,
+                source: "duckduckgo".to_string(),
             });
         }
 
@@ -578,6 +611,7 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
                 title,
                 url,
                 snippet,
+                source: "bing".to_string(),
             });
         }
     }
@@ -690,6 +724,17 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
     decode_html_entities(&result)
+}
+
+fn is_success(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+/// `429 Too Many Requests`, as `reqwest::StatusCode` displays it.
+fn status_text(status: u16) -> String {
+    reqwest::StatusCode::from_u16(status)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| status.to_string())
 }
 
 /// Truncate a snippet to a maximum length at a word boundary
@@ -907,11 +952,13 @@ mod tests {
                 title: "British Airways | Book flights".to_string(),
                 url: "https://www.britishairways.com/".to_string(),
                 snippet: "Find cheap flights and book online.".to_string(),
+                source: "bing".to_string(),
             },
             SearchResult {
                 title: "Quiz Widget".to_string(),
                 url: "https://quizwidget.example/".to_string(),
                 snippet: "Add a quiz to your page.".to_string(),
+                source: "bing".to_string(),
             },
         ];
         assert!(!results_match_query("Virtue restaurant Chicago", &decoys));
@@ -923,6 +970,7 @@ mod tests {
             title: "The British Museum".to_string(),
             url: "https://www.britishmuseum.org/collection".to_string(),
             snippet: "Explore the collection.".to_string(),
+            source: "bing".to_string(),
         }];
         assert!(results_match_query("British Museum opening hours", &real));
         // A term may match through the decoded URL or the snippet alone.
@@ -935,6 +983,7 @@ mod tests {
             title: "Quiz Widget".to_string(),
             url: "https://quizwidget.example/".to_string(),
             snippet: "Add a quiz to your page.".to_string(),
+            source: "bing".to_string(),
         }];
         assert!(results_match_query("who won", &results));
     }
@@ -949,6 +998,7 @@ mod tests {
             title: "BTS World Tour Tickets".to_string(),
             url: "https://tickets.example/bts".to_string(),
             snippet: "See what fans are saying about the tour.".to_string(),
+            source: "bing".to_string(),
         }];
         assert!(!results_match_query(
             "what is the capital of France",
@@ -964,6 +1014,7 @@ mod tests {
             title: "Paris - Wikipedia".to_string(),
             url: "https://en.wikipedia.org/wiki/Paris".to_string(),
             snippet: "Paris is the capital and most populous city of France.".to_string(),
+            source: "bing".to_string(),
         }];
         assert!(results_match_query("what is the capital of France", &real));
     }
@@ -976,6 +1027,7 @@ mod tests {
             title: "Quiz Widget".to_string(),
             url: "https://quizwidget.example/".to_string(),
             snippet: "Add a quiz to your page.".to_string(),
+            source: "bing".to_string(),
         }];
         assert!(results_match_query("what should this have been", &results));
     }
