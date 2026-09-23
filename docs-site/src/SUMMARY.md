@@ -65,6 +65,7 @@
       - [M2 AFlow](./dev/research/modules/m2-aflow.md)
       - [M3 GEPA](./dev/research/modules/m3-gepa.md)
       - [M4 ACE](./dev/research/modules/m4-ace.md)
+      - [M6 Retrieval](./dev/research/modules/m6-retrieval.md)
 - [Reference](./dev/crates.md)
   - [chatty-core](./dev/crates/chatty-core.md)
   - [chatty-gpui](./dev/crates/chatty-gpui.md)

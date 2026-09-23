@@ -654,7 +654,7 @@ fn resolve_href(base: Option<&reqwest::Url>, href: &str) -> Option<String> {
 /// `base_url` is the URL the body came from; relative `href`s resolve against
 /// it. `fragment` is the `#fragment` that was asked for: if an element carries
 /// a matching `id`, the text starts there instead of at the top of the page.
-fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<&str>) -> String {
+pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<&str>) -> String {
     let base = base_url.and_then(|url| reqwest::Url::parse(url).ok());
     let mut result = String::with_capacity(html.len() / 2);
     let mut in_tag = false;

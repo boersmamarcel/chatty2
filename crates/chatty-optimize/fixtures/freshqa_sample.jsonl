@@ -1,0 +1,2 @@
+{"id":"3","question":"How many UC schools are there in the United States?","answers":["10","10 schools","ten"],"fact_type":"slow-changing","false_premise":false,"split":"TEST"}
+{"id":"0","question":"What is the name of the first animal to land on the moon?","answers":["No animal has ever landed on the moon yet."],"fact_type":"slow-changing","false_premise":true,"split":"TEST"}

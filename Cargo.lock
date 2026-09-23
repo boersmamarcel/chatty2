@@ -1808,6 +1808,7 @@ dependencies = [
  "bollard",
  "bytes",
  "calamine 0.36.1",
+ "chatty-optimize",
  "chromiumoxide",
  "chrono",
  "comemo",
@@ -1928,6 +1929,7 @@ dependencies = [
 name = "chatty-optimize"
 version = "0.3.99"
 dependencies = [
+ "csv",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "serde",
@@ -1936,6 +1938,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]

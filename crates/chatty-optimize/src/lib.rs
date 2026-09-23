@@ -23,6 +23,7 @@ pub mod calibration;
 pub mod cost;
 pub mod datasets;
 pub mod gepa;
+pub mod search_eval;
 pub mod stats;
 pub mod strategy;
 pub mod wiki_env;
@@ -34,8 +35,9 @@ pub use calibration::{
 };
 pub use cost::{CostRow, CostRowInput, format_cost_sheet, row_from_model_prices};
 pub use datasets::{
-    DatasetError, DatasetItem, FeverItem, Gsm8kItem, HotpotQaItem, HumanEvalItem, Split,
-    SplitParts, SplitSpec, load_fever, load_gsm8k, load_hotpotqa, load_humaneval, split_items,
+    DatasetError, DatasetItem, FeverItem, FramesItem, Gsm8kItem, HotpotQaItem, HumanEvalItem,
+    SimpleQaItem, Split, SplitParts, SplitSpec, load_fever, load_frames, load_gsm8k, load_hotpotqa,
+    load_humaneval, load_simpleqa, split_items, stratified_sample,
 };
 pub use stats::{
     BinaryOutcome, ContinuousOutcome, McNemarResult, MinimumDetectableEffect,

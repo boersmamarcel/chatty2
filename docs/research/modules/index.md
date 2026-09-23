@@ -1,4 +1,4 @@
-# Research modules (M0–M4)
+# Research modules (M0–M4, M6)
 
 **When to read this:** You need a per-paper view of what is being built, where it lands in
 Chatty, and how far along the pipeline each module is.
@@ -18,6 +18,8 @@ flowchart TB
   M0 --> M2
   M0 --> M3
   M0 --> M4
+  M1 --> M6[M6 Retrieval]
+  M4 -.memory store.- M6
 ```
 
 | Module | Paper | Crate(s) | Stage | Promotion |
@@ -27,6 +29,7 @@ flowchart TB
 | [M2 AFlow](./m2-aflow.md) | Zhang et al. ICLR 2025 Oral | `chatty-flow`, `chatty-optimize` | Not started | Pending |
 | [M3 GEPA](./m3-gepa.md) | Agrawal et al. ICLR 2026 Oral | `chatty-optimize` | Not started | Pending |
 | [M4 ACE](./m4-ace.md) | Zhang et al. ICLR 2026 | `chatty-playbook` | Not started | Pending |
+| [M6 Retrieval](./m6-retrieval.md) | Retrieval literature (BM25, RRF, rerankers, packing) | `chatty-core` tools, `chatty-optimize` eval | Eval built; improvements gated | Pending |
 
 **M5 (DGM)** lives in the separate `agenticloop` repo — not documented here. See
 [`RESERVED.md`](../../../RESERVED.md).

@@ -24,6 +24,7 @@ A small set of symbols in the research crates is reserved for the human to write
 | [M2 AFlow](./modules/m2-aflow.md) | Zhang et al., ICLR 2025 | [`chatty-flow`](../../crates/chatty-flow/README.md) (IR + interpreter), [`chatty-optimize`](../../crates/chatty-optimize/README.md) (MCTS) | Workflow topology search offline; saved workflows run in-app |
 | [M3 GEPA](./modules/m3-gepa.md) | Agrawal et al., ICLR 2026 | [`chatty-optimize`](../../crates/chatty-optimize/README.md) | Reflective prompt optimization of `ModelConfig.preamble` |
 | [M4 ACE](./modules/m4-ace.md) | Zhang et al., ICLR 2026 | [`chatty-playbook`](../../crates/chatty-playbook/README.md) | Evolving playbook over the memory/skills store with deterministic merge |
+| [M6 Retrieval](./modules/m6-retrieval.md) | Retrieval literature (BM25, RRF, rerankers, context packing) | `chatty-core` (`search_web`, `search_memory`), [`chatty-optimize`](../../crates/chatty-optimize/README.md) (eval) | One retrieval pipeline over two corpora, open web and agent memory, measured on SimpleQA and FRAMES |
 
 Per-module pages, dependency graph and status: [modules/index.md](./modules/index.md).
 The fifth paper (DGM) self-modifies its target repo and therefore lives in a separate
