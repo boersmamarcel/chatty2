@@ -88,6 +88,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/modules/m2-aflow.md`](research/modules/m2-aflow.md) | chatty-flow | AFlow workflow search |
 | [`research/modules/m3-gepa.md`](research/modules/m3-gepa.md) | chatty-optimize | GEPA prompt evolution |
 | [`research/modules/m4-ace.md`](research/modules/m4-ace.md) | chatty-playbook | ACE playbook deltas |
+| [`research/modules/m6-retrieval.md`](research/modules/m6-retrieval.md) | chatty-core, chatty-optimize | Retrieval pipeline: open web + memory |
 
 ## Crate READMEs (`crates/*/README.md`, synced to the site under Reference)
 

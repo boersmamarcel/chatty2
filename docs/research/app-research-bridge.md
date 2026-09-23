@@ -53,7 +53,8 @@ flowchart TB
 | **Agent loop** | `services/llm_service.rs`, `factories/agent_factory/` | Every chat turn | [M1 ReAct](./modules/m1-react.md) | Already **default**; strategy variants TBD |
 | **LLM tools (~60)** | `tools/` | Tool calls in chat | M1 (action space), M2 (workflow nodes) | Tools ship; topology search offline |
 | **Sub-agents** | `invoke_agent_tool`, `list_agents_tool` | Agent delegation | [M2 AFlow](./modules/m2-aflow.md) | Winning IR → `FlowSettingsModel` (planned) |
-| **Memory store** | `services/memory_service.rs`, `memory.mv2` | `remember` / `search_memory` | [M4 ACE](./modules/m4-ace.md) | Playbook on same store; scope TBD ([AGE-47](https://linear.app/agents-research/issue/AGE-47)) |
+| **Memory store** | `services/memory_service.rs`, `memory.mv2` | `remember` / `search_memory` | [M4 ACE](./modules/m4-ace.md), [M6 Retrieval](./modules/m6-retrieval.md) (Part B) | Playbook on same store; scope TBD ([AGE-47](https://linear.app/agents-research/issue/AGE-47)) |
+| **Web search** | `tools/search_web_tool.rs`, `tools/fetch_tool.rs` | `search_web` / `fetch` | [M6 Retrieval](./modules/m6-retrieval.md) (Part A) | Provider chain + keyless tier as **default** if the eval shows it |
 | **Skills** | `save_skill_tool`, `SKILL.md` files, `[SKILL]` prefix | Procedures in context | M4 ACE (facts vs procedures split) | Self-improving playbook vs manual skills |
 | **Context window** | `token_budget/` + GPUI footer bar | Token fill indicator | M3 cost, M4 prefix-cache | Estimation and compaction ship |
 | **Model preamble** | `ModelConfig.preamble` | Settings → model system prompt | M1 few-shot block, [M3 GEPA](./modules/m3-gepa.md) | User-editable; GEPA optimizes offline |
@@ -100,7 +101,9 @@ termination only; loop body is not rewritten.
 
 Persistent memory uses memvid (`memory.mv2`). The agent gets `remember` and
 `search_memory`; skills are stored with a `[SKILL]` title prefix or as filesystem
-`SKILL.md` files. First message of each conversation triggers automatic recall.
+`SKILL.md` files. There is no automatic recall: the preamble tells the model to call
+`search_memory` itself. How that retrieval works, stage by stage, is in
+[M6 Retrieval](./modules/m6-retrieval.md) Part B.
 
 | Concern | Doc | Key files |
 |---------|-----|-----------|
@@ -216,7 +219,7 @@ registry. Execution settings control workspace path, approval mode, and sandbox.
 
 | Tool cluster | Examples | Research use |
 |--------------|----------|--------------|
-| Search / fetch | `search_web`, `fetch` | M1 WikiEnv adapter (paper fidelity) |
+| Search / fetch | `search_web`, `fetch` | M1 WikiEnv adapter (paper fidelity); [M6 Retrieval](./modules/m6-retrieval.md) Part A (SimpleQA/FRAMES eval) |
 | Code | `run_command`, sandbox | M2 Programmer operator |
 | Agents | `invoke_agent` | M2 Ensemble / Review-and-Revise nodes |
 | Memory | `remember`, `search_memory` | M4 playbook backing store |
@@ -262,6 +265,7 @@ Stage B evals run in [`harbor-chatty`](https://github.com/boersmamarcel/harbor-c
 | [M2 AFlow](./modules/m2-aflow.md) | Sub-agent tools + future `FlowSettingsModel` | [component-map.md](../component-map.md) |
 | [M3 GEPA](./modules/m3-gepa.md) | `ModelConfig.preamble` | [settings-integration-map](./settings-integration-map.md) |
 | [M4 ACE](./modules/m4-ace.md) | `memory_service`, skill tools | [agent-memory.md](../agent-memory.md) |
+| [M6 Retrieval](./modules/m6-retrieval.md) | `search_web_tool.rs`, `fetch_tool.rs`, `search_memory_tool.rs`, `doc_retriever_tool.rs` | [agent-memory.md](../agent-memory.md), [`evals/search/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/evals/search/README.md) |
 
 ## Related
 
