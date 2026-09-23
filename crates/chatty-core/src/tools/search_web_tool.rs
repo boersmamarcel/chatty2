@@ -28,6 +28,19 @@ const WIKIPEDIA_USER_AGENT: &str = concat!(
 /// Wikipedia's search API caps `srsearch` length; stay well under it.
 const MAX_WIKIPEDIA_QUERY_CHARS: usize = 250;
 
+/// Pages fetched per search for passage selection (the top results only).
+const MAX_PASSAGE_PAGES: usize = 5;
+
+/// Time budget for fetching one page for passage selection; a page that
+/// misses it keeps the engine's snippet.
+const PAGE_FETCH_BUDGET_SECS: u64 = 6;
+
+/// Page bodies above this are cut before extraction.
+const MAX_PAGE_BYTES: usize = 2_000_000;
+
+/// Characters of best-passage text put in front of a result's snippet.
+const PASSAGE_CHARS: usize = 600;
+
 /// Maximum snippet length per result (characters)
 const MAX_SNIPPET_LENGTH: usize = 1000;
 
@@ -401,6 +414,117 @@ impl SearchWebTool {
             .collect())
     }
 
+    /// Passage stage (AGE-517): fetch the top results' pages in parallel,
+    /// split them into passages, BM25-rank the passages against the query
+    /// over this query's own passages, and put each page's best passage in
+    /// front of its snippet. Best effort: a page that fails, times out, or has
+    /// no matching passage keeps the engine's snippet. Result order is not
+    /// changed here.
+    async fn add_best_passages(&self, query: &str, results: &mut [SearchResult]) {
+        let n = results.len().min(MAX_PASSAGE_PAGES);
+        if n == 0 {
+            return;
+        }
+        let texts = futures::future::join_all(results[..n].iter().map(|r| async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(PAGE_FETCH_BUDGET_SECS),
+                self.page_text(r),
+            )
+            .await
+            .ok()
+            .flatten()
+        }))
+        .await;
+
+        let query_terms: Vec<String> = crate::tools::passages::tokenize(query)
+            .into_iter()
+            .filter(|t| !QUERY_STOPWORDS.contains(&t.as_str()))
+            .collect();
+        // (result index, passage text, tokens) over every fetched page.
+        let mut owners = Vec::new();
+        let mut passages = Vec::new();
+        let mut tokens = Vec::new();
+        for (i, text) in texts.iter().enumerate() {
+            let Some(text) = text else { continue };
+            for p in crate::tools::passages::split_passages(
+                text,
+                crate::tools::passages::PASSAGE_WORDS,
+                crate::tools::passages::PASSAGE_STRIDE,
+            ) {
+                tokens.push(crate::tools::passages::tokenize(&p));
+                owners.push(i);
+                passages.push(p);
+            }
+        }
+        let scores = crate::tools::passages::score_passages(&query_terms, &tokens);
+        for (i, result) in results[..n].iter_mut().enumerate() {
+            let best = (0..passages.len())
+                .filter(|&j| owners[j] == i && scores[j] > 0.0)
+                .max_by(|&a, &b| scores[a].total_cmp(&scores[b]));
+            if let Some(j) = best {
+                let passage: String = passages[j].chars().take(PASSAGE_CHARS).collect();
+                result.snippet = truncate_snippet(&format!("{passage} … {}", result.snippet));
+            }
+        }
+    }
+
+    /// Plain text of a result's page: Wikipedia articles through the API
+    /// (clean text, compliant User-Agent), anything else as HTML fetched
+    /// behind the SSRF guard and converted like `fetch` does.
+    async fn page_text(&self, result: &SearchResult) -> Option<String> {
+        if let Some(title) = result
+            .url
+            .strip_prefix("https://en.wikipedia.org/wiki/")
+            .map(|t| t.replace('_', " "))
+        {
+            let builder = self
+                .api_client
+                .get("https://en.wikipedia.org/w/api.php")
+                .header(reqwest::header::USER_AGENT, WIKIPEDIA_USER_AGENT)
+                .query(&[
+                    ("action", "query"),
+                    ("prop", "extracts"),
+                    ("explaintext", "1"),
+                    ("redirects", "1"),
+                    ("format", "json"),
+                    ("formatversion", "2"),
+                    ("titles", title.as_str()),
+                ]);
+            let response = self
+                .send("wikipedia_page", title.clone(), "Wikipedia", builder)
+                .await
+                .ok()?;
+            let v: serde_json::Value = serde_json::from_str(&response.body).ok()?;
+            return v["query"]["pages"][0]["extract"]
+                .as_str()
+                .map(str::to_string);
+        }
+
+        let url = result.url.clone();
+        let check = url.clone();
+        tokio::task::spawn_blocking(move || crate::services::ssrf_guard::check_public_host(&check))
+            .await
+            .ok()?
+            .ok()?;
+        let response = self
+            .send("page", url.clone(), "Page", self.client.get(&url))
+            .await
+            .ok()?;
+        if !is_success(response.status) || response.body.starts_with("%PDF") {
+            return None;
+        }
+        let mut body = response.body;
+        if body.len() > MAX_PAGE_BYTES {
+            let mut cut = MAX_PAGE_BYTES;
+            while !body.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            body.truncate(cut);
+        }
+        let text = crate::tools::fetch_tool::html_to_text(&body, Some(&url), None);
+        Some(crate::tools::passages::strip_link_targets(&text))
+    }
+
     /// Fallback search with no API key: tries Bing HTML first (works from
     /// this network as of 2026-09-21), then DuckDuckGo lite. DuckDuckGo now
     /// answers most queries with a 202 "anomaly" challenge page instead of
@@ -569,6 +693,13 @@ impl Tool for SearchWebTool {
                 self.search_keyless(&query, max_results).await?
             }
         };
+        let mut results = results;
+        // Keyless only: Wikipedia/scrape snippets are ~150 chars and often
+        // miss the answer; Tavily/Brave already return page chunks, and on
+        // the eval passages added +2.5 points hit@5 (n.s.) there for ~2x p95.
+        if self.provider.is_none() {
+            self.add_best_passages(&query, &mut results).await;
+        }
         let result_count = results.len();
         if result_count == 0 {
             warn!(query = %query, "Web search returned no results");

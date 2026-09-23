@@ -41,6 +41,9 @@ pub struct ResponseCache {
     /// On a cache hit, sleep for the recorded latency, so replayed runs keep
     /// realistic (and parallel-composed) latency numbers.
     simulate_latency: bool,
+    /// Sources that must never go live even in [`CacheMode::Record`] (e.g.
+    /// a paid API whose recorded responses are the budget).
+    replay_only: Vec<String>,
 }
 
 impl ResponseCache {
@@ -49,7 +52,14 @@ impl ResponseCache {
             dir: dir.into(),
             mode,
             simulate_latency,
+            replay_only: Vec::new(),
         }
+    }
+
+    /// Never fetch `sources` live: a miss for them is a `replay miss` error.
+    pub fn with_replay_only(mut self, sources: Vec<String>) -> Self {
+        self.replay_only = sources;
+        self
     }
 
     fn path(&self, source: &str, key: &str) -> PathBuf {
@@ -79,7 +89,7 @@ impl ResponseCache {
             }
             return Ok(entry.response);
         }
-        if self.mode == CacheMode::Replay {
+        if self.mode == CacheMode::Replay || self.replay_only.iter().any(|s| s == source) {
             return Err(ToolError::OperationFailed(format!(
                 "replay miss: no recorded {source} response for {key:?}"
             )));

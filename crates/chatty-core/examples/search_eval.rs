@@ -59,6 +59,7 @@ struct RunArgs {
     cache: Option<PathBuf>,
     replay: bool,
     replay_latency: bool,
+    replay_only: Vec<String>,
     exclude: Vec<String>,
     limit: Option<usize>,
 }
@@ -67,7 +68,7 @@ fn usage() -> ! {
     eprintln!(
         "usage:\n  search_eval run --dataset simpleqa|frames --data FILE [--ids FILE] \
          --provider tavily|brave|fallback|keyless [--mode single|fanout --queries FILE] \
-         [--k N] [--concurrency N] [--delay-ms N] [--cache DIR] [--replay] [--replay-latency] \
+         [--k N] [--concurrency N] [--delay-ms N] [--cache DIR] [--replay] [--replay-latency] [--replay-only SOURCE]... \
          [--exclude-source S]... [--limit N] --out FILE\n  \
          search_eval rescore RUN.jsonl [--exclude-source S]...\n  \
          search_eval paired A.jsonl B.jsonl --metric hit1|hit5|all_sources5|all_sources10|ok \
@@ -111,6 +112,7 @@ fn parse_run(args: &[String]) -> RunArgs {
             "--cache" => r.cache = Some(val().into()),
             "--replay" => r.replay = true,
             "--replay-latency" => r.replay_latency = true,
+            "--replay-only" => r.replay_only.push(val()),
             "--exclude-source" => r.exclude.push(val()),
             "--limit" => r.limit = Some(val().parse().unwrap_or_else(|_| usage())),
             _ => usage(),
@@ -217,7 +219,9 @@ async fn run(r: RunArgs) {
         } else {
             CacheMode::Record
         };
-        tool = tool.with_response_cache(Arc::new(ResponseCache::new(dir, mode, r.replay_latency)));
+        tool = tool.with_response_cache(Arc::new(
+            ResponseCache::new(dir, mode, r.replay_latency).with_replay_only(r.replay_only.clone()),
+        ));
     }
     let tool = Arc::new(tool);
     eprintln!(

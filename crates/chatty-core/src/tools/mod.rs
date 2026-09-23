@@ -182,6 +182,7 @@ pub mod invoke_agent_tool;
 pub mod list_agents_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
+pub mod passages;
 mod path_utils;
 #[cfg(feature = "pdf")]
 pub mod pdf_extract_text_tool;
