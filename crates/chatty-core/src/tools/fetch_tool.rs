@@ -218,7 +218,19 @@ impl Tool for FetchTool {
         // SSRF protection: block requests to private/internal networks
         validate_url_host(&url)?;
 
-        let page = match self.pages.get(&url) {
+        // A page is read from the cache only to page through it or search
+        // it (`start_index` or `find`); a plain fetch downloads it again, so
+        // a page that changes (a status endpoint, a live feed) is never
+        // served stale. The User-Agent is part of the key: a retry with the
+        // identity a site asked for must not get back the page it refused.
+        let cache_key = format!("{url}\n{}", args.user_agent.as_deref().unwrap_or(""));
+        let reuse = args.start_index.is_some() || find.is_some();
+        let cached = if reuse {
+            self.pages.get(&cache_key)
+        } else {
+            None
+        };
+        let page = match cached {
             Some(page) => {
                 info!(url = %url, "Serving fetch from the session page cache");
                 page
@@ -235,7 +247,7 @@ impl Tool for FetchTool {
             {
                 Download::Page(page) => {
                     let page = Arc::new(page);
-                    self.pages.insert(url.clone(), Arc::clone(&page));
+                    self.pages.insert(cache_key, Arc::clone(&page));
                     page
                 }
                 Download::Done(output) => return Ok(output),
@@ -284,8 +296,8 @@ enum Download {
 }
 
 /// The session's recently fetched pages, keyed by the URL as asked for
-/// (fragment included, since it decides where the text starts), oldest
-/// first. Bounded by [`MAX_CACHED_PAGES`] and [`MAX_CACHED_BYTES`].
+/// (fragment included, since it decides where the text starts) and the
+/// User-Agent override, least recently used first. Bounded by [`MAX_CACHED_PAGES`] and [`MAX_CACHED_BYTES`].
 #[derive(Clone, Default)]
 struct PageCache(Arc<Mutex<CachedPages>>);
 
@@ -2071,10 +2083,14 @@ mod tests {
     async fn test_call_pages_and_finds_in_the_session_cache() {
         let tool = FetchTool::new(None);
         let url = "https://doc.example.invalid/10-q.htm";
-        tool.pages.insert(url.to_string(), page(&long_page()));
-        let call = |start_index: Option<usize>, max_length: Option<usize>, find: Option<&str>| {
+        tool.pages.insert(format!("{url}\n"), page(&long_page()));
+        let try_call = |start_index: Option<usize>,
+                        max_length: Option<usize>,
+                        find: Option<&str>,
+                        user_agent: Option<&str>| {
             let tool = tool.clone();
             let find = find.map(str::to_string);
+            let user_agent = user_agent.map(str::to_string);
             async move {
                 tool.call(
                     &mut ToolContext::new(),
@@ -2083,15 +2099,28 @@ mod tests {
                         max_length,
                         start_index,
                         find,
-                        user_agent: None,
+                        user_agent,
                     },
                 )
                 .await
-                .expect("served from the cache")
             }
         };
+        let call = |start_index: Option<usize>, max_length: Option<usize>, find: Option<&str>| {
+            let call = try_call(start_index, max_length, find, None);
+            async move { call.await.expect("served from the cache") }
+        };
 
-        let first = call(None, None, None).await;
+        // A plain fetch downloads again (here: fails, the host doesn't
+        // resolve), so a changing page is never served stale; so does a
+        // different User-Agent, even when paging.
+        assert!(try_call(None, None, None, None).await.is_err());
+        assert!(
+            try_call(Some(0), None, None, Some("Research bot admin@example.com"))
+                .await
+                .is_err()
+        );
+
+        let first = call(Some(0), None, None).await;
         assert!(first.truncated);
         assert_eq!(first.total_length, Some(long_page().len()));
         assert!(
@@ -2101,7 +2130,7 @@ mod tests {
         );
 
         // max_length can't take a window past what the context shaper keeps.
-        let clamped = call(None, Some(200_000), None).await;
+        let clamped = call(Some(0), Some(200_000), None).await;
         assert_eq!(clamped.content, first.content);
 
         let found = call(None, None, Some("total consideration")).await;
