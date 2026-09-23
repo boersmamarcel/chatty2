@@ -396,14 +396,98 @@ real tool, with no agent loop:
   without Wikipedia is the honest general-web number, because FRAMES is all-Wikipedia
   and much of SimpleQA is too.
 
-### Baselines
+### Baselines (2026-09-23)
 
-*Pending: runs in progress 2026-09-23.*
+Keyed means Tavily `basic`. Brave was not run: there is no key, and it was skipped by
+decision. Tavily was measured live once, on SimpleQA DEV only. There were then no more
+live calls, to protect the credit budget (179 credits used); later Tavily numbers are
+replays of those recordings.
+
+| Config | Set | error | empty | hit@1 / @5 | FRAMES recall@10 | p50 / p95 ms |
+|---|---|---|---|---|---|---|
+| Keyed (Tavily) | SimpleQA DEV | 10.5%¹ | 0% | 59.5% / **70.0%** | — | 1200 / 3517 |
+| Keyless (Bing → DDG) | SimpleQA DEV | 47% | 46% | 0% / **0%** | — | 683 / 1271 |
+| Keyless | SimpleQA HOLDOUT | 74% | 15% | 0% / 0% | — | 688 / 788 |
+| Keyless | FRAMES single DEV | 57% | 15% | 0% / 0% | 0% | 221 / 846 |
+| Keyless | FRAMES fan-out DEV | 26% | 29% | 0% / 0% | 0.5% | 1523 / 2194 |
+
+¹ All 21 are replay misses (items never recorded). On the 179 recorded items, Tavily had
+0 errors and hit@5 ≈ 78%.
+
+Two findings from the baseline itself:
+
+- **A Tavily development key rate-limits hard.** At concurrency 4, 65 of 200 calls got
+  `429`, and the block then held for minutes. At concurrency 1 there were none. An agent
+  firing parallel searches on a dev key will see this.
+- **Keyless was worse than "no working search": it returned wrong results as if they were
+  right.**
+  - Bing answers our scraper with decoy pages.
+  - The one-term decoy guard let 14 of them through as "ok": "architect" matched
+    architecture firms in Cyprus for a question about a palace in Buenos Aires.
+  - DuckDuckGo's real result pages parsed to nothing.
 
 ### Iteration log
 
-One entry per Phase 2 change, kept or reverted: "paper says X; in Chatty we measured Y;
-because Z". *No iterations yet: Phase 2 is gated on the M6 reflection gate.*
+One entry per Phase 2 change, kept or reverted, in the form "paper says X; in Chatty we
+measured Y; because Z". Predictions and results were posted on
+[AGE-517](https://linear.app/agents-research/issue/AGE-517) before and after each run.
+
+**1. DuckDuckGo lite parser. Kept.**
+- **Says:** nothing to cite; this is a recall bug at the candidate stage.
+- **Measured:** SimpleQA DEV hit@5 0% → 22% (McNemar 44/0, p < 0.001). FRAMES did not
+  move, and the prediction was 3–8%.
+- **Because:** DDG serves roughly the first 25 requests of a session and then blocks. The
+  SimpleQA DEV run went first and got the working pages. The gain is real but depends on
+  DDG's block state. HOLDOUT, recorded while blocked, shows 0% from it.
+
+**2. Wikipedia API in parallel with the scrape. Kept.**
+- **Says:**
+  - ReAct's action space was a keyless Wikipedia search API.
+  - Rewrite-Retrieve-Read and query2doc: shape the query for the retriever.
+- **Measured:**
+  - SimpleQA DEV hit@5 22% → 33% (29/7, p = 0.0005). Error+empty 57% → 0%.
+  - FRAMES recall@10: single 0% → 34%, fan-out 0.5% → 44%. All-sources@10 fan-out
+    0% → 13%.
+  - HOLDOUT confirms: error+empty 0%; SimpleQA hit@5 24%; FRAMES recall@10 38% / 43%.
+- **Because:**
+  - Wikipedia's search ANDs every term, so a whole question finds nothing. The content
+    words joined with `OR` let rare entity names drive the ranking.
+  - A search snippet is only ~150 characters, so the right article at rank 1 often still
+    misses the answer string. That is the job of the passage stage.
+  - The first attempt failed on Wikimedia's 10 requests/minute cap for unidentified
+    User-Agents. Wikipedia calls now send a User-Agent with the project URL (200/minute).
+- **Without Wikipedia**, SimpleQA DEV stays at 21.5%.
+
+**3. Browser escalation (headless Chrome when the scrape is blocked). Reverted.**
+- **Says:** AGE-517's premise was that a real browser on a home IP passes checks plain
+  HTTP fails. One manual probe agreed: Chrome got the real Jerlov Award results where
+  reqwest got decoys.
+- **Measured:** 342 escalations, 0 hits gained. 188 were Bing "There are no results for
+  …" pages and 154 were connection refusals (`chrome-error://`). Latency got worse.
+- **Because:** Bing blocks by IP, not by client. After a day of evaluation traffic this
+  workstation's IP was flagged, and a real Chrome, even at human pace, got the same
+  empty or decoy pages. Some of those decoys were adult-site forum threads.
+- **Caveat:** this says little about a user doing a few searches a day on a clean IP.
+  The patch is kept outside the repo for a re-test from another network.
+
+**4. Fetch the top pages and put the best BM25 passage in the snippet. Kept, keyless only.**
+- **Says:**
+  - BM25 (term saturation, length normalisation) is the robust zero-shot scorer (BEIR).
+  - RECOMP: pass the useful part of a document, not the engine's excerpt.
+- **Measured:**
+  - Keyless SimpleQA hit@5 33% → 48% (30/0, p < 0.001); hit@1 13% → 27%; p95
+    1.3 s → 2.3 s.
+  - Keyed (Tavily) hit@5 70% → 72.5% (5/0, p = 0.07), with p95 up to about 7.8 s.
+- **Because:**
+  - A Wikipedia search snippet is about 150 characters around the query terms, while the
+    answer usually sits a sentence or two away in the article. The passage window
+    catches it.
+  - Tavily's `content` is already a query-focused extract, so a second lexical selection
+    adds little there and costs a slow page fetch. The stage therefore runs on the
+    keyless path only.
+- **Statistics caveat:** idf here comes from the passages of 5 pages, a collection far
+  smaller than BM25 assumes. It still works, because the rare entity names in a question
+  are rare in almost any collection.
 
 ## Part B — internal memory retrieval
 
