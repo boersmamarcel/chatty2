@@ -448,6 +448,11 @@ impl Tool for SearchWebTool {
 /// - A `<a class="result-link">` anchor with href and title text
 /// - A `<td class="result-snippet">` cell with the snippet text
 fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+    // DDG lite now single-quotes these class attributes (seen 2026-09-23);
+    // accept both styles rather than silently parsing a real page to nothing.
+    let html = &html
+        .replace("class='result-link'", "class=\"result-link\"")
+        .replace("class='result-snippet'", "class=\"result-snippet\"");
     let mut results = Vec::new();
 
     // Extract all result links: <a class="result-link" href="...">Title</a>
@@ -488,6 +493,10 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
             pos = link_start + link_marker.len();
             continue;
         };
+
+        // Result hrefs are `//duckduckgo.com/l/?uddg=<real url>` redirects;
+        // ads go through `y.js` and stay non-http, so they are skipped below.
+        let url = decode_ddg_redirect(&url);
 
         // Skip non-http URLs (DDG internal links)
         if !url.starts_with("http") {
@@ -542,6 +551,29 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     }
 
     results
+}
+
+/// Resolve a DDG lite result href (`//duckduckgo.com/l/?uddg=<pct-encoded
+/// url>&amp;rut=…`) to its destination; anything else is returned as found.
+fn decode_ddg_redirect(href: &str) -> String {
+    let href = decode_html_entities(href);
+    if !href.contains("duckduckgo.com/l/?") {
+        return href;
+    }
+    let absolute = if href.starts_with("//") {
+        format!("https:{href}")
+    } else {
+        href.clone()
+    };
+    reqwest::Url::parse(&absolute)
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "uddg")
+                .map(|(_, v)| v.into_owned())
+        })
+        .filter(|u| u.starts_with("http"))
+        .unwrap_or(href)
 }
 
 /// Whether a DuckDuckGo lite response with no parsed results looks like the
@@ -827,6 +859,22 @@ mod tests {
         assert_eq!(results[0].url, "https://example.com");
         assert_eq!(results[0].title, "Example Title");
         assert_eq!(results[0].snippet, "Some snippet text here");
+    }
+
+    /// DDG lite markup as served 2026-09-23: single-quoted classes and
+    /// `//duckduckgo.com/l/?uddg=` redirect hrefs; ads use `y.js` and are dropped.
+    #[test]
+    fn test_parse_ddg_lite_single_quoted_redirect_markup() {
+        let html = r#"<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FKenny_Ball&amp;rut=d653" class='result-link'>Kenny Ball - Wikipedia</a>
+            <td class='result-snippet'>English jazz <b>trumpeter</b>.</td>
+            <a rel="nofollow" href="//duckduckgo.com/y.js?ad_domain=x.com&amp;u3=abc" class='result-link'>Sponsored</a>
+            <td class='result-snippet'>Buy now</td>"#;
+        let results = parse_ddg_lite_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://en.wikipedia.org/wiki/Kenny_Ball");
+        assert_eq!(results[0].title, "Kenny Ball - Wikipedia");
+        assert_eq!(results[0].snippet, "English jazz trumpeter.");
+        assert_eq!(results[0].source, "duckduckgo");
     }
 
     /// AGE-495: DDG's 202 bot-check page has no `result-link` anchors, so it
