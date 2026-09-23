@@ -24,10 +24,10 @@ use chatty_core::settings::models::search_settings::SearchProvider;
 use chatty_core::tools::SearchWebTool;
 use chatty_core::tools::response_cache::{CacheMode, ResponseCache};
 use chatty_core::tools::search_web_tool::SearchWebToolArgs;
-use chatty_optimize::datasets::{load_frames, load_simpleqa};
+use chatty_optimize::datasets::{load_frames, load_freshqa, load_simpleqa};
 use chatty_optimize::search_eval::{
     CallStatus, EvalResult, PairedMetric, SearchEvalRow, Summary, by_primary_stratum,
-    classify_error, paired_csv, score_results,
+    classify_error, paired_csv, score_results_any,
 };
 use futures::StreamExt;
 use rig_agent::tool::{Tool, ToolContext};
@@ -40,6 +40,7 @@ struct Item {
     id: String,
     query: String,
     answer: String,
+    aliases: Vec<String>,
     gold_links: Vec<String>,
     strata: Vec<String>,
 }
@@ -68,7 +69,7 @@ struct RunArgs {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  search_eval run --dataset simpleqa|frames --data FILE [--ids FILE] \
+        "usage:\n  search_eval run --dataset simpleqa|frames|freshqa --data FILE [--ids FILE] \
          --provider tavily|brave|fallback|keyless [--mode single|fanout --queries FILE] \
          [--k N] [--concurrency N] [--delay-ms N] [--cache DIR] [--replay] [--replay-latency] [--replay-only SOURCE]... [--reranker URL [--reranker-model M]] \
          [--exclude-source S]... [--limit N] --out FILE\n  \
@@ -141,6 +142,7 @@ fn load_items(r: &RunArgs) -> Vec<Item> {
                 id: i.id,
                 query: i.question,
                 answer: i.answer,
+                aliases: vec![],
                 gold_links: vec![],
                 strata: vec![i.topic],
             })
@@ -152,8 +154,24 @@ fn load_items(r: &RunArgs) -> Vec<Item> {
                 id: i.id,
                 query: i.prompt,
                 answer: i.answer,
+                aliases: vec![],
                 gold_links: i.wiki_links,
                 strata: i.reasoning_types,
+            })
+            .collect(),
+        "freshqa" => load_freshqa(&r.data)
+            .expect("load freshqa")
+            .into_iter()
+            .map(|i| {
+                let mut answers = i.answers.into_iter();
+                Item {
+                    id: i.id,
+                    query: i.question,
+                    answer: answers.next().unwrap_or_default(),
+                    aliases: answers.collect(),
+                    gold_links: vec![],
+                    strata: vec![i.fact_type],
+                }
             })
             .collect(),
         _ => usage(),
@@ -353,7 +371,10 @@ async fn eval_item(
         CallStatus::Ok
     };
     let error_class = first_error.as_deref().map(classify_error);
-    let score = score_results(&item.answer, &item.gold_links, &results);
+    let answers: Vec<&str> = std::iter::once(item.answer.as_str())
+        .chain(item.aliases.iter().map(String::as_str))
+        .collect();
+    let score = score_results_any(&answers, &item.gold_links, &results);
     SearchEvalRow {
         id: item.id,
         dataset: dataset.to_string(),
@@ -369,6 +390,7 @@ async fn eval_item(
         },
         error_text: first_error,
         gold_answer: item.answer,
+        gold_aliases: item.aliases,
         gold_links: item.gold_links,
         strata: item.strata,
         results,

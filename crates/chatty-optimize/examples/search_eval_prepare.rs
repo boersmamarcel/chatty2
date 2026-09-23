@@ -8,13 +8,17 @@
 //! cargo run -p chatty-optimize --example search_eval_prepare -- <data_dir> evals/search
 //! ```
 //!
+//! Optional: FreshQA (AGE-517 freshness check). Export the latest release's
+//! Google Sheet as CSV to `<data_dir>/freshqa.csv`; a fixed sample of 100
+//! valid-premise TEST questions is drawn, stratified by fact type.
+//!
 //! Writes `<data_dir>/simpleqa.jsonl` and `<data_dir>/frames.jsonl` (not
 //! committed) and the ID lists under `evals/search/` (committed). Re-running
 //! reproduces the same lists; the seeds below must never change.
 
 use chatty_optimize::datasets::{
-    FramesItem, SimpleQaItem, parse_py_str_list, parse_reasoning_types, parse_simpleqa_topic,
-    stratified_sample,
+    FramesItem, FreshQaItem, SimpleQaItem, parse_py_str_list, parse_reasoning_types,
+    parse_simpleqa_topic, stratified_sample,
 };
 use std::fs;
 use std::io::Write;
@@ -26,6 +30,8 @@ const SIMPLEQA_SEED: u64 = 515;
 const FRAMES_SAMPLE: usize = 150;
 const FRAMES_HOLDOUT: usize = 50;
 const FRAMES_SEED: u64 = 516;
+const FRESHQA_SAMPLE: usize = 100;
+const FRESHQA_SEED: u64 = 519;
 /// Seed offset for the DEV/HOLDOUT split drawn from each sample.
 const HOLDOUT_SEED_OFFSET: u64 = 1_000;
 
@@ -65,6 +71,32 @@ fn main() {
         FRAMES_HOLDOUT,
         FRAMES_SEED,
     );
+
+    let freshqa_csv = data.join("freshqa.csv");
+    if freshqa_csv.exists() {
+        let all = read_freshqa(&freshqa_csv);
+        write_jsonl(&data.join("freshqa.jsonl"), &all);
+        // String match cannot score a false-premise answer (a correction),
+        // so only valid-premise TEST questions are sampled.
+        let pool: Vec<&FreshQaItem> = all
+            .iter()
+            .filter(|i| !i.false_premise && i.split == "TEST")
+            .collect();
+        let strata: Vec<&str> = pool.iter().map(|i| i.fact_type.as_str()).collect();
+        let sample: String = stratified_sample(&strata, FRESHQA_SAMPLE, FRESHQA_SEED)
+            .into_iter()
+            .map(|p| format!("{}\n", pool[p].id))
+            .collect();
+        fs::write(
+            ids.join(format!("freshqa_ids_{FRESHQA_SAMPLE}.txt")),
+            sample,
+        )
+        .unwrap();
+        println!(
+            "freshqa: sample {FRESHQA_SAMPLE} of {} valid-premise TEST items",
+            pool.len()
+        );
+    }
 }
 
 fn read_simpleqa(path: &Path) -> Vec<SimpleQaItem> {
@@ -118,6 +150,48 @@ fn read_frames(path: &Path) -> Vec<FramesItem> {
                 answer: rec[answer].trim().to_string(),
                 wiki_links: parse_py_str_list(&rec[links]),
                 reasoning_types: parse_reasoning_types(&rec[types]),
+            }
+        })
+        .collect()
+}
+
+/// FreshQA's CSV export starts with a warning line and a blank line before
+/// the header (`id,split,question,…,answer_0..answer_9,note`).
+fn read_freshqa(path: &Path) -> Vec<FreshQaItem> {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let start = text
+        .find("id,split,question")
+        .expect("FreshQA: no header row");
+    let mut rdr = csv::Reader::from_reader(&text.as_bytes()[start..]);
+    let headers = rdr.headers().unwrap().clone();
+    let col = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h == name)
+            .unwrap_or_else(|| panic!("FreshQA: no column {name:?}"))
+    };
+    let (id, split, question, premise, fact) = (
+        col("id"),
+        col("split"),
+        col("question"),
+        col("false_premise"),
+        col("fact_type"),
+    );
+    let answer_cols: Vec<usize> = (0..10).map(|i| col(&format!("answer_{i}"))).collect();
+    rdr.records()
+        .map(|rec| {
+            let rec = rec.unwrap();
+            FreshQaItem {
+                id: rec[id].to_string(),
+                question: rec[question].trim().to_string(),
+                answers: answer_cols
+                    .iter()
+                    .map(|&c| rec[c].trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect(),
+                fact_type: rec[fact].trim().to_string(),
+                false_premise: rec[premise].trim().eq_ignore_ascii_case("true"),
+                split: rec[split].trim().to_string(),
             }
         })
         .collect()

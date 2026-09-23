@@ -65,6 +65,10 @@ pub struct SearchEvalRow {
     #[serde(default)]
     pub error_text: Option<String>,
     pub gold_answer: String,
+    /// Further acceptable answers (FreshQA lists up to 10); a hit on any
+    /// counts. Empty for SimpleQA/FRAMES, so their scores are unchanged.
+    #[serde(default)]
+    pub gold_aliases: Vec<String>,
     /// FRAMES gold Wikipedia links; empty for SimpleQA.
     #[serde(default)]
     pub gold_links: Vec<String>,
@@ -262,10 +266,19 @@ pub fn without_sources(results: &[EvalResult], exclude: &[String]) -> Vec<EvalRe
 }
 
 pub fn answer_hit_at_k(answer: &str, results: &[EvalResult], k: usize) -> bool {
+    answers_hit_at_k(&[answer], results, k)
+}
+
+/// Like [`answer_hit_at_k`], for a question with several acceptable answers.
+pub fn answers_hit_at_k(answers: &[&str], results: &[EvalResult], k: usize) -> bool {
     results
         .iter()
         .take(k)
-        .any(|r| !is_leak(&r.url) && contains_answer(&format!("{} {}", r.title, r.snippet), answer))
+        .any(|r| !is_leak(&r.url) && contains_any(&format!("{} {}", r.title, r.snippet), answers))
+}
+
+fn contains_any(text: &str, answers: &[&str]) -> bool {
+    answers.iter().any(|a| contains_answer(text, a))
 }
 
 /// Matched gold links among the first `k` results, and the gold total.
@@ -283,10 +296,20 @@ pub fn source_matches_at_k(gold: &[String], results: &[EvalResult], k: usize) ->
 }
 
 pub fn score_results(gold_answer: &str, gold_links: &[String], results: &[EvalResult]) -> RowScore {
-    let hit = HIT_KS.map(|k| answer_hit_at_k(gold_answer, results, k));
-    let leak_hit = results.iter().take(5).any(|r| {
-        is_leak(&r.url) && contains_answer(&format!("{} {}", r.title, r.snippet), gold_answer)
-    });
+    score_results_any(&[gold_answer], gold_links, results)
+}
+
+/// [`score_results`] for a question with several acceptable answers.
+pub fn score_results_any(
+    answers: &[&str],
+    gold_links: &[String],
+    results: &[EvalResult],
+) -> RowScore {
+    let hit = HIT_KS.map(|k| answers_hit_at_k(answers, results, k));
+    let leak_hit = results
+        .iter()
+        .take(5)
+        .any(|r| is_leak(&r.url) && contains_any(&format!("{} {}", r.title, r.snippet), answers));
     let recall = |k| {
         let (m, n) = source_matches_at_k(gold_links, results, k);
         (
@@ -304,6 +327,13 @@ pub fn score_results(gold_answer: &str, gold_links: &[String], results: &[EvalRe
         all_sources_5,
         all_sources_10,
     }
+}
+
+/// The gold answer plus its aliases.
+pub fn row_answers(row: &SearchEvalRow) -> Vec<&str> {
+    std::iter::once(row.gold_answer.as_str())
+        .chain(row.gold_aliases.iter().map(String::as_str))
+        .collect()
 }
 
 /// The results the model would have seen had the `exclude` sources not
@@ -334,7 +364,7 @@ pub fn rescore(row: &SearchEvalRow, exclude: &[String]) -> (CallStatus, RowScore
     };
     (
         status,
-        score_results(&row.gold_answer, &row.gold_links, &results),
+        score_results_any(&row_answers(row), &row.gold_links, &results),
     )
 }
 
@@ -429,7 +459,7 @@ impl Summary {
             }
             if let Some(first) = results.iter().take(5).find(|r| {
                 !is_leak(&r.url)
-                    && contains_answer(&format!("{} {}", r.title, r.snippet), &row.gold_answer)
+                    && contains_any(&format!("{} {}", r.title, r.snippet), &row_answers(row))
             }) {
                 s.by_source.entry(first.source.clone()).or_default().1 += 1;
             }
@@ -603,6 +633,7 @@ mod tests {
             error_class: None,
             error_text: None,
             gold_answer: "Michio Sugeno".into(),
+            gold_aliases: vec![],
             gold_links: vec![],
             strata: vec!["Science and technology".into()],
             results,
@@ -741,6 +772,23 @@ mod tests {
             rescore(&only_wiki, &["Wikipedia".into()]).0,
             CallStatus::Empty
         );
+    }
+
+    #[test]
+    fn any_alias_counts_as_a_hit() {
+        let mut r = row(
+            vec![res(
+                "t",
+                "https://a.com",
+                "there are ten campuses",
+                "tavily",
+            )],
+            CallStatus::Ok,
+        );
+        r.gold_answer = "10".into();
+        assert!(!rescore(&r, &[]).1.hit[2]);
+        r.gold_aliases = vec!["ten".into()];
+        assert!(rescore(&r, &[]).1.hit[2]);
     }
 
     #[test]

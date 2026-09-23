@@ -2,6 +2,7 @@
 
 mod fever;
 mod frames;
+mod freshqa;
 mod gsm8k;
 mod hotpotqa;
 mod humaneval;
@@ -11,6 +12,7 @@ mod stratified;
 
 pub use fever::{FeverItem, load_fever};
 pub use frames::{FramesItem, load_frames, parse_py_str_list, parse_reasoning_types};
+pub use freshqa::{FreshQaItem, load_freshqa};
 pub use gsm8k::{Gsm8kItem, load_gsm8k};
 pub use hotpotqa::{HotpotQaItem, load_hotpotqa};
 pub use humaneval::{HumanEvalItem, load_humaneval};
