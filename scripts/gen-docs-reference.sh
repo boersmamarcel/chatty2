@@ -89,6 +89,8 @@ tools = [
     ("browser_console", "web", "browser_tools.rs", "feature: browser"),
     ("browser_network", "web", "browser_tools.rs", "feature: browser"),
     ("browser_resize", "web", "browser_tools.rs", "feature: browser"),
+    ("browser_click", "web", "browser_tools.rs", "feature: browser; by snapshot ref; approval off localhost/workspace"),
+    ("browser_type", "web", "browser_tools.rs", "feature: browser; by snapshot ref; refuses password/card fields; never submits"),
 ]
 for name, cat, src, notes in tools:
     print(f"| `{name}` | {cat} | `{src}` | {notes} |")
@@ -118,6 +120,8 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
+| `/now <text>` | Cancel the running turn and send `<text>` next | — | Yes |
+| `/unqueue` | Take back the message queued last | — | Yes |
 | `/model [query]` | Switch / list models | — | Yes |
 | `/tools [name]` | Open tool picker or toggle by name | — | Yes |
 | `/modules …` | Module runtime settings | — | Yes |
