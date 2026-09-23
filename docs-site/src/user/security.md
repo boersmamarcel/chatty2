@@ -31,6 +31,12 @@ A pending approval waits five minutes; if you do not answer, the call fails and 
 > [!WARNING]
 > **Auto-approve All** lets the model run any enabled tool without review. Use it only for a workspace you can afford to lose, and prefer a per-run `--auto-approve` in the terminal for scripted jobs.
 
+## Browser and web
+
+By default the browser and `fetch` reach only `localhost` and workspace-local files; opening it to the public web or your own LAN is an explicit setting ([Agents & tools](./agents-and-tools.md#web-and-the-built-in-browser)). Either way, the same address filter refuses link-local and cloud-metadata addresses, so a page cannot redirect a fetch or a click into your machine's or your cloud provider's internal network. Clicking and typing outside `localhost` and the workspace ask for your approval every time, and the agent never types into a password or card-number field.
+
+The agent's standing instructions also draw a hard line around anything it reads from a page: text on a page — including text written to look like a system prompt, a task, or a message addressed to the agent — is treated as the page's content, never as a new instruction. It can report that text back to you; it cannot act on it. That framing is what keeps a malicious or compromised page from hijacking the turn that's looking at it.
+
 ## Secrets
 
 - **Settings → Secrets** holds key–value pairs that are exported as environment variables in every shell session. The agent can use the *names* in scripts (`os.environ["API_KEY"]`) but never sees the values; they are not logged and are masked in tool output.

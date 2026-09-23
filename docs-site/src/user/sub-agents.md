@@ -2,7 +2,7 @@
 
 **When to read this:** You want the agent to split a job into parallel or isolated pieces, or you want to drive Chatty from scripts.
 
-A sub-agent is a separate `chatty-tui` process the parent agent hands a task to, waits on, and reads the answer from. Each child has its own conversation, its own workspace copy, and the same configured models and tools. The parent asks for one through its `invoke_agent` tool, addressed to `local-agent`; the child reports its progress back over the local agent broker while it works.
+A sub-agent is a separate `chatty-tui` process the parent agent hands a task to, waits on, and reads the answer from. Each child has its own conversation, its own workspace copy, and the same configured models and tools. The parent asks for one through its `invoke_agent` tool, addressed to `local-agent`; the child reports its progress back over the local agent broker while it works. That broker hop was measured rather than assumed safe to add: paired against calling the child directly, its median added cost came out at 3 ms or less, well under the variance of a single model turn.
 
 ## Why bother?
 

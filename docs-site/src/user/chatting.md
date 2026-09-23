@@ -98,6 +98,7 @@ The bar follows **Enable Git Integration** in Settings → Code Execution. Priva
 - Titles are generated automatically. The search icon in the title bar opens **Search conversations…**, which filters the sidebar as you type.
 - Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, **Take online…**, and **Delete**.
 - The sidebar shows the running cost per conversation; each reply shows its input and output tokens and cost. Pricing uses the per-million-token rates on the model, which the OpenRouter catalogue fills in for you.
+- Chatty only ever appends to the prompt it sends — the system instructions, tool list and prior turns already sent are never rewritten — so a provider's prompt cache keeps recognising them turn after turn. Providers that price cached input lower pass that saving straight through to the cost shown here.
 - **Regenerate** under a reply asks for a fresh answer. Chatty keeps both versions, which is what makes preference-pair export possible ([Advanced](./advanced.md)).
 
 ![Token and cost tracking](../assets/animations/advanced_token_tracking.gif)
