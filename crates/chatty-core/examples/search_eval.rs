@@ -296,6 +296,7 @@ async fn eval_item(
 ) -> SearchEvalRow {
     let started = Instant::now();
     let mut per_query: Vec<Vec<EvalResult>> = Vec::new();
+    let mut per_query_candidates: Vec<Vec<EvalResult>> = Vec::new();
     let mut first_error: Option<String> = None;
     let mut bytes = 0;
     let mut n_errors = 0;
@@ -307,17 +308,18 @@ async fn eval_item(
         match tool.call(&mut ToolContext::new(), args).await {
             Ok(out) => {
                 bytes += serde_json::to_string(&out).map_or(0, |s| s.len());
-                per_query.push(
-                    out.results
-                        .into_iter()
+                let convert = |list: Vec<chatty_core::tools::search_web_tool::SearchResult>| {
+                    list.into_iter()
                         .map(|r| EvalResult {
                             title: r.title,
                             url: r.url,
                             snippet: r.snippet,
                             source: r.source,
                         })
-                        .collect(),
-                );
+                        .collect::<Vec<_>>()
+                };
+                per_query.push(convert(out.results));
+                per_query_candidates.push(convert(out.candidates));
             }
             Err(e) => {
                 n_errors += 1;
@@ -327,6 +329,7 @@ async fn eval_item(
     }
     let latency_ms = started.elapsed().as_millis() as u64;
     let results = merge_round_robin(per_query);
+    let candidates = merge_round_robin(per_query_candidates);
     let status = if n_errors == queries.len() {
         CallStatus::Error
     } else if results.is_empty() {
@@ -354,6 +357,8 @@ async fn eval_item(
         gold_links: item.gold_links,
         strata: item.strata,
         results,
+        candidates,
+        k,
         latency_ms,
         bytes,
         escalated: false,

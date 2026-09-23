@@ -72,6 +72,14 @@ pub struct SearchEvalRow {
     #[serde(default)]
     pub strata: Vec<String>,
     pub results: Vec<EvalResult>,
+    /// Every backend result before merging and truncation. Used only when
+    /// rescoring with excluded sources, so "without Wikipedia" means "the
+    /// web results that would have filled those slots", not fewer slots.
+    #[serde(default)]
+    pub candidates: Vec<EvalResult>,
+    /// Results per item the run asked for (`--k`); 0 in old rows.
+    #[serde(default)]
+    pub k: usize,
     pub latency_ms: u64,
     pub n_calls: usize,
     pub bytes: usize,
@@ -298,10 +306,27 @@ pub fn score_results(gold_answer: &str, gold_links: &[String], results: &[EvalRe
     }
 }
 
+/// The results the model would have seen had the `exclude` sources not
+/// existed: from `candidates` (refilled up to `k`) when the row has them,
+/// else from `results`.
+pub fn shown_without(row: &SearchEvalRow, exclude: &[String]) -> Vec<EvalResult> {
+    if exclude.is_empty() {
+        return row.results.clone();
+    }
+    if row.candidates.is_empty() {
+        return without_sources(&row.results, exclude);
+    }
+    let k = if row.k == 0 { row.results.len() } else { row.k };
+    without_sources(&row.candidates, exclude)
+        .into_iter()
+        .take(k)
+        .collect()
+}
+
 /// Status and score of a row after dropping `exclude` sources. A row whose
 /// every result came from an excluded source becomes `Empty`.
 pub fn rescore(row: &SearchEvalRow, exclude: &[String]) -> (CallStatus, RowScore) {
-    let results = without_sources(&row.results, exclude);
+    let results = shown_without(row, exclude);
     let status = match row.status {
         CallStatus::Error => CallStatus::Error,
         _ if results.is_empty() => CallStatus::Empty,
@@ -373,7 +398,7 @@ impl Summary {
         let mut rec10 = 0.0;
         for row in rows {
             let (status, score) = rescore(row, exclude);
-            let results = without_sources(&row.results, exclude);
+            let results = shown_without(row, exclude);
             s.n += 1;
             match status {
                 CallStatus::Error => {
@@ -581,6 +606,8 @@ mod tests {
             gold_links: vec![],
             strata: vec!["Science and technology".into()],
             results,
+            candidates: vec![],
+            k: 0,
             latency_ms: 100,
             n_calls: 1,
             bytes: 0,
@@ -714,6 +741,24 @@ mod tests {
             rescore(&only_wiki, &["Wikipedia".into()]).0,
             CallStatus::Empty
         );
+    }
+
+    #[test]
+    fn exclusion_refills_from_candidates_up_to_k() {
+        let wiki = res(
+            "W",
+            "https://en.wikipedia.org/wiki/S",
+            "nothing",
+            "wikipedia",
+        );
+        let web1 = res("B1", "https://a.com", "nothing", "bing");
+        let web2 = res("B2", "https://b.com", "Michio Sugeno", "bing");
+        let mut r = row(vec![wiki.clone(), web1.clone()], CallStatus::Ok);
+        r.candidates = vec![wiki, web1, web2];
+        r.k = 2;
+        // Shown list: no hit. Without Wikipedia, web2 moves into the 2 slots.
+        assert!(!rescore(&r, &[]).1.hit[2]);
+        assert!(rescore(&r, &["wikipedia".into()]).1.hit[2]);
     }
 
     #[test]

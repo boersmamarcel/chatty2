@@ -14,6 +14,20 @@ use std::sync::Arc;
 /// Request timeout for search API calls
 const SEARCH_TIMEOUT_SECS: u64 = 15;
 
+/// Wikimedia caps requests without a meaningful User-Agent (a URL or
+/// contact) at 10/minute and compliant ones at 200/minute; the shared
+/// `http_client::USER_AGENT` is shaped for SEC EDGAR and lands in the 10/minute
+/// bucket (measured 2026-09-23: 467/596 requests answered 429).
+/// <https://www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits>
+const WIKIPEDIA_USER_AGENT: &str = concat!(
+    "Chatty/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/boersmamarcel/chatty2) reqwest"
+);
+
+/// Wikipedia's search API caps `srsearch` length; stay well under it.
+const MAX_WIKIPEDIA_QUERY_CHARS: usize = 250;
+
 /// Maximum snippet length per result (characters)
 const MAX_SNIPPET_LENGTH: usize = 1000;
 
@@ -30,7 +44,7 @@ pub struct SearchWebToolArgs {
 }
 
 /// A single search result
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     /// Title of the search result
     pub title: String,
@@ -52,6 +66,11 @@ pub struct SearchWebToolOutput {
     pub results: Vec<SearchResult>,
     /// Number of results returned
     pub result_count: usize,
+    /// Every result the backends returned before merging and truncation,
+    /// in merged order. Not shown to the model; the retrieval eval uses it
+    /// to rescore a run as if one source (e.g. Wikipedia) did not exist.
+    #[serde(skip)]
+    pub candidates: Vec<SearchResult>,
 }
 
 // ── Tavily API types ────────────────────────────────────────────────────────
@@ -94,6 +113,25 @@ struct BraveResult {
     description: String,
 }
 
+// ── Wikipedia API types ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct WikipediaSearchResponse {
+    query: Option<WikipediaQuery>,
+}
+
+#[derive(Deserialize)]
+struct WikipediaQuery {
+    search: Vec<WikipediaHit>,
+}
+
+#[derive(Deserialize)]
+struct WikipediaHit {
+    title: String,
+    #[serde(default)]
+    snippet: String,
+}
+
 // ── Tool implementation ─────────────────────────────────────────────────────
 
 /// Web search tool that queries Tavily or Brave Search APIs,
@@ -101,6 +139,9 @@ struct BraveResult {
 #[derive(Clone)]
 pub struct SearchWebTool {
     client: reqwest::Client,
+    /// Client for public APIs (Wikipedia): not the browser-impersonating one
+    /// used for scraping. Wikipedia requests also set `WIKIPEDIA_USER_AGENT`.
+    api_client: reqwest::Client,
     /// None means fallback mode (use DuckDuckGo lite HTML scraping)
     provider: Option<SearchProvider>,
     /// None means fallback mode (no API key configured)
@@ -116,6 +157,7 @@ impl SearchWebTool {
     pub fn new(provider: SearchProvider, api_key: String, default_max_results: usize) -> Self {
         let client = crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS);
         Self {
+            api_client: client.clone(),
             client,
             provider: Some(provider),
             api_key: Some(api_key),
@@ -130,6 +172,7 @@ impl SearchWebTool {
         let client = crate::services::http_client::browser_client(SEARCH_TIMEOUT_SECS);
         Self {
             client,
+            api_client: crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS),
             provider: None,
             api_key: None,
             default_max_results,
@@ -261,6 +304,101 @@ impl SearchWebTool {
             .unwrap_or_default();
 
         Ok(results)
+    }
+
+    /// Keyless tier (AGE-517): the Wikipedia search API and the web scrape
+    /// run in parallel; results are interleaved Wikipedia-first. Either side
+    /// failing is survivable; both failing (or one failing and the other
+    /// finding nothing) is an error, never a silent empty list.
+    ///
+    /// Returns `(merged, candidates)`: the list shown to the model, truncated
+    /// to `max_results`, and every backend result in merged order.
+    async fn search_keyless(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<(Vec<SearchResult>, Vec<SearchResult>), ToolError> {
+        let (wiki, web) = tokio::join!(
+            self.search_wikipedia(query, max_results),
+            self.search_web_fallback(query, max_results)
+        );
+        let lists = match (wiki, web) {
+            (Ok(wiki), Ok(web)) => vec![wiki, web],
+            (Ok(wiki), Err(web_error)) if !wiki.is_empty() => {
+                warn!(query = %query, error = %web_error, "Web scrape failed; using Wikipedia only");
+                vec![wiki]
+            }
+            (Ok(_), Err(web_error)) => {
+                return Err(ToolError::OperationFailed(format!(
+                    "{web_error}; Wikipedia found no matching article"
+                )));
+            }
+            (Err(wiki_error), Ok(web)) => {
+                warn!(query = %query, error = %wiki_error, "Wikipedia search failed; using web results only");
+                vec![web]
+            }
+            (Err(wiki_error), Err(web_error)) => {
+                return Err(ToolError::OperationFailed(format!(
+                    "{web_error}; Wikipedia search also failed ({wiki_error})"
+                )));
+            }
+        };
+        let candidates = interleave(&lists);
+        let merged = candidates.iter().take(max_results).cloned().collect();
+        Ok((merged, candidates))
+    }
+
+    /// Wikipedia full-text search (`list=search`), which needs no key and
+    /// does not bot-block. CirrusSearch ANDs every term, so a whole question
+    /// usually matches nothing; the query is reduced to its content words
+    /// joined with `OR`, which lets the rare, specific terms drive ranking.
+    async fn search_wikipedia(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, ToolError> {
+        let search = wikipedia_query(query);
+        let limit = max_results.to_string();
+        let builder = self
+            .api_client
+            .get("https://en.wikipedia.org/w/api.php")
+            .header(reqwest::header::USER_AGENT, WIKIPEDIA_USER_AGENT)
+            .query(&[
+                ("action", "query"),
+                ("list", "search"),
+                ("format", "json"),
+                ("formatversion", "2"),
+                ("srprop", "snippet"),
+                ("srsearch", search.as_str()),
+                ("srlimit", limit.as_str()),
+            ]);
+        let key = format!("{max_results}|{search}");
+        let response = self.send("wikipedia", key, "Wikipedia", builder).await?;
+        if !is_success(response.status) {
+            return Err(ToolError::OperationFailed(format!(
+                "Wikipedia API returned {}",
+                status_text(response.status)
+            )));
+        }
+        let parsed: WikipediaSearchResponse =
+            serde_json::from_str(&response.body).map_err(|e| {
+                ToolError::OperationFailed(format!("Failed to parse Wikipedia response: {e}"))
+            })?;
+        Ok(parsed
+            .query
+            .map(|q| q.search)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hit| SearchResult {
+                url: format!(
+                    "https://en.wikipedia.org/wiki/{}",
+                    hit.title.replace(' ', "_")
+                ),
+                snippet: truncate_snippet(strip_html_tags(&hit.snippet).trim()),
+                title: hit.title,
+                source: "wikipedia".to_string(),
+            })
+            .collect())
     }
 
     /// Fallback search with no API key: tries Bing HTML first (works from
@@ -415,18 +553,20 @@ impl Tool for SearchWebTool {
             .unwrap_or(self.default_max_results)
             .clamp(1, 20);
 
-        let results = match (&self.provider, &self.api_key) {
+        let (results, candidates) = match (&self.provider, &self.api_key) {
             (Some(SearchProvider::Tavily), Some(key)) => {
                 info!(query = %query, max_results, provider = "tavily", "Performing web search");
-                self.search_tavily(&query, max_results, key).await?
+                let results = self.search_tavily(&query, max_results, key).await?;
+                (results.clone(), results)
             }
             (Some(SearchProvider::Brave), Some(key)) => {
                 info!(query = %query, max_results, provider = "brave", "Performing web search");
-                self.search_brave(&query, max_results, key).await?
+                let results = self.search_brave(&query, max_results, key).await?;
+                (results.clone(), results)
             }
             _ => {
-                info!(query = %query, max_results, provider = "keyless-fallback", "Performing web search");
-                self.search_web_fallback(&query, max_results).await?
+                info!(query = %query, max_results, provider = "keyless", "Performing web search");
+                self.search_keyless(&query, max_results).await?
             }
         };
         let result_count = results.len();
@@ -438,7 +578,66 @@ impl Tool for SearchWebTool {
             query,
             results,
             result_count,
+            candidates,
         })
+    }
+}
+
+/// Round-robin merge (first of each list, then second of each, …), keeping
+/// the first occurrence of each URL.
+fn interleave(lists: &[Vec<SearchResult>]) -> Vec<SearchResult> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let longest = lists.iter().map(Vec::len).max().unwrap_or(0);
+    for i in 0..longest {
+        for list in lists {
+            if let Some(r) = list.get(i)
+                && seen.insert(r.url.clone())
+            {
+                out.push(r.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Function words that carry no search signal in a question. Unlike
+/// `STOPWORDS` (decoy detection) this includes short words, because here
+/// they are removed from the query, not merely ignored in a match.
+const QUERY_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "by", "with", "from", "as", "and", "or",
+    "is", "was", "are", "were", "be", "been", "did", "do", "does", "has", "have", "had", "who",
+    "whom", "whose", "what", "which", "when", "where", "why", "how", "that", "this", "these",
+    "those", "it", "its", "his", "her", "their", "they", "he", "she", "i", "my", "me", "you",
+    "your", "we", "our", "name", "named", "first", "last", "year", "month", "day", "exact",
+    "exactly", "specific", "many", "much", "number", "during", "after", "before", "into", "about",
+    "than", "then", "there", "also", "only", "same", "other", "one",
+];
+
+/// Reduce a natural-language question to Wikipedia search syntax: content
+/// words (order kept, duplicates dropped) joined with ` OR `, capped at
+/// [`MAX_WIKIPEDIA_QUERY_CHARS`]. A query with no content words is passed
+/// through unchanged.
+fn wikipedia_query(query: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = String::new();
+    for word in query.split_whitespace() {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let lower = word.to_lowercase();
+        if word.is_empty() || QUERY_STOPWORDS.contains(&lower.as_str()) || !seen.insert(lower) {
+            continue;
+        }
+        let sep = if out.is_empty() { "" } else { " OR " };
+        if out.len() + sep.len() + word.len() > MAX_WIKIPEDIA_QUERY_CHARS {
+            break;
+        }
+        out.push_str(sep);
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        query.to_string()
+    } else {
+        out
     }
 }
 
@@ -875,6 +1074,40 @@ mod tests {
         assert_eq!(results[0].title, "Kenny Ball - Wikipedia");
         assert_eq!(results[0].snippet, "English jazz trumpeter.");
         assert_eq!(results[0].source, "duckduckgo");
+    }
+
+    #[test]
+    fn test_wikipedia_query_keeps_content_words_joined_with_or() {
+        assert_eq!(
+            wikipedia_query("Which district in Kashmir was originally known as Panwangam?"),
+            "district OR Kashmir OR originally OR known OR Panwangam"
+        );
+        assert_eq!(
+            wikipedia_query("Who received the IEEE Frank Rosenblatt Award in 2010?"),
+            "received OR IEEE OR Frank OR Rosenblatt OR Award OR 2010"
+        );
+        // Nothing left after stopword removal: pass the query through.
+        assert_eq!(wikipedia_query("who was it"), "who was it");
+        // Long prompts are capped, never cut mid-word.
+        let long = "alpha ".repeat(10) + &"word".repeat(3) + &" beta".repeat(200);
+        assert!(wikipedia_query(&long).len() <= MAX_WIKIPEDIA_QUERY_CHARS);
+    }
+
+    #[test]
+    fn test_interleave_round_robin_dedupes_urls() {
+        let r = |u: &str, s: &str| SearchResult {
+            title: u.into(),
+            url: u.into(),
+            snippet: String::new(),
+            source: s.into(),
+        };
+        let merged = interleave(&[
+            vec![r("w1", "wikipedia"), r("w2", "wikipedia")],
+            vec![r("b1", "bing"), r("w1", "bing"), r("b3", "bing")],
+        ]);
+        let urls: Vec<_> = merged.iter().map(|m| m.url.as_str()).collect();
+        assert_eq!(urls, ["w1", "b1", "w2", "b3"]);
+        assert_eq!(merged[0].source, "wikipedia");
     }
 
     /// AGE-495: DDG's 202 bot-check page has no `result-link` anchors, so it
