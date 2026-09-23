@@ -45,6 +45,9 @@ const PAGE_FETCH_BUDGET_SECS: u64 = 6;
 /// Page bodies above this are cut before extraction.
 const MAX_PAGE_BYTES: usize = 2_000_000;
 
+/// Passages per page (the BM25 top ones) the cross-encoder judges.
+const RERANK_PASSAGES_PER_PAGE: usize = 3;
+
 /// Characters of best-passage text put in front of a result's snippet.
 const PASSAGE_CHARS: usize = 600;
 
@@ -584,25 +587,57 @@ impl SearchWebTool {
                 result.snippet = truncate_snippet(&format!("{passage} … {}", result.snippet));
             }
         }
-        // Cross-encoder over (title + best passage or snippet) when configured.
+        // Cross-encoder over each candidate's top BM25 page passages (or its
+        // snippet when the page failed): the best-scoring passage becomes the
+        // snippet's lead and its score the candidate's rank.
         if let Some(reranker) = &self.reranker {
-            let documents: Vec<String> = pool
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    let text = best_page_passage[i]
-                        .map(|j| passages[j].0.as_str())
-                        .unwrap_or(r.snippet.as_str());
-                    format!(
-                        "{}\n{}",
-                        r.title,
-                        text.chars().take(PASSAGE_CHARS).collect::<String>()
-                    )
-                })
-                .collect();
-            if let Some(scores) = self.rerank_scores(reranker, query, documents).await {
+            let mut doc_owner = Vec::new();
+            let mut documents = Vec::new();
+            let mut doc_passage: Vec<Option<usize>> = Vec::new();
+            for (i, r) in pool.iter().enumerate() {
+                let mut mine: Vec<usize> = (0..passages.len())
+                    .filter(|&j| owners[j] == i && passages[j].1 && scores[j] > 0.0)
+                    .collect();
+                mine.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+                mine.truncate(RERANK_PASSAGES_PER_PAGE);
+                if mine.is_empty() {
+                    doc_owner.push(i);
+                    doc_passage.push(None);
+                    documents.push(format!("{}\n{}", r.title, r.snippet));
+                }
+                for j in mine {
+                    doc_owner.push(i);
+                    doc_passage.push(Some(j));
+                    let text: String = passages[j].0.chars().take(PASSAGE_CHARS).collect();
+                    documents.push(format!("{}\n{text}", r.title));
+                }
+            }
+            if let Some(ce) = self.rerank_scores(reranker, query, documents).await {
+                let mut best: Vec<(f64, Option<usize>)> =
+                    vec![(f64::NEG_INFINITY, None); pool.len()];
+                for (d, &i) in doc_owner.iter().enumerate() {
+                    if ce[d] > best[i].0 {
+                        best[i] = (ce[d], doc_passage[d]);
+                    }
+                }
+                for (i, result) in pool.iter_mut().enumerate() {
+                    if let (Some(j), Some(bm25_best)) = (best[i].1, best_page_passage[i])
+                        && j != bm25_best
+                    {
+                        // Swap the lead passage for the one the cross-encoder preferred.
+                        let old: String =
+                            passages[bm25_best].0.chars().take(PASSAGE_CHARS).collect();
+                        let rest = result
+                            .snippet
+                            .strip_prefix(&format!("{old} … "))
+                            .unwrap_or(&result.snippet)
+                            .to_string();
+                        let lead: String = passages[j].0.chars().take(PASSAGE_CHARS).collect();
+                        result.snippet = truncate_snippet(&format!("{lead} … {rest}"));
+                    }
+                }
                 let mut order: Vec<usize> = (0..pool.len()).collect();
-                order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+                order.sort_by(|&a, &b| best[b].0.total_cmp(&best[a].0));
                 let mut slots: Vec<Option<SearchResult>> = pool.into_iter().map(Some).collect();
                 return order.into_iter().filter_map(|i| slots[i].take()).collect();
             }
