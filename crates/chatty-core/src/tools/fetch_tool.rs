@@ -884,6 +884,122 @@ const VOID_TAGS: [&str; 14] = [
 /// turns it into ` | ` once the row's cells are known.
 const CELL_BREAK: char = '\u{1F}';
 
+/// Whether tag `element` (a closing tag when `closing`) ends an open
+/// `hidden` element whose end tag may be omitted, per HTML's implied end
+/// tags: a `<p>` ends at the next block, an `<li>` at the next item or the
+/// end of its list, a cell at the next cell or row, and so on.
+fn implicitly_closes(hidden: &str, element: &str, closing: bool) -> bool {
+    const P_ENDERS: [&str; 22] = [
+        "p",
+        "div",
+        "table",
+        "ul",
+        "ol",
+        "dl",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "section",
+        "article",
+        "blockquote",
+        "pre",
+        "hr",
+        "main",
+        "header",
+        "footer",
+        "nav",
+        "form",
+    ];
+    const P_CONTAINERS: [&str; 10] = [
+        "div",
+        "td",
+        "th",
+        "li",
+        "dd",
+        "section",
+        "article",
+        "blockquote",
+        "main",
+        "body",
+    ];
+    match hidden {
+        "p" if closing => P_CONTAINERS.contains(&element),
+        "p" => P_ENDERS.contains(&element),
+        "li" if closing => matches!(element, "ul" | "ol" | "menu" | "body"),
+        "li" => element == "li",
+        "td" | "th" if closing => matches!(
+            element,
+            "tr" | "table" | "tbody" | "thead" | "tfoot" | "body"
+        ),
+        "td" | "th" => matches!(element, "td" | "th" | "tr"),
+        "tr" if closing => matches!(element, "table" | "tbody" | "thead" | "tfoot" | "body"),
+        "tr" => element == "tr",
+        "dt" | "dd" if closing => matches!(element, "dl" | "body"),
+        "dt" | "dd" => matches!(element, "dt" | "dd"),
+        "option" if closing => matches!(element, "select" | "datalist" | "optgroup" | "body"),
+        "option" => matches!(element, "option" | "optgroup"),
+        _ => false,
+    }
+}
+
+/// Placeholder for a block element inside a table cell; see
+/// `resolve_cell_breaks`.
+const SOFT_BREAK: char = '\u{1E}';
+
+/// A line of extracted text longer than this is not a table row but a page
+/// laid out as a table (a Paul Graham essay, Hacker News, older sites): its
+/// block elements go back to being line breaks.
+const MAX_ROW_BYTES: usize = 2_000;
+
+/// Settle the [`SOFT_BREAK`]s block elements inside table cells left behind.
+/// On a table row they become spaces, so a filing that wraps each cell's
+/// value in a `<p>` still reads as one row; on a line longer than
+/// [`MAX_ROW_BYTES`] they become newlines, or a page laid out as one big
+/// cell would come out as a single line of tens of KB. Neighbouring
+/// whitespace folds into the break either way.
+fn resolve_cell_breaks(text: &str) -> String {
+    if !text.contains(SOFT_BREAK) {
+        return text.to_string();
+    }
+    text.split('\n')
+        .map(|line| {
+            if !line.contains(SOFT_BREAK) {
+                return line.to_string();
+            }
+            let brk = if line.len() > MAX_ROW_BYTES {
+                '\n'
+            } else {
+                ' '
+            };
+            let mut out = String::with_capacity(line.len());
+            let mut pending_break = false;
+            for ch in line.chars() {
+                if ch == SOFT_BREAK {
+                    pending_break = true;
+                    continue;
+                }
+                if pending_break && ch == ' ' {
+                    continue;
+                }
+                if pending_break {
+                    let kept = out.trim_end_matches(' ').len();
+                    out.truncate(kept);
+                    if !out.is_empty() && !out.ends_with(CELL_BREAK) {
+                        out.push(brk);
+                    }
+                    pending_break = false;
+                }
+                out.push(ch);
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Whether a raw opening tag hides its element (`style="display: none"`):
 /// a browser shows none of that text, and documents use such blocks for
 /// machine-readable data — an inline-XBRL filing opens with tens of KB of
@@ -1092,7 +1208,16 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
             let closing = name.starts_with('/');
             let element = name.trim_start_matches('/');
 
-            // Inside a hidden element, only track where it ends
+            // Inside a hidden element, only track where it ends. One whose
+            // end tag HTML lets a page leave out also ends where a browser
+            // would close it, and this tag is then read as usual; otherwise
+            // an unclosed hidden `<p>` or `<li>` would hide the rest of the
+            // page.
+            if let Some((hidden_name, 1)) = hidden.as_ref()
+                && implicitly_closes(hidden_name, element, closing)
+            {
+                hidden = None;
+            }
             if let Some((hidden_name, depth)) = hidden.as_mut() {
                 if element == hidden_name.as_str() {
                     if closing {
@@ -1199,8 +1324,11 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
                     | "main"
             );
             if is_block && in_cell {
-                if !last_was_whitespace {
-                    result.push(' ');
+                // A break that `resolve_cell_breaks` settles once the whole
+                // row is known: a space on a table row, a newline on a page
+                // laid out as one big cell.
+                if !result.ends_with([SOFT_BREAK, CELL_BREAK, '\n']) {
+                    result.push(SOFT_BREAK);
                     last_was_whitespace = true;
                 }
             } else if is_block && !result.ends_with('\n') {
@@ -1234,6 +1362,7 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
 
     // Decode HTML entities, once (`html_entities::decode_html_entities`)
     let result = crate::tools::html_entities::decode_html_entities(&result);
+    let result = resolve_cell_breaks(&result);
     let result = tidy_table_rows(&result);
 
     // Trim each line (a decoded `&nbsp;` spacer leaves lines of only
@@ -1716,6 +1845,49 @@ mod tests {
             text,
             "Total revenue | $359,747\nNet loss | (12)\nAfter\nthe table"
         );
+    }
+
+    /// A page laid out as one big table cell (Paul Graham's essays, Hacker
+    /// News, older sites) keeps its paragraphs: only a row short enough to
+    /// be a table row reads its blocks as spaces.
+    #[test]
+    fn test_html_to_text_page_laid_out_in_a_table_keeps_its_paragraphs() {
+        let paragraph = "word ".repeat(150);
+        let html = format!(
+            "<table><tr><td><img src=\"x.gif\"></td><td><font>Title<br><br>{p}<br><br>{p}\
+             <p>{p}</p><p>Last paragraph.</p></font></td></tr></table>",
+            p = paragraph
+        );
+        let text = extract(&html);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "got {text:?}");
+        assert_eq!(lines[0], "Title");
+        assert_eq!(lines[1], paragraph.trim());
+        assert_eq!(lines[4], "Last paragraph.");
+        assert!(!text.contains(SOFT_BREAK));
+    }
+
+    /// A hidden element whose end tag the page left out ends where a
+    /// browser would close it, instead of hiding the rest of the page.
+    #[test]
+    fn test_html_to_text_unclosed_hidden_element_does_not_hide_the_page() {
+        let html = "<body><p style=\"display:none\">secret<p>First visible\
+                    <ul><li style=\"display:none\">hidden item<li>Shown item</ul>\
+                    <table><tr><td style=\"display:none\">x<td>Cell</table>\
+                    <div>After</div></body>";
+        let text = extract(html);
+        assert!(!text.contains("secret"), "got {text:?}");
+        assert!(!text.contains("hidden item"), "got {text:?}");
+        assert!(text.contains("First visible"), "got {text:?}");
+        assert!(text.contains("Shown item"), "got {text:?}");
+        assert!(text.contains("Cell"), "got {text:?}");
+        assert!(text.contains("After"), "got {text:?}");
+        // A closed one still hides all of itself, nested tags included.
+        let closed = extract(
+            "<p style=\"display:none\">a <b>b</b> c</p><p>Shown</p>\
+             <div style=\"display:none\"><p>x<div>y</div>z</div><p>Also shown</p>",
+        );
+        assert_eq!(closed, "Shown\nAlso shown");
     }
 
     /// A long page made of numbered lines, for the find tests.
