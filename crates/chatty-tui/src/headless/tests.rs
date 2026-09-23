@@ -128,20 +128,38 @@ fn keeps_plain_text_payload_lines() {
 
 #[test]
 fn detects_answer_file_requirement() {
-    assert!(prompt_requires_answer_file(
-        "write ONLY the final answer to `/app/answer.txt`"
-    ));
-    assert!(prompt_requires_answer_file(
-        "Create ANSWER.TXT once you are done"
-    ));
-    assert!(!prompt_requires_answer_file(
-        "Explain the result in the terminal"
-    ));
+    assert!(prompt_requires_answer_file(&[
+        "write ONLY the final answer to `/app/answer.txt`",
+        ""
+    ]));
+    assert!(prompt_requires_answer_file(&[
+        "Create ANSWER.TXT once you are done",
+        ""
+    ]));
+    assert!(!prompt_requires_answer_file(&[
+        "Explain the result in the terminal",
+        ""
+    ]));
+}
+
+#[test]
+fn detects_answer_file_requirement_from_preamble_only() {
+    // AGE evidence: the instruction to write /app/answer.txt sometimes
+    // arrives via --preamble rather than --message; detection must look at
+    // both instead of only the message.
+    assert!(prompt_requires_answer_file(&[
+        "What is the total revenue?",
+        "You are FinanceAgent. Write your final answer to /app/answer.txt."
+    ]));
+    assert!(!prompt_requires_answer_file(&[
+        "What is the total revenue?",
+        "You are FinanceAgent. Be concise."
+    ]));
 }
 
 #[test]
 fn tool_budget_stop_only_applies_to_answer_file_tasks() {
-    assert!(!prompt_requires_answer_file("Explain the result"));
+    assert!(!prompt_requires_answer_file(&["Explain the result", ""]));
     assert_eq!(MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION, 16);
 }
 

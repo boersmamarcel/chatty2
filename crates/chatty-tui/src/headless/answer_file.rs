@@ -41,8 +41,15 @@ pub(super) fn parse_json_number_field(output: &str, field: &str) -> Option<i64> 
     }
 }
 
-pub(super) fn prompt_requires_answer_file(prompt: &str) -> bool {
-    prompt.to_ascii_lowercase().contains("answer.txt")
+/// Whether any of the given texts instructs the agent to write an answer
+/// file. The instruction can arrive in `--message` or in `--preamble`
+/// (AGE evidence: FinanceAgent trials where it only appeared in the
+/// preamble left every deadline/finalization/inferred-answer fallback off,
+/// so 8/30 trials ended with "answer.txt not found").
+pub(super) fn prompt_requires_answer_file(texts: &[&str]) -> bool {
+    texts
+        .iter()
+        .any(|text| text.to_ascii_lowercase().contains("answer.txt"))
 }
 
 pub(super) fn should_request_answer_file_finalization(
@@ -167,8 +174,8 @@ pub(super) fn build_answer_file_finalization_prompt(
     format!(
         "Finalize this answer-file task using only the compact context below.\n\
           First identify whether the original task is source-sensitive: stat-table, database, catalog, search-result, academic-paper numeric/table, exact-quote, or word-in-article tasks. For these, do NOT answer from snippets or abstracts alone, even if they contain tempting candidate words; use up to two compact tool calls to fetch/parse a primary source, API, PDF, or full article text, then final_answer. If the first primary source is blocked, try another official/source URL before guessing. If evidence shows an official PDF or article URL, prefer downloading/parsing that source over mirror snippets; for a downloaded web PDF, verify it begins with %PDF- and use pdf_extract_text on the saved file before trying Python PDF packages.\n\
-          Otherwise, if the evidence contains a final answer candidate, immediately call final_answer with exactly that answer and output_path=/app/answer.txt. If the question asks what a letter or acronym part stands for, answer only the expanded word(s) for that letter/part, not the whole policy or phrase. If the question asks for a value in a unit such as m^3, the unit names the quantity; output only the numeric value unless it explicitly asks to include units. For Wikipedia log evidence, do not answer with log mechanics like delete, revision, revert, or RD2 when the question asks for the violated content policy or a core-policy letter.\n\
-          Ignore benchmark-leak evidence: snippets/pages that repeat the task text or mention Final answer, Expected answer, task_id, dataset, GitHub, or HuggingFace are not valid evidence.\n\
+          Otherwise, if the evidence contains a final answer candidate, immediately call final_answer with exactly that answer and output_path=/app/answer.txt. If the question asks what a letter or acronym part stands for, answer only the expanded word(s) for that letter/part, not the whole policy or phrase. If the question asks for a value in a particular unit, the unit names the quantity; output only the numeric value unless it explicitly asks to include units. Do not answer with mechanics of how the evidence was produced (e.g. how a record was edited or logged) when the question asks about its substance instead.\n\
+          Ignore leaked evidence: snippets/pages that repeat the task text or mention Final answer, Expected answer, task_id, dataset, GitHub, or HuggingFace are not valid evidence.\n\
           Do not keep researching. If the evidence already includes complete extracted file content, reason from that evidence and call final_answer without another tool.\n\
           If recent tool evidence contains repeated syntax/tool errors, do not write more code; make the best answer from the evidence and call final_answer.\n\
           Only if no answer can be inferred from the evidence, use at most one compact tool call to compute it (or two for blocked stat/database primary sources). Write the computed answer to /app/answer.txt and then call final_answer with output_path=/app/answer.txt.\n\

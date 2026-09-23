@@ -98,6 +98,15 @@ impl HeadlessRunner {
         self.config.team.is_some()
     }
 
+    /// This role's preamble (`--preamble`, or a team leader's/worker's own
+    /// declared one), if any. An instruction like "write your answer to
+    /// /app/answer.txt" can arrive here instead of in `--message`, which the
+    /// answer-file heuristics need to check too (AGE evidence: FinanceAgent
+    /// trials that only got the instruction via `--preamble`).
+    pub(super) fn role_preamble(&self) -> Option<&str> {
+        self.config.role.preamble.as_deref()
+    }
+
     /// Build the agent (with the session's store handles) and its conversation.
     pub async fn init_conversation(&mut self) -> Result<()> {
         let mcp_tools = match self.config.mcp_service {

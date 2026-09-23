@@ -64,7 +64,10 @@ pub async fn run_headless(
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
     message: String,
 ) -> Result<()> {
-    let answer_file_required = prompt_requires_answer_file(&message);
+    let answer_file_required = prompt_requires_answer_file(&[
+        message.as_str(),
+        engine.role_preamble().unwrap_or_default(),
+    ]);
 
     // Send message
     engine.send_message(message.clone());
