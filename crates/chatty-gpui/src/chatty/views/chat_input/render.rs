@@ -31,7 +31,7 @@ use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
 use super::ThumbnailCache;
 use super::at_mention::{at_menu_items_for, render_at_menu};
 use super::slash::{render_slash_menu, slash_menu_items_with_skills};
-use super::{ChatInput, ChatInputEvent, ChatInputState};
+use super::{ChatInput, ChatInputEvent, ChatInputState, format_run_status};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 
 // ---------------------------------------------------------------------------
@@ -161,6 +161,14 @@ impl RenderOnce for ChatInput {
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
         let is_streaming = self.state.read(cx).is_streaming();
+        let run_status = is_streaming
+            .then(|| {
+                format_run_status(
+                    self.state.read(cx).turn_progress(),
+                    self.state.read(cx).turn_elapsed(),
+                )
+            })
+            .flatten();
 
         // Read thumbnail cache (for PDF previews)
         let thumbnail_cache = self.state.read(cx).thumbnail_cache.clone();
@@ -628,6 +636,22 @@ impl RenderOnce for ChatInput {
                                             })
                                             .child(model_popover),
                                     )
+                                    .when_some(run_status, |row, status| {
+                                        // Live run indicator: turn count, this
+                                        // turn's tokens, elapsed time. Small
+                                        // and unobtrusive, next to Stop —
+                                        // there is no turn cap to watch for
+                                        // anymore, so this is the only signal
+                                        // the run is still making progress.
+                                        row.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px_2()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(status),
+                                        )
+                                    })
                                     .when(is_streaming, |row| {
                                         // Send stays while a reply streams: the
                                         // message waits in the conversation's
