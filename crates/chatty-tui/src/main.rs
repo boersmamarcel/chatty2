@@ -72,7 +72,8 @@ TOOL GROUPS:
     ask-user     Allow the model to ask the user a clarifying question
 
   Defaults come from the persisted Chatty execution settings. CLI flags override
-  those defaults for the session.
+  those defaults for the session. --only replaces the defaults outright with a
+  strict allow-list instead of adding to or subtracting from them.
 
 EXAMPLES:
   chatty-tui                                     # Interactive, default model
@@ -81,6 +82,7 @@ EXAMPLES:
   chatty-tui --ollama --model llama3.2           # Use a specific Ollama model
   chatty-tui --openai-compat-url http://localhost:8000  # Connect to vllm/llama.cpp
   chatty-tui --enable git,shell --disable fetch   # Custom tool set
+  chatty-tui --only fs-read,fs-write              # Strict allow-list
   chatty-tui --headless -m \"What is Rust?\"        # One-shot query
   cat src/main.rs | chatty-tui --pipe             # Pipe file contents as input"
 )]
@@ -141,6 +143,17 @@ struct Cli {
     /// Example: --disable fetch,docker-exec
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
     disable: Vec<String>,
+
+    /// Run with exactly these tool groups and no others (comma-separated
+    /// strict allow-list). Same group names as --enable/--disable. Unlike
+    /// --enable, which adds to the persisted defaults, --only ignores them:
+    /// every unnamed group is turned off. Applied after --enable/--disable
+    /// (which are otherwise unaffected — --only just replaces their effect
+    /// for the groups it manages) and before --tools/--tool-loading.
+    ///
+    /// Example: --only fs-read,fs-write
+    #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
+    only: Vec<String>,
 
     /// How the model is offered its tools: `all` (default) sends every
     /// enabled tool's schema with every request; `dynamic` sends a small
@@ -501,6 +514,9 @@ async fn main() -> Result<()> {
 
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable)?;
+    if !cli.only.is_empty() {
+        apply_tool_only(&mut execution_settings, &cli.only)?;
+    }
     if let Some(tool_loading) = cli.tool_loading {
         execution_settings.tool_loading = tool_loading;
     }
@@ -1004,13 +1020,13 @@ fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfi
     );
 }
 
-/// The tool group names recognized by --enable/--disable.
+/// The tool group names recognized by --enable/--disable/--only.
 const VALID_TOOL_GROUPS: &str =
     "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user";
 
-/// Flip one named tool group on `settings`. Shared by --enable and --disable
-/// so the group vocabulary (and its docker-exec/code-exec coupling) is
-/// defined in exactly one place.
+/// Flip one named tool group on `settings`. Shared by --enable, --disable
+/// and --only so the group vocabulary (and its docker-exec/code-exec
+/// coupling) is defined in exactly one place.
 fn set_tool_group(
     settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
     name: &str,
@@ -1052,9 +1068,39 @@ fn apply_tool_overrides(
     Ok(())
 }
 
+/// All tool groups --only can turn off before turning the named ones back on.
+const ALL_TOOL_GROUPS: &[&str] = &[
+    "shell",
+    "fs-read",
+    "fs-write",
+    "fetch",
+    "git",
+    "code-exec",
+    "docker-exec",
+    "ask-user",
+];
+
+/// Strict allow-list: turn every known group off, then turn on exactly the
+/// ones named in `only`. Unlike --enable/--disable, which adjust the
+/// persisted defaults, this ignores them entirely for the groups it manages.
+fn apply_tool_only(
+    settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
+    only: &[String],
+) -> Result<()> {
+    for group in ALL_TOOL_GROUPS {
+        set_tool_group(settings, group, false)
+            .expect("ALL_TOOL_GROUPS entries are always valid group names");
+    }
+    for name in only {
+        set_tool_group(settings, name, true)
+            .with_context(|| "invalid name in --only".to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tool_override_tests {
-    use super::apply_tool_overrides;
+    use super::{apply_tool_only, apply_tool_overrides};
     use chatty_core::settings::models::ExecutionSettingsModel;
 
     #[test]
@@ -1102,6 +1148,36 @@ mod tool_override_tests {
         apply_tool_overrides(&mut settings, &["docker-exec".to_string()], &[]).unwrap();
         assert!(settings.execute_code_enabled);
         assert!(settings.docker_code_execution_enabled);
+    }
+
+    #[test]
+    fn only_turns_off_every_group_not_named() {
+        // A permissive baseline: --only must still cut it down.
+        let mut settings = ExecutionSettingsModel {
+            git_enabled: true,
+            browser_enabled: true,
+            ..Default::default()
+        };
+        assert!(settings.filesystem_read_enabled); // on by default
+
+        apply_tool_only(&mut settings, &["fs-read".to_string()]).unwrap();
+
+        assert!(settings.filesystem_read_enabled);
+        assert!(!settings.filesystem_write_enabled);
+        assert!(!settings.fetch_enabled);
+        assert!(!settings.git_enabled);
+        assert!(!settings.enabled);
+        assert!(!settings.ask_user_enabled);
+    }
+
+    #[test]
+    fn only_rejects_an_unknown_name() {
+        let mut settings = ExecutionSettingsModel::default();
+        let err = format!(
+            "{:#}",
+            apply_tool_only(&mut settings, &["not-a-group".to_string()]).unwrap_err()
+        );
+        assert!(err.contains("not-a-group"), "error was: {err}");
     }
 }
 
