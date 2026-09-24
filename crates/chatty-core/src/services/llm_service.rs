@@ -502,12 +502,14 @@ pub async fn stream_prompt(
     clarification_rx: Option<mpsc::UnboundedReceiver<ClarificationNotification>>,
     turn_budget: TurnBudget,
 ) -> Result<ResponseStream> {
-    // A stale `ModelConfig::supports_images` (OpenRouter's blanket default is
-    // "true" for every model behind it) or a model switch mid-conversation
-    // (history built for a vision model, now sent to a text-only one) would
-    // otherwise reach the provider as-is and come back as a raw 400 (e.g.
-    // "At most 0 image(s) may be provided") instead of something the model or
-    // the user can act on. Strip images up front and tell the model instead.
+    // A model switch mid-conversation (history built for a vision model, now
+    // sent to a text-only one) or an image-producing tool result would
+    // otherwise reach a model configured as text-only as-is and come back as
+    // a raw 400 (e.g. "At most 0 image(s) may be provided") instead of
+    // something the model or the user can act on. Strip images up front and
+    // tell the model instead. This trusts `ModelConfig::supports_images`: a
+    // text-only model wrongly flagged `true` (OpenRouter's blanket default)
+    // still sends its images, and a vision model flagged `false` loses them.
     let (history, contents) = strip_unsupported_images(history, contents, agent.supports_images());
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
