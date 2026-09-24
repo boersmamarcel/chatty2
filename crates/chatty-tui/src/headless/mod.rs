@@ -38,8 +38,27 @@ pub use runner::HeadlessRunner;
 
 const MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS: usize = 5;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
-const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
-const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 3;
+/// Tool results an answer-file run may spend exploring before headless stops
+/// it for a finalization turn, as a share of the run's `max_agent_turns`
+/// (see `answer_file_tool_budget`). 80 % sits just after chatty-core's
+/// `TurnBudget` wrap-up note (75 %), so the model hears "start wrapping up"
+/// once, gets a few turns to act on it, and only then is handed the
+/// finalization turn — which, unlike TurnBudget's tool-free last word, can
+/// still write the answer file.
+const ANSWER_FILE_TOOL_BUDGET_PERCENT: usize = 80;
+/// The budget never drops below this: a small cap (the default is 10) ends
+/// the stream through TurnBudget first, and the post-stream finalization
+/// catches a missing answer file there.
+const MIN_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
+/// The budget when the run has no turn cap (`max_agent_turns == 0`).
+const UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 40;
+/// Failed tool results (not counting sandbox/path-policy refusals) before a
+/// finalization turn. Was 3, which one bad Python script plus a refusal
+/// tripped while the model was still converging.
+const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 8;
+/// Tools that run a command whose output the model has not seen yet when an
+/// answer file they wrote appears (`python3 count.py; echo -n 5 > answer.txt`).
+const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
 const FINALIZATION_MAX_AGENT_TURNS: u32 = 12;
 const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 6_000;
 const FINALIZATION_EVIDENCE_CHARS: usize = 16_000;
@@ -113,6 +132,10 @@ pub async fn run_headless(
     // and per-turn verbosity tracking.
     let max_agent_turns = engine.execution_settings.max_agent_turns as usize;
     let mut loop_guard = AgentLoopGuard::new(max_agent_turns, answer_file_required);
+    let tool_budget = answer_file_tool_budget(max_agent_turns);
+    // Set when a command tool wrote the answer file: the model gets one more
+    // turn to see that command's output before the run stops.
+    let mut answer_file_grace_turn = false;
     // Hard-stop flag set when loop_guard or the backstop threshold is exceeded.
     let mut text_overflow_stop_requested = false;
     let mut text_hard_stop_requested = false;
@@ -168,6 +191,7 @@ pub async fn run_headless(
                 let mut called_final_answer = false;
                 let mut pivot_msg: Option<String> = None;
                 let mut tool_failed = false;
+                let mut wrote_by_command = false;
                 let mut compact_file_extracted = false;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
@@ -196,7 +220,8 @@ pub async fn run_headless(
                         }
                         called_final_answer = true;
                     }
-                    tool_failed = status == "err";
+                    tool_failed = status == "err" && !tool_result_is_policy_refusal(tc);
+                    wrote_by_command = COMMAND_TOOLS.contains(&tc.name.as_str());
                     compact_file_extracted =
                         compact_file_extraction_tool_result(answer_file_required, tc);
                     // Check for repeated identical tool call (loop detection).
@@ -217,10 +242,27 @@ pub async fn run_headless(
                     eprintln!("final_answer completed and answer file exists; stopping stream.");
                     engine.stop_stream();
                 } else if stops_on_answer_file(&engine, answer_file_required) {
-                    // Answer file was written by a non-final_answer tool (e.g. echo via shell).
-                    // Stop the stream so the model doesn't loop writing the same answer repeatedly.
-                    eprintln!("Answer file exists after tool call; stopping stream early.");
-                    engine.stop_stream();
+                    match answer_file_stop(answer_file_grace_turn, wrote_by_command) {
+                        AnswerFileStop::Now => {
+                            // Written by a dedicated write (write_file & co.),
+                            // or the model has had its look at the command's
+                            // output and acted again: stop so it doesn't
+                            // loop rewriting the same answer.
+                            eprintln!("Answer file exists after tool call; stopping stream early.");
+                            engine.stop_stream();
+                        }
+                        AnswerFileStop::AfterNextTurn => {
+                            // `python3 count.py; echo -n 5 > answer.txt`: the
+                            // model has not seen what the command printed.
+                            // One more model turn to read it (and rewrite the
+                            // file if it disagrees); the next tool result, a
+                            // final_answer, or the turn ending stops the run.
+                            answer_file_grace_turn = true;
+                            eprintln!(
+                                "Answer file written by a command; letting the model see its output for one more turn."
+                            );
+                        }
+                    }
                 } else if !compact_file_finalization_sent
                     && compact_file_extracted
                     && !answer_file_exists(&engine)
@@ -259,6 +301,7 @@ pub async fn run_headless(
                 if should_stop_for_answer_file_tool_budget(
                     answer_file_required,
                     tool_results_since_finalization,
+                    tool_budget,
                     finalization_attempts,
                     tool_budget_stop_requested,
                     &engine,
@@ -285,17 +328,27 @@ pub async fn run_headless(
             AppEvent::ToolCallError { ref id, .. } => {
                 let id_str = id.clone();
                 engine.handle_event(event);
+                let mut refused = false;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
+                    refused = tool_result_is_policy_refusal(tc);
+                }
+                if answer_file_grace_turn && stops_on_answer_file(&engine, answer_file_required) {
+                    eprintln!("Answer file exists after the extra turn; stopping stream.");
+                    engine.stop_stream();
+                    continue;
                 }
                 tool_results_since_finalization += 1;
-                failed_tool_results_since_finalization += 1;
+                if !refused {
+                    failed_tool_results_since_finalization += 1;
+                }
                 if should_stop_for_answer_file_tool_budget(
                     answer_file_required,
                     tool_results_since_finalization,
+                    tool_budget,
                     finalization_attempts,
                     tool_budget_stop_requested,
                     &engine,
@@ -586,6 +639,30 @@ pub async fn run_headless(
 /// flow does, or its turns run out, never on a file somebody else wrote.
 fn stops_on_answer_file(engine: &HeadlessRunner, answer_file_required: bool) -> bool {
     answer_file_required && !engine.is_team_leader() && answer_file_exists(engine)
+}
+
+/// What an answer file that just appeared after a tool result means for
+/// the stream.
+#[derive(Debug, PartialEq, Eq)]
+enum AnswerFileStop {
+    /// Stop the stream now.
+    Now,
+    /// Let the model see this tool result for one more turn first.
+    AfterNextTurn,
+}
+
+/// A dedicated write of the answer (write_file, apply_diff, ...) holds no
+/// output the model has not seen, so it stops the run at once. A command
+/// (`shell_execute`, `execute_code`) that computes and writes in one go does
+/// — `python3 count.py; echo -n 5 > answer.txt` wrote 5 while the script
+/// printed 7 — so the model gets one more turn to read it. Once that grace
+/// turn has been given (`grace_given`), any further tool result stops.
+fn answer_file_stop(grace_given: bool, wrote_by_command: bool) -> AnswerFileStop {
+    if wrote_by_command && !grace_given {
+        AnswerFileStop::AfterNextTurn
+    } else {
+        AnswerFileStop::Now
+    }
 }
 
 fn should_infer_missing_answer(original_prompt: &str) -> bool {

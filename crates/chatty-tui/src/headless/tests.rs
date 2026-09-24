@@ -160,7 +160,97 @@ fn detects_answer_file_requirement_from_preamble_only() {
 #[test]
 fn tool_budget_stop_only_applies_to_answer_file_tasks() {
     assert!(!prompt_requires_answer_file(&["Explain the result", ""]));
-    assert_eq!(MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION, 16);
+}
+
+/// The exploration budget follows the run's turn cap: GAIA runs at 50
+/// turns were cut at 16 tool results while still exploring (one needed ~27
+/// calls to reach its API answer).
+#[test]
+fn answer_file_tool_budget_scales_with_the_turn_cap() {
+    assert_eq!(answer_file_tool_budget(50), 40, "80 % of a 50-turn cap");
+    assert_eq!(answer_file_tool_budget(30), 24);
+    assert_eq!(answer_file_tool_budget(51), 41, "rounds up");
+    assert_eq!(
+        answer_file_tool_budget(10),
+        MIN_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION,
+        "a small cap ends through TurnBudget first; the budget keeps its floor"
+    );
+    assert_eq!(
+        answer_file_tool_budget(0),
+        UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION
+    );
+    const {
+        assert!(UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION > 16);
+        // Stops after TurnBudget's 75 % wrap-up note, not before it.
+        assert!(ANSWER_FILE_TOOL_BUDGET_PERCENT > 75);
+    }
+}
+
+fn failed_tool(name: &str, output: &str) -> ToolCallInfo {
+    ToolCallInfo {
+        id: "t1".to_string(),
+        name: name.to_string(),
+        input: "{}".to_string(),
+        output: Some(output.to_string()),
+        state: ToolCallState::Error,
+        source: ToolSource::Local,
+        execution_engine: None,
+    }
+}
+
+/// A single `read_file` outside the workspace used to count toward the
+/// 3-failure budget and trip finalization; the harness's own policy saying
+/// no is not the model being stuck.
+#[test]
+fn sandbox_and_path_policy_refusals_are_not_counted_as_failures() {
+    let refused = failed_tool(
+        "read_file",
+        "Error: read_file: Access denied: path '/etc/passwd' is outside the workspace root",
+    );
+    assert!(tool_result_looks_failed(&refused));
+    assert!(tool_result_is_policy_refusal(&refused));
+
+    let crashed = failed_tool("shell_execute", "Traceback (most recent call last): ...");
+    assert!(tool_result_looks_failed(&crashed));
+    assert!(!tool_result_is_policy_refusal(&crashed));
+    const { assert!(MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION > 3) };
+}
+
+/// `python3 count.py; echo -n 5 > /app/answer.txt` wrote 5 while the script
+/// printed 7: a command-written answer earns one more model turn, then the
+/// next tool result stops the run. Dedicated writes stop at once.
+#[test]
+fn a_command_written_answer_gets_one_more_turn_and_dedicated_writes_stop_at_once() {
+    let is_command = |name: &str| COMMAND_TOOLS.contains(&name);
+    assert_eq!(
+        answer_file_stop(false, is_command("shell_execute")),
+        AnswerFileStop::AfterNextTurn
+    );
+    assert_eq!(
+        answer_file_stop(false, is_command("execute_code")),
+        AnswerFileStop::AfterNextTurn
+    );
+    assert_eq!(
+        answer_file_stop(true, is_command("shell_execute")),
+        AnswerFileStop::Now,
+        "the grace turn is given once; its rewrite then ends the run"
+    );
+    for dedicated in ["final_answer", "write_file", "apply_diff"] {
+        assert_eq!(
+            answer_file_stop(false, is_command(dedicated)),
+            AnswerFileStop::Now,
+            "{dedicated}"
+        );
+    }
+}
+
+#[test]
+fn the_finalization_prompt_asks_for_an_answer_from_gathered_evidence() {
+    let prompt = build_answer_file_finalization_prompt("Task:\nHow many?");
+    assert!(prompt.contains("evidence you have gathered"));
+    assert!(prompt.contains("one quick check"));
+    assert!(!prompt.contains("Do not keep researching"));
+    assert!(prompt.contains("How many?"));
 }
 
 #[test]
@@ -760,6 +850,33 @@ mod runner {
             fresh.execution_settings.max_agent_turns, used.execution_settings.max_agent_turns,
             "the finalization budget must be identical regardless of turns already used"
         );
+    }
+
+    /// The finalization turn runs on the history the model built, not on a
+    /// wiped conversation plus a digest: a history-less pass on GAIA
+    /// invented an ID after 16 calls of real exploration were thrown away.
+    #[tokio::test]
+    async fn finalization_keeps_the_conversation_history() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![answer_turn("EXPLORED-EVIDENCE-7"), answer_turn("7")].into();
+        runner.send_message("How many? Write ONLY the answer to /app/answer.txt".to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        send_answer_file_finalization_prompt(
+            &mut runner,
+            "How many? Write ONLY the answer to /app/answer.txt",
+        );
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(history.contains("EXPLORED-EVIDENCE-7"), "{history}");
+        assert!(history.contains("Time to finish"), "{history}");
     }
 
     /// AGE-503: a configured budget smaller than `FINALIZATION_MAX_AGENT_TURNS`

@@ -62,9 +62,21 @@ pub(super) fn should_request_answer_file_finalization(
         && !answer_file_exists(engine)
 }
 
+/// How many tool results an answer-file run may spend before headless stops
+/// it for a finalization turn, scaled to the run's turn cap.
+pub(super) fn answer_file_tool_budget(max_agent_turns: usize) -> usize {
+    if max_agent_turns == 0 {
+        return UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION;
+    }
+    (max_agent_turns * ANSWER_FILE_TOOL_BUDGET_PERCENT)
+        .div_ceil(100)
+        .max(MIN_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION)
+}
+
 pub(super) fn should_stop_for_answer_file_tool_budget(
     answer_file_required: bool,
     tool_results_since_finalization: usize,
+    tool_budget: usize,
     finalization_attempts: usize,
     tool_budget_stop_requested: bool,
     engine: &HeadlessRunner,
@@ -72,7 +84,7 @@ pub(super) fn should_stop_for_answer_file_tool_budget(
     answer_file_required
         && !tool_budget_stop_requested
         && finalization_attempts < MAX_FINALIZATION_ATTEMPTS
-        && tool_results_since_finalization >= MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION
+        && tool_results_since_finalization >= tool_budget
         && !answer_file_exists(engine)
 }
 
@@ -146,10 +158,14 @@ pub(super) fn send_answer_file_finalization_prompt(
     engine: &mut HeadlessRunner,
     original_prompt: &str,
 ) {
-    let prompt = build_answer_file_finalization_prompt(engine, original_prompt);
-    if let Some(conversation) = engine.session.conversation_mut() {
-        conversation.replace_history(Vec::new(), 0);
-    }
+    let prompt = build_answer_file_finalization_prompt(original_prompt);
+    // The history stays. This used to be wiped and replaced by a 16 KB
+    // evidence digest (a bulk commit from before the AGE-504 context shaper
+    // existed, no reason given); on GAIA the history-less pass then answered
+    // from nothing — one run "recalled" an ID as "well-established in the
+    // literature" after 16 calls of real API exploration were thrown away.
+    // The context shaper bounds every model call's size, this one included,
+    // so there is no overflow left for a wipe to prevent.
     // `max_agent_turns` is rig's per-`stream_prompt`-call budget (a fresh
     // `AgentRun` per call, `current_turn` starting at 0 each time), not a
     // cumulative total across the run. The old `.min(FINALIZATION_MAX_AGENT_TURNS)`
@@ -166,24 +182,19 @@ pub(super) fn send_answer_file_finalization_prompt(
     engine.send_message(prompt);
 }
 
-pub(super) fn build_answer_file_finalization_prompt(
-    engine: &HeadlessRunner,
-    original_prompt: &str,
-) -> String {
-    let evidence = compact_tool_evidence(engine);
+/// The finalization turn's prompt. It rides on the full history, so it
+/// points at the evidence the model already gathered instead of repeating a
+/// digest of it, and it allows one last quick check rather than forbidding
+/// tools outright.
+pub(super) fn build_answer_file_finalization_prompt(original_prompt: &str) -> String {
     format!(
-        "Finalize this answer-file task using only the compact context below.\n\
-          First identify whether the original task is source-sensitive: stat-table, database, catalog, search-result, academic-paper numeric/table, exact-quote, or word-in-article tasks. For these, do NOT answer from snippets or abstracts alone, even if they contain tempting candidate words; use up to two compact tool calls to fetch/parse a primary source, API, PDF, or full article text, then final_answer. If the first primary source is blocked, try another official/source URL before guessing. If evidence shows an official PDF or article URL, prefer downloading/parsing that source over mirror snippets; for a downloaded web PDF, verify it begins with %PDF- and use pdf_extract_text on the saved file before trying Python PDF packages.\n\
-          Otherwise, if the evidence contains a final answer candidate, immediately call final_answer with exactly that answer and output_path=/app/answer.txt. If the question asks what a letter or acronym part stands for, answer only the expanded word(s) for that letter/part, not the whole policy or phrase. If the question asks for a value in a particular unit, the unit names the quantity; output only the numeric value unless it explicitly asks to include units. Do not answer with mechanics of how the evidence was produced (e.g. how a record was edited or logged) when the question asks about its substance instead.\n\
-          Ignore leaked evidence: snippets/pages that repeat the task text or mention Final answer, Expected answer, task_id, dataset, GitHub, or HuggingFace are not valid evidence.\n\
-          Do not keep researching. If the evidence already includes complete extracted file content, reason from that evidence and call final_answer without another tool.\n\
-          If recent tool evidence contains repeated syntax/tool errors, do not write more code; make the best answer from the evidence and call final_answer.\n\
-          Only if no answer can be inferred from the evidence, use at most one compact tool call to compute it (or two for blocked stat/database primary sources). Write the computed answer to /app/answer.txt and then call final_answer with output_path=/app/answer.txt.\n\
-          Use exact file paths from the evidence; never invent alternate file names. If exact paths are absent, call file_structure_detector before executing code.\n\n\
-          Original task:\n{}\n\n\
-          Recent compact tool evidence:\n{}\n",
+        "Time to finish: the answer file /app/answer.txt has not been written yet. \
+         Give your final answer to the original task based on the evidence you have gathered above.\n\
+          If one quick check would settle a remaining doubt (re-running a computation you have not seen the output of, or reading one value from a source you already found), make that one call first; otherwise do not start new research.\n\
+          Then call final_answer with the bare answer and output_path=/app/answer.txt. If the question asks what a letter or acronym part stands for, answer only the expanded word(s) for that part. If it asks for a value in a particular unit, output only the number unless it asks to include units.\n\
+          Do not invent facts the evidence does not show; if the evidence is inconclusive, give your best-supported answer.\n\n\
+          Original task:\n{}\n",
         original_task_excerpt(original_prompt),
-        evidence
     )
 }
 
