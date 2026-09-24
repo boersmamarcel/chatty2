@@ -56,10 +56,7 @@ pub(super) fn profile_spreadsheet(
 
     let mut csv = String::new();
     for row in range.rows() {
-        let cells: Vec<String> = row
-            .iter()
-            .map(|cell| csv_field(&cell.to_string()))
-            .collect();
+        let cells: Vec<String> = row.iter().map(|cell| csv_field(&cell_text(cell))).collect();
         csv.push_str(&cells.join(","));
         csv.push('\n');
     }
@@ -96,6 +93,25 @@ pub(super) fn profile_spreadsheet(
         "'{}' is a spreadsheet, and this build has no Excel support",
         path.display()
     )))
+}
+
+/// A cell as CSV text. calamine's `Display` writes a date cell as its Excel
+/// serial number (`45292`), which DuckDB would profile as a plain number;
+/// write it as an ISO date (with the time when it has one) so it is
+/// profiled as a date. Durations keep their numeric value.
+#[cfg(feature = "excel")]
+fn cell_text(cell: &calamine::Data) -> String {
+    match cell {
+        calamine::Data::DateTime(dt) if dt.is_datetime() => {
+            let (y, mo, d, h, mi, s, _) = dt.to_ymd_hms_milli();
+            if (h, mi, s) == (0, 0, 0) {
+                format!("{y:04}-{mo:02}-{d:02}")
+            } else {
+                format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+            }
+        }
+        other => other.to_string(),
+    }
 }
 
 /// `value` as one CSV field, quoted when it holds a separator, quote or
@@ -416,4 +432,27 @@ pub(super) fn is_complex_type(upper_data_type: &str) -> bool {
         || upper_data_type.contains("LIST")
         || upper_data_type.contains("STRUCT")
         || upper_data_type.contains("MAP")
+}
+
+#[cfg(all(test, feature = "excel"))]
+mod spreadsheet_tests {
+    use super::cell_text;
+    use calamine::{Data, ExcelDateTime, ExcelDateTimeType};
+
+    #[test]
+    fn date_cells_are_written_as_iso_dates_not_serials() {
+        let date = Data::DateTime(ExcelDateTime::new(
+            45292.0,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
+        assert_eq!(cell_text(&date), "2024-01-01");
+        let noon = Data::DateTime(ExcelDateTime::new(
+            45292.5,
+            ExcelDateTimeType::DateTime,
+            false,
+        ));
+        assert_eq!(cell_text(&noon), "2024-01-01 12:00:00");
+        assert_eq!(cell_text(&Data::Float(1.5)), "1.5");
+    }
 }
