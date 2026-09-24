@@ -617,3 +617,100 @@ fn test_exit_code_from_status_preserves_shell_exit_code() {
         .expect("failed to capture exit status");
     assert_eq!(ShellSession::exit_code_from_status(status), 42);
 }
+
+/// A scratch workspace with `home/` inside it, so the profile is visible to
+/// a bubblewrap-sandboxed shell too (only the workspace is bound).
+fn workspace_with_profile(profile: &str) -> (tempfile::TempDir, String, String) {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = workspace.path().join("home");
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::write(home.join(".profile"), profile).unwrap();
+    std::fs::write(
+        home.join("bin/chatty-profile-tool"),
+        "#!/bin/sh\necho tool-ran\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            home.join("bin/chatty-profile-tool"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let workspace_str = workspace.path().to_str().unwrap().to_string();
+    let home_str = home.to_str().unwrap().to_string();
+    (workspace, workspace_str, home_str)
+}
+
+/// The project's environment lives in the login profile (a conda env, PATH
+/// additions): the shell must see it from the first command. The profile's
+/// own output, a `read` on stdin, a `cd` and a `set -e` must not leak into
+/// the session.
+#[tokio::test]
+async fn test_login_profile_environment_is_loaded() {
+    let (_workspace, workspace, home) = workspace_with_profile(
+        "echo profile-noise\n\
+         echo profile-noise-stderr >&2\n\
+         read -r swallowed\n\
+         export PATH=\"$HOME/bin:$PATH\"\n\
+         export CHATTY_PROFILE_MARK=from-profile\n\
+         cd /\n\
+         set -e\n",
+    );
+    let session = ShellSession::with_secrets(Some(workspace.clone()), 30, 51200, false, vec![])
+        .with_home(&home);
+
+    let output = session
+        .execute("echo \"$CHATTY_PROFILE_MARK\"; chatty-profile-tool; pwd")
+        .await
+        .unwrap();
+    assert_eq!(output.exit_code, 0, "{output:?}");
+    assert_eq!(
+        output.stdout,
+        format!("from-profile\ntool-ran\n{workspace}"),
+        "profile env visible, profile noise and cd not"
+    );
+
+    // `set -e` from the profile would end the shell on this failure.
+    assert_eq!(session.execute("false").await.unwrap().exit_code, 1);
+    let output = session.execute("echo still-here").await.unwrap();
+    assert_eq!(output.stdout, "still-here");
+}
+
+/// Secrets are injected after the profile, so a profile cannot shadow them.
+#[tokio::test]
+async fn test_secrets_win_over_the_login_profile() {
+    let (_workspace, workspace, home) = workspace_with_profile("export MY_SECRET=from-profile\n");
+    let session = ShellSession::with_secrets(
+        Some(workspace),
+        30,
+        51200,
+        false,
+        vec![("MY_SECRET".to_string(), "from-secrets".to_string())],
+    )
+    .with_home(&home);
+    let output = session.execute("echo \"$MY_SECRET\"").await.unwrap();
+    assert_eq!(output.stdout, "from-secrets");
+}
+
+/// A profile that hangs or exits costs one bounded wait, then the session
+/// runs without it instead of losing the shell.
+#[tokio::test]
+async fn test_broken_login_profile_falls_back_to_a_plain_shell() {
+    for profile in ["sleep 600\n", "exit 3\n"] {
+        let (_workspace, workspace, home) = workspace_with_profile(profile);
+        let session =
+            ShellSession::with_secrets(Some(workspace), 30, 51200, false, vec![]).with_home(&home);
+        let started = std::time::Instant::now();
+        let output = session.execute("echo works").await.unwrap();
+        assert_eq!(output.stdout, "works", "profile {profile:?}");
+        assert!(
+            started.elapsed() < LOGIN_PROFILE_TIMEOUT + std::time::Duration::from_secs(10),
+            "profile {profile:?} took {:?}",
+            started.elapsed()
+        );
+        assert!(!session.load_login_profile.load(Ordering::Relaxed));
+    }
+}
