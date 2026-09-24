@@ -60,6 +60,12 @@ const MAX_RETRY_AFTER_SECS: u64 = 10;
 const WAYBACK_AVAILABLE_URL: &str = "https://archive.org/wayback/available";
 const WAYBACK_WEB_URL: &str = "https://web.archive.org";
 
+/// How long the Wayback availability lookup may take. It runs on every
+/// blocked or dead page, and archive.org can be slow: a lookup that has not
+/// answered by then is dropped and the live answer returned, so a guessed
+/// URL that 404s costs the turn seconds, not the 30 s request timeout.
+const WAYBACK_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Arguments for the fetch tool
 #[derive(Deserialize, Serialize)]
 pub struct FetchToolArgs {
@@ -130,6 +136,7 @@ pub struct FetchTool {
     /// host. Fields so tests can point them at a local server.
     wayback_available_url: String,
     wayback_web_url: String,
+    wayback_lookup_timeout: std::time::Duration,
 }
 
 impl FetchTool {
@@ -141,6 +148,7 @@ impl FetchTool {
             pages: PageCache::default(),
             wayback_available_url: WAYBACK_AVAILABLE_URL.to_string(),
             wayback_web_url: WAYBACK_WEB_URL.to_string(),
+            wayback_lookup_timeout: WAYBACK_LOOKUP_TIMEOUT,
         }
     }
 
@@ -557,6 +565,7 @@ impl FetchTool {
         let response = self
             .client
             .get(lookup)
+            .timeout(self.wayback_lookup_timeout)
             .send()
             .await
             .map_err(|e| warn!(error = %e, "Wayback availability lookup failed"))
@@ -2637,6 +2646,38 @@ mod tests {
         assert_eq!(output.status, 404);
         assert_eq!(output.content, "no such page");
         assert!(output.note.unwrap().contains("no archived copy"));
+    }
+
+    /// A Wayback lookup that never answers is dropped after the lookup
+    /// timeout and the live 404 comes back, instead of stalling the turn.
+    #[tokio::test]
+    async fn test_slow_archive_lookup_does_not_stall_the_answer() {
+        let (base, _) =
+            mock_server(|_, _, _| ("404 Not Found", String::new(), "gone".into())).await;
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_base = format!("http://{}", silent.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = silent.accept().await {
+                held.push(stream);
+            }
+        });
+        let tool = FetchTool {
+            wayback_available_url: format!("{silent_base}/wayback/available"),
+            wayback_web_url: silent_base,
+            wayback_lookup_timeout: std::time::Duration::from_millis(200),
+            ..FetchTool::new(None)
+        };
+        let started = std::time::Instant::now();
+        let Download::Done(output) = tool
+            .download(&format!("{base}/nope"), None, None, 0, MAX_WINDOW)
+            .await
+            .unwrap()
+        else {
+            panic!("expected the 404 back");
+        };
+        assert_eq!(output.status, 404);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
