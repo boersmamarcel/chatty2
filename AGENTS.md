@@ -184,7 +184,14 @@ examples.
   emits events. Streams carry a monotonic epoch so a stale `StreamEnded`
   can't tear down a newer turn, and a shared stall watchdog
   (`chatty-core/src/services/stream_processor.rs`) ends a turn after 180s
-  of silence. See [`docs/stream-manager.md`](docs/stream-manager.md).
+  of silence; `--headless` auto-resumes a stalled turn itself, up to
+  `HEADLESS_STALL_RESUME_ATTEMPTS` (2) times, before failing the run.
+  See [`docs/stream-manager.md`](docs/stream-manager.md).
+- **Turn budget** — `TurnBudget` (`chatty-core/src/services/turn_budget.rs`)
+  is a rig hook every `stream_prompt` call registers: it tells the model
+  how many tool turns are left once most of the budget is spent, and gives
+  it one final tool-free call to answer instead of letting rig's
+  `MaxTurnsError` swallow an in-progress reply.
 - **Error handling** — Don't `.ok()` away errors silently. Log as
   `warn!()` for non-critical paths; propagate with `?` for critical I/O.
 - **Tool errors** — Every `impl Tool`'s error path must go through
