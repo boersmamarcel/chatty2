@@ -503,7 +503,7 @@ with its own model and tool set:
 | `model` | Optional. Passed as `--model` to each child, resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the child runs the roster's default, as an undeclared worker does. |
 | `tools` | Optional. A named tool profile passed as `--tools`: `coordinator`, `coder` or `reviewer`. An allowlist of tool *names* — see below. |
 | `preamble` | Optional. The role's standing instructions, passed as `--preamble` and appended to the worker's system prompt after the base preamble, before the tool summary. |
-| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`. Composes with `tools`: it can narrow a named profile further, but never re-enables a tool the profile already excludes. |
+| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user` (`_` works for `-`; an unknown name fails the worker at start-up). Composes with `tools`: it can narrow a named profile further, but never re-enables a tool the profile already excludes. |
 | `max_agent_turns` | Optional. This worker's own turn budget (AGE-440), passed as `--max-agent-turns <n>` ahead of `extra_args` and applied to the child's execution settings before its loop guard is sized. Absent: the child runs with no turn cap and a 30-minute time budget (a run without a human never takes the persisted cap). Independent of the team file's `max_agent_turns`, which is the leader's. |
 | `extra_args` | Optional. Any further `chatty-tui` flags, appended verbatim. |
 
