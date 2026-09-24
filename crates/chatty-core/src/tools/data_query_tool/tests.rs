@@ -63,6 +63,55 @@ async fn profile_data_returns_compact_generic_summary() {
     );
 }
 
+/// GAIA/DABstep traces: profile_data rejected .xlsx, so the model fell back
+/// to pandas in the shell. The first sheet is profiled like a CSV.
+#[cfg(feature = "excel")]
+#[tokio::test]
+async fn profile_data_reads_the_first_sheet_of_an_xlsx() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("Sales").unwrap();
+    sheet.write_string(0, 0, "category").unwrap();
+    sheet.write_string(0, 1, "amount").unwrap();
+    for (row, (category, amount)) in [("book", 10.0), ("book, used", 20.0), ("game", 30.0)]
+        .into_iter()
+        .enumerate()
+    {
+        sheet.write_string(row as u32 + 1, 0, category).unwrap();
+        sheet.write_number(row as u32 + 1, 1, amount).unwrap();
+    }
+    workbook.add_worksheet().set_name("Notes").unwrap();
+    workbook.save(dir.path().join("sales.xlsx")).unwrap();
+
+    let service = Arc::new(
+        FileSystemService::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let output = ProfileDataTool::new(service)
+        .call(
+            &mut ToolContext::new(),
+            ProfileDataArgs {
+                path: "sales.xlsx".to_string(),
+                sample_rows: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.format, "excel");
+    assert_eq!(output.row_count, 3);
+    let amount = output
+        .column_profiles
+        .iter()
+        .find(|profile| profile.name == "amount")
+        .unwrap();
+    assert_eq!(amount.sum, Some(60.0));
+    assert!(output.notes[0].contains("'Sales'"), "{:?}", output.notes);
+    assert!(output.notes[0].contains("Notes"), "{:?}", output.notes);
+}
+
 #[test]
 fn profile_skips_top_values_for_complex_types() {
     assert!(!should_collect_top_values("VARCHAR[]"));
