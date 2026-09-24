@@ -34,6 +34,27 @@ use tracing::warn;
 /// cut with a note (a task that size is a pasted document, not an ask).
 const TASK_MAX_CHARS: usize = 12_000;
 
+/// Share of the history budget the verbatim task may take in the summary.
+/// At 32k the budget is ~18k tokens, and a 12 000-character task (~3-4k
+/// tokens) plus the rest of the summary would leave the kept messages little
+/// room before the next trigger.
+const TASK_MAX_BUDGET_FRACTION: f64 = 0.15;
+
+/// Characters per token assumed when the task cap is derived from a token
+/// budget: low, because code and paths tokenise densely.
+const TASK_CHARS_PER_TOKEN: f64 = 3.0;
+
+/// The task is never cut below this many characters, whatever the budget.
+const TASK_MIN_CHARS: usize = 2_000;
+
+/// How many characters of the task a summary carries for a history budget of
+/// `budget_tokens`: [`TASK_MAX_BUDGET_FRACTION`] of it, between
+/// [`TASK_MIN_CHARS`] and [`TASK_MAX_CHARS`].
+pub fn task_max_chars(budget_tokens: usize) -> usize {
+    let chars = budget_tokens as f64 * TASK_MAX_BUDGET_FRACTION * TASK_CHARS_PER_TOKEN;
+    (chars as usize).clamp(TASK_MIN_CHARS, TASK_MAX_CHARS)
+}
+
 /// Characters of the last command's output the summary carries (its tail).
 const LAST_COMMAND_TAIL_CHARS: usize = 2_000;
 
@@ -118,6 +139,9 @@ pub struct SummaryInputs<'a> {
     /// The rendered transcript is cut to its last this-many characters, so
     /// the summarising call itself fits the model's window.
     pub transcript_max_chars: usize,
+    /// The task is carried verbatim up to this many characters
+    /// ([`task_max_chars`] of the history budget).
+    pub task_max_chars: usize,
 }
 
 /// The summary message and its prose (kept so the next compaction can build
@@ -168,6 +192,7 @@ pub async fn build_summary(inputs: SummaryInputs<'_>) -> Summary {
     let text = render_summary(
         inputs.covered,
         task.as_deref(),
+        inputs.task_max_chars,
         &writes,
         git_status.as_deref(),
         last_command.as_ref(),
@@ -184,6 +209,7 @@ pub async fn build_summary(inputs: SummaryInputs<'_>) -> Summary {
 fn render_summary(
     replaced: usize,
     task: Option<&str>,
+    task_max_chars: usize,
     writes: &FileWrites,
     git_status: Option<&str>,
     last_command: Option<&(String, String)>,
@@ -197,9 +223,13 @@ fn render_summary(
     out.push_str("## Task (the original request, verbatim)\n");
     match task {
         Some(task) => {
-            out.push_str(&head_chars(task, TASK_MAX_CHARS));
-            if task.chars().count() > TASK_MAX_CHARS {
-                out.push_str("\n[… task text cut at 12 000 characters]");
+            out.push_str(&head_chars(task, task_max_chars));
+            let total = task.chars().count();
+            if total > task_max_chars {
+                out.push_str(&format!(
+                    "\n[… task text cut at {task_max_chars} of {total} characters to fit the \
+                     context window]"
+                ));
             }
         }
         None => out.push_str("(no task text found in the history)"),
@@ -235,11 +265,17 @@ fn render_summary(
     out.push_str("\n## Progress, open questions and next step\n");
     out.push_str(prose.trim());
 
-    out.push_str(
+    // `git status` only answered in a repository; outside one (a GAIA
+    // scratch directory) the model is not sent to run git.
+    out.push_str(if git_status.is_some() {
         "\n\n## Before you continue\nThe workspace is the source of truth, not this summary: \
-         re-check the current state first (in a git repository, `git status && git diff`), \
-         then carry on with the task above.",
-    );
+         re-check the current state first (`git status && git diff`), then carry on with the \
+         task above."
+    } else {
+        "\n\n## Before you continue\nThe workspace is the source of truth, not this summary: \
+         re-check the current state first (list and read the files you rely on), then carry on \
+         with the task above."
+    });
     out
 }
 
@@ -661,6 +697,47 @@ mod tests {
             Some("Done so far: x")
         );
         assert_eq!(clean_prose("<think>only thinking</think>  "), None);
+    }
+
+    #[test]
+    fn the_task_cap_follows_the_budget() {
+        // ~18k tokens of history budget at a 32k window.
+        assert_eq!(task_max_chars(18_000), 8_100);
+        assert_eq!(task_max_chars(1_000), TASK_MIN_CHARS);
+        assert_eq!(task_max_chars(200_000), TASK_MAX_CHARS);
+
+        let task = "t".repeat(5_000);
+        let text = render_summary(
+            3,
+            Some(&task),
+            2_000,
+            &FileWrites::default(),
+            None,
+            None,
+            "prose",
+        );
+        assert!(text.contains(&"t".repeat(2_000)));
+        assert!(!text.contains(&"t".repeat(2_001)));
+        assert!(text.contains("task text cut at 2000 of 5000 characters"));
+    }
+
+    #[test]
+    fn the_regrounding_step_names_git_only_in_a_repository() {
+        let render = |git: Option<&str>| {
+            render_summary(
+                3,
+                Some("task"),
+                TASK_MAX_CHARS,
+                &FileWrites::default(),
+                git,
+                None,
+                "prose",
+            )
+        };
+        assert!(render(Some("")).contains("git status && git diff"));
+        let plain = render(None);
+        assert!(!plain.contains("git "), "{plain}");
+        assert!(plain.contains("list and read the files you rely on"));
     }
 
     #[tokio::test]
