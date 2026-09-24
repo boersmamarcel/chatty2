@@ -240,7 +240,7 @@ pub fn execution_settings_page() -> SettingPage {
                         "Max Agent Turns",
                         SettingField::number_input(
                             NumberFieldOptions {
-                                min: 1.0,
+                                min: 0.0,
                                 max: 100.0,
                                 ..Default::default()
                             },
@@ -249,14 +249,15 @@ pub fn execution_settings_page() -> SettingPage {
                             },
                             |val: f64, cx: &mut App| {
                                 execution_settings_controller::set_max_agent_turns(
-                                    val.clamp(1.0, 100.0) as u32, cx,
+                                    val.clamp(0.0, 100.0) as u32, cx,
                                 );
                             },
                         )
-                        .default_value(10.0),
+                        .default_value(0.0),
                     )
                     .description(
-                        "Maximum number of tool-call rounds the agent can perform per response. \
+                        "Maximum number of tool-call rounds the agent can perform per response; \
+                         0 means no limit (stop a response at any time with Stop). \
                          Applies to all agentic interactions, including code execution and MCP tool calls.",
                     ),
                 ]),

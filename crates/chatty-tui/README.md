@@ -125,7 +125,9 @@ Flags a worker is started with (a leader rarely passes these by hand):
 `--participant-name <NAME>` (register with the broker and wait for one task),
 `--tools <profile>` (`coordinator` / `coder` / `reviewer` allowlist), `--preamble
 <text>` (role instructions) and `--max-agent-turns <n>` (that worker's own turn
-budget, AGE-440). `--tools` / `--preamble` / `--model` on a `--team` leader override
+budget, AGE-440; `0` is no cap). A run without a human (`--headless`, `--pipe`, a
+worker) never takes the persisted turn cap: with no `--max-agent-turns` it runs
+uncapped under `--max-duration` (default `30m`). `--tools` / `--preamble` / `--model` on a `--team` leader override
 the team file's leader settings. Design and file format:
 [`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md).
 

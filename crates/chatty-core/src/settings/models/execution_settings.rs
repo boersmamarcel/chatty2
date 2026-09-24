@@ -70,7 +70,9 @@ pub struct ExecutionSettingsModel {
     pub max_output_bytes: usize,
     /// Enable network isolation in sandbox (when available)
     pub network_isolation: bool,
-    /// Maximum number of agentic turns (tool-call rounds) per response
+    /// Maximum number of agentic turns (tool-call rounds) per response;
+    /// `0` (the default) is no cap. An interactive user has Stop; headless
+    /// runs get a wall-clock budget instead (`chatty-tui --max-duration`).
     #[serde(default = "default_max_agent_turns")]
     pub max_agent_turns: u32,
     /// Enable persistent agent memory (remember/search_memory tools).
@@ -113,8 +115,11 @@ fn default_true() -> bool {
     true
 }
 
+/// No cap: a cap of 10 ended real tasks mid-way — the same local model
+/// through Codex CLI (which has none) needed more than 50 commands for 5 of
+/// its 8 SWE-bench wins.
 fn default_max_agent_turns() -> u32 {
-    10
+    0
 }
 
 impl Default for ExecutionSettingsModel {
