@@ -36,6 +36,29 @@ const ALIASES: &[(&str, &str)] = &[
     ("create_file", "write_file"),
 ];
 
+/// The parameters of each alias target, `(tool, required, optional)`. An
+/// alias is only renamed when the call's arguments fit its target: the
+/// rename keeps the arguments as emitted, and `grep {pattern, path}` run as
+/// `search_code` would silently drop the path and search everything.
+const TARGET_PARAMS: &[(&str, &[&str], &[&str])] = &[
+    (
+        "search_code",
+        &["pattern"],
+        &["case_insensitive", "file_type", "max_results"],
+    ),
+    ("read_file", &["path"], &["start_line", "end_line"]),
+    ("list_directory", &["path"], &[]),
+    ("glob_search", &["pattern"], &[]),
+    ("shell_execute", &["command"], &["timeout_seconds"]),
+    ("search_web", &["query"], &["max_results"]),
+    (
+        "fetch",
+        &["url"],
+        &["max_length", "start_index", "find", "user_agent"],
+    ),
+    ("write_file", &["path", "content"], &[]),
+];
+
 /// How many real tool names an unknown call is answered with.
 const SUGGESTIONS: usize = 3;
 
@@ -44,24 +67,42 @@ const SUGGESTIONS: usize = 3;
 enum Resolution {
     /// Run it as this allowed tool.
     Rename(String),
+    /// An alias of this allowed tool, called with arguments it does not
+    /// take: answer with the tool and its parameters instead of running it.
+    Retarget { tool: String, params: String },
     /// No tool it clearly means: these are the closest allowed names.
     Suggest(Vec<String>),
 }
 
 /// `name` as the tool it most likely means: itself once case, `-` for `_`
 /// and a `functions.` style namespace are normalised away, else a known
-/// alias — either only when this turn allows the result.
-fn resolve(name: &str, allowed: &[String]) -> Resolution {
+/// alias whose target takes `args` — either only when this turn allows the
+/// result.
+fn resolve(name: &str, args: Option<&str>, allowed: &[String]) -> Resolution {
     let bare = name.rsplit(['.', ':', '/']).next().unwrap_or(name);
     let normal = bare.trim().to_ascii_lowercase().replace('-', "_");
+    if normal != name && allowed.contains(&normal) {
+        return Resolution::Rename(normal);
+    }
     let alias = ALIASES
         .iter()
         .find(|(alias, _)| *alias == normal)
         .map(|(_, tool)| (*tool).to_string());
-    for candidate in [Some(normal.clone()), alias].into_iter().flatten() {
-        if candidate != name && allowed.contains(&candidate) {
-            return Resolution::Rename(candidate);
+    if let Some(tool) = alias.filter(|tool| allowed.contains(tool)) {
+        let Some((_, required, optional)) = TARGET_PARAMS.iter().find(|(t, _, _)| *t == tool)
+        else {
+            return Resolution::Rename(tool);
+        };
+        if args_fit(args, required, optional) {
+            return Resolution::Rename(tool);
         }
+        let params = required
+            .iter()
+            .map(|p| format!("`{p}` (required)"))
+            .chain(optional.iter().map(|p| format!("`{p}`")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Resolution::Retarget { tool, params };
     }
 
     let mut ranked: Vec<(usize, &String)> = allowed
@@ -76,6 +117,22 @@ fn resolve(name: &str, allowed: &[String]) -> Resolution {
             .map(|(_, tool)| tool.clone())
             .collect(),
     )
+}
+
+/// Whether the emitted `args` (a JSON object, or nothing) carry every
+/// `required` key and no key outside `required` and `optional`.
+fn args_fit(args: Option<&str>, required: &[&str], optional: &[&str]) -> bool {
+    let object = match args.map(str::trim).filter(|a| !a.is_empty()) {
+        None => serde_json::Map::new(),
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(serde_json::Value::Object(object)) => object,
+            _ => return false,
+        },
+    };
+    required.iter().all(|key| object.contains_key(*key))
+        && object
+            .keys()
+            .all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str()))
 }
 
 /// Levenshtein distance, lowered for a name that contains the other or
@@ -119,10 +176,22 @@ impl AgentHook for ToolNameRepair {
         if event.available_tools.is_empty() || event.allowed_tools.is_empty() {
             return None;
         }
-        match resolve(&event.tool_name, &event.allowed_tools) {
+        match resolve(
+            &event.tool_name,
+            event.args.as_deref(),
+            &event.allowed_tools,
+        ) {
             Resolution::Rename(tool) => {
                 tracing::info!(called = %event.tool_name, tool = %tool, "Renaming a call to an aliased tool name");
                 Some(InvalidToolCallAction::repair(tool))
+            }
+            Resolution::Retarget { tool, params } => {
+                tracing::warn!(called = %event.tool_name, tool = %tool, "Aliased tool name called with arguments its tool does not take");
+                Some(InvalidToolCallAction::skip(format!(
+                    "There is no tool named `{called}`, so this call did not run. The tool for \
+                     this is `{tool}`, which takes: {params}. Call `{tool}` with those arguments.",
+                    called = event.tool_name,
+                )))
             }
             Resolution::Suggest(names) => {
                 tracing::warn!(called = %event.tool_name, "Unknown tool call; answering with the nearest tool names");
@@ -158,17 +227,21 @@ mod tests {
             "list_directory",
             "shell_execute",
         ]);
-        for (called, tool) in [
-            ("grep_code", "search_code"),
-            ("rg", "search_code"),
-            ("cat", "read_file"),
-            ("ls", "list_directory"),
-            ("bash", "shell_execute"),
-            ("Read_File", "read_file"),
-            ("functions.read-file", "read_file"),
+        for (called, args, tool) in [
+            ("grep_code", r#"{"pattern":"fn main"}"#, "search_code"),
+            (
+                "rg",
+                r#"{"pattern":"x","case_insensitive":true}"#,
+                "search_code",
+            ),
+            ("cat", r#"{"path":"README.md"}"#, "read_file"),
+            ("ls", r#"{"path":"."}"#, "list_directory"),
+            ("bash", r#"{"command":"pwd"}"#, "shell_execute"),
+            ("Read_File", r#"{"whatever":1}"#, "read_file"),
+            ("functions.read-file", "", "read_file"),
         ] {
             assert_eq!(
-                resolve(called, &tools),
+                resolve(called, Some(args), &tools),
                 Resolution::Rename(tool.to_string()),
                 "{called}"
             );
@@ -178,10 +251,33 @@ mod tests {
     #[test]
     fn an_alias_of_a_tool_this_turn_lacks_is_only_suggested() {
         let tools = allowed(&["find_files", "read_file", "glob_search", "write_file"]);
-        let Resolution::Suggest(names) = resolve("grep_code", &tools) else {
+        let Resolution::Suggest(names) = resolve("grep_code", Some(r#"{"pattern":"x"}"#), &tools)
+        else {
             panic!("search_code is not allowed, so nothing to rename to");
         };
         assert_eq!(names.len(), SUGGESTIONS);
+    }
+
+    /// The rename keeps the emitted arguments, so an alias whose arguments
+    /// its target does not take is answered with the target's parameters.
+    #[test]
+    fn an_alias_with_arguments_its_tool_lacks_is_retargeted_not_run() {
+        let tools = allowed(&["search_code", "read_file", "shell_execute"]);
+        for (called, args, tool) in [
+            ("grep", r#"{"pattern":"x","path":"src"}"#, "search_code"),
+            ("cat", r#"{"file_path":"a.txt"}"#, "read_file"),
+            ("bash", r#"{"cmd":"ls"}"#, "shell_execute"),
+            ("bash", "", "shell_execute"),
+            ("bash", "[1]", "shell_execute"),
+        ] {
+            match resolve(called, Some(args), &tools) {
+                Resolution::Retarget { tool: t, params } => {
+                    assert_eq!(t, tool, "{called} {args}");
+                    assert!(params.contains("(required)"), "{params}");
+                }
+                other => panic!("{called} {args}: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -193,11 +289,11 @@ mod tests {
             "fetch",
             "git_diff",
         ]);
-        let Resolution::Suggest(names) = resolve("search_codebase", &tools) else {
+        let Resolution::Suggest(names) = resolve("search_codebase", None, &tools) else {
             panic!("no alias");
         };
         assert_eq!(names[0], "search_code");
-        let Resolution::Suggest(names) = resolve("read_files", &tools) else {
+        let Resolution::Suggest(names) = resolve("read_files", None, &tools) else {
             panic!("no alias");
         };
         assert_eq!(names[0], "read_file");
@@ -241,10 +337,9 @@ mod tests {
         }
     }
 
-    fn tool_call(name: &str) -> Vec<MockStreamEvent> {
+    fn tool_call(name: &str, args: serde_json::Value) -> Vec<MockStreamEvent> {
         vec![
-            MockStreamEvent::tool_call("tool_call_1", name, serde_json::json!({}))
-                .with_call_id("call_1"),
+            MockStreamEvent::tool_call("tool_call_1", name, args).with_call_id("call_1"),
             MockStreamEvent::final_response_with_total_tokens(4),
         ]
     }
@@ -256,8 +351,8 @@ mod tests {
         ]
     }
 
-    async fn run(called: &str) -> (MockCompletionModel, usize) {
-        let model = MockCompletionModel::from_stream_turns(vec![tool_call(called), done()]);
+    async fn run(called: &str, args: serde_json::Value) -> (MockCompletionModel, usize) {
+        let model = MockCompletionModel::from_stream_turns(vec![tool_call(called, args), done()]);
         let search = FakeSearchCode::default();
         let agent = AgentBuilder::new(model.clone())
             .tool(search.clone())
@@ -272,14 +367,27 @@ mod tests {
 
     #[tokio::test]
     async fn an_aliased_call_runs_the_real_tool() {
-        let (model, calls) = run("grep_code").await;
+        let (model, calls) = run("grep_code", serde_json::json!({"pattern": "fn main"})).await;
         assert_eq!(calls, 1);
         assert_eq!(model.requests().len(), 2);
     }
 
     #[tokio::test]
+    async fn an_aliased_call_with_foreign_arguments_is_answered_not_run() {
+        let (model, calls) = run("grep", serde_json::json!({"pattern": "x", "path": "src"})).await;
+        assert_eq!(calls, 0);
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        let history = format!("{:?}", requests[1].chat_history);
+        assert!(
+            history.contains("The tool for this is `search_code`"),
+            "{history}"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unknown_call_is_answered_and_the_turn_goes_on() {
-        let (model, calls) = run("frobnicate").await;
+        let (model, calls) = run("frobnicate", serde_json::json!({})).await;
         assert_eq!(calls, 0);
         let requests = model.requests();
         assert_eq!(requests.len(), 2);
