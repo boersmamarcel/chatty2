@@ -69,6 +69,7 @@ TOOL GROUPS:
     git          Git operations (status, diff, log, add, branch, commit)
     code-exec    Expose the execute_code tool (Monty-backed Python fast path)
     docker-exec  Allow Docker fallback for execute_code (requires Docker)
+    ask-user     Allow the model to ask the user a clarifying question
 
   Defaults come from the persisted Chatty execution settings. CLI flags override
   those defaults for the session.
@@ -123,7 +124,9 @@ struct Cli {
     ///
     /// Overrides the persisted Chatty execution settings. Multiple groups
     /// can be specified as a comma-separated list. Valid tool group names:
-    ///   shell, fs-read, fs-write, fetch, git, code-exec, docker-exec
+    ///   shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user
+    ///
+    /// An unknown name is a hard error, not a warning.
     ///
     /// Example: --enable shell,git,fetch
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
@@ -133,7 +136,7 @@ struct Cli {
     ///
     /// Overrides the persisted Chatty execution settings. Same valid group
     /// names as --enable. Applied after --enable, so if a group appears in
-    /// both, it will be disabled.
+    /// both, it will be disabled. An unknown name is a hard error.
     ///
     /// Example: --disable fetch,docker-exec
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
@@ -497,7 +500,7 @@ async fn main() -> Result<()> {
     };
 
     // Apply CLI tool overrides
-    apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
+    apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable)?;
     if let Some(tool_loading) = cli.tool_loading {
         execution_settings.tool_loading = tool_loading;
     }
@@ -1001,47 +1004,104 @@ fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfi
     );
 }
 
+/// The tool group names recognized by --enable/--disable.
+const VALID_TOOL_GROUPS: &str =
+    "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user";
+
+/// Flip one named tool group on `settings`. Shared by --enable and --disable
+/// so the group vocabulary (and its docker-exec/code-exec coupling) is
+/// defined in exactly one place.
+fn set_tool_group(
+    settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
+    name: &str,
+    on: bool,
+) -> Result<()> {
+    match name {
+        "shell" => settings.enabled = on,
+        "fs-read" => settings.filesystem_read_enabled = on,
+        "fs-write" => settings.filesystem_write_enabled = on,
+        "fetch" => settings.fetch_enabled = on,
+        "git" => settings.git_enabled = on,
+        "code-exec" => settings.execute_code_enabled = on,
+        "docker-exec" => {
+            if on {
+                // Docker execution implies code-exec is on too.
+                settings.execute_code_enabled = true;
+            }
+            settings.docker_code_execution_enabled = on;
+        }
+        "ask-user" => settings.ask_user_enabled = on,
+        other => bail!("Unknown tool group '{other}' (valid: {VALID_TOOL_GROUPS})"),
+    }
+    Ok(())
+}
+
 fn apply_tool_overrides(
     settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
     enable: &[String],
     disable: &[String],
-) {
+) -> Result<()> {
     for name in enable {
-        match name.as_str() {
-            "shell" => settings.enabled = true,
-            "fs-read" => settings.filesystem_read_enabled = true,
-            "fs-write" => settings.filesystem_write_enabled = true,
-            "fetch" => settings.fetch_enabled = true,
-            "git" => settings.git_enabled = true,
-            "code-exec" => settings.execute_code_enabled = true,
-            "docker-exec" => {
-                settings.execute_code_enabled = true;
-                settings.docker_code_execution_enabled = true;
-            }
-            other => {
-                tracing::warn!(
-                    name = other,
-                    "Unknown tool group in --enable (valid: shell, fs-read, fs-write, fetch, git, code-exec, docker-exec)"
-                );
-            }
-        }
+        set_tool_group(settings, name, true)
+            .with_context(|| "invalid name in --enable".to_string())?;
     }
     for name in disable {
-        match name.as_str() {
-            "shell" => settings.enabled = false,
-            "fs-read" => settings.filesystem_read_enabled = false,
-            "fs-write" => settings.filesystem_write_enabled = false,
-            "fetch" => settings.fetch_enabled = false,
-            "git" => settings.git_enabled = false,
-            "code-exec" => settings.execute_code_enabled = false,
-            "docker-exec" => settings.docker_code_execution_enabled = false,
-            other => {
-                tracing::warn!(
-                    name = other,
-                    "Unknown tool group in --disable (valid: shell, fs-read, fs-write, fetch, git, code-exec, docker-exec)"
-                );
-            }
-        }
+        set_tool_group(settings, name, false)
+            .with_context(|| "invalid name in --disable".to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tool_override_tests {
+    use super::apply_tool_overrides;
+    use chatty_core::settings::models::ExecutionSettingsModel;
+
+    #[test]
+    fn enable_ask_user_turns_the_group_on() {
+        let mut settings = ExecutionSettingsModel {
+            ask_user_enabled: false,
+            ..Default::default()
+        };
+        apply_tool_overrides(&mut settings, &["ask-user".to_string()], &[]).unwrap();
+        assert!(settings.ask_user_enabled);
+    }
+
+    #[test]
+    fn disable_ask_user_turns_the_group_off() {
+        let mut settings = ExecutionSettingsModel::default();
+        assert!(settings.ask_user_enabled);
+        apply_tool_overrides(&mut settings, &[], &["ask-user".to_string()]).unwrap();
+        assert!(!settings.ask_user_enabled);
+    }
+
+    #[test]
+    fn unknown_enable_name_is_a_hard_error() {
+        let mut settings = ExecutionSettingsModel::default();
+        let err = format!(
+            "{:#}",
+            apply_tool_overrides(&mut settings, &["not-a-group".to_string()], &[]).unwrap_err()
+        );
+        assert!(err.contains("not-a-group"), "error was: {err}");
+    }
+
+    #[test]
+    fn unknown_disable_name_is_a_hard_error() {
+        let mut settings = ExecutionSettingsModel::default();
+        let err = format!(
+            "{:#}",
+            apply_tool_overrides(&mut settings, &[], &["not-a-group".to_string()]).unwrap_err()
+        );
+        assert!(err.contains("not-a-group"), "error was: {err}");
+    }
+
+    #[test]
+    fn docker_exec_enable_implies_code_exec() {
+        let mut settings = ExecutionSettingsModel::default();
+        assert!(!settings.execute_code_enabled);
+        apply_tool_overrides(&mut settings, &["docker-exec".to_string()], &[]).unwrap();
+        assert!(settings.execute_code_enabled);
+        assert!(settings.docker_code_execution_enabled);
     }
 }
 

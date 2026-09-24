@@ -147,6 +147,12 @@ pub struct ExecutionSettingsModel {
     /// snapshots) do not change.
     #[serde(default, skip_serializing_if = "ToolLoading::is_all")]
     pub tool_loading: ToolLoading,
+    /// Offer the `ask_user` tool (the input-required chain, ADR-0011 C7) to
+    /// the model. On by default; an unattended run (e.g. a benchmark
+    /// harness with no one to answer) sets this off via `chatty-tui
+    /// --disable ask-user` so a stray call fails fast instead of blocking.
+    #[serde(default = "default_true")]
+    pub ask_user_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -186,6 +192,7 @@ impl Default for ExecutionSettingsModel {
             embedding_model: None,
             hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
             tool_loading: ToolLoading::All,
+            ask_user_enabled: true,
         }
     }
 }
