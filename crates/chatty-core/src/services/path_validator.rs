@@ -5,6 +5,15 @@ use tokio::fs;
 /// Maximum file size allowed for read operations (10MB)
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
+/// When this process first built a [`PathValidator`]: the start of the
+/// session whose temp-dir scratch files `validate_readable` lets through.
+static SESSION_START: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
+
+/// Slack for file-system timestamp granularity: a file written right as the
+/// session started can carry an mtime a little before the clock read.
+const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Validates and restricts file system paths to a workspace root directory.
 ///
 /// All paths are canonicalized to resolve symlinks and `..` sequences,
@@ -13,10 +22,27 @@ pub struct PathValidator {
     workspace_root: PathBuf,
 }
 
+/// Whether a temp-dir file is this session's scratch output: owned by this
+/// user and modified since the session started.
+fn is_this_sessions(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != nix::unistd::geteuid().as_raw() {
+            return false;
+        }
+    }
+    let since = SESSION_START
+        .checked_sub(MTIME_SLACK)
+        .unwrap_or(*SESSION_START);
+    metadata.modified().is_ok_and(|modified| modified >= since)
+}
+
 impl PathValidator {
     /// Create a new PathValidator with the given workspace root.
     /// The workspace root is canonicalized at creation time.
     pub async fn new(workspace_root: &str) -> Result<Self> {
+        std::sync::LazyLock::force(&SESSION_START);
         let root = PathBuf::from(workspace_root);
         let canonical_root = fs::canonicalize(&root).await.map_err(|e| {
             anyhow!(
@@ -65,13 +91,17 @@ impl PathValidator {
     }
 
     /// [`validate`](Self::validate) for a read-only text read, which may
-    /// also reach the system temp directory (`/tmp`): the model writes
-    /// scratch files there from the shell (`python ... > /tmp/out.txt`) and
-    /// then could not read them back. Read-only: writes, listings and
+    /// also reach scratch files in the system temp directory (`/tmp`): the
+    /// model writes them there from the shell (`python ... > /tmp/out.txt`)
+    /// and then could not read them back. Read-only: writes, listings and
     /// deletes still go through `validate`, and a symlink out of the temp
-    /// dir is resolved and refused like any other outside path. What can be
-    /// read there is only what this user's OS permissions already allow the
-    /// shell tool to read.
+    /// dir is resolved and refused like any other outside path.
+    ///
+    /// Only this session's scratch output: a regular file owned by this
+    /// user and modified since the session started. On a desktop, `/tmp`
+    /// also holds other programs' files (and read_file, unlike the
+    /// sandboxed shell, needs no approval and sees the host `/tmp`), so an
+    /// older file there, or another user's, stays out of reach.
     pub async fn validate_readable(&self, path: &str) -> Result<PathBuf> {
         let error = match self.validate(path).await {
             Ok(canonical) => return Ok(canonical),
@@ -84,9 +114,20 @@ impl PathValidator {
             return Err(error);
         };
         match fs::canonicalize(std::env::temp_dir()).await {
-            Ok(temp) if temp.parent().is_some() && canonical.starts_with(&temp) => Ok(canonical),
-            _ => Err(error),
+            Ok(temp) if temp.parent().is_some() && canonical.starts_with(&temp) => {}
+            _ => return Err(error),
         }
+        let Ok(metadata) = fs::metadata(&canonical).await else {
+            return Err(error);
+        };
+        if !metadata.is_file() || !is_this_sessions(&metadata) {
+            return Err(anyhow!(
+                "Access denied: '{}' is in the temp directory but is not a file this session \
+                 wrote; only scratch files written since the session started can be read there",
+                path
+            ));
+        }
+        Ok(canonical)
     }
 
     /// Validate a path for a file that may not yet exist (write operations).
@@ -249,12 +290,12 @@ mod tests {
     #[tokio::test]
     async fn test_validate_readable_allows_the_temp_dir_read_only() {
         let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let note = scratch.path().join("out.txt");
-        fs::write(&note, "42").unwrap();
         let validator = PathValidator::new(workspace.path().to_str().unwrap())
             .await
             .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let note = scratch.path().join("out.txt");
+        fs::write(&note, "42").unwrap();
 
         let note_path = note.to_str().unwrap();
         assert!(validator.validate_readable(note_path).await.is_ok());
@@ -262,6 +303,32 @@ mod tests {
 
         let outside = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         assert!(validator.validate_readable(outside).await.is_err());
+
+        // A temp file from before the session (another program's) is refused.
+        let old = scratch.path().join("old.txt");
+        fs::write(&old, "secret").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+            .unwrap();
+        let refused = validator
+            .validate_readable(old.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("not a file this session"),
+            "{refused}"
+        );
+
+        // A directory in the temp dir is not readable as a file.
+        assert!(
+            validator
+                .validate_readable(scratch.path().to_str().unwrap())
+                .await
+                .is_err()
+        );
 
         #[cfg(unix)]
         {
