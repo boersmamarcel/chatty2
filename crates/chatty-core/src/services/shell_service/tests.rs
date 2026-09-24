@@ -210,7 +210,13 @@ async fn test_output_truncation() {
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(output.truncated);
-    assert!(output.stdout.contains("[truncated"));
+    assert!(
+        output
+            .stdout
+            .contains("bytes omitted; rerun with a filter (grep/tail)")
+    );
+    assert!(output.stdout.starts_with("1\n"), "keeps the head");
+    assert!(output.stdout.ends_with("1000"), "keeps the tail");
 }
 
 #[tokio::test]
@@ -601,11 +607,47 @@ async fn test_shell_status_masks_secrets() {
 }
 
 #[test]
-fn test_truncate_output_at_char_boundary_preserves_utf8() {
-    let mut output = format!("{}📈bbb📈tail", "a".repeat(995));
-    ShellSession::truncate_output_at_char_boundary(&mut output, 1004);
-    assert!(output.contains('📈'));
-    assert!(output.contains("[truncated"));
+fn bound_output_keeps_head_and_tail_on_char_boundaries() {
+    let mut output = format!("{}📈middle📈{}", "a".repeat(499), "z".repeat(499));
+    assert!(ShellSession::bound_output(&mut output, 1_000));
+    let (head, rest) = output.split_once("\n... [").expect("an omission line");
+    let (note, tail) = rest.split_once("] ...\n").expect("the tail follows it");
+    assert!(head.chars().all(|c| c == 'a'), "{head}");
+    assert!(tail.ends_with(&"z".repeat(499)), "{tail}");
+    assert!(note.contains("bytes omitted; rerun with a filter (grep/tail) to see more"));
+    assert!(output.len() < 1_100);
+}
+
+#[test]
+fn bound_output_uses_the_default_cap_under_a_larger_configured_max() {
+    let mut small = "x".repeat(SHELL_OUTPUT_DEFAULT_CAP_BYTES);
+    assert!(
+        !ShellSession::bound_output(&mut small, 51_200),
+        "at the cap: whole"
+    );
+
+    let mut output = (1..=5_000)
+        .map(|n| format!("line {n}\n"))
+        .collect::<String>();
+    let original = output.len();
+    assert!(ShellSession::bound_output(&mut output, 51_200));
+    assert!(output.len() < SHELL_OUTPUT_DEFAULT_CAP_BYTES + 100);
+    assert!(output.starts_with("line 1\n"));
+    assert!(output.trim_end().ends_with("line 5000"));
+    let (head, rest) = output.split_once("\n... [").expect("an omission line");
+    let (note, tail) = rest.split_once("] ...\n").expect("the tail follows it");
+    let omitted = original - head.len() - tail.len();
+    assert!(
+        note.starts_with(&format!("{omitted} bytes omitted")),
+        "{note}"
+    );
+}
+
+#[test]
+fn bound_output_honours_a_smaller_configured_max() {
+    let mut output = "y".repeat(3_000);
+    assert!(ShellSession::bound_output(&mut output, 1_000));
+    assert!(output.contains("[2000 bytes omitted"));
 }
 
 #[test]

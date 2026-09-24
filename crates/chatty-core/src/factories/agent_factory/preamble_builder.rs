@@ -479,7 +479,9 @@ in the workspace you were given; do not install the project itself from a packag
 most specific relevant tests, then broader ones.\n\
 \n\
 **Bounded output**: Keep command output short: filter it with `tail`, `head` or `grep` rather \
-than printing whole logs or files.\n\
+than printing whole logs or files. One shell command that finds, reads and checks at once, with \
+bounded output (`rg -n PATTERN src | head -20`, the tail of a test run), beats a string of small \
+read and search calls.\n\
 \n\
 **Binary and Office files**: Files with binary formats must not be read with `read_file` / `read_binary` (returns garbage). \
 Use the dedicated native tools instead: `read_docx` for Word (.docx), `read_excel` for spreadsheets (.xlsx/.xls/.ods), \
@@ -1241,6 +1243,7 @@ mod tests {
             "do not install the project itself",
             "most specific relevant tests, then broader ones",
             "`tail`, `head` or `grep`",
+            "beats a string of small read and search calls",
             "Once checked evidence answers the question",
         ] {
             assert!(prompt.contains(kept), "missing {kept:?}");
