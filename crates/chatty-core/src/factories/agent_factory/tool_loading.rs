@@ -353,10 +353,26 @@ impl ToolLoader {
         )
     }
 
+    /// The group `name` asks for: a group's name in any case, or the name
+    /// of a tool in one (a model asked for `search_web` as often as `web`).
+    fn resolve_group(&self, name: &str) -> Option<&Group> {
+        let name = name.trim();
+        self.inner
+            .groups
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name))
+            .or_else(|| {
+                self.inner
+                    .groups
+                    .iter()
+                    .find(|g| g.tools.iter().any(|tool| tool == name))
+            })
+    }
+
     /// Load `group` (a no-op if it is loaded): the names of its tools, or
     /// the error the model sees for a group this agent does not have.
     pub fn load(&self, group: &str) -> Result<Vec<String>, String> {
-        let Some(found) = self.inner.groups.iter().find(|g| g.name == group) else {
+        let Some(found) = self.resolve_group(group) else {
             return Err(format!(
                 "Unknown tool group `{group}`. The groups are: {}.",
                 self.group_names().join(", ")
@@ -373,11 +389,20 @@ impl ToolLoader {
     /// Load the group of every tool called in `messages`: a call in the
     /// history is only valid against a request that still advertises it.
     fn load_groups_called_in(&self, messages: &[Message]) {
-        let called: Vec<&'static str> = messages
+        let mut called: Vec<&'static str> = messages
             .iter()
             .flat_map(called_tool_names)
             .filter_map(|name| self.group_of(name))
             .collect();
+        // A `load_tools` call in the history loaded its group: an agent
+        // rebuilt over that history (or a resumed conversation) keeps it,
+        // even before any of the group's tools were called.
+        called.extend(
+            messages
+                .iter()
+                .flat_map(load_tools_groups)
+                .filter_map(|group| self.resolve_group(group).map(|g| g.name)),
+        );
         if called.is_empty() {
             return;
         }
@@ -465,6 +490,25 @@ fn called_tool_names(message: &Message) -> Vec<&str> {
             .iter()
             .filter_map(|item| match item {
                 UserContent::ToolResult(result) => Some(result.name.as_str()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The `group` arguments of the `load_tools` calls an assistant message
+/// makes.
+fn load_tools_groups(message: &Message) -> Vec<&str> {
+    match message {
+        Message::Assistant { content, .. } => content
+            .iter()
+            .filter_map(|item| match item {
+                AssistantContent::ToolCall(call)
+                    if call.function.name == LoadToolsTool::NAME_STR =>
+                {
+                    call.function.arguments.get("group")?.as_str()
+                }
                 _ => None,
             })
             .collect(),
@@ -578,7 +622,7 @@ impl Tool for LoadToolsTool {
     ) -> Result<Self::Output, Self::Error> {
         let tools = self
             .loader
-            .load(args.group.trim())
+            .load(&args.group)
             .map_err(ToolError::OperationFailed)?;
         Ok(LoadToolsOutput {
             group: args.group,
@@ -688,6 +732,42 @@ mod tests {
         let error = loader.load("internet").unwrap_err();
         assert!(error.contains("Unknown tool group `internet`"), "{error}");
         assert!(error.contains("web, git, answer, mcp"), "{error}");
+    }
+
+    /// A model that names the group in another case, or names one of its
+    /// tools instead, gets the group rather than an error.
+    #[test]
+    fn a_group_can_be_loaded_by_a_tool_name_or_in_any_case() {
+        let (loader, _) = calibrated(&[]);
+        assert_eq!(loader.load(" Web ").unwrap(), ["search_web", "fetch"]);
+        assert_eq!(loader.load("git_diff").unwrap(), ["git_diff"]);
+        assert_eq!(loader.loaded_groups(), ["git", "web"]);
+        assert!(
+            loader.load("read_file").is_err(),
+            "core tools have no group"
+        );
+    }
+
+    /// A history whose `load_tools` call loaded a group keeps it loaded on
+    /// an agent built over that history, though none of its tools ran yet.
+    #[test]
+    fn a_load_tools_call_in_the_history_keeps_its_group_loaded() {
+        let (loader, _) = calibrated(&[]);
+        let load = Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::ToolCall(ToolCall::new(
+                ToolCallId::new("call_1").unwrap(),
+                ToolFunction::new("load_tools".into(), serde_json::json!({"group": "web"})),
+            ))],
+        };
+        loader.load_groups_called_in(&[Message::user("task"), load]);
+        assert_eq!(loader.loaded_groups(), ["web"]);
+        assert!(
+            loader
+                .active_tools()
+                .unwrap()
+                .contains(&"search_web".to_string())
+        );
     }
 
     #[test]
