@@ -196,6 +196,12 @@ pub struct AgentClient {
     request_recorder: RequestRecorder,
     /// The loaded tool groups, when the agent loads its tools dynamically.
     tool_loader: Option<ToolLoader>,
+    /// Whether this agent's model accepts image input (`ModelConfig::supports_images`
+    /// at build time). `stream_prompt` strips images before sending a request
+    /// when this is false, so a stale capability flag or an image carried in
+    /// from history (e.g. after switching to a text-only model mid-conversation)
+    /// fails as a clear, model-visible note instead of a provider 400.
+    supports_images: bool,
 }
 
 impl AgentClient {
@@ -1388,6 +1394,13 @@ impl AgentClient {
     /// (AGE-212) and, later, per-provider auth are derived from.
     pub fn provider(&self) -> crate::settings::models::providers_store::ProviderType {
         self.provider.clone()
+    }
+
+    /// Whether this agent's model accepts image input, per `ModelConfig`
+    /// at build time. `stream_prompt` uses this to strip images from a
+    /// request rather than let the provider 400 on them.
+    pub fn supports_images(&self) -> bool {
+        self.supports_images
     }
 }
 
