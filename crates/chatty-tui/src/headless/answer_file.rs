@@ -154,11 +154,19 @@ pub(super) fn build_compact_file_recovery_prompt(compact_prompt: &str) -> String
     )
 }
 
+/// `turn_was_cut` is set when the finalization follows a stream headless
+/// stopped (tool or failure budget) or that failed: rig hands back a turn's
+/// tool round-trips only with its final response, so that turn went into
+/// the history with its text but without a single tool result. The prompt
+/// then carries the transcript's digest of them, or "the evidence you have
+/// gathered above" would point at nothing.
 pub(super) fn send_answer_file_finalization_prompt(
     engine: &mut HeadlessRunner,
     original_prompt: &str,
+    turn_was_cut: bool,
 ) {
-    let prompt = build_answer_file_finalization_prompt(original_prompt);
+    let evidence = turn_was_cut.then(|| compact_tool_evidence(engine));
+    let prompt = build_answer_file_finalization_prompt(original_prompt, evidence.as_deref());
     // The history stays. This used to be wiped and replaced by a 16 KB
     // evidence digest (a bulk commit from before the AGE-504 context shaper
     // existed, no reason given); on GAIA the history-less pass then answered
@@ -185,9 +193,13 @@ pub(super) fn send_answer_file_finalization_prompt(
 /// The finalization turn's prompt. It rides on the full history, so it
 /// points at the evidence the model already gathered instead of repeating a
 /// digest of it, and it allows one last quick check rather than forbidding
-/// tools outright.
-pub(super) fn build_answer_file_finalization_prompt(original_prompt: &str) -> String {
-    format!(
+/// tools outright. `cut_turn_evidence` is the digest for a turn whose tool
+/// results never reached the history (see `send_answer_file_finalization_prompt`).
+pub(super) fn build_answer_file_finalization_prompt(
+    original_prompt: &str,
+    cut_turn_evidence: Option<&str>,
+) -> String {
+    let mut prompt = format!(
         "Time to finish: the answer file /app/answer.txt has not been written yet. \
          Give your final answer to the original task based on the evidence you have gathered above.\n\
           If one quick check would settle a remaining doubt (re-running a computation you have not seen the output of, or reading one value from a source you already found), make that one call first; otherwise do not start new research.\n\
@@ -195,7 +207,16 @@ pub(super) fn build_answer_file_finalization_prompt(original_prompt: &str) -> St
           Do not invent facts the evidence does not show; if the evidence is inconclusive, give your best-supported answer.\n\n\
           Original task:\n{}\n",
         original_task_excerpt(original_prompt),
-    )
+    );
+    if let Some(evidence) = cut_turn_evidence {
+        prompt.push_str(
+            "\nYour last turn was stopped, so its tool calls and results are not in the history above. \
+             This is a compact digest of the tool results from this run; treat it as the evidence you gathered:\n",
+        );
+        prompt.push_str(evidence);
+        prompt.push('\n');
+    }
+    prompt
 }
 
 pub(super) fn original_task_excerpt(original_prompt: &str) -> String {

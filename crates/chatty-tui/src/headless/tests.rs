@@ -246,7 +246,7 @@ fn a_command_written_answer_gets_one_more_turn_and_dedicated_writes_stop_at_once
 
 #[test]
 fn the_finalization_prompt_asks_for_an_answer_from_gathered_evidence() {
-    let prompt = build_answer_file_finalization_prompt("Task:\nHow many?");
+    let prompt = build_answer_file_finalization_prompt("Task:\nHow many?", None);
     assert!(prompt.contains("evidence you have gathered"));
     assert!(prompt.contains("one quick check"));
     assert!(!prompt.contains("Do not keep researching"));
@@ -814,6 +814,7 @@ mod runner {
         send_answer_file_finalization_prompt(
             &mut runner,
             "Write ONLY the final answer to /app/answer.txt",
+            false,
         );
 
         assert_eq!(
@@ -834,6 +835,7 @@ mod runner {
         send_answer_file_finalization_prompt(
             &mut fresh,
             "Write ONLY the final answer to /app/answer.txt",
+            false,
         );
 
         let (mut used, _event_rx2) = test_runner().await;
@@ -844,6 +846,7 @@ mod runner {
         send_answer_file_finalization_prompt(
             &mut used,
             "Write ONLY the final answer to /app/answer.txt",
+            false,
         );
 
         assert_eq!(
@@ -868,6 +871,7 @@ mod runner {
         send_answer_file_finalization_prompt(
             &mut runner,
             "How many? Write ONLY the answer to /app/answer.txt",
+            false,
         );
         while runner.is_streaming {
             let event = event_rx.recv().await.expect("turn events");
@@ -877,6 +881,66 @@ mod runner {
         let history = format!("{:?}", runner.session.conversation().unwrap().messages());
         assert!(history.contains("EXPLORED-EVIDENCE-7"), "{history}");
         assert!(history.contains("Time to finish"), "{history}");
+    }
+
+    /// The tool and failure budgets end the stream mid-turn, and rig hands
+    /// back a turn's tool round-trips only with its final response: the cut
+    /// turn is in the history as text alone. A finalization that only
+    /// pointed at "the evidence gathered above" then had none, so after a
+    /// cut the prompt carries the transcript's digest of the tool results.
+    #[tokio::test]
+    async fn finalization_after_a_cut_turn_carries_the_tool_evidence() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![
+            Scenario {
+                name: "cut_after_a_tool",
+                progress: Vec::new(),
+                items: vec![
+                    ScriptedItem::Chunk(StreamChunk::Text("Querying the API.".into())),
+                    ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                        id: "call_1".into(),
+                        name: "fetch".into(),
+                    }),
+                    ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                        id: "call_1".into(),
+                        arguments: "{}".into(),
+                    }),
+                    ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                        id: "call_1".into(),
+                        result: "record id UNIQUE-API-ID-42".into(),
+                    }),
+                    ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                        StreamErrorKind::Stalled,
+                        stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+                    ))),
+                ],
+            },
+            answer_turn("42"),
+        ]
+        .into();
+        let task = "Which id? Write ONLY the answer to /app/answer.txt";
+        runner.send_message(task.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(!history.contains("UNIQUE-API-ID-42"), "{history}");
+
+        send_answer_file_finalization_prompt(&mut runner, task, true);
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let sent = runner.scripted_inputs.lock().unwrap().clone();
+        let finalization = sent.last().expect("finalization prompt sent");
+        assert!(finalization.contains("Time to finish"), "{finalization}");
+        assert!(finalization.contains("UNIQUE-API-ID-42"), "{finalization}");
+        assert!(
+            !build_answer_file_finalization_prompt(task, None).contains("digest"),
+            "a turn that ended on its own keeps its round-trips; no digest"
+        );
     }
 
     /// AGE-503: a configured budget smaller than `FINALIZATION_MAX_AGENT_TURNS`
@@ -890,6 +954,7 @@ mod runner {
         send_answer_file_finalization_prompt(
             &mut runner,
             "Write ONLY the final answer to /app/answer.txt",
+            false,
         );
 
         assert_eq!(

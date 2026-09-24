@@ -466,7 +466,7 @@ pub async fn run_headless(
                         delay_secs
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                    send_answer_file_finalization_prompt(&mut engine, &message);
+                    send_answer_file_finalization_prompt(&mut engine, &message, true);
                     continue;
                 }
                 if should_request_answer_file_finalization(
@@ -482,7 +482,7 @@ pub async fn run_headless(
                     eprintln!(
                         "Answer file was not created; requesting a compact finalization pass."
                     );
-                    send_answer_file_finalization_prompt(&mut engine, &message);
+                    send_answer_file_finalization_prompt(&mut engine, &message, false);
                     continue;
                 }
                 break;
