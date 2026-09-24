@@ -71,6 +71,9 @@ TOOL GROUPS:
     docker-exec  Allow Docker fallback for execute_code (requires Docker)
     ask-user     Allow the model to ask the user a clarifying question
 
+  Names are case-insensitive, `_` works for `-` (ask_user, fs_read), and an
+  unknown name is an error.
+
   Defaults come from the persisted Chatty execution settings. CLI flags override
   those defaults for the session. --only replaces the defaults outright with a
   strict allow-list instead of adding to or subtracting from them.
@@ -150,6 +153,10 @@ struct Cli {
     /// every unnamed group is turned off. Applied after --enable/--disable
     /// (which are otherwise unaffected — --only just replaces their effect
     /// for the groups it manages) and before --tools/--tool-loading.
+    ///
+    /// It covers the groups listed under TOOL GROUPS only; tools outside
+    /// them (web search, memory, browser, MCP servers) keep following their
+    /// own settings. Use --tools <profile> to narrow by tool name.
     ///
     /// Example: --only fs-read,fs-write
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
@@ -1032,7 +1039,10 @@ fn set_tool_group(
     name: &str,
     on: bool,
 ) -> Result<()> {
-    match name {
+    let canonical = canonical_tool_group(name);
+    match canonical.as_str() {
+        // A stray empty entry (`--enable shell,`) names nothing.
+        "" => {}
         "shell" => settings.enabled = on,
         "fs-read" => settings.filesystem_read_enabled = on,
         "fs-write" => settings.filesystem_write_enabled = on,
@@ -1047,9 +1057,23 @@ fn set_tool_group(
             settings.docker_code_execution_enabled = on;
         }
         "ask-user" => settings.ask_user_enabled = on,
-        other => bail!("Unknown tool group '{other}' (valid: {VALID_TOOL_GROUPS})"),
+        _ => bail!("Unknown tool group '{name}' (valid: {VALID_TOOL_GROUPS})"),
     }
     Ok(())
+}
+
+/// The group a --enable/--disable/--only entry names. Callers spell groups
+/// several ways — the Harbor benchmark adapter passes `--disable ask_user`
+/// (the tool's own name), and a team file's `disable_tools` may say
+/// `fs_write` — and an unknown name is a hard error, so accept any case,
+/// `_` for `-`, and the name of the one tool a group stands for.
+fn canonical_tool_group(name: &str) -> String {
+    let group = name.trim().to_ascii_lowercase().replace('_', "-");
+    match group.as_str() {
+        "shell-execute" => "shell".to_string(),
+        "execute-code" => "code-exec".to_string(),
+        _ => group,
+    }
 }
 
 fn apply_tool_overrides(
@@ -1167,6 +1191,51 @@ mod tool_override_tests {
         assert!(!settings.fetch_enabled);
         assert!(!settings.git_enabled);
         assert!(!settings.enabled);
+        assert!(!settings.ask_user_enabled);
+    }
+
+    /// The Harbor benchmark adapter starts every run with
+    /// `--enable shell,fs-read,fs-write,git,code-exec --disable ask_user`;
+    /// with unknown names a hard error, the underscore spelling must still
+    /// resolve or every benchmark run dies at startup.
+    #[test]
+    fn harbor_adapter_argv_parses_and_turns_ask_user_off() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "chatty-tui",
+            "--headless",
+            "--enable",
+            "shell,fs-read,fs-write,git,code-exec",
+            "--disable",
+            "ask_user",
+        ])
+        .unwrap();
+        let mut settings = ExecutionSettingsModel::default();
+        apply_tool_overrides(&mut settings, &cli.enable, &cli.disable).unwrap();
+        assert!(!settings.ask_user_enabled);
+        assert!(settings.enabled && settings.git_enabled && settings.execute_code_enabled);
+    }
+
+    #[test]
+    fn group_names_accept_underscores_case_tool_names_and_stray_commas() {
+        let mut settings = ExecutionSettingsModel {
+            ask_user_enabled: true,
+            ..Default::default()
+        };
+        apply_tool_overrides(
+            &mut settings,
+            &[
+                " Shell_Execute".to_string(),
+                "execute_code".to_string(),
+                "FS_WRITE".to_string(),
+                String::new(),
+            ],
+            &["ask_user".to_string()],
+        )
+        .unwrap();
+        assert!(settings.enabled);
+        assert!(settings.execute_code_enabled);
+        assert!(settings.filesystem_write_enabled);
         assert!(!settings.ask_user_enabled);
     }
 
