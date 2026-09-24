@@ -29,6 +29,7 @@ use super::prompt_cache_http::PromptCachingHttpClient;
 use super::request_recorder::RequestRecorder;
 use super::tool_collector::NativeTools;
 use super::tool_loading::ToolLoader;
+use super::tool_name_repair::ToolNameRepair;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -382,8 +383,9 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
 /// the context guard that keeps every model call of the run inside the
 /// model's window (AGE-504), and the recorder that keeps the last request
 /// for a run that fails. Under dynamic tool loading the loader goes ahead of
-/// the context guard, so a group it loads is counted in the same call.
-/// Utility agents (titles, summaries) carry none of them.
+/// the context guard, so a group it loads is counted in the same call; a
+/// call to a tool name the agent lacks is renamed or answered after it
+/// ([`ToolNameRepair`]). Utility agents (titles, summaries) carry none of them.
 fn chat_agent_builder(
     native_tools: NativeTools,
     builder: AgentBuilder,
@@ -398,7 +400,10 @@ fn chat_agent_builder(
         Some(loader) => builder.add_hook(loader),
         None => builder,
     };
-    builder.add_hook(context_shaper).add_hook(request_recorder)
+    builder
+        .add_hook(ToolNameRepair)
+        .add_hook(context_shaper)
+        .add_hook(request_recorder)
 }
 
 /// Ollama's per-request `think` switch, from the model's `extra_params.think`
