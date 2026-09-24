@@ -48,7 +48,8 @@ impl Tool for ReadFileTool {
     fn description(&self) -> String {
         "Read the contents of a text file within the workspace. \
                           Returns the file contents as a string. \
-                          Files must be within the workspace directory and under 10MB. \
+                          Files must be within the workspace directory (or, read-only, /tmp) \
+                          and under 10MB. \
                           Optionally provide start_line and end_line (1-based, inclusive) to read \
                           a specific range. Without an end_line, up to 2000 lines are returned. Every \
                           read is capped at ~20,000 characters, cut on a line boundary; \
