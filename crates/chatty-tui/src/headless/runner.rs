@@ -285,7 +285,8 @@ impl HeadlessRunner {
     /// `max_agent_turns`, at least [`FINAL_PASS_TOOL_TURNS`] once the run has
     /// spent any (so a follow-up can still write the answer), never more
     /// than `max_agent_turns + FINAL_PASS_TOOL_TURNS` over the whole run,
-    /// and at most [`FINAL_PASS_TOOL_TURNS`] for a finalization pass. `None`
+    /// and at most [`FINAL_PASS_TOOL_TURNS`] (at least one, for
+    /// `final_answer`, even past that ceiling) for a finalization pass. `None`
     /// for an uncapped (`0`) run, which rig refuses as before.
     pub(super) fn pass_turn_budget(&self, final_pass: bool) -> Option<TurnBudget> {
         let total = self.execution_settings.max_agent_turns as usize;
@@ -302,7 +303,11 @@ impl HeadlessRunner {
                 .min((total + FINAL_PASS_TOOL_TURNS).saturating_sub(spent))
         };
         if final_pass {
-            turns = turns.min(FINAL_PASS_TOOL_TURNS);
+            // At least one: a finalization pass exists to call
+            // `final_answer`, and with no tool turn it can only answer in
+            // text, which writes no answer file. `MAX_FINALIZATION_ATTEMPTS`
+            // bounds what this adds past the run's ceiling.
+            turns = turns.clamp(1, FINAL_PASS_TOOL_TURNS);
         }
         Some(TurnBudget::run_share(turns, total, spent))
     }

@@ -858,6 +858,7 @@ mod runner {
         let first = runner.pass_turn_budget(false).unwrap();
         assert_eq!(first, TurnBudget::run_share(50, 50, 0));
         let mut total = 0;
+        let mut past_ceiling = 0;
         for final_pass in [false, false, false, true, false, true, true] {
             let budget = runner.pass_turn_budget(final_pass).unwrap();
             if final_pass {
@@ -867,14 +868,23 @@ mod runner {
             if total == 0 {
                 assert_eq!(budget, first);
             }
+            if runner.tool_turns_spent >= 50 + FINAL_PASS_TOOL_TURNS {
+                // Past the ceiling only a finalization gets a tool turn:
+                // the one it needs for `final_answer`.
+                assert_eq!(budget.tool_turns(), usize::from(final_pass));
+                if final_pass {
+                    past_ceiling += 1;
+                }
+            }
             spend_tool_turns(&mut runner, budget.tool_turns());
             total += budget.tool_turns();
         }
         assert_eq!(runner.tool_turns_spent, total);
-        assert_eq!(total, 50 + FINAL_PASS_TOOL_TURNS);
+        assert_eq!(past_ceiling, 3);
+        assert_eq!(total, 50 + FINAL_PASS_TOOL_TURNS + past_ceiling);
         assert_eq!(
             runner.pass_turn_budget(false),
-            Some(TurnBudget::run_share(0, 50, 50 + FINAL_PASS_TOOL_TURNS)),
+            Some(TurnBudget::run_share(0, 50, total)),
             "a spent run still gets its tool-free last word, and no tools"
         );
     }
@@ -894,6 +904,25 @@ mod runner {
         assert_eq!(
             runner.pass_turn_budget(false),
             Some(TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 50, 49))
+        );
+    }
+
+    /// A finalization pass on a run past its ceiling still gets the one
+    /// tool turn `final_answer` needs: with none it could only answer in
+    /// text, and no answer file would be written.
+    #[tokio::test]
+    async fn a_finalization_past_the_ceiling_can_still_call_final_answer() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 10;
+        spend_tool_turns(&mut runner, 10 + FINAL_PASS_TOOL_TURNS);
+        let spent = 10 + FINAL_PASS_TOOL_TURNS;
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(0, 10, spent))
+        );
+        assert_eq!(
+            runner.pass_turn_budget(true),
+            Some(TurnBudget::run_share(1, 10, spent))
         );
     }
 
