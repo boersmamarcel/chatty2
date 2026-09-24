@@ -45,7 +45,14 @@ pub type EventObserver = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
 /// spent, and all a finalization pass ever gets: enough to write the answer
 /// file, not to research again. A run spends at most `max_agent_turns` plus
 /// this many tool turns across all its passes.
-pub(super) const FINAL_PASS_TOOL_TURNS: usize = 4;
+///
+/// Six, not four: the finalization prompt allows one quick check before
+/// `final_answer`, and that check is usually a script. One failed run of it
+/// and its fix, a shell command that writes the answer file (which earns a
+/// grace turn to read its output), then `final_answer` is already four, and
+/// TurnBudget disables tools after the last. Six leaves one call of slack
+/// and still bounds a `--max-agent-turns 50` run at 56.
+pub(super) const FINAL_PASS_TOOL_TURNS: usize = 6;
 
 pub struct HeadlessRunner {
     pub session: AgentSession,

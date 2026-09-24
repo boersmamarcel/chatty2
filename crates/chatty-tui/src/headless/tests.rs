@@ -874,7 +874,7 @@ mod runner {
         assert_eq!(total, 50 + FINAL_PASS_TOOL_TURNS);
         assert_eq!(
             runner.pass_turn_budget(false),
-            Some(TurnBudget::run_share(0, 50, 54)),
+            Some(TurnBudget::run_share(0, 50, 50 + FINAL_PASS_TOOL_TURNS)),
             "a spent run still gets its tool-free last word, and no tools"
         );
     }
