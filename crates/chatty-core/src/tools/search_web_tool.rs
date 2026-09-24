@@ -854,7 +854,10 @@ impl Tool for SearchWebTool {
     fn description(&self) -> String {
         "Search the web and return relevant results. \
                          Use this to find up-to-date information, research topics, find documentation, \
-                         or answer questions that require current web data."
+                         or answer questions that require current web data. \
+                         If general results are thin, search the site itself through its own search \
+                         page or API (e.g. MediaWiki `api.php?action=query&list=search`, PubMed \
+                         Central `?term=`, the Wayback CDX API); never guess IDs or URLs."
                 .to_string()
     }
 
@@ -1360,6 +1363,7 @@ mod tests {
         let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
         assert!(def.description.contains("Search the web"));
+        assert!(def.description.contains("never guess IDs or URLs"));
     }
 
     #[tokio::test]
