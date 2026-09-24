@@ -139,6 +139,19 @@ struct Cli {
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
     disable: Vec<String>,
 
+    /// How the model is offered its tools: `all` (default) sends every
+    /// enabled tool's schema with every request; `dynamic` sends a small
+    /// core — shell_execute, read_file, write_file, apply_diff, search_code,
+    /// glob_search, the todo plan — plus `load_tools`, with which the model
+    /// loads a group (web, git, files, documents, data, ...) when the task
+    /// needs it. A loaded group stays loaded. Overrides the persisted
+    /// setting for this session; valid with --headless, --pipe and the
+    /// interactive TUI.
+    ///
+    /// Example: --tool-loading dynamic
+    #[arg(long, value_name = "MODE")]
+    tool_loading: Option<chatty_core::settings::models::ToolLoading>,
+
     /// Run with a named tool profile: an allowlist of tool *names*.
     ///
     /// Where --enable/--disable work on tool groups, a profile is the whole
@@ -485,6 +498,9 @@ async fn main() -> Result<()> {
 
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
+    if let Some(tool_loading) = cli.tool_loading {
+        execution_settings.tool_loading = tool_loading;
+    }
 
     // --tools / --preamble: the role this process runs as (ADR-0011 C11);
     // a team's leader role fills in whichever flag was not given.
@@ -1551,6 +1567,28 @@ mod cli_smoke_tests {
         assert!(team(&["--headless", "-m", "hi"]).headless);
         assert!(team(&["--pipe"]).pipe);
         assert!(Cli::try_parse_from(["chatty-tui", "--team"]).is_err());
+    }
+
+    /// `--tool-loading all|dynamic`, absent by default so the persisted
+    /// setting (default `all`) applies.
+    #[test]
+    fn tool_loading_flag_parses() {
+        use chatty_core::settings::models::ToolLoading;
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["chatty-tui"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).map(|cli| cli.tool_loading)
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(
+            parse(&["--tool-loading", "dynamic", "--headless", "-m", "hi"]).unwrap(),
+            Some(ToolLoading::Dynamic)
+        );
+        assert_eq!(
+            parse(&["--tool-loading", "all"]).unwrap(),
+            Some(ToolLoading::All)
+        );
+        assert!(parse(&["--tool-loading", "some"]).is_err());
     }
 }
 
