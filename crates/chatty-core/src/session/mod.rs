@@ -68,6 +68,7 @@ use crate::models::message_types::{
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::repositories::ConversationData;
+use crate::services::turn_budget::TurnBudget;
 use crate::services::{
     AgentTaskController, AgentTaskSnapshot, RecoveryAction, StreamError, StreamErrorKind,
     StreamSurface, decide_recovery, exchange_count, extract_user_text, install_progress_channel,
@@ -138,6 +139,10 @@ pub struct TurnInput {
     /// Attachment paths persisted with the user message.
     pub attachments: Vec<PathBuf>,
     pub kind: TurnKind,
+    /// This turn's tool-turn budget when it is not the configured
+    /// `max_agent_turns`: headless runs its follow-up passes on what is left
+    /// of the run's budget.
+    pub turn_budget: Option<TurnBudget>,
 }
 
 impl TurnInput {
@@ -148,6 +153,7 @@ impl TurnInput {
             llm_only_contents: Vec::new(),
             attachments: Vec::new(),
             kind: TurnKind::Human,
+            turn_budget: None,
         }
     }
 
@@ -166,6 +172,7 @@ impl TurnInput {
             llm_only_contents: Vec::new(),
             attachments: Vec::new(),
             kind: TurnKind::Regenerate,
+            turn_budget: None,
         }
     }
 }
@@ -462,6 +469,7 @@ impl AgentSession {
             llm_only_contents,
             attachments,
             kind,
+            turn_budget,
         } = input;
 
         // Snapshot BEFORE committing the new message: `stream_prompt` appends
@@ -530,6 +538,9 @@ impl AgentSession {
             clarification_rx,
             cancel_flag,
             progress_slot: conversation.invoke_agent_progress_slot(),
+            turn_budget: turn_budget.unwrap_or_else(|| {
+                TurnBudget::new(self.config.execution_settings.max_agent_turns as usize)
+            }),
             policy: TurnPolicy {
                 surface: self.config.surface,
                 max_agent_turns: self.config.execution_settings.max_agent_turns as usize,
@@ -894,6 +905,7 @@ struct PreparedTurn {
     cancel_flag: Arc<AtomicBool>,
     progress_slot: InvokeAgentProgressSlot,
     policy: TurnPolicy,
+    turn_budget: TurnBudget,
 }
 
 impl PreparedTurn {
@@ -909,7 +921,7 @@ impl PreparedTurn {
             Some(self.approval_rx),
             Some(self.resolution_rx),
             Some(self.clarification_rx),
-            self.policy.max_agent_turns,
+            self.turn_budget,
         )
         .await;
         let stream = match stream {

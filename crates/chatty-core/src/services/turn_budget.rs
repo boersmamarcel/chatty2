@@ -18,6 +18,13 @@
 //!   normally instead of erroring. All `max_agent_turns` tool turns stay
 //!   usable; the extra call is the only cost.
 //!
+//! A headless run sends follow-up passes (finalization, stall resume,
+//! loop-guard pivots) as new `stream_prompt` calls on the same history.
+//! Each would otherwise get a fresh full budget, so one run made 101 tool
+//! calls under `--max-agent-turns 50`. [`TurnBudget::run_share`] gives such
+//! a pass only its share of the run's budget, and its notes count down the
+//! run, not the pass.
+//!
 //! Nothing here touches history, so tool-call/result pairing (AGE-513) and
 //! the context shaper's history patch (AGE-504) are unaffected: the note is
 //! appended inside the tool result it rides on.
@@ -34,9 +41,19 @@ pub const FINAL_TURN_NOTE: &str = "[No tool turns left. Tools are now disabled: 
      final answer, or a short summary of what you did and what remains, using what you have.]";
 
 /// Tool budget for one `stream_prompt` run; see the module docs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnBudget {
     tool_turns: usize,
+    /// Set when this `stream_prompt` run is one pass of a longer run
+    /// (headless follow-ups): the run's whole budget and what earlier
+    /// passes spent of it.
+    run: Option<RunShare>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunShare {
+    total: usize,
+    spent: usize,
 }
 
 /// Run-scoped marker: the model call whose tool results already carry a note.
@@ -45,7 +62,26 @@ struct NotedTurn(usize);
 
 impl TurnBudget {
     pub fn new(tool_turns: usize) -> Self {
-        Self { tool_turns }
+        Self {
+            tool_turns,
+            run: None,
+        }
+    }
+
+    /// One pass of a run with `total` tool turns of which earlier passes
+    /// spent `spent`: this pass may use `tool_turns`, and its notes count
+    /// down from the run's `total`. A pass with no tool turns left still
+    /// gets the tool-free wrap-up call, so it can answer in text.
+    pub fn run_share(tool_turns: usize, total: usize, spent: usize) -> Self {
+        Self {
+            tool_turns,
+            run: Some(RunShare { total, spent }),
+        }
+    }
+
+    /// Tool turns this pass may use.
+    pub fn tool_turns(&self) -> usize {
+        self.tool_turns
     }
 
     /// Set rig's call budget on `request` and register this hook on it.
@@ -56,7 +92,7 @@ impl TurnBudget {
     /// rig's model-call budget: every tool turn plus the wrap-up call. A zero
     /// budget stays zero (rig then refuses the run outright, as before).
     pub fn rig_max_turns(&self) -> usize {
-        if self.tool_turns == 0 {
+        if self.tool_turns == 0 && self.run.is_none() {
             0
         } else {
             self.tool_turns + 1
@@ -65,7 +101,15 @@ impl TurnBudget {
 
     /// Whether model call `turn` (one-based) is the tool-free wrap-up call.
     fn is_wrap_up(&self, turn: usize) -> bool {
-        self.tool_turns > 0 && turn > self.tool_turns
+        (self.tool_turns > 0 || self.run.is_some()) && turn > self.tool_turns
+    }
+
+    /// The note for model call `turn` (one-based) of this pass.
+    fn note(&self, turn: usize) -> Option<String> {
+        match self.run {
+            None => budget_note(turn, self.tool_turns),
+            Some(run) => run_budget_note(turn, self.tool_turns, run.total, run.spent),
+        }
     }
 }
 
@@ -74,15 +118,27 @@ impl TurnBudget {
 /// the budget is spent, then the count of tool turns left, then
 /// [`FINAL_TURN_NOTE`] once the next call is the wrap-up.
 pub fn budget_note(turn: usize, tool_turns: usize) -> Option<String> {
-    if tool_turns == 0 || turn * 4 < tool_turns * 3 {
+    run_budget_note(turn, tool_turns, tool_turns, 0)
+}
+
+/// [`budget_note`] for model call `turn` of a pass with `pass_turns` tool
+/// turns, in a run of `total` tool turns of which `spent` went to earlier
+/// passes: the threshold and the "of N" are the run's.
+pub fn run_budget_note(
+    turn: usize,
+    pass_turns: usize,
+    total: usize,
+    spent: usize,
+) -> Option<String> {
+    if pass_turns == 0 || total == 0 || (spent + turn) * 4 < total * 3 {
         return None;
     }
-    if turn >= tool_turns {
+    if turn >= pass_turns {
         return Some(FINAL_TURN_NOTE.to_string());
     }
-    let left = tool_turns - turn;
+    let left = pass_turns - turn;
     Some(format!(
-        "[{left} of {tool_turns} tool turns left. Start wrapping up: finish the current change \
+        "[{left} of {total} tool turns left. Start wrapping up: finish the current change \
          and give your answer.]"
     ))
 }
@@ -125,7 +181,7 @@ impl AgentHook for TurnBudget {
         event: ToolResultEvent<'_>,
     ) -> ToolResultAction {
         let turn = ctx.turn();
-        let Some(note) = budget_note(turn, self.tool_turns) else {
+        let Some(note) = self.note(turn) else {
             return ToolResultAction::Keep;
         };
         // Once per turn: a parallel batch needs one note, not one per result.
@@ -186,6 +242,34 @@ mod tests {
         let budget = TurnBudget::new(2);
         assert!(!budget.is_wrap_up(2));
         assert!(budget.is_wrap_up(3));
+    }
+
+    #[test]
+    fn a_run_share_counts_down_the_run() {
+        // Pass 2 of a 50-turn run that already spent 45: its 5 turns are
+        // the run's last, and the note says so from its first call.
+        assert!(
+            run_budget_note(1, 5, 50, 45)
+                .unwrap()
+                .starts_with("[4 of 50 tool turns left.")
+        );
+        assert_eq!(
+            run_budget_note(5, 5, 50, 45).as_deref(),
+            Some(FINAL_TURN_NOTE)
+        );
+        // Early in the run a follow-up pass stays quiet.
+        assert_eq!(run_budget_note(1, 40, 50, 10), None);
+    }
+
+    #[test]
+    fn a_spent_run_share_still_gets_its_wrap_up_call() {
+        let spent = TurnBudget::run_share(0, 50, 50);
+        assert_eq!(spent.rig_max_turns(), 1);
+        assert!(spent.is_wrap_up(1));
+        assert_eq!(TurnBudget::run_share(4, 50, 48).rig_max_turns(), 5);
+        // The standalone budget is unchanged.
+        assert_eq!(TurnBudget::new(0).rig_max_turns(), 0);
+        assert!(!TurnBudget::new(0).is_wrap_up(1));
     }
 
     #[test]

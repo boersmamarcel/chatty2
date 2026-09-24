@@ -59,7 +59,6 @@ const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 8;
 /// Tools that run a command whose output the model has not seen yet when an
 /// answer file they wrote appears (`python3 count.py; echo -n 5 > answer.txt`).
 const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
-const FINALIZATION_MAX_AGENT_TURNS: u32 = 12;
 const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 6_000;
 const FINALIZATION_EVIDENCE_CHARS: usize = 16_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 4_000;

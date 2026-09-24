@@ -145,6 +145,7 @@ pub(super) fn send_compact_file_answer_prompt(engine: &mut HeadlessRunner, promp
     if let Some(conversation) = engine.session.conversation_mut() {
         conversation.replace_history(Vec::new(), 0);
     }
+    engine.next_pass_is_final = true;
     engine.send_message(prompt);
 }
 
@@ -174,19 +175,9 @@ pub(super) fn send_answer_file_finalization_prompt(
     // literature" after 16 calls of real API exploration were thrown away.
     // The context shaper bounds every model call's size, this one included,
     // so there is no overflow left for a wipe to prevent.
-    // `max_agent_turns` is rig's per-`stream_prompt`-call budget (a fresh
-    // `AgentRun` per call, `current_turn` starting at 0 each time), not a
-    // cumulative total across the run. The old `.min(FINALIZATION_MAX_AGENT_TURNS)`
-    // narrowed that per-call budget for the finalization pass (and every
-    // call after it, since this field is never restored) from whatever the
-    // operator configured down to 12 — so a task that legitimately needed
-    // more than 12 model calls to wrap up died with `MaxTurnsError`
-    // (AGE-503). `.max()` instead only raises a too-small configured value
-    // up to the floor, and never narrows a larger one.
-    engine.execution_settings.max_agent_turns = engine
-        .execution_settings
-        .max_agent_turns
-        .max(FINALIZATION_MAX_AGENT_TURNS);
+    // A finalization pass writes the answer; it does not research again,
+    // and it does not get a fresh `max_agent_turns` of its own.
+    engine.next_pass_is_final = true;
     engine.send_message(prompt);
 }
 

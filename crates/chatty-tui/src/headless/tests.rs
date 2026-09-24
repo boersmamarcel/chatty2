@@ -437,7 +437,9 @@ fn unknown_tool_call_recovery_prompt_echoes_the_rig_error_and_asks_for_a_real_to
 mod runner {
     use super::*;
     use crate::engine::{ChatEngineConfig, MessageRole};
+    use crate::headless::runner::FINAL_PASS_TOOL_TURNS;
     use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
+    use chatty_core::services::turn_budget::TurnBudget;
     use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
     use chatty_core::settings::models::models_store::{ModelConfig, ModelsModel};
     use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -830,65 +832,115 @@ mod runner {
         );
     }
 
-    /// AGE-503 regression: `max_agent_turns` is rig's per-`stream_prompt`-call
-    /// budget (a fresh `AgentRun` per call, `current_turn` starting at 0
-    /// every time) — not a cumulative total across the run. Finalization
-    /// used to narrow that per-call budget down to an absolute
-    /// `FINALIZATION_MAX_AGENT_TURNS` (12) via `.min()`, even when the
-    /// operator had configured a larger one (e.g. `--max-agent-turns 30`),
-    /// so a wrap-up prompt that legitimately needed more than 12 model
-    /// calls died with `MaxTurnsError`. A configured budget already at or
-    /// above the floor must be left untouched.
-    #[tokio::test]
-    async fn finalization_never_narrows_a_configured_budget_below_the_floor() {
-        let (mut runner, _event_rx) = test_runner().await;
-        runner.execution_settings.max_agent_turns = 30;
-        for _ in 0..20 {
-            runner.transcript.start_assistant();
+    /// `n` model calls that each made one tool call, as the runner sees them.
+    fn spend_tool_turns(runner: &mut HeadlessRunner, n: usize) {
+        for i in 0..n {
+            runner.handle_event(AppEvent::ToolCallStarted {
+                id: format!("call_{i}"),
+                name: "shell_execute".into(),
+            });
+            runner.handle_event(AppEvent::ToolCallResult {
+                id: format!("call_{i}"),
+                result: "ok".into(),
+            });
         }
+    }
+
+    /// The 76-minute run: `--max-agent-turns 50`, yet 101 shell calls,
+    /// because every follow-up pass got a fresh 50. Across the first pass,
+    /// stall resumes, pivots and finalizations that each spend all they are
+    /// given, the run stays within `max_agent_turns + FINAL_PASS_TOOL_TURNS`.
+    #[tokio::test]
+    async fn follow_up_passes_share_the_runs_turn_budget() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 50;
+
+        let first = runner.pass_turn_budget(false).unwrap();
+        assert_eq!(first, TurnBudget::run_share(50, 50, 0));
+        let mut total = 0;
+        for final_pass in [false, false, false, true, false, true, true] {
+            let budget = runner.pass_turn_budget(final_pass).unwrap();
+            if final_pass {
+                assert!(budget.tool_turns() <= FINAL_PASS_TOOL_TURNS);
+            }
+            // The first of these is the first pass: it gets the whole run.
+            if total == 0 {
+                assert_eq!(budget, first);
+            }
+            spend_tool_turns(&mut runner, budget.tool_turns());
+            total += budget.tool_turns();
+        }
+        assert_eq!(runner.tool_turns_spent, total);
+        assert_eq!(total, 50 + FINAL_PASS_TOOL_TURNS);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(0, 50, 54)),
+            "a spent run still gets its tool-free last word, and no tools"
+        );
+    }
+
+    /// A follow-up after a partly spent pass gets what is left; one after a
+    /// nearly spent pass still gets the floor, so it can write the answer.
+    #[tokio::test]
+    async fn a_follow_up_gets_the_rest_of_the_run_or_the_floor() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 50;
+        spend_tool_turns(&mut runner, 30);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(20, 50, 30))
+        );
+        spend_tool_turns(&mut runner, 19);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 50, 49))
+        );
+    }
+
+    /// A parallel batch is one model call, so one tool turn.
+    #[tokio::test]
+    async fn a_parallel_tool_batch_counts_as_one_turn() {
+        let (mut runner, _event_rx) = test_runner().await;
+        for id in ["a", "b"] {
+            runner.handle_event(AppEvent::ToolCallStarted {
+                id: id.into(),
+                name: "shell_execute".into(),
+            });
+        }
+        for id in ["a", "b"] {
+            runner.handle_event(AppEvent::ToolCallResult {
+                id: id.into(),
+                result: "ok".into(),
+            });
+        }
+        assert_eq!(runner.tool_turns_spent, 1);
+    }
+
+    /// A finalization pass exists to write the answer: it gets the floor,
+    /// not a fresh `max_agent_turns` (AGE-503 used to raise it to 12 and
+    /// leave every later pass there too).
+    #[tokio::test]
+    async fn a_finalization_pass_gets_only_the_floor() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 30;
+        runner.scripted_turns = vec![answer_turn("7")].into();
 
         send_answer_file_finalization_prompt(
             &mut runner,
             "Write ONLY the final answer to /app/answer.txt",
             false,
         );
-
-        assert_eq!(
-            runner.execution_settings.max_agent_turns, 30,
-            "a configured budget already above the floor must be left untouched \
-             (the old `.min()` code would have narrowed this to 12)"
-        );
-    }
-
-    /// AGE-503: there is no cumulative "turns used" accounting anywhere in
-    /// the real turn-limit path, so the finalization budget must not depend
-    /// on how many assistant rows the transcript already has. A runner with
-    /// 0 prior rows and one with 20 must land on the exact same budget.
-    #[tokio::test]
-    async fn finalization_budget_is_independent_of_turns_already_used() {
-        let (mut fresh, _event_rx) = test_runner().await;
-        fresh.execution_settings.max_agent_turns = 30;
-        send_answer_file_finalization_prompt(
-            &mut fresh,
-            "Write ONLY the final answer to /app/answer.txt",
-            false,
-        );
-
-        let (mut used, _event_rx2) = test_runner().await;
-        used.execution_settings.max_agent_turns = 30;
-        for _ in 0..20 {
-            used.transcript.start_assistant();
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
         }
-        send_answer_file_finalization_prompt(
-            &mut used,
-            "Write ONLY the final answer to /app/answer.txt",
-            false,
-        );
 
         assert_eq!(
-            fresh.execution_settings.max_agent_turns, used.execution_settings.max_agent_turns,
-            "the finalization budget must be identical regardless of turns already used"
+            runner.scripted_budgets,
+            vec![Some(TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 30, 0))]
         );
+        assert_eq!(runner.execution_settings.max_agent_turns, 30, "untouched");
+        assert!(!runner.next_pass_is_final, "only the one pass");
     }
 
     /// The finalization turn runs on the history the model built, not on a
@@ -976,26 +1028,6 @@ mod runner {
         assert!(
             !build_answer_file_finalization_prompt(task, None).contains("digest"),
             "a turn that ended on its own keeps its round-trips; no digest"
-        );
-    }
-
-    /// AGE-503: a configured budget smaller than `FINALIZATION_MAX_AGENT_TURNS`
-    /// is raised to the floor so the wrap-up pass always gets at least 12
-    /// model calls.
-    #[tokio::test]
-    async fn finalization_raises_a_too_small_configured_budget_to_the_floor() {
-        let (mut runner, _event_rx) = test_runner().await;
-        runner.execution_settings.max_agent_turns = 5;
-
-        send_answer_file_finalization_prompt(
-            &mut runner,
-            "Write ONLY the final answer to /app/answer.txt",
-            false,
-        );
-
-        assert_eq!(
-            runner.execution_settings.max_agent_turns,
-            FINALIZATION_MAX_AGENT_TURNS
         );
     }
 
@@ -1199,6 +1231,55 @@ mod runner {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[1], "Count the files in /data", "got {sent:?}");
+    }
+
+    /// A stall resume runs on what the stalled pass left of the run's budget.
+    #[tokio::test]
+    async fn a_stall_resume_gets_only_the_rest_of_the_runs_budget() {
+        let tool = |i: usize| {
+            [
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: format!("call_{i}"),
+                    name: "shell_execute".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: format!("call_{i}"),
+                    result: "ok".into(),
+                }),
+            ]
+        };
+        let mut items: Vec<ScriptedItem> = (0..3).flat_map(tool).collect();
+        items.push(ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+            StreamErrorKind::Stalled,
+            stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+        ))));
+        let stalled = Scenario {
+            name: "stall_after_three_tools",
+            progress: Vec::new(),
+            items,
+        };
+        let (mut runner, mut event_rx, _started, _workspace) =
+            scripted_runner(vec![stalled, answer_turn("Done.")]).await;
+        runner.execution_settings.max_agent_turns = 10;
+
+        runner.send_message("summarize the repo".to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+        runner.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        assert_eq!(
+            runner.scripted_budgets,
+            vec![
+                Some(TurnBudget::run_share(10, 10, 0)),
+                Some(TurnBudget::run_share(7, 10, 3)),
+            ]
+        );
     }
 
     /// Other errors keep their behaviour: one that is not retried ends the

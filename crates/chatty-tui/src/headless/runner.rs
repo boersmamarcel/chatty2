@@ -20,6 +20,7 @@ use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::services::StreamSurface;
 use chatty_core::services::team::Team;
+use chatty_core::services::turn_budget::TurnBudget;
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, Arrival, Decision, Mailbox, SessionEvent, TurnEnd, TurnInput,
     TurnKind,
@@ -39,6 +40,12 @@ use crate::events::AppEvent;
 /// the turn is silent to anyone outside this process — which is what plain
 /// `--headless` is: an answer on stdout and a log on stderr.
 pub type EventObserver = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
+
+/// Tool turns a follow-up pass gets once the run's `max_agent_turns` is
+/// spent, and all a finalization pass ever gets: enough to write the answer
+/// file, not to research again. A run spends at most `max_agent_turns` plus
+/// this many tool turns across all its passes.
+pub(super) const FINAL_PASS_TOOL_TURNS: usize = 4;
 
 pub struct HeadlessRunner {
     pub session: AgentSession,
@@ -61,6 +68,20 @@ pub struct HeadlessRunner {
     /// The message of the last turn when it ended with nothing to keep and
     /// was rolled back off the history (AGE-243), for a retry to re-send.
     rolled_back_message: Option<String>,
+    /// Tool turns (model calls that made tool calls) every pass of this run
+    /// has spent so far. `max_agent_turns` is the run's budget, not each
+    /// pass's: every follow-up headless sends is a new `stream_prompt`, and
+    /// with a fresh budget each one run made 101 tool calls in 76 minutes
+    /// under `--max-agent-turns 50`.
+    pub(super) tool_turns_spent: usize,
+    /// Whether the current model call already counted as a tool turn: a
+    /// parallel batch is one turn, the next call starts after its results.
+    in_tool_turn: bool,
+    /// The next pass is a finalization and gets [`FINAL_PASS_TOOL_TURNS`].
+    pub(super) next_pass_is_final: bool,
+    /// Tests only: the budget every turn started with, in order.
+    #[cfg(test)]
+    pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
     /// Tests only: each turn plays the next of these instead of calling the
     /// provider, so `run_headless` can be driven end to end offline.
     #[cfg(test)]
@@ -95,6 +116,11 @@ impl HeadlessRunner {
             mailbox: Mailbox::new(),
             pending_first_turn,
             rolled_back_message: None,
+            tool_turns_spent: 0,
+            in_tool_turn: false,
+            next_pass_is_final: false,
+            #[cfg(test)]
+            scripted_budgets: Vec::new(),
             #[cfg(test)]
             scripted_turns: Default::default(),
             #[cfg(test)]
@@ -240,13 +266,44 @@ impl HeadlessRunner {
             execution_settings: self.execution_settings.clone(),
             ..self.session.config().clone()
         });
+        let final_pass = std::mem::take(&mut self.next_pass_is_final);
         Some(TurnInput {
             kind,
+            turn_budget: self.pass_turn_budget(final_pass),
             ..TurnInput::text(message)
         })
     }
 
+    /// The budget of the next pass: what is left of the run's
+    /// `max_agent_turns`, at least [`FINAL_PASS_TOOL_TURNS`] once the run has
+    /// spent any (so a follow-up can still write the answer), never more
+    /// than `max_agent_turns + FINAL_PASS_TOOL_TURNS` over the whole run,
+    /// and at most [`FINAL_PASS_TOOL_TURNS`] for a finalization pass. `None`
+    /// for an uncapped (`0`) run, which rig refuses as before.
+    pub(super) fn pass_turn_budget(&self, final_pass: bool) -> Option<TurnBudget> {
+        let total = self.execution_settings.max_agent_turns as usize;
+        if total == 0 {
+            return None;
+        }
+        let spent = self.tool_turns_spent;
+        let mut turns = if spent == 0 {
+            total
+        } else {
+            total
+                .saturating_sub(spent)
+                .max(FINAL_PASS_TOOL_TURNS)
+                .min((total + FINAL_PASS_TOOL_TURNS).saturating_sub(spent))
+        };
+        if final_pass {
+            turns = turns.min(FINAL_PASS_TOOL_TURNS);
+        }
+        Some(TurnBudget::run_share(turns, total, spent))
+    }
+
     fn spawn_turn(&mut self, input: TurnInput) {
+        self.in_tool_turn = false;
+        #[cfg(test)]
+        self.scripted_budgets.push(input.turn_budget);
         #[cfg(test)]
         if let Some(scenario) = self.scripted_turns.pop_front() {
             let text = input
@@ -304,10 +361,15 @@ impl HeadlessRunner {
         match event {
             AppEvent::StreamStarted => self.is_streaming = true,
             AppEvent::TextChunk(text) => {
+                self.in_tool_turn = false;
                 self.session.append_streaming_text(&text);
                 self.transcript.push_text(&text);
             }
             AppEvent::ToolCallStarted { id, name } => {
+                if !self.in_tool_turn {
+                    self.in_tool_turn = true;
+                    self.tool_turns_spent += 1;
+                }
                 self.session.note_tool_started(&id, &name);
                 self.transcript.tool_started(id, name);
             }
@@ -316,10 +378,12 @@ impl HeadlessRunner {
                 self.transcript.tool_input(&id, &arguments);
             }
             AppEvent::ToolCallResult { id, result } => {
+                self.in_tool_turn = false;
                 self.session.note_tool_result(&id, &result);
                 self.transcript.tool_result(&id, result);
             }
             AppEvent::ToolCallError { id, error } => {
+                self.in_tool_turn = false;
                 self.session.note_tool_error(&id, &error);
                 self.transcript.tool_error(&id, error);
             }
