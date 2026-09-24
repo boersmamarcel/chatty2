@@ -1065,7 +1065,8 @@ mod runner {
     // -------------------------------------------------------------------
 
     use chatty_core::services::{
-        HEADLESS_STALL_RESUME_ATTEMPTS, Scenario, ScriptedItem, StreamChunk, stalled_stream_message,
+        HEADLESS_STALL_RESUME_ATTEMPTS, HEADLESS_TRANSPORT_RETRY_ATTEMPTS, Scenario, ScriptedItem,
+        StreamChunk, stalled_stream_message,
     };
 
     fn stalled_turn() -> Scenario {
@@ -1260,6 +1261,191 @@ mod runner {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[1], "Count the files in /data", "got {sent:?}");
+    }
+
+    // -------------------------------------------------------------------
+    // Transport errors: the retry keeps the task.
+    // -------------------------------------------------------------------
+
+    const CODING_TASK: &str =
+        "Fix the bug in sympy/printing/codegen.py so the regression test passes.";
+
+    /// A turn that read a file, then lost its connection to the model:
+    /// what chatty-core's stream sends for a failed run — the round-trips
+    /// its last request carried, then the transport error.
+    fn transport_error_turn() -> Scenario {
+        use rig_core::completion::Message;
+        use rig_core::completion::message::{
+            AssistantContent, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+            UserContent,
+        };
+        let call = Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::ToolCall(ToolCall::new(
+                ToolCallId::new("call_1").unwrap(),
+                ToolFunction::new(
+                    "read_file".into(),
+                    serde_json::json!({"path": "codegen.py"}),
+                ),
+            ))],
+        };
+        let result = Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new("call_1").unwrap(),
+                name: "read_file".into(),
+                content: vec![ToolResultContent::text("UNIQUE-TOOL-OUTPUT")],
+                provider: None,
+            })],
+        };
+        Scenario {
+            name: "transport_error",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Reading the file.".into())),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_1".into(),
+                    arguments: r#"{"path":"codegen.py"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_1".into(),
+                    result: "UNIQUE-TOOL-OUTPUT".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::TurnMessages(vec![
+                    Message::user(CODING_TASK),
+                    call,
+                    result,
+                ])),
+                ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Transport,
+                    "CompletionError: ProviderError: Http client error: error sending request for \
+                     url (http://127.0.0.1:8000/v1/chat/completions)",
+                ))),
+            ],
+        }
+    }
+
+    /// The failed turn's tool round-trips reach the history the retry runs
+    /// on, not just its text.
+    #[tokio::test]
+    async fn a_transport_error_keeps_the_turns_tool_results_in_the_history() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![transport_error_turn()].into();
+
+        runner.send_message(CODING_TASK.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(history.contains(CODING_TASK), "{history}");
+        assert!(history.contains("Reading the file."), "{history}");
+        assert!(history.contains("UNIQUE-TOOL-OUTPUT"), "{history}");
+    }
+
+    /// The offline benchmark's failure: a transport error mid-run, then a
+    /// continuation that no longer said what the task was and told the model
+    /// to write /app/answer.txt. The retry restates the task, and a run with
+    /// no answer file hears nothing about one.
+    #[tokio::test]
+    async fn a_transport_error_retry_restates_the_task() {
+        let (mut runner, event_rx, started, _workspace) =
+            scripted_runner(vec![transport_error_turn(), answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        let sent = sent.lock().unwrap();
+        assert!(sent[1].contains(CODING_TASK), "got {sent:?}");
+        assert!(!sent[1].contains("answer.txt"), "got {sent:?}");
+        assert!(!sent[1].contains("final_answer"), "got {sent:?}");
+    }
+
+    /// The same error before the model said anything: the turn is rolled
+    /// back with its message, and the retry is that same message.
+    #[tokio::test]
+    async fn a_transport_error_before_any_output_resends_the_same_message() {
+        let silent = Scenario {
+            name: "silent_transport_error",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Transport,
+                "error sending request for url",
+            )))],
+        };
+        let (mut runner, event_rx, started, _workspace) =
+            scripted_runner(vec![silent, answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        assert_eq!(sent.lock().unwrap()[1], CODING_TASK);
+    }
+
+    /// A provider that never comes back: the retries are bounded and the
+    /// run fails.
+    #[tokio::test]
+    async fn transport_error_retries_are_bounded() {
+        let mut turns: Vec<Scenario> = (0..HEADLESS_TRANSPORT_RETRY_ATTEMPTS + 3)
+            .map(|_| transport_error_turn())
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (mut runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+        runner.skip_recovery_delay = true;
+
+        let error = run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect_err("a provider that never recovers fails the run");
+
+        assert!(
+            error.to_string().contains("error sending request"),
+            "{error}"
+        );
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + HEADLESS_TRANSPORT_RETRY_ATTEMPTS,
+            "the first turn plus the bounded retries"
+        );
+    }
+
+    /// An answer-file run still hears where the answer goes, after the task.
+    #[test]
+    fn the_stream_error_prompt_names_the_answer_file_only_when_one_is_required() {
+        let coding = stream_error_recovery_prompt(CODING_TASK, false);
+        assert!(coding.contains(CODING_TASK));
+        assert!(!coding.contains("answer.txt"));
+        let qa = stream_error_recovery_prompt("Write the answer to /app/answer.txt", true);
+        assert!(qa.contains("output_path=/app/answer.txt"));
+        assert!(qa.contains("The task, unchanged:\nWrite the answer to /app/answer.txt"));
+    }
+
+    /// A stall resume restates the task too.
+    #[tokio::test]
+    async fn a_stall_resume_restates_the_task() {
+        let (mut runner, event_rx, _started, _workspace) =
+            scripted_runner(vec![stalled_turn(), answer_turn("Resumed and done.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the resumed run exits 0");
+
+        let sent = sent.lock().unwrap();
+        assert!(sent[1].starts_with(STALL_RESUME_PROMPT), "got {sent:?}");
+        assert!(sent[1].contains(CODING_TASK), "got {sent:?}");
     }
 
     /// A stall resume runs on what the stalled pass left of the run's budget.

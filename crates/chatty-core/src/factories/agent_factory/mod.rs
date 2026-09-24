@@ -2,11 +2,13 @@ mod azure_auth_http;
 mod build_context;
 #[cfg(test)]
 mod cache_breakpoint_probe;
+mod connect_retry_http;
 mod empty_turn_retry;
 mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
+mod request_recorder;
 #[cfg(test)]
 mod tool_block_determinism;
 mod tool_collector;
@@ -57,6 +59,7 @@ use tool_registry::active_native_tool_names;
 pub use build_context::{AgentBuildContext, AgentRole, AgentServices, gated_exec_settings};
 pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
 pub(crate) use provider_builder::ollama_think;
+pub use request_recorder::RequestRecorder;
 pub use tool_profile::{ToolProfile, tool_profile, tool_profile_names};
 pub use tool_registry::ToolAvailability;
 
@@ -186,6 +189,8 @@ pub struct AgentClient {
     utility: Agent,
     /// The in-loop context guard registered on `agent` (AGE-504).
     context_shaper: ContextShaper,
+    /// The last model request `agent` sent, for a run that fails.
+    request_recorder: RequestRecorder,
 }
 
 impl AgentClient {
@@ -205,6 +210,11 @@ impl AgentClient {
     /// The in-loop context guard this agent's requests go through (AGE-504).
     pub fn context_shaper(&self) -> &ContextShaper {
         &self.context_shaper
+    }
+
+    /// The record of the last model request `agent` sent.
+    pub fn request_recorder(&self) -> &RequestRecorder {
+        &self.request_recorder
     }
 
     /// Create AgentClient from ModelConfig, ProviderConfig and build context
