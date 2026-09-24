@@ -20,9 +20,92 @@ pub(super) fn data_format_from_extension(ext: &str) -> Result<&'static str, Data
         "csv" | "tsv" => Ok("csv"),
         "json" | "jsonl" | "ndjson" => Ok("json"),
         _ => Err(DataQueryError::UnsupportedFormat(format!(
-            "Unsupported file extension '.{}'. Supported: .parquet, .csv, .tsv, .json, .jsonl, .ndjson",
+            "Unsupported file extension '.{}'. Supported: .parquet, .csv, .tsv, .json, .jsonl, .ndjson (profile_data also reads .xlsx, .xls and .ods)",
             ext
         ))),
+    }
+}
+
+/// Whether `ext` names a spreadsheet `profile_data` reads through calamine.
+pub(super) fn is_spreadsheet_extension(ext: &str) -> bool {
+    matches!(ext, "xlsx" | "xlsm" | "xls" | "xlsb" | "ods")
+}
+
+/// Profile a spreadsheet's first sheet: calamine reads it (DuckDB's own
+/// Excel reader is an extension the sandbox cannot load), it is written as
+/// CSV into a private temp dir, and that CSV is profiled like any other so
+/// column types are inferred the same way. The header is the first row.
+#[cfg(feature = "excel")]
+pub(super) fn profile_spreadsheet(
+    path: &std::path::Path,
+    sample_rows: u32,
+) -> Result<ProfileDataSummary, DataQueryError> {
+    use calamine::{Reader, open_workbook_auto};
+
+    let mut workbook = open_workbook_auto(path).map_err(|e| {
+        DataQueryError::QueryFailed(format!("Failed to open '{}': {e}", path.display()))
+    })?;
+    let sheets = workbook.sheet_names().to_vec();
+    let first = sheets
+        .first()
+        .ok_or_else(|| DataQueryError::QueryFailed("Workbook has no sheets".to_string()))?
+        .clone();
+    let range = workbook
+        .worksheet_range(&first)
+        .map_err(|e| DataQueryError::QueryFailed(format!("Failed to read sheet '{first}': {e}")))?;
+
+    let mut csv = String::new();
+    for row in range.rows() {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|cell| csv_field(&cell.to_string()))
+            .collect();
+        csv.push_str(&cells.join(","));
+        csv.push('\n');
+    }
+    let dir = tempfile::tempdir()
+        .map_err(|e| DataQueryError::QueryFailed(format!("Failed to create temp dir: {e}")))?;
+    let csv_path = dir.path().join("sheet.csv");
+    std::fs::write(&csv_path, csv)
+        .map_err(|e| DataQueryError::QueryFailed(format!("Failed to stage sheet: {e}")))?;
+
+    let (columns, row_count, sample, profiles, mut notes) = profile_data_file(
+        &dir.path().to_string_lossy(),
+        &csv_path.to_string_lossy(),
+        "csv",
+        sample_rows,
+    )?;
+    notes.insert(
+        0,
+        format!(
+            "Profiled sheet '{first}' ({} of {} sheet(s): {}); use read_excel for other sheets.",
+            1,
+            sheets.len(),
+            sheets.join(", ")
+        ),
+    );
+    Ok((columns, row_count, sample, profiles, notes))
+}
+
+#[cfg(not(feature = "excel"))]
+pub(super) fn profile_spreadsheet(
+    path: &std::path::Path,
+    _sample_rows: u32,
+) -> Result<ProfileDataSummary, DataQueryError> {
+    Err(DataQueryError::UnsupportedFormat(format!(
+        "'{}' is a spreadsheet, and this build has no Excel support",
+        path.display()
+    )))
+}
+
+/// `value` as one CSV field, quoted when it holds a separator, quote or
+/// line break.
+#[cfg(feature = "excel")]
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 

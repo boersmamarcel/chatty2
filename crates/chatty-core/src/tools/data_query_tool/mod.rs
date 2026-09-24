@@ -512,7 +512,7 @@ impl Tool for ProfileDataTool {
     type Output = ProfileDataOutput;
 
     fn description(&self) -> String {
-        "Profile a local CSV, JSON, JSONL, or Parquet file with compact, structured statistics. Returns schema, row count, a tiny sample, numeric min/max/avg/sum, categorical top values, null counts, and notes. Use this early for generic data-analysis tasks before writing custom code or many SQL queries."
+        "Profile a local CSV, JSON, JSONL, Parquet or Excel (.xlsx/.xls, first sheet) file with compact, structured statistics. Returns schema, row count, a tiny sample, numeric min/max/avg/sum, categorical top values, null counts, and notes. Use this early for generic data-analysis tasks before writing custom code or many SQL queries."
                 .to_string()
     }
 
@@ -522,7 +522,7 @@ impl Tool for ProfileDataTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .tsv, .json, .jsonl, .ndjson."
+                    "description": "Path to the data file, relative to workspace root. Supports .parquet, .csv, .tsv, .json, .jsonl, .ndjson, .xlsx, .xls, .ods."
                 },
                 "sample_rows": {
                     "type": "integer",
@@ -568,20 +568,31 @@ impl Tool for ProfileDataTool {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let format = data_format_from_extension(&ext)?;
-        let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
-        let file_path_owned = canonical.to_string_lossy().to_string();
         let sample_rows = args
             .sample_rows
             .unwrap_or(DEFAULT_PROFILE_SAMPLE_ROWS)
             .clamp(1, MAX_PROFILE_SAMPLE_ROWS);
 
+        let (format, profiled) = if is_spreadsheet_extension(&ext) {
+            let path = canonical.clone();
+            (
+                "excel",
+                tokio::task::spawn_blocking(move || profile_spreadsheet(&path, sample_rows)).await,
+            )
+        } else {
+            let format = data_format_from_extension(&ext)?;
+            let workspace_root = self.service.workspace_root().to_string_lossy().to_string();
+            let file_path_owned = canonical.to_string_lossy().to_string();
+            (
+                format,
+                tokio::task::spawn_blocking(move || {
+                    profile_data_file(&workspace_root, &file_path_owned, format, sample_rows)
+                })
+                .await,
+            )
+        };
         let (columns, row_count, sample_rows_markdown, column_profiles, mut notes) =
-            tokio::task::spawn_blocking(move || {
-                profile_data_file(&workspace_root, &file_path_owned, format, sample_rows)
-            })
-            .await
-            .map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
+            profiled.map_err(|e| DataQueryError::QueryFailed(format!("Task error: {}", e)))??;
 
         if columns.len() > MAX_PROFILE_IMPORTANT_COLUMNS {
             notes.push(format!(
