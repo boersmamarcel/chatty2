@@ -306,7 +306,7 @@ pub async fn run_headless(
                     } else {
                         "ok"
                     };
-                    if tc.name == "final_answer" && answer_file_exists(&engine) {
+                    if final_answer_ends_run(answer_file_required, &tc.name, &engine) {
                         if let Err(error) =
                             normalize_existing_answer_file_for_prompt(&engine, &message)
                         {
@@ -662,7 +662,9 @@ pub async fn run_headless(
                     continue;
                 }
 
-                if answer_file_exists(&engine) {
+                // A stale answer.txt says nothing about a run that asks for
+                // none: it retries like any other.
+                if answer_file_required && answer_file_exists(&engine) {
                     eprintln!(
                         "Answer file already exists; keeping the run for verifier evaluation."
                     );
@@ -785,6 +787,19 @@ pub async fn run_headless(
     println!("{}", response);
 
     Ok(())
+}
+
+/// Whether a `tool_name` result ends the run as its final answer: only in a
+/// run whose task asks for an answer file, and once that file exists. In a
+/// coding run with no answer file, a final_answer carrying a diagnosis
+/// (and an answer.txt left in the workspace) stopped the run before the fix
+/// was made.
+fn final_answer_ends_run(
+    answer_file_required: bool,
+    tool_name: &str,
+    engine: &HeadlessRunner,
+) -> bool {
+    answer_file_required && tool_name == "final_answer" && answer_file_exists(engine)
 }
 
 /// Whether a tool result ends the turn because the task's answer file now

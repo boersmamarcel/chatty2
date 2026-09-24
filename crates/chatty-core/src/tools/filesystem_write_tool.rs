@@ -139,7 +139,18 @@ pub struct FinalAnswerTool {
     service: Arc<FileSystemService>,
     approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
+    /// Whether the run's task asks for an answer file, when known (see
+    /// `AgentBuildContext::answer_file`). `Some(false)` writes nothing.
+    answer_file: Option<bool>,
 }
+
+/// What `final_answer` says when the run's task asks for no answer file.
+/// A SWE-bench run called it with a diagnosis instead of making the fix,
+/// and the answer.txt it wrote into the repository ended the run.
+pub const NO_ANSWER_FILE_MESSAGE: &str = "This task does not ask for an answer file, so \
+     final_answer wrote nothing: it is only for tasks that ask for their answer in a file \
+     (answer.txt). If the task asks for a change, make it with the editing tools and verify it; \
+     your last message is your answer.";
 
 impl FinalAnswerTool {
     pub fn new(
@@ -151,6 +162,15 @@ impl FinalAnswerTool {
             service,
             approval_mode,
             pending_approvals,
+            answer_file: None,
+        }
+    }
+
+    /// Whether the run's task asks for an answer file, when the host knows.
+    pub fn with_answer_file(self, answer_file: Option<bool>) -> Self {
+        Self {
+            answer_file,
+            ..self
         }
     }
 }
@@ -209,6 +229,11 @@ impl Tool for FinalAnswerTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        if self.answer_file == Some(false) {
+            return Err(ToolError::OperationFailed(
+                NO_ANSWER_FILE_MESSAGE.to_string(),
+            ));
+        }
         let path = args.output_path.unwrap_or_else(|| "answer.txt".to_string());
         let (answer, notes) = normalize_final_answer(
             &args.answer,
@@ -763,6 +788,61 @@ mod tests {
         WriteApprovalDecision, WriteApprovalStore, WriteOperation,
     };
     use crate::settings::models::execution_settings::ApprovalMode;
+
+    /// A run whose task asks for no answer file: final_answer refuses and
+    /// leaves no answer.txt behind. A run that asks for one (or does not
+    /// know) still gets the file.
+    #[tokio::test]
+    async fn final_answer_writes_only_when_the_task_asks_for_an_answer_file() {
+        use super::{FinalAnswerArgs, FinalAnswerTool, NO_ANSWER_FILE_MESSAGE};
+        use crate::models::write_approval_store::WriteApprovalStore;
+        use crate::services::filesystem_service::FileSystemService;
+        use rig_agent::tool::{Tool, ToolContext};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = |answer_file| {
+            FinalAnswerTool::new(
+                service.clone(),
+                ApprovalMode::AutoApproveAll,
+                WriteApprovalStore::new().get_pending_approvals(),
+            )
+            .with_answer_file(answer_file)
+        };
+        let args = || FinalAnswerArgs {
+            answer: "The bug is in codegen.py".into(),
+            output_path: None,
+            guidance: None,
+            format_hint: None,
+            trailing_newline: None,
+        };
+        let answer_txt = dir.path().join("answer.txt");
+
+        let error = tool(Some(false))
+            .call(&mut ToolContext::new(), args())
+            .await
+            .map(|_| ())
+            .expect_err("no answer file is asked for");
+        assert!(
+            error.to_string().contains(NO_ANSWER_FILE_MESSAGE),
+            "{error}"
+        );
+        assert!(!answer_txt.exists());
+
+        for answer_file in [None, Some(true)] {
+            tool(answer_file)
+                .call(&mut ToolContext::new(), args())
+                .await
+                .expect("the answer is written");
+            assert!(answer_txt.exists());
+            std::fs::remove_file(&answer_txt).unwrap();
+        }
+    }
 
     /// AGE-246 / D7: two agents, each with its own `WriteApprovalStore`, must
     /// not cross-notify — a request made against agent A's store is

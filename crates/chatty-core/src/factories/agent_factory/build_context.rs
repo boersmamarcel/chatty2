@@ -86,6 +86,12 @@ pub struct AgentBuildContext {
     /// the system prompt says so, so the model finishes the work instead of
     /// offering to. Only chatty-tui's headless runner sets it.
     pub unattended: bool,
+    /// Whether this run's task asks for an answer file (`answer.txt`),
+    /// when the host knows before the agent exists — chatty-tui's
+    /// `--headless` reads it off `--message`. `Some(false)`: `final_answer`
+    /// writes nothing, so a coding run cannot leave an answer.txt behind.
+    /// `None` (every other host) keeps it writing as before.
+    pub answer_file: Option<bool>,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -204,6 +210,8 @@ impl AgentBuildContext {
             // Only a `--team` leader has one (see `AgentBuildContext::team_skill`).
             team_skill: None,
             unattended: false,
+            // Only chatty-tui's `--headless` knows its task up front.
+            answer_file: None,
         }
     }
 }

@@ -1448,6 +1448,90 @@ mod runner {
         assert!(sent[1].contains(CODING_TASK), "got {sent:?}");
     }
 
+    // -------------------------------------------------------------------
+    // final_answer ends only an answer-file run.
+    // -------------------------------------------------------------------
+
+    /// A turn that calls final_answer with a diagnosis and then goes on.
+    fn final_answer_then_more_turn() -> Scenario {
+        Scenario {
+            name: "final_answer_then_more",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: "final_answer".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_1".into(),
+                    arguments: r#"{"answer":"The bug is in codegen.py"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_1".into(),
+                    result: r#"{"path":"answer.txt"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text("Now making the fix.".into())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    /// The SWE-bench failure: a coding run's final_answer (and an answer.txt
+    /// in the workspace) stopped the run before the fix was made. It no
+    /// longer does, so the transport error after it is retried like any
+    /// other — which also no longer ends on the stale answer.txt.
+    #[tokio::test]
+    async fn final_answer_does_not_end_a_run_without_an_answer_file() {
+        let mut turn = final_answer_then_more_turn();
+        turn.items.pop();
+        turn.items
+            .push(ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Transport,
+                "error sending request for url",
+            ))));
+        let (mut runner, event_rx, started, workspace) =
+            scripted_runner(vec![turn, answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        std::fs::write(workspace.path().join("answer.txt"), "stale\n").unwrap();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            2,
+            "the run went on after final_answer"
+        );
+    }
+
+    /// An answer-file run still ends on final_answer once the file exists;
+    /// no other run does, and no other tool does.
+    #[tokio::test]
+    async fn final_answer_ends_only_an_answer_file_run() {
+        let (mut runner, _event_rx) = test_runner().await;
+        let workspace = tempfile::tempdir().unwrap();
+        runner.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        std::fs::write(workspace.path().join("answer.txt"), "42\n").unwrap();
+
+        assert!(final_answer_ends_run(true, "final_answer", &runner));
+        assert!(!final_answer_ends_run(false, "final_answer", &runner));
+        assert!(!final_answer_ends_run(true, "write_file", &runner));
+    }
+
+    /// `--headless` tells the agent whether the task asks for an answer
+    /// file before it is built; the preamble counts as the task too.
+    #[tokio::test]
+    async fn the_task_decides_whether_final_answer_writes_a_file() {
+        let (mut runner, _event_rx) = test_runner().await;
+        assert_eq!(runner.answer_file, None, "unknown until the task is seen");
+        runner.note_task(CODING_TASK);
+        assert_eq!(runner.answer_file, Some(false));
+        runner.note_task("Write the answer to /app/answer.txt");
+        assert_eq!(runner.answer_file, Some(true));
+    }
+
     /// A stall resume runs on what the stalled pass left of the run's budget.
     #[tokio::test]
     async fn a_stall_resume_gets_only_the_rest_of_the_runs_budget() {

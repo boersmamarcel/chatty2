@@ -253,6 +253,7 @@ impl AgentClient {
             spend_gate,
             team_skill,
             unattended,
+            answer_file,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -481,7 +482,8 @@ impl AgentClient {
                                     service.clone(),
                                     write_approval_mode.clone(),
                                     approvals.clone(),
-                                ),
+                                )
+                                .with_answer_file(answer_file),
                                 CreateDirectoryTool::new(service.clone()),
                                 DeleteFileTool::new(
                                     service.clone(),
