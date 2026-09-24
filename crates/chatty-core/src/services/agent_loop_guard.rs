@@ -15,6 +15,13 @@
 //!    emitted in the current turn without a tool call. Returns `true` when the
 //!    soft limit is exceeded so the frontend can stop the stream early.
 //!
+//! 4. **Busy without progress** (unattended runs only, opt-in through
+//!    [`AgentLoopGuard::with_progress_check`]) — [`PROGRESS_WINDOW_TOOL_CALLS`]
+//!    tool calls in a row that write no file, run no new test command and
+//!    read no file not read before earn one nudge to change approach or
+//!    finish; a second such window asks the frontend to finalize. SWE-bench
+//!    runs of a local model went 310–450 tool calls without either.
+//!
 //! ## Usage (in both frontends)
 //!
 //! ```ignore
@@ -37,7 +44,7 @@
 //! }
 //! ```
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 // ── Tunables ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +62,82 @@ const LATE_GAME_THRESHOLD: usize = 2;
 
 /// Ring-buffer size for recent tool calls used for repetition detection.
 const TOOL_CALL_HISTORY_LEN: usize = 6;
+
+/// Tool calls in a row without progress (no file written, no new test
+/// command, no file read for the first time) before the progress check
+/// nudges, and again before it asks for finalization. On the SWE-bench runs
+/// that stalled, Codex CLI solved whole tasks in ~66 calls; 25 calls of pure
+/// re-reading and searching is a third of that.
+pub const PROGRESS_WINDOW_TOOL_CALLS: usize = 25;
+
+/// Tools that write a file.
+const FILE_WRITE_TOOLS: &[&str] = &[
+    "write_file",
+    "apply_diff",
+    "delete_file",
+    "move_file",
+    "create_directory",
+    "final_answer",
+    "write_docx",
+    "write_excel",
+    "edit_excel",
+    "write_pptx",
+];
+
+/// Tools that run a command.
+const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
+
+/// A shell command containing one of these writes files.
+const SHELL_WRITE_MARKERS: &[&str] = &[
+    " > ",
+    ">>",
+    "sed -i",
+    "tee ",
+    "git apply",
+    "patch ",
+    "cat >",
+    "open(",
+    ".write(",
+];
+
+/// A command containing one of these runs tests.
+const TEST_RUNNER_MARKERS: &[&str] = &[
+    "pytest",
+    "unittest",
+    "tox",
+    "nox",
+    "runtests",
+    "cargo test",
+    "go test",
+    "npm test",
+    "npm run test",
+    "yarn test",
+    "pnpm test",
+    "jest",
+    "vitest",
+    "mocha",
+    "make test",
+    "make check",
+    "mvn test",
+    "gradle test",
+    "ctest",
+    "rspec",
+    "phpunit",
+];
+
+/// Shell commands whose file arguments are a read.
+const SHELL_READERS: &[&str] = &["cat", "head", "tail", "sed", "nl", "less", "more", "bat"];
+
+/// The progress check's verdict on a finished tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressCheck {
+    /// Progress, or still inside the window.
+    Fine,
+    /// A window without progress: send this once, then carry on.
+    Nudge(String),
+    /// A second window without progress after the nudge: finalize.
+    Finalize,
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -90,6 +173,19 @@ pub struct AgentLoopGuard {
 
     /// Pending deadline message to be retrieved after `on_turn_complete`.
     pending_deadline: Option<String>,
+
+    /// Whether the busy-without-progress check runs (unattended runs only).
+    progress_check: bool,
+
+    /// Tool calls since the last one that made progress.
+    calls_without_progress: usize,
+
+    /// Whether the current stretch without progress was already nudged.
+    progress_nudged: bool,
+
+    /// Files read so far, and test commands run so far.
+    seen_files: HashSet<String>,
+    seen_test_commands: HashSet<String>,
 }
 
 impl AgentLoopGuard {
@@ -107,7 +203,83 @@ impl AgentLoopGuard {
             text_bytes_this_turn: 0,
             tool_called_this_turn: false,
             pending_deadline: None,
+            progress_check: false,
+            calls_without_progress: 0,
+            progress_nudged: false,
+            seen_files: HashSet::new(),
+            seen_test_commands: HashSet::new(),
         }
+    }
+
+    /// Turn on the busy-without-progress check. Only unattended runs do:
+    /// someone watching an interactive chat is its progress check.
+    pub fn with_progress_check(mut self) -> Self {
+        self.progress_check = true;
+        self
+    }
+
+    /// Call after each completed tool result (success or error), with the
+    /// call's JSON arguments. Returns what the progress check makes of the
+    /// run so far; always [`ProgressCheck::Fine`] when the check is off.
+    pub fn on_tool_progress(&mut self, name: &str, input: &str) -> ProgressCheck {
+        if !self.progress_check {
+            return ProgressCheck::Fine;
+        }
+        if self.made_progress(name, input) {
+            self.calls_without_progress = 0;
+            self.progress_nudged = false;
+            return ProgressCheck::Fine;
+        }
+        self.calls_without_progress += 1;
+        if self.calls_without_progress < PROGRESS_WINDOW_TOOL_CALLS {
+            return ProgressCheck::Fine;
+        }
+        self.calls_without_progress = 0;
+        if self.progress_nudged {
+            return ProgressCheck::Finalize;
+        }
+        self.progress_nudged = true;
+        ProgressCheck::Nudge(format!(
+            "PROGRESS CHECK: your last {PROGRESS_WINDOW_TOOL_CALLS} tool calls wrote no file, ran \
+             no new test and read no new file. Stop re-reading and searching. Either change \
+             approach now — make the edit you have evidence for and run the most specific test — \
+             or, if you cannot get further, finish with your best result so far."
+        ))
+    }
+
+    /// Whether this call moved the run forward: it wrote a file, ran a test
+    /// command not run before, or read a file not read before.
+    fn made_progress(&mut self, name: &str, input: &str) -> bool {
+        if FILE_WRITE_TOOLS.contains(&name) {
+            return true;
+        }
+        let args: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+        if COMMAND_TOOLS.contains(&name) {
+            let command = args
+                .get("command")
+                .or_else(|| args.get("code"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(input);
+            if SHELL_WRITE_MARKERS.iter().any(|m| command.contains(m)) {
+                return true;
+            }
+            if TEST_RUNNER_MARKERS.iter().any(|m| command.contains(m))
+                && self.seen_test_commands.insert(command.trim().to_string())
+            {
+                return true;
+            }
+            let mut new_read = false;
+            for path in shell_read_paths(command) {
+                new_read |= self.seen_files.insert(path);
+            }
+            return new_read;
+        }
+        if (name.starts_with("read_") || name.starts_with("pdf_"))
+            && let Some(path) = args.get("path").and_then(|v| v.as_str())
+        {
+            return self.seen_files.insert(path.to_string());
+        }
+        false
     }
 
     // ── Event handlers ────────────────────────────────────────────────────────
@@ -216,6 +388,32 @@ impl AgentLoopGuard {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// The file arguments of the reading commands (`cat`, `sed -n`, `head` …)
+/// in a shell command line, split on the usual separators.
+fn shell_read_paths(command: &str) -> Vec<String> {
+    command
+        .split(['|', ';', '&', '\n'])
+        .filter_map(|segment| {
+            let mut words = segment.split_whitespace();
+            let program = words.next()?;
+            SHELL_READERS
+                .contains(&program)
+                .then(|| words.filter(|w| looks_like_path(w)).map(str::to_string))
+        })
+        .flatten()
+        .collect()
+}
+
+fn looks_like_path(word: &str) -> bool {
+    !word.starts_with('-')
+        && !word.starts_with('\'')
+        && !word.starts_with('"')
+        && (word.contains('/') || word.contains('.'))
+        && !word
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ',' || c == 'p' || c == '.')
+}
 
 /// Truncate and clean a tool input string for use in loop detection and
 /// in pivot prompt messages.  We only need enough to distinguish two calls.
@@ -341,6 +539,112 @@ mod tests {
         g.on_tool_completed("shell", "echo hi");
         // After a tool call, verbosity guard is disabled for this turn.
         assert!(!g.on_text_chunk(VERBOSITY_SOFT_LIMIT_BYTES + 1));
+    }
+
+    fn progress_guard() -> AgentLoopGuard {
+        AgentLoopGuard::new(0, false).with_progress_check()
+    }
+
+    /// `n` calls that make no progress: the same search, over and over
+    /// with a different pattern each time.
+    fn search_without_progress(g: &mut AgentLoopGuard, n: usize) -> Vec<ProgressCheck> {
+        (0..n)
+            .map(|i| g.on_tool_progress("search_code", &format!(r#"{{"pattern": "needle{i}"}}"#)))
+            .collect()
+    }
+
+    #[test]
+    fn a_window_without_progress_nudges_once_then_finalizes() {
+        let mut g = progress_guard();
+        let first = search_without_progress(&mut g, PROGRESS_WINDOW_TOOL_CALLS);
+        assert!(
+            first[..PROGRESS_WINDOW_TOOL_CALLS - 1]
+                .iter()
+                .all(|c| *c == ProgressCheck::Fine)
+        );
+        let ProgressCheck::Nudge(nudge) = &first[PROGRESS_WINDOW_TOOL_CALLS - 1] else {
+            panic!("expected a nudge, got {:?}", first.last());
+        };
+        assert!(nudge.contains("change approach"));
+        assert!(nudge.contains("finish with your best result"));
+
+        let second = search_without_progress(&mut g, PROGRESS_WINDOW_TOOL_CALLS);
+        assert_eq!(second.last(), Some(&ProgressCheck::Finalize));
+        assert_eq!(
+            second.iter().filter(|c| **c != ProgressCheck::Fine).count(),
+            1,
+            "one verdict per window"
+        );
+    }
+
+    #[test]
+    fn writes_new_tests_and_new_reads_are_progress() {
+        let progress = [
+            ("write_file", r#"{"path": "a.py", "content": "x"}"#),
+            ("apply_diff", r#"{"path": "a.py"}"#),
+            ("shell_execute", r#"{"command": "sed -i 's/a/b/' a.py"}"#),
+            (
+                "shell_execute",
+                r#"{"command": "python -m pytest tests/test_a.py -q 2>&1 | tail -5"}"#,
+            ),
+            ("read_file", r#"{"path": "src/new.py"}"#),
+            (
+                "shell_execute",
+                r#"{"command": "sed -n '1,80p' src/other.py"}"#,
+            ),
+            (
+                "shell_execute",
+                r#"{"command": "rg -n foo src | head; cat setup.cfg"}"#,
+            ),
+        ];
+        for (name, input) in progress {
+            let mut g = progress_guard();
+            search_without_progress(&mut g, PROGRESS_WINDOW_TOOL_CALLS - 1);
+            // Without progress this call would complete the window.
+            assert_eq!(
+                g.on_tool_progress(name, input),
+                ProgressCheck::Fine,
+                "{input}"
+            );
+            assert!(
+                search_without_progress(&mut g, PROGRESS_WINDOW_TOOL_CALLS - 1)
+                    .iter()
+                    .all(|c| *c == ProgressCheck::Fine),
+                "{input} restarts the window"
+            );
+        }
+    }
+
+    #[test]
+    fn rereading_and_rerunning_are_not_progress() {
+        let mut g = progress_guard();
+        g.on_tool_progress("read_file", r#"{"path": "a.py"}"#);
+        g.on_tool_progress("shell_execute", r#"{"command": "pytest -q"}"#);
+        let mut last = ProgressCheck::Fine;
+        for i in 0..PROGRESS_WINDOW_TOOL_CALLS {
+            last = if i % 2 == 0 {
+                g.on_tool_progress("read_file", r#"{"path": "a.py"}"#)
+            } else {
+                g.on_tool_progress("shell_execute", r#"{"command": "pytest -q"}"#)
+            };
+        }
+        assert!(matches!(last, ProgressCheck::Nudge(_)), "{last:?}");
+    }
+
+    #[test]
+    fn the_progress_check_is_off_unless_asked_for() {
+        let mut g = AgentLoopGuard::new(0, false);
+        let checks = search_without_progress(&mut g, PROGRESS_WINDOW_TOOL_CALLS * 3);
+        assert!(checks.iter().all(|c| *c == ProgressCheck::Fine));
+    }
+
+    #[test]
+    fn shell_read_paths_finds_the_files_read() {
+        assert_eq!(
+            shell_read_paths("sed -n '10,40p' src/a.py && cat README.md | head -5"),
+            vec!["src/a.py".to_string(), "README.md".to_string()]
+        );
+        assert!(shell_read_paths("rg -n needle src").is_empty());
     }
 
     #[test]

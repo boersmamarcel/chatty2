@@ -24,6 +24,7 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
+use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
@@ -96,6 +97,44 @@ fn stream_error_recovery_prompt(original_prompt: &str, answer_file_required: boo
     prompt
 }
 
+/// Act on the progress check's verdict for a finished tool call; `true` when
+/// it stopped the stream (the caller skips the rest of the event). A nudge
+/// goes out the way a loop pivot does, once the cancelled turn has ended; a
+/// finalization is the answer-file finalization pass when the run needs an
+/// answer file, and a tool-free last pass otherwise.
+fn on_no_progress(
+    progress: ProgressCheck,
+    answer_file_required: bool,
+    engine: &mut HeadlessRunner,
+    pending_loop_pivot_prompt: &mut Option<String>,
+    finalization_pending_after_cancel: &mut bool,
+    no_progress_final_pass_pending: &mut bool,
+) -> bool {
+    match progress {
+        ProgressCheck::Fine => false,
+        ProgressCheck::Nudge(nudge) => {
+            eprintln!(
+                "No progress in {PROGRESS_WINDOW_TOOL_CALLS} tool calls: nudging the model to change approach or finish."
+            );
+            pending_loop_pivot_prompt.get_or_insert(nudge);
+            engine.stop_stream();
+            true
+        }
+        ProgressCheck::Finalize => {
+            eprintln!(
+                "Still no progress {PROGRESS_WINDOW_TOOL_CALLS} tool calls after the nudge: stopping exploration for a final pass."
+            );
+            if answer_file_required {
+                *finalization_pending_after_cancel = true;
+            } else {
+                *no_progress_final_pass_pending = true;
+            }
+            engine.stop_stream();
+            true
+        }
+    }
+}
+
 /// The run's task, restated at the end of every continuation headless sends
 /// after an error: a continuation that does not say what to continue left
 /// the model guessing at the task from whatever the history still showed.
@@ -111,6 +150,15 @@ fn task_reminder(original_prompt: &str) -> String {
 const TIME_UP_PROMPT: &str = "Agent protocol follow-up: the time budget for this run is used \
      up and tools are now disabled. Reply now with your final answer, or with a short summary of \
      what you did and what remains.";
+
+/// The last pass of a run the progress check stopped: two windows of
+/// [`PROGRESS_WINDOW_TOOL_CALLS`] tool calls without a file written, a new
+/// test run or a new file read. Tools are off, so the model answers from
+/// what it has; the edits it made are on disk either way.
+const NO_PROGRESS_FINAL_PROMPT: &str = "Agent protocol follow-up: your recent tool calls made \
+     no progress (no file written, no new test run, no new file read), even after a nudge, so \
+     tools are now disabled. Reply now with your best final result: what you changed, what state \
+     the work is in, and what remains.";
 
 /// Where a run with a time budget (`--max-duration`) stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,7 +246,14 @@ pub async fn run_headless(
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.
     let max_agent_turns = engine.execution_settings.max_agent_turns as usize;
-    let mut loop_guard = AgentLoopGuard::new(max_agent_turns, answer_file_required);
+    // Headless is unattended, so it also runs the busy-without-progress check.
+    let mut loop_guard =
+        AgentLoopGuard::new(max_agent_turns, answer_file_required).with_progress_check();
+    // Set when the progress check asks for finalization on a run without an
+    // answer file: the run's tool-free last pass follows once the turn ends,
+    // and the run ends after it.
+    let mut no_progress_final_pass_pending = false;
+    let mut no_progress_final_pass_sent = false;
     let tool_budget = answer_file_tool_budget(max_agent_turns);
     // Set when a command tool wrote the answer file: the model gets one more
     // turn to see that command's output before the run stops.
@@ -287,6 +342,7 @@ pub async fn run_headless(
                 let mut tool_failed = false;
                 let mut wrote_by_command = false;
                 let mut compact_file_extracted = false;
+                let mut progress = ProgressCheck::Fine;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
@@ -320,6 +376,7 @@ pub async fn run_headless(
                         compact_file_extraction_tool_result(answer_file_required, tc);
                     // Check for repeated identical tool call (loop detection).
                     pivot_msg = loop_guard.on_tool_completed(&tc.name, &tc.input);
+                    progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
                 }
                 if !called_final_answer
                     && answer_file_required
@@ -387,6 +444,15 @@ pub async fn run_headless(
                     engine.stop_stream();
                     tool_results_since_finalization = 0;
                     continue;
+                } else if on_no_progress(
+                    progress,
+                    answer_file_required,
+                    &mut engine,
+                    &mut pending_loop_pivot_prompt,
+                    &mut finalization_pending_after_cancel,
+                    &mut no_progress_final_pass_pending,
+                ) {
+                    continue;
                 }
                 tool_results_since_finalization += 1;
                 if tool_failed {
@@ -423,16 +489,28 @@ pub async fn run_headless(
                 let id_str = id.clone();
                 engine.handle_event(event);
                 let mut refused = false;
+                let mut progress = ProgressCheck::Fine;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
                     refused = tool_result_is_policy_refusal(tc);
+                    progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
                 }
                 if answer_file_grace_turn && stops_on_answer_file(&engine, answer_file_required) {
                     eprintln!("Answer file exists after the extra turn; stopping stream.");
                     engine.stop_stream();
+                    continue;
+                }
+                if on_no_progress(
+                    progress,
+                    answer_file_required,
+                    &mut engine,
+                    &mut pending_loop_pivot_prompt,
+                    &mut finalization_pending_after_cancel,
+                    &mut no_progress_final_pass_pending,
+                ) {
                     continue;
                 }
                 tool_results_since_finalization += 1;
@@ -518,6 +596,15 @@ pub async fn run_headless(
                 }
                 if let Some(pivot) = pending_loop_pivot_prompt.take() {
                     engine.send_message(pivot);
+                    continue;
+                }
+                if no_progress_final_pass_sent {
+                    // The run's last pass after the progress check stopped it.
+                    break;
+                }
+                if std::mem::take(&mut no_progress_final_pass_pending) {
+                    no_progress_final_pass_sent = true;
+                    engine.send_time_up_pass(NO_PROGRESS_FINAL_PROMPT.to_string());
                     continue;
                 }
                 if let Some((delay, error)) = recovery_pending_after_error.take() {
