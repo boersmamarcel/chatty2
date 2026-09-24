@@ -93,7 +93,9 @@ use rig_core::message::UserContent;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
 
-use crate::services::context_compaction::{Summarizer, SummaryInputs, build_summary};
+use crate::services::context_compaction::{
+    Summarizer, SummaryInputs, build_summary, task_max_chars,
+};
 use crate::services::{call_ids, enforce_tool_round_trips, result_ids, tool_round_trips_intact};
 use crate::settings::models::models_store::ModelConfig;
 use crate::token_budget::counter::TokenCounter;
@@ -547,6 +549,7 @@ impl ContextShaper {
             workspace: self.inner.workspace.get(),
             summarizer: self.inner.summarizer.get().map(|s| s.as_ref()),
             transcript_max_chars,
+            task_max_chars: task_max_chars(budget),
         })
         .await;
         let compaction = Compaction {
@@ -1451,7 +1454,7 @@ mod compaction_tests {
         );
         assert!(!summary.contains("<think>"));
         assert!(
-            summary.contains("git status && git diff"),
+            summary.contains("re-check the current state first"),
             "re-grounding step"
         );
 
@@ -1541,6 +1544,7 @@ mod compaction_tests {
 
         let summary = text_of(&sent[0]);
         assert!(summary.contains("`git status --short` now:\n```\n?? parser.py\n```"));
+        assert!(summary.contains("`git status && git diff`"));
     }
 
     /// On rig's own loop with scripted streams: the request the model gets
