@@ -405,21 +405,6 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
     p
 }
 
-/// Appended to the system prompt of a run nobody is watching (headless,
-/// pipe, a delegated worker): a model that ends with "Want me to apply
-/// this?" has done nothing there.
-pub(super) const UNATTENDED_RUN_NOTE: &str = "\n\n<run_mode>\nThis run is non-interactive: \
-     nobody will answer questions or confirm steps. Finish the work yourself instead of offering \
-     to do it.\n</run_mode>";
-
-/// `preamble` for a run that is `unattended`, or unchanged.
-pub(super) fn with_run_mode(mut preamble: String, unattended: bool) -> String {
-    if unattended {
-        preamble.push_str(UNATTENDED_RUN_NOTE);
-    }
-    preamble
-}
-
 fn default_system_prompt(provider_type: &ProviderType) -> String {
     let provider_name = provider_type.display_name();
     let provider_specific_guidance = match provider_type {
@@ -453,23 +438,16 @@ do yourself. Prefer doing over describing.\n\
 running code — begin with that tool call. Do not narrate what you are about to do; just do it. \
 Pre-tool reasoning text wastes tokens and delays the answer.\n\
 \n\
-**See it through**: Stop only when the task is verifiably done, not at the first plausible-looking \
-answer. Never present a guess as fact: check key facts against a primary source or tool output, and \
-get numbers by computing them with a tool, not in your head.\n\
-\n\
 **Commit on evidence**: When a tool call returns enough information to answer the question, \
-act on it immediately. Do not continue exploring when you already have the answer.\n\
+act on it immediately. Do not continue exploring when you already have the answer. The cost of \
+an extra tool call is always higher than the cost of a direct answer.\n\
 \n\
-**When stuck, change approach**: After 3 failed or unhelpful attempts at the same sub-problem \
-(tool calls, or rounds of code with contradictory output), stop repeating that approach. Re-read \
-what you have learned and try a different one (another tool, source or method) rather than stopping.\n\
+**Failure budget**: After 3 failed or unhelpful tool calls on the same sub-problem, stop trying \
+that approach. Switch strategy or make a best-guess decision. Infinite retries never converge.\n\
 \n\
-**Code changes**: Reproduce the problem first. Make the smallest change that fixes the root cause, \
-in the workspace you were given; do not install the project itself from a package index. Run the \
-most specific relevant tests, then broader ones.\n\
-\n\
-**Bounded output**: Keep command output short: filter it with `tail`, `head` or `grep` rather \
-than printing whole logs or files.\n\
+**Code iteration limit**: After 3 rounds of code that give contradictory, confusing, or oscillating \
+output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \
+how to proceed. Continuing to rewrite code indefinitely does not converge.\n\
 \n\
 **Binary and Office files**: Files with binary formats must not be read with `read_file` / `read_binary` (returns garbage). \
 Use the dedicated native tools instead: `read_docx` for Word (.docx), `read_excel` for spreadsheets (.xlsx/.xls/.ods), \
@@ -1181,47 +1159,5 @@ mod tests {
         assert!(!note.contains("git_commit"), "{note}");
         assert!(!note.contains("write_file"), "{note}");
         assert!(!note.contains("invoke_agent"), "{note}");
-    }
-
-    /// The agentic-behavior steering: finish the task, verify rather than
-    /// guess, change approach rather than stop, and the code-change
-    /// routine. The old lines that pushed a local model to answer early
-    /// ("the cost of an extra tool call is always higher…", "make a
-    /// best-guess decision", "ask the user how to proceed") are gone.
-    #[test]
-    fn the_default_prompt_steers_toward_finishing_and_verifying() {
-        let prompt = default_system_prompt(&ProviderType::Ollama);
-        for kept in [
-            "verifiably done",
-            "primary source or tool output",
-            "not in your head",
-            "rather than stopping",
-            "Reproduce the problem first",
-            "root cause",
-            "do not install the project itself",
-            "most specific relevant tests, then broader ones",
-            "`tail`, `head` or `grep`",
-        ] {
-            assert!(prompt.contains(kept), "missing {kept:?}");
-        }
-        for gone in [
-            "always higher than the cost of a direct answer",
-            "best-guess decision",
-            "ask the user how to proceed",
-        ] {
-            assert!(!prompt.contains(gone), "still has {gone:?}");
-        }
-        assert!(
-            !prompt.contains("non-interactive"),
-            "only unattended runs say so"
-        );
-    }
-
-    #[test]
-    fn an_unattended_run_is_told_nobody_will_answer() {
-        let prompt = with_run_mode("Base.".to_string(), true);
-        assert!(prompt.starts_with("Base."));
-        assert!(prompt.contains("nobody will answer questions"));
-        assert_eq!(with_run_mode("Base.".to_string(), false), "Base.");
     }
 }

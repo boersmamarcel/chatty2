@@ -82,10 +82,6 @@ pub struct AgentBuildContext {
     /// Only chatty-tui's `--team` sets it, on top of [`Self::from_services`];
     /// a worker or an ordinary chat agent has none.
     pub team_skill: Option<TeamSkill>,
-    /// Nobody is watching this run (headless, pipe, a delegated worker):
-    /// the system prompt says so, so the model finishes the work instead of
-    /// offering to. Only chatty-tui's headless runner sets it.
-    pub unattended: bool,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -203,7 +199,6 @@ impl AgentBuildContext {
             spend_gate: None,
             // Only a `--team` leader has one (see `AgentBuildContext::team_skill`).
             team_skill: None,
-            unattended: false,
         }
     }
 }
