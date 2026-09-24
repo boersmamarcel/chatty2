@@ -1532,6 +1532,229 @@ mod runner {
         assert_eq!(runner.answer_file, Some(true));
     }
 
+    // -------------------------------------------------------------------
+    // Tool loading: what the first request of a headless coding run
+    // carries under `all` and `dynamic`.
+    // -------------------------------------------------------------------
+
+    /// A local OpenAI-compatible endpoint that answers every request with a
+    /// 400 and hands its JSON body over, so a turn can be sent and the
+    /// request it made read back without a model.
+    fn capture_requests() -> (String, std::sync::mpsc::Receiver<serde_json::Value>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; length];
+                if reader.read_exact(&mut body).is_ok()
+                    && let Ok(json) = serde_json::from_slice(&body)
+                {
+                    let _ = tx.send(json);
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
+                      Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+            }
+        });
+        (url, rx)
+    }
+
+    const BENCHMARK_TASK: &str = "Fix the failing test in the repository at /testbed.";
+
+    /// The first model request of a headless coding run as the benchmark
+    /// adapter starts it (`--enable shell,fs-read,fs-write,git,code-exec
+    /// --auto-approve`, fetch and search on by default, memory on, a git
+    /// workspace), under `tool_loading`.
+    async fn first_request_of_a_coding_run(
+        tool_loading: chatty_core::settings::models::ToolLoading,
+    ) -> serde_json::Value {
+        first_request_of_a_run(tool_loading, BENCHMARK_TASK).await
+    }
+
+    async fn first_request_of_a_run(
+        tool_loading: chatty_core::settings::models::ToolLoading,
+        task: &str,
+    ) -> serde_json::Value {
+        let _ = chatty_core::init_repositories();
+        let (url, requests) = capture_requests();
+        let workspace = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git is installed");
+        // The benchmark's runs have memory on. The store's index lock is
+        // process-wide (and may be held by another process on the machine),
+        // so one store serves the whole test process, and a store that
+        // cannot open only drops the three memory tools from both sides.
+        static MEMORY: tokio::sync::OnceCell<
+            Option<(chatty_core::services::MemoryService, tempfile::TempDir)>,
+        > = tokio::sync::OnceCell::const_new();
+        let memory = MEMORY
+            .get_or_init(|| async {
+                let dir = tempfile::tempdir().unwrap();
+                match chatty_core::services::MemoryService::open_or_create(dir.path()).await {
+                    Ok(memory) => Some((memory, dir)),
+                    Err(error) => {
+                        eprintln!("memory store did not open ({error:#}); measuring without it");
+                        None
+                    }
+                }
+            })
+            .await
+            .as_ref()
+            .map(|(memory, _)| memory.clone());
+        let execution_settings = ExecutionSettingsModel {
+            enabled: true,
+            filesystem_read_enabled: true,
+            filesystem_write_enabled: true,
+            git_enabled: true,
+            execute_code_enabled: true,
+            approval_mode:
+                chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll,
+            workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+            max_agent_turns: 0,
+            tool_loading,
+            ..ExecutionSettingsModel::default()
+        };
+        let model_config = ModelConfig::new(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            ProviderType::OpenRouter,
+            "qwen".to_string(),
+        );
+        let mut provider_config =
+            ProviderConfig::new("OpenAI-compat".to_string(), ProviderType::OpenRouter);
+        provider_config.base_url = Some(url);
+        provider_config.api_key = Some("no-key-required".to_string());
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut runner = HeadlessRunner::new(
+            ChatEngineConfig {
+                model_config,
+                provider_config,
+                execution_settings,
+                module_settings: ModuleSettingsModel::default(),
+                broker_port: None,
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: memory,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                role: Default::default(),
+                team: None,
+                is_sub_agent: true,
+                services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
+            },
+            event_tx,
+        );
+        runner.note_task(task);
+        runner.init_conversation().await.expect("the agent builds");
+
+        runner.send_message(task.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+        requests
+            .try_iter()
+            .find(|body| body.get("tools").is_some())
+            .expect("the turn sent a request with tools")
+    }
+
+    fn tool_names(request: &serde_json::Value) -> Vec<String> {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn system_prompt(request: &serde_json::Value) -> String {
+        let content = &request["messages"][0]["content"];
+        match content.as_str() {
+            Some(text) => text.to_string(),
+            None => content.to_string(),
+        }
+    }
+
+    /// Under `dynamic` the first request carries the core and `load_tools`
+    /// only, and the system prompt lists the groups to load; under `all`
+    /// it carries every tool, as before, and no `load_tools`. Run with
+    /// `--nocapture` for the sizes.
+    #[tokio::test]
+    async fn dynamic_tool_loading_sends_only_the_core_up_front() {
+        use chatty_core::settings::models::ToolLoading;
+        let all = first_request_of_a_coding_run(ToolLoading::All).await;
+        let dynamic = first_request_of_a_coding_run(ToolLoading::Dynamic).await;
+
+        for (mode, request) in [("all", &all), ("dynamic", &dynamic)] {
+            let prompt = system_prompt(request).len();
+            let tools = serde_json::to_string(&request["tools"]).unwrap().len();
+            eprintln!(
+                "{mode:>7}: {n:>2} tools, schemas {tools:>6} B, system prompt {prompt:>6} B, \
+                 together {sum:>6} B (~{tokens} tokens at 4 B/token)",
+                n = tool_names(request).len(),
+                sum = tools + prompt,
+                tokens = (tools + prompt) / 4,
+            );
+        }
+
+        let all_tools = tool_names(&all);
+        assert!(all_tools.contains(&"search_web".to_string()));
+        assert!(all_tools.contains(&"git_commit".to_string()));
+        assert!(!all_tools.contains(&"load_tools".to_string()));
+        assert!(!system_prompt(&all).contains("## Tool Groups"));
+
+        let mut dynamic_tools = tool_names(&dynamic);
+        dynamic_tools.sort();
+        let mut core: Vec<String> = chatty_core::factories::agent_factory::CORE_TOOLS
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        core.sort();
+        assert_eq!(dynamic_tools, core, "the core, nothing else");
+        let prompt = system_prompt(&dynamic);
+        assert!(prompt.contains("## Tool Groups"), "{prompt}");
+        assert!(
+            prompt.contains("- **web** — load when the answer needs information from the internet")
+        );
+        assert!(!dynamic_tools.contains(&"final_answer".to_string()));
+    }
+
+    /// A run whose task asks for an answer file starts with final_answer
+    /// loaded; a coding run does not (the dynamic test above).
+    #[tokio::test]
+    async fn an_answer_file_run_starts_with_final_answer_loaded() {
+        let request = first_request_of_a_run(
+            chatty_core::settings::models::ToolLoading::Dynamic,
+            "How many rows are there? Write the answer to /app/answer.txt",
+        )
+        .await;
+        assert!(tool_names(&request).contains(&"final_answer".to_string()));
+        assert!(!system_prompt(&request).contains("- **answer**"));
+    }
+
     /// A stall resume runs on what the stalled pass left of the run's budget.
     #[tokio::test]
     async fn a_stall_resume_gets_only_the_rest_of_the_runs_budget() {

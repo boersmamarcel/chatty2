@@ -3,6 +3,7 @@ use crate::settings::models::search_settings::SearchSettingsModel;
 
 use super::build_context::AgentRole;
 use super::mcp_helpers::McpTools;
+use super::tool_loading::ToolLoader;
 use super::tool_registry::{ToolAvailability, active_native_tool_names};
 
 /// Build the augmented preamble with the role's standing instructions, tool
@@ -10,7 +11,9 @@ use super::tool_registry::{ToolAvailability, active_native_tool_names};
 ///
 /// `tools` is what the agent was actually built with — already narrowed by
 /// `role.profile`, so the summary never describes a family of tools the
-/// profile removed wholesale.
+/// profile removed wholesale — and, under dynamic tool loading
+/// (`tool_loader`), to what the first request advertises, followed by the
+/// catalog of groups the model can load.
 #[allow(clippy::too_many_arguments)] // one argument per prompt section
 pub(super) fn build_preamble(
     base_preamble: &str,
@@ -21,12 +24,16 @@ pub(super) fn build_preamble(
     mcp_tool_info: &[(String, String, String)],
     secret_key_names: &[String],
     role: &AgentRole,
+    tool_loader: Option<&ToolLoader>,
 ) -> String {
     // A tool profile (ADR-0011 C11) removes tools the settings would
     // otherwise have registered. Most sections below are already gated on
     // `tools`, which the caller narrowed; these are the always-on ones, which
     // a profile can take away too.
-    let allows = |name: &str| role.profile.is_none_or(|profile| profile.allows(name));
+    let allows = |name: &str| {
+        role.profile.is_none_or(|profile| profile.allows(name))
+            && tool_loader.is_none_or(|loader| loader.starts_active(name))
+    };
     let mut tool_sections: Vec<String> = Vec::new();
 
     if tools.fetch || tools.search_web {
@@ -390,6 +397,9 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         p.push_str(preamble);
     }
     p.push_str(&tool_summary);
+    if let Some(loader) = tool_loader {
+        p.push_str(&loader.catalog());
+    }
     p.push_str(formatting_guide);
     p.push_str(memory_instructions);
     p.push_str(skills_instructions);
@@ -570,6 +580,7 @@ mod tests {
             &mcp_info,
             &secrets,
             &AgentRole::default(),
+            None,
         );
         assert!(result.starts_with("Base prompt."));
         assert!(result.contains("create_chart"));
@@ -593,6 +604,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("shell_execute"));
         assert!(result.contains("shell_cd"));
@@ -617,6 +629,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("doc_retriever"));
         assert!(result.contains("read_file"));
@@ -640,6 +653,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("git_status"));
         assert!(result.contains("git_diff"));
@@ -661,6 +675,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("## Memory"));
         assert!(result.contains("remember"));
@@ -680,6 +695,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(!result.contains("## Memory"));
     }
@@ -697,6 +713,7 @@ mod tests {
             &[],
             &secrets,
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("API_KEY"));
         assert!(result.contains("DB_PASSWORD"));
@@ -715,6 +732,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(!result.contains("environment variables with sensitive"));
     }
@@ -736,6 +754,7 @@ mod tests {
             &mcp_info,
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("MCP tools"));
         assert!(result.contains("my_tool"));
@@ -757,6 +776,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_excel"));
         assert!(!result.contains("write_excel"));
@@ -778,6 +798,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_excel"));
         assert!(result.contains("write_excel"));
@@ -800,6 +821,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("pdf_info"));
         assert!(result.contains("pdf_extract_text"));
@@ -821,6 +843,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_docx"));
         assert!(result.contains("write_docx"));
@@ -842,6 +865,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_pptx"));
         assert!(result.contains("write_pptx"));
@@ -862,6 +886,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("file_structure_detector"));
         assert!(result.contains("query_data"));
@@ -880,6 +905,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("## Skills"));
         assert!(result.contains("read_skill"));
@@ -904,6 +930,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("search_web"));
         assert!(result.contains("fetch"));
@@ -924,6 +951,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("compile_typst"));
         assert!(result.contains("Typst markup"));
@@ -944,6 +972,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("execute_code"));
         assert!(result.contains("Monty or Docker"));
@@ -964,6 +993,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("browser_use"));
     }
@@ -983,6 +1013,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("daytona_run"));
     }
@@ -1002,6 +1033,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("publish_wasm_module"));
     }
@@ -1018,6 +1050,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("<identity>"));
         assert!(result.contains("Current model provider: OpenRouter."));
@@ -1035,6 +1068,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         let ollama = build_preamble(
             "",
@@ -1045,6 +1079,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(openrouter.contains("concise structured markdown"));
         assert!(ollama.contains("direct and efficient"));
@@ -1067,6 +1102,7 @@ mod tests {
             &[],
             &[],
             &role,
+            None,
         );
         assert!(result.contains("## Your Role"));
         assert!(result.contains("You are the reviewer. Never edit the tree."));
@@ -1093,6 +1129,7 @@ mod tests {
                 &[],
                 &[],
                 &AgentRole::default(),
+                None,
             )
         };
         let blank = AgentRole {
@@ -1108,6 +1145,7 @@ mod tests {
             &[],
             &[],
             &blank,
+            None,
         );
         assert!(!args().contains("## Your Role"));
         assert_eq!(args(), with_blank);
@@ -1131,6 +1169,7 @@ mod tests {
                     preamble: None,
                     profile,
                 },
+                None,
             )
         };
 
@@ -1170,6 +1209,7 @@ mod tests {
             &[],
             &[],
             &role,
+            None,
         );
         assert!(result.contains("You run the `reviewer` tool profile"));
         assert!(result.contains("git_diff"));

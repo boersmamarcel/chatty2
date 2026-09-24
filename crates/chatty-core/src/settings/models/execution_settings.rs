@@ -13,6 +13,38 @@ pub enum ApprovalMode {
     AutoApproveAll,
 }
 
+/// How an agent's tools are offered to the model.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolLoading {
+    /// Every tool the settings allow, on every request.
+    #[default]
+    All,
+    /// A small core of tools, plus groups the model loads with `load_tools`
+    /// when the task needs them (`agent_factory::tool_loading`).
+    Dynamic,
+}
+
+impl ToolLoading {
+    fn is_all(&self) -> bool {
+        *self == Self::All
+    }
+}
+
+impl std::str::FromStr for ToolLoading {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "dynamic" => Ok(Self::Dynamic),
+            other => Err(format!(
+                "unknown tool loading `{other}` (valid: all, dynamic)"
+            )),
+        }
+    }
+}
+
 /// Settings for code execution tool
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionSettingsModel {
@@ -109,6 +141,12 @@ pub struct ExecutionSettingsModel {
     /// only the move UI.
     #[serde(default)]
     pub hosted_conversations_enabled: bool,
+    /// How the agent's tools are offered to the model: all of them on
+    /// every request, or a core plus groups loaded on demand. Absent from
+    /// the file while it is the default, so existing settings (and their
+    /// snapshots) do not change.
+    #[serde(default, skip_serializing_if = "ToolLoading::is_all")]
+    pub tool_loading: ToolLoading,
 }
 
 fn default_true() -> bool {
@@ -147,6 +185,7 @@ impl Default for ExecutionSettingsModel {
             embedding_provider: None,
             embedding_model: None,
             hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
+            tool_loading: ToolLoading::All,
         }
     }
 }
