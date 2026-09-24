@@ -78,20 +78,33 @@ const LOGIN_PROFILE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from
 /// commands, and a hang would wedge every command after. Here its stdin is
 /// `/dev/null`, its output is discarded, `set -e`/`-u` it may leave behind
 /// are undone (either would end the persistent shell on the model's first
-/// failing command), the starting directory is restored, and the caller
+/// failing command), as is `set -x`/`-v` (the trace would land in every
+/// command's output), the starting directory is restored, and the caller
 /// bounds the whole thing with [`LOGIN_PROFILE_TIMEOUT`].
+///
+/// `PATH` entries the shell inherited but the profile dropped are appended
+/// back: Debian's `/etc/profile` resets `PATH` to the system directories,
+/// which would otherwise lose a container's `ENV PATH` additions
+/// (`/usr/local/cargo/bin`, `/usr/local/go/bin`, a venv). What the profile
+/// prepends still comes first.
 ///
 /// Without it the project's environment — a conda env activated in the
 /// login profile, PATH additions — was missing: "No module named …" in
 /// 20/20 SWE-bench trials, 3–10 turns lost each.
 const LOGIN_PROFILE_INIT: &str = r#"__chatty_cwd=$PWD
+__chatty_path=$PATH
 { if [ -r /etc/profile ]; then . /etc/profile; fi
 for __chatty_f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
 if [ -r "$__chatty_f" ]; then . "$__chatty_f"; break; fi
 done; } </dev/null >/dev/null 2>&1
-set +eu
+set +euxv
 cd "$__chatty_cwd" 2>/dev/null
-unset __chatty_cwd __chatty_f
+IFS=: read -r -a __chatty_pa <<<"$__chatty_path"
+for __chatty_p in "${__chatty_pa[@]}"; do
+case ":$PATH:" in *":$__chatty_p:"*) ;; *) [ -n "$__chatty_p" ] && PATH=${PATH:+$PATH:}$__chatty_p ;; esac
+done
+export PATH
+unset __chatty_cwd __chatty_f __chatty_path __chatty_pa __chatty_p
 "#;
 
 /// How long to wait for the shell to become waitable after its stdout hit

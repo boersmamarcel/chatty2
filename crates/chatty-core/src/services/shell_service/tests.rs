@@ -714,3 +714,40 @@ async fn test_broken_login_profile_falls_back_to_a_plain_shell() {
         assert!(!session.load_login_profile.load(Ordering::Relaxed));
     }
 }
+
+/// Debian's `/etc/profile` resets `PATH`; entries the shell inherited (a
+/// container's `ENV PATH`, e.g. `/usr/local/cargo/bin`) must survive it,
+/// after whatever the profile put first. A `set -x` in the profile must not
+/// trace every later command into its output.
+#[tokio::test]
+async fn test_login_profile_keeps_inherited_path_and_drops_xtrace() {
+    let (_workspace, workspace, home) =
+        workspace_with_profile("PATH=\"$HOME/bin:/usr/bin:/bin\"\nexport PATH\nset -x\n");
+    let session =
+        ShellSession::with_secrets(Some(workspace), 30, 51200, false, vec![]).with_home(&home);
+
+    let output = session.execute("echo \"$PATH\"").await.unwrap();
+    assert_eq!(output.exit_code, 0, "{output:?}");
+    let path = output.stdout;
+    assert!(
+        path.starts_with(&format!("{home}/bin:/usr/bin:/bin")),
+        "profile PATH first: {path}"
+    );
+    let entries: Vec<&str> = path.split(':').collect();
+    for inherited in std::env::var("PATH").unwrap().split(':') {
+        if !inherited.is_empty() {
+            assert!(entries.contains(&inherited), "{inherited} lost from {path}");
+        }
+    }
+    assert_eq!(
+        entries.len(),
+        entries
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "no duplicates: {path}"
+    );
+
+    let output = session.execute("echo plain").await.unwrap();
+    assert_eq!(output.stdout, "plain", "no xtrace in output");
+}
