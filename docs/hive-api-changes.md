@@ -58,12 +58,15 @@ pub answer_file: Option<bool>,
 pipe, a delegated worker) so the model finishes the work instead of
 offering to continue. `answer_file` is `Some(false)` when the run is known
 in advance not to want an `answer.txt` from `final_answer` (a coding run),
-`None` everywhere else (writes as before). Both default to `false`/`None`
-in `AgentBuildContext::default()` (`build_context.rs:212,214`), so existing
-construction via `..Default::default()` is unaffected.
+`None` everywhere else (writes as before). `AgentBuildContext` has no
+`Default`; `AgentBuildContext::from_services()` sets both to `false`/`None`
+(`build_context.rs:212,214`), so construction via
+`..AgentBuildContext::from_services(services)` is unaffected, while a full
+struct literal fails to compile until both fields are filled in.
 
-**Hive fix**: no change required if hive builds `AgentBuildContext` via
-`Default`/`from_services()` and doesn't need the behavior. If hive runs
+**Hive fix**: no change required if hive builds `AgentBuildContext` on top
+of `from_services()` and doesn't need the behavior; a full struct literal
+needs `unattended: false, answer_file: None`. If hive runs
 agents unattended (no human to answer `ask_user` or accept a continue
 offer), set `unattended: true` explicitly to get the same finish-the-work
 prompt language chatty-tui's headless/pipe modes get.
@@ -87,9 +90,38 @@ deserializes to `All` when absent). If hive constructs
 `ExecutionSettingsModel` with a struct literal instead of `Default`, add
 `tool_loading: ToolLoading::All` (or `Default::default()`).
 
+## `ExecutionSettingsModel::ask_user_enabled` (new field)
+
+`crates/chatty-core/src/settings/models/execution_settings.rs`:
+
+```rust
+#[serde(default = "default_true", skip_serializing_if = "is_true")]
+pub ask_user_enabled: bool,
+```
+
+Gates the `ask_user` tool in `agent_factory` (`chatty-tui --disable
+ask-user`). Defaults to `true` and deserializes to `true` when absent, so
+persisted settings keep offering the tool. Like `tool_loading` it is skipped
+on serialization at its default, so settings files and `SettingsSnapshot`
+bytes are unchanged unless a run turns it off. The
+gate only applies when the agent gets execution settings at all:
+`gated_exec_settings` returns `None` when every execution group is off, and
+`None` offers `ask_user` whenever a clarification store exists.
+
+**Hive fix**: a struct-literal `ExecutionSettingsModel` needs
+`ask_user_enabled: true` (or `..Default::default()`). A hosted worker that
+must never park on a question can set it `false`.
+
+## `AgentClient::supports_images()` (new method)
+
+Additive. `stream_prompt` now replaces image content (new message, history,
+tool results) with a text note when the agent's `ModelConfig::supports_images`
+was `false` at build time. No hive change needed, but a hosted model whose
+config says `supports_images: false` no longer sends images at all.
+
 ## `stream_prompt` now takes a `TurnBudget`
 
-`crates/chatty-core/src/services/llm_service.rs:437`:
+`crates/chatty-core/src/services/llm_service.rs:496`:
 
 ```rust
 pub async fn stream_prompt(
@@ -109,6 +141,8 @@ internally from `max_agent_turns`). It sets rig's per-call turn cap
 tool turns remain.
 
 **Hive fix**: any direct caller of `stream_prompt` needs to pass
-`TurnBudget::new(max_agent_turns)` at the call site (same value the old
+`TurnBudget::new(max_agent_turns as usize)`
+(`chatty_core::services::turn_budget::TurnBudget`; `max_agent_turns` is a
+`u32` on `ExecutionSettingsModel`) at the call site (same value the old
 internal default used), or a smaller budget if hive is resuming a run that
 already spent part of its turn allowance.
