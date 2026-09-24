@@ -216,6 +216,42 @@ fn sandbox_and_path_policy_refusals_are_not_counted_as_failures() {
     const { assert!(MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION > 3) };
 }
 
+/// "not allowed" is ordinary program and page text; matching it hid real
+/// failures from the failure budget. Only the harness's own refusal of a
+/// non-command tool is exempt.
+#[test]
+fn program_output_that_says_not_allowed_is_still_a_failure() {
+    for (name, output) in [
+        (
+            "execute_code",
+            "Traceback (most recent call last):\nValueError: negative dimensions are not allowed",
+        ),
+        (
+            "shell_execute",
+            "{\"exit_code\": 22, \"stdout\": \"405 Method Not Allowed\"}",
+        ),
+        (
+            "shell_execute",
+            "{\"exit_code\": 1, \"stderr\": \"Access denied: path '/x' is outside the workspace root\"}",
+        ),
+        ("fetch", "Error: fetch: HTTP 405 Method Not Allowed"),
+    ] {
+        let tc = failed_tool(name, output);
+        assert!(tool_result_looks_failed(&tc), "{name}: {output}");
+        assert!(!tool_result_is_policy_refusal(&tc), "{name}: {output}");
+    }
+    for refusal in [
+        "Error: write_file: Output path '/etc/x' is outside the workspace directory",
+        "Error: list_directory: Access denied: glob pattern '/**' is outside the workspace root",
+        "Error: query_data: Path not allowed: /etc/data.csv",
+    ] {
+        assert!(
+            tool_result_is_policy_refusal(&failed_tool("read_file", refusal)),
+            "{refusal}"
+        );
+    }
+}
+
 /// `python3 count.py; echo -n 5 > /app/answer.txt` wrote 5 while the script
 /// printed 7: a command-written answer earns one more model turn, then the
 /// next tool result stops the run. Dedicated writes stop at once.

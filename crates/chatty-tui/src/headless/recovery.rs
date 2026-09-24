@@ -32,15 +32,27 @@ pub(super) fn tool_result_looks_failed(tool_call: &ToolCallInfo) -> bool {
 /// refusing the call (e.g. `read_file` outside the workspace). That is the
 /// model learning where it may look, not a sign it is stuck, so it does not
 /// count toward the failure budget.
+///
+/// Only a tool's own error counts, never a command's output: `shell_execute`
+/// and `execute_code` print whatever the program printed, and a Python
+/// `ValueError: negative dimensions are not allowed` or an HTTP `405 Method
+/// Not Allowed` page is a real failure. The phrases are the path validator's
+/// and the output-path check's, not a bare "not allowed".
 pub(super) fn tool_result_is_policy_refusal(tool_call: &ToolCallInfo) -> bool {
+    if !matches!(tool_call.state, ToolCallState::Error)
+        || COMMAND_TOOLS.contains(&tool_call.name.as_str())
+    {
+        return false;
+    }
     let Some(output) = tool_call.output.as_deref() else {
         return false;
     };
     let lowered = output.to_ascii_lowercase();
-    lowered.contains("outside the workspace")
-        || lowered.contains("access denied: path")
+    lowered.contains("access denied: path")
         || lowered.contains("access denied: glob")
-        || lowered.contains("not allowed")
+        || lowered.contains("is outside the workspace")
+        || lowered.contains("resolves outside the workspace")
+        || lowered.contains("path not allowed:")
 }
 
 pub(super) fn parse_exit_code(output: &str) -> Option<i32> {
