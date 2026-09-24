@@ -242,6 +242,7 @@ impl AgentClient {
             role,
             spend_gate,
             team_skill,
+            unattended,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -1219,15 +1220,18 @@ impl AgentClient {
         };
 
         // Build the augmented preamble
-        let preamble = build_preamble(
-            &model_config.preamble,
-            &model_config.provider_type,
-            &tool_availability,
-            &search_settings,
-            &mcp_mgmt_tools,
-            &mcp_tool_info,
-            &secret_key_names,
-            &role,
+        let preamble = preamble_builder::with_run_mode(
+            build_preamble(
+                &model_config.preamble,
+                &model_config.provider_type,
+                &tool_availability,
+                &search_settings,
+                &mcp_mgmt_tools,
+                &mcp_tool_info,
+                &secret_key_names,
+                &role,
+            ),
+            unattended,
         );
 
         // Build native tools once (all providers use the same set)

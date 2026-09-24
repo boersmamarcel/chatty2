@@ -199,6 +199,7 @@ impl HeadlessRunner {
             mcp_tools,
             role: self.config.role.clone(),
             team_skill: self.config.team.as_ref().and_then(Team::skill),
+            unattended: true,
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.config.user_secrets.clone(),
