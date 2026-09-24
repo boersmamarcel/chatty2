@@ -146,7 +146,7 @@ async fn run_turn(
         None,
         None,
         None,
-        1,
+        crate::services::turn_budget::TurnBudget::new(1),
     )
     .await
     .expect("the stream opens");
