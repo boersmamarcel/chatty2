@@ -129,6 +129,7 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
         provider: ProviderType::OpenRouter,
         utility: agent,
         context_shaper: ContextShaper::for_model(&model_config),
+        request_recorder: Default::default(),
     }
 }
 

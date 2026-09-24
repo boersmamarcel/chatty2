@@ -21,19 +21,25 @@ use rig_core::http_client::{
 };
 use rig_core::wasm_compat::WasmCompatSend;
 
+use super::connect_retry_http::ConnectRetryHttpClient;
+
 /// `reqwest::Client` that marks the latest user/assistant message of every
-/// chat-completions request as a prompt-cache breakpoint.
+/// chat-completions request as a prompt-cache breakpoint, and sends a
+/// request again when the connection failed before any response
+/// ([`ConnectRetryHttpClient`]).
 ///
 /// `Default` is required by rig's completion-model bounds on the HTTP client
 /// type, not used by chatty itself.
 #[derive(Clone, Debug, Default)]
 pub struct PromptCachingHttpClient {
-    inner: reqwest::Client,
+    inner: ConnectRetryHttpClient,
 }
 
 impl PromptCachingHttpClient {
     pub fn new(inner: reqwest::Client) -> Self {
-        Self { inner }
+        Self {
+            inner: ConnectRetryHttpClient::new(inner),
+        }
     }
 }
 

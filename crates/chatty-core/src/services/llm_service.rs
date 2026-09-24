@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::factories::AgentClient;
+use crate::factories::agent_factory::RequestRecorder;
 use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::ApiCallUsage;
@@ -72,7 +73,10 @@ pub enum StreamChunk {
     /// rig's own record of the turn, in order: the prompt, each assistant
     /// tool-call message, each tool-result message, the final text. Arrives
     /// with the final response, before `Done`, so the frontends can persist
-    /// the tool round-trips behind the final text (AGE-247).
+    /// the tool round-trips behind the final text (AGE-247). A run that
+    /// fails with a provider error sends it too, just before its `Error`,
+    /// holding what its last model call was sending (see
+    /// `failed_run_messages`).
     TurnMessages(Vec<Message>),
     Done,
     Error(crate::services::stream_processor::StreamError),
@@ -392,6 +396,28 @@ fn budget_spent_end(
     Some(chunks)
 }
 
+/// The messages of a run that failed with a provider error (transport, HTTP
+/// status, malformed or unknown tool call): what its last model call was
+/// sending, past the `history_len` the run started with, as the turn's
+/// `TurnMessages`. rig hands a failed run's messages back to nobody, so
+/// without this every tool round-trip of the run is lost and a retry
+/// continues from a history that no longer shows the work (the offline
+/// benchmark's "retry lost the task"). `None` for the errors that carry
+/// their own record or end the run on purpose (`Other`: max turns,
+/// cancellation), and when no call went out.
+fn failed_run_messages(
+    err: &StreamingError,
+    recorder: &RequestRecorder,
+    history_len: usize,
+) -> Option<StreamChunk> {
+    if classify_streaming_error(err) == StreamErrorKind::Other {
+        return None;
+    }
+    let recorded = recorder.take()?;
+    let messages = recorded.get(history_len..).filter(|m| !m.is_empty())?;
+    Some(StreamChunk::TurnMessages(messages.to_vec()))
+}
+
 /// Stream a prompt with an agent
 ///
 /// # Arguments
@@ -420,6 +446,8 @@ pub async fn stream_prompt(
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
     let history_len = history.len();
+    let request_recorder = agent.request_recorder().clone();
+    request_recorder.clear();
 
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
@@ -449,6 +477,11 @@ pub async fn stream_prompt(
                                     yield Ok(chunk);
                                 }
                                 return;
+                            }
+                            if let Err(e) = &result
+                                && let Some(chunk) = failed_run_messages(e, &request_recorder, history_len)
+                            {
+                                yield Ok(chunk);
                             }
                             let (chunks, stop) = map_stream_result(result, semantics);
                             for chunk in chunks {
@@ -533,11 +566,11 @@ mod tests {
     use rig_core::streaming::ToolCallDeltaContent;
 
     use super::{
-        BUDGET_SPENT_NOTE, Message, MultiTurnStreamItem, PromptError, StreamChunk, StreamErrorKind,
-        StreamedAssistantContent, StreamedUserContent, StreamingError, UsageSemantics,
-        WRAP_UP_TOOL_CALL_STOP, budget_spent_end, classify_completion_error,
-        classify_streaming_error, map_item, map_stream_result, normalize_usage,
-        streamed_tool_result_to_text, tool_result_looks_like_error,
+        BUDGET_SPENT_NOTE, Message, MultiTurnStreamItem, PromptError, RequestRecorder, StreamChunk,
+        StreamErrorKind, StreamedAssistantContent, StreamedUserContent, StreamingError,
+        UsageSemantics, WRAP_UP_TOOL_CALL_STOP, budget_spent_end, classify_completion_error,
+        classify_streaming_error, failed_run_messages, map_item, map_stream_result,
+        normalize_usage, streamed_tool_result_to_text, tool_result_looks_like_error,
     };
 
     /// Anthropic reports `input_tokens` without the cached share; OpenAI-style
@@ -1006,5 +1039,59 @@ mod tests {
         assert!(budget_spent_end(&cancelled, 0, true).is_none());
         let transport = StreamingError::Completion(CompletionError::ProviderError("boom".into()));
         assert!(budget_spent_end(&transport, 0, true).is_none());
+    }
+
+    /// A run that failed on the wire hands on the round-trips its last
+    /// request carried, past the history it started with; an error that
+    /// ends a run on purpose does not.
+    #[test]
+    fn a_failed_run_hands_on_what_its_last_call_was_sending() {
+        let earlier = Message::user("an earlier turn");
+        let prompt = Message::user("the task");
+        let call = Message::Assistant {
+            id: None,
+            content: vec![rig_core::message::AssistantContent::ToolCall(
+                ToolCall::new(
+                    ToolCallId::new("call_1").unwrap(),
+                    ToolFunction::new("read_file".into(), serde_json::json!({"path": "a"})),
+                ),
+            )],
+        };
+        let result = Message::User {
+            content: vec![rig_core::message::UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new("call_1").unwrap(),
+                name: "read_file".into(),
+                content: vec![ToolResultContent::text("contents")],
+                provider: None,
+            })],
+        };
+        let recorder = RequestRecorder::default();
+        let transport = StreamingError::Completion(CompletionError::ProviderError(
+            "Http client error: error sending request for url".into(),
+        ));
+
+        recorder.record(vec![
+            earlier.clone(),
+            prompt.clone(),
+            call.clone(),
+            result.clone(),
+        ]);
+        match failed_run_messages(&transport, &recorder, 1) {
+            Some(StreamChunk::TurnMessages(messages)) => {
+                assert_eq!(messages, vec![prompt.clone(), call.clone(), result.clone()]);
+            }
+            other => panic!("expected the run's messages, got {other:?}"),
+        }
+        assert!(
+            failed_run_messages(&transport, &recorder, 1).is_none(),
+            "the record is handed on once"
+        );
+
+        recorder.record(vec![earlier, prompt, call, result]);
+        let cancelled = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+            chat_history: Vec::new(),
+            reason: "stop".into(),
+        }));
+        assert!(failed_run_messages(&cancelled, &recorder, 1).is_none());
     }
 }

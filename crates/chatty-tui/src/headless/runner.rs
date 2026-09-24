@@ -101,6 +101,10 @@ pub struct HeadlessRunner {
     /// Tests only: the text of every turn started, in order.
     #[cfg(test)]
     pub(super) scripted_inputs: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Tests only: retry a failed turn at once instead of after the
+    /// policy's delay.
+    #[cfg(test)]
+    pub(super) skip_recovery_delay: bool,
 }
 
 impl HeadlessRunner {
@@ -139,6 +143,8 @@ impl HeadlessRunner {
             scripted_turns: Default::default(),
             #[cfg(test)]
             scripted_inputs: Default::default(),
+            #[cfg(test)]
+            skip_recovery_delay: false,
         }
     }
 

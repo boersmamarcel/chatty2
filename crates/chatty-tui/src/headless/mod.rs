@@ -72,7 +72,39 @@ const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool ca
 const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. Its tool \
      calls and their results are not in the history, but files it wrote are still on disk. \
      Continue the task from where you left off: check the current state before redoing work.";
-const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
+/// Sent on the same history after a provider error (a dropped connection,
+/// an HTTP error status, a malformed tool call) ended a turn the model had
+/// already said something in. The failed run's tool round-trips were
+/// persisted with it (`failed_run_messages` in chatty-core), so the history
+/// holds the work; the task is restated all the same. This used to be a
+/// generic "continue the same benchmark task ... call final_answer with
+/// output_path=/app/answer.txt" prompt, and on a SWE-bench run with no
+/// answer file the model took it for a Q&A task and wrote /app/answer.txt
+/// instead of fixing the code.
+fn stream_error_recovery_prompt(original_prompt: &str, answer_file_required: bool) -> String {
+    let mut prompt = String::from(
+        "A provider error interrupted your last response. The tool calls and results above \
+         are still valid and files you wrote are still on disk. Continue the same task from \
+         where you left off: check the current state before redoing work.",
+    );
+    if answer_file_required {
+        prompt.push_str(
+            " When you have the answer, call final_answer with output_path=/app/answer.txt.",
+        );
+    }
+    prompt.push_str(&task_reminder(original_prompt));
+    prompt
+}
+
+/// The run's task, restated at the end of every continuation headless sends
+/// after an error: a continuation that does not say what to continue left
+/// the model guessing at the task from whatever the history still showed.
+fn task_reminder(original_prompt: &str) -> String {
+    format!(
+        "\n\nThe task, unchanged:\n{}",
+        original_task_excerpt(original_prompt)
+    )
+}
 
 /// The run's last pass after its time budget ran out mid-turn: tools are
 /// off, so the model answers from what it has.
@@ -493,32 +525,48 @@ pub async fn run_headless(
                     failed_tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
                     failure_budget_stop_requested = false;
+                    #[cfg(test)]
+                    let delay = if engine.skip_recovery_delay {
+                        std::time::Duration::ZERO
+                    } else {
+                        delay
+                    };
                     if error.kind != StreamErrorKind::Stalled {
                         eprintln!(
-                            "Retrying after stream error in {}s with a compact continuation prompt.",
+                            "Retrying after stream error in {}s on the same history.",
                             delay.as_secs()
                         );
                     }
                     tokio::time::sleep(delay).await;
                     if let Some(message) = engine.take_rolled_back_message() {
                         // The turn failed before the model said anything, so
-                        // it was rolled back with its prompt: send that again.
+                        // it was rolled back with its prompt: send that
+                        // same message again.
                         engine.send_recovery_prompt(message);
                     } else if error.kind == StreamErrorKind::Stalled {
-                        engine.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+                        engine.send_recovery_prompt(format!(
+                            "{STALL_RESUME_PROMPT}{}",
+                            task_reminder(&message)
+                        ));
                     } else if error.kind == StreamErrorKind::UnknownToolCall {
                         // AGE-497: rig's own message already lists the
                         // available/allowed tool names, so it is worth
                         // re-sending verbatim instead of the generic prompt.
-                        engine.send_recovery_prompt(unknown_tool_call_recovery_prompt(
-                            &error.message,
+                        engine.send_recovery_prompt(format!(
+                            "{}{}",
+                            unknown_tool_call_recovery_prompt(&error.message),
+                            task_reminder(&message)
                         ));
                     } else if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
+                        // Carries the original task itself.
                         engine.send_recovery_prompt(build_compact_file_recovery_prompt(
                             compact_prompt,
                         ));
                     } else {
-                        engine.send_recovery_prompt(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                        engine.send_recovery_prompt(stream_error_recovery_prompt(
+                            &message,
+                            answer_file_required,
+                        ));
                     }
                     continue;
                 }
