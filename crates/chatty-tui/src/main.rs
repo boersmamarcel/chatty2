@@ -186,9 +186,9 @@ struct Cli {
     /// time is left; once it is spent the model answers with tools
     /// disabled, and a pass that overruns it is stopped for that answer.
     ///
-    /// Defaults to 30m when neither this nor --max-agent-turns (or a
-    /// team's budget) is given. Ignored by the interactive TUI, which has
-    /// Stop.
+    /// Defaults to 30m when the run has no turn cap (no --max-agent-turns
+    /// or team budget, or an explicit 0). Ignored by the interactive TUI,
+    /// which has Stop.
     ///
     /// Example: --max-duration 2h
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
@@ -1263,16 +1263,17 @@ const DEFAULT_UNATTENDED_MAX_DURATION: std::time::Duration =
 /// The turn cap and time budget of a run without a human: the turn cap is
 /// `--max-agent-turns`, else the team's budget, else none (`0`) -- never the
 /// persisted interactive setting. The time budget is `--max-duration`, else
-/// [`DEFAULT_UNATTENDED_MAX_DURATION`] when no turn cap was given either;
-/// with a cap and no --max-duration the run keeps its old, cap-only shape.
+/// [`DEFAULT_UNATTENDED_MAX_DURATION`] when the run has no turn cap (none
+/// given, or an explicit `0`), so no unattended run is unbounded; with a
+/// cap and no --max-duration the run keeps its old, cap-only shape.
 fn unattended_run_limits(
     turns_flag: Option<u32>,
     team_turns: Option<u32>,
     duration_flag: Option<std::time::Duration>,
 ) -> (u32, Option<std::time::Duration>) {
-    let turns = turns_flag.or(team_turns);
-    let duration = duration_flag.or(turns.is_none().then_some(DEFAULT_UNATTENDED_MAX_DURATION));
-    (turns.unwrap_or(0), duration)
+    let turns = turns_flag.or(team_turns).unwrap_or(0);
+    let duration = duration_flag.or((turns == 0).then_some(DEFAULT_UNATTENDED_MAX_DURATION));
+    (turns, duration)
 }
 
 /// `--max-duration`: seconds (`90`), or numbers with `s`/`m`/`h` units
@@ -1404,8 +1405,8 @@ mod resolve_model_tests {
         assert_eq!(cli.max_duration, Some(std::time::Duration::from_secs(1800)));
     }
 
-    /// A run without a human: a given cap keeps the old cap-only shape
-    /// (`0` is no cap); with no cap it gets no cap and a time budget,
+    /// A run without a human: a given cap keeps the old cap-only shape;
+    /// with no cap (none given, or `0`) it gets a time budget,
     /// whatever the persisted setting says.
     #[test]
     fn unattended_runs_get_a_turn_cap_or_a_time_budget() {
@@ -1413,7 +1414,19 @@ mod resolve_model_tests {
         let hour = std::time::Duration::from_secs(3600);
         assert_eq!(unattended_run_limits(None, None, None), (0, Some(thirty)));
         assert_eq!(unattended_run_limits(Some(50), None, None), (50, None));
-        assert_eq!(unattended_run_limits(Some(0), None, None), (0, None));
+        // An explicit `0` (flag or team) is no cap, never no bound at all.
+        assert_eq!(
+            unattended_run_limits(Some(0), None, None),
+            (0, Some(thirty))
+        );
+        assert_eq!(
+            unattended_run_limits(None, Some(0), None),
+            (0, Some(thirty))
+        );
+        assert_eq!(
+            unattended_run_limits(Some(0), Some(40), None),
+            (0, Some(thirty))
+        );
         assert_eq!(unattended_run_limits(None, Some(40), None), (40, None));
         assert_eq!(unattended_run_limits(Some(50), Some(40), None), (50, None));
         assert_eq!(
