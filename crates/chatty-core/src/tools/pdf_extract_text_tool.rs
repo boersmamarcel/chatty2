@@ -206,18 +206,35 @@ fn extract_text_without_pdfium(
     pdf_path: &std::path::Path,
     pages: Option<&[u32]>,
 ) -> Result<ExtractResult, String> {
-    let document = lopdf::Document::load(pdf_path).map_err(|e| e.to_string())?;
-    let total_pages = document.get_pages().len() as u32;
-    let pages = page_indices(pages, total_pages)
-        .into_iter()
-        .map(|page| {
-            // lopdf numbers pages from 1; a page it can't decode reads as
-            // empty, like pdfium's.
-            let text = document.extract_text(&[page + 1]).unwrap_or_default();
-            PageText { page, text }
-        })
-        .collect();
-    Ok(ExtractResult { total_pages, pages })
+    // lopdf indexes into the file's own offsets and lengths; a malformed
+    // PDF can make it panic. Turn that into a readable failure here rather
+    // than a bare "task panicked" from the blocking task.
+    let result = std::panic::catch_unwind(|| {
+        let document = lopdf::Document::load(pdf_path).map_err(|e| e.to_string())?;
+        let total_pages = document.get_pages().len() as u32;
+        let pages: Vec<PageText> = page_indices(pages, total_pages)
+            .into_iter()
+            .map(|page| {
+                // lopdf numbers pages from 1; a page it can't decode reads
+                // as empty, like pdfium's.
+                let text = document.extract_text(&[page + 1]).unwrap_or_default();
+                PageText { page, text }
+            })
+            .collect();
+        Ok(ExtractResult { total_pages, pages })
+    })
+    .unwrap_or_else(|_| Err("the PDF is malformed".to_string()))?;
+    // Scanned pages, or fonts without a Unicode map, give lopdf nothing to
+    // read. Empty pages would read as "this PDF says nothing"; say it could
+    // not be read instead, so the error points at pdftotext / OCR.
+    if !result.pages.is_empty() && result.pages.iter().all(|p| p.text.trim().is_empty()) {
+        return Err(
+            "no text could be read from the requested pages (scanned, or fonts \
+                    without a text encoding)"
+                .to_string(),
+        );
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -444,6 +461,36 @@ startxref
         let path = dir.path().join("broken.pdf");
         fs::write(&path, b"not a pdf").unwrap();
         assert!(extract_text_without_pdfium(&path, None).is_err());
+    }
+
+    /// Pages with no show-text operators come back as an error that says
+    /// so, not as empty pages.
+    #[test]
+    fn test_fallback_reports_pages_without_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan.pdf");
+        let mut pdf = String::from_utf8(two_page_pdf()).unwrap();
+        for shown in ["(Revenue grew 12 percent) Tj", "(Second page text) Tj"] {
+            // Same length, so the xref offsets stay right.
+            pdf = pdf.replace(shown, &" ".repeat(shown.len()));
+        }
+        fs::write(&path, pdf).unwrap();
+        let Err(error) = extract_text_without_pdfium(&path, None) else {
+            panic!("pages without text must be an error");
+        };
+        assert!(error.contains("no text"), "{error}");
+    }
+
+    /// Truncated and garbled inputs fail with an error, never a panic.
+    #[test]
+    fn test_fallback_survives_truncated_pdfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cut.pdf");
+        let pdf = two_page_pdf();
+        for cut in (0..pdf.len()).step_by(37) {
+            fs::write(&path, &pdf[..cut]).unwrap();
+            let _ = extract_text_without_pdfium(&path, None);
+        }
     }
 
     #[tokio::test]
