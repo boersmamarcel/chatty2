@@ -398,6 +398,12 @@ pub struct ChatEngine {
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
     pub total_cache_write_tokens: u32,
+    /// The active response's most recent provider round-trip
+    /// (`ApiCallUsage::turn`) and when it started, for the status bar's live
+    /// run indicator (turn count + elapsed) now that there is no turn cap.
+    /// `None` when not streaming.
+    pub current_turn: Option<u32>,
+    turn_started_at: Option<std::time::Instant>,
     /// The most recently completed turn's per-request usage. Its last call's
     /// prompt size is the model's actual current context fill — summing every
     /// request in the turn over-states it by the tool-call count (AGE-223).
@@ -515,6 +521,8 @@ impl ChatEngine {
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            current_turn: None,
+            turn_started_at: None,
             last_turn_usage: None,
             title: "New Chat".to_string(),
             is_ready: false,
@@ -911,6 +919,8 @@ impl ChatEngine {
         match event {
             AppEvent::StreamStarted => {
                 self.is_streaming = true;
+                self.current_turn = None;
+                self.turn_started_at = Some(std::time::Instant::now());
                 self.pin_to_bottom();
                 EngineAction::Redraw
             }
@@ -972,8 +982,13 @@ impl ChatEngine {
                 });
                 EngineAction::Redraw
             }
-            // Per-request records are folded into `TokenUsage` by the session.
-            AppEvent::ApiCallUsage(_) => EngineAction::None,
+            // The aggregate is folded into `TokenUsage` by the session; the
+            // per-request `turn` index itself is only used live, here, for
+            // the status bar's running turn count.
+            AppEvent::ApiCallUsage(call) => {
+                self.current_turn = Some(call.turn);
+                EngineAction::Redraw
+            }
             AppEvent::TokenUsage(usage) => {
                 self.total_input_tokens =
                     self.total_input_tokens.saturating_add(usage.input_tokens);
@@ -1326,11 +1341,18 @@ impl ChatEngine {
 
     fn reset_stream_state(&mut self) {
         self.is_streaming = false;
+        self.current_turn = None;
+        self.turn_started_at = None;
         self.pending_approval = None;
         // Drop the popover and unblock any `ask_user` call still waiting, so a
         // cancelled stream cannot leave a tool parked until its timeout.
         self.pending_clarification = None;
         self.session.clarifications().cancel_all();
+    }
+
+    /// How long the active response has been running, when one is in flight.
+    pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
+        self.turn_started_at.map(|start| start.elapsed())
     }
 }
 

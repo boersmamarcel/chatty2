@@ -104,6 +104,12 @@ pub struct ChatInputState {
     supports_pdf: bool,
     thumbnail_cache: ThumbnailCache,
     is_streaming: bool,
+    /// When the active response started (`None` when not streaming), so the
+    /// status area can show elapsed time for a run with no turn cap.
+    turn_started_at: Option<std::time::Instant>,
+    /// The most recent provider round-trip's index (`ApiCallUsage::turn`)
+    /// and its own token total, updated live from `StreamManagerEvent::TurnProgress`.
+    turn_progress: Option<(u32, u32)>,
     /// Index of the highlighted item in the slash-command picker.
     slash_menu_selected: usize,
     /// Scroll state for the slash-command picker so keyboard navigation can
@@ -151,6 +157,8 @@ impl ChatInputState {
             supports_images: false,
             supports_pdf: false,
             is_streaming: false,
+            turn_started_at: None,
+            turn_progress: None,
             slash_menu_selected: 0,
             slash_menu_scroll_handle: ScrollHandle::new(),
             last_slash_query: None,
@@ -212,12 +220,33 @@ impl ChatInputState {
     /// Set streaming state
     pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
         self.is_streaming = streaming;
+        self.turn_started_at = streaming.then(std::time::Instant::now);
+        self.turn_progress = None;
         cx.notify();
     }
 
     /// Check if currently streaming
     pub fn is_streaming(&self) -> bool {
         self.is_streaming
+    }
+
+    /// Record one provider round-trip of the active response (AGE: live run
+    /// indicator). `turn` and `tokens` come straight off `ApiCallUsage`, so
+    /// they need no further lookup at render time.
+    pub fn record_turn_progress(&mut self, turn: u32, tokens: u32, cx: &mut Context<Self>) {
+        self.turn_progress = Some((turn, tokens));
+        cx.notify();
+    }
+
+    /// The active response's turn count and this turn's own token total,
+    /// when at least one provider round-trip has completed.
+    pub fn turn_progress(&self) -> Option<(u32, u32)> {
+        self.turn_progress
+    }
+
+    /// How long the active response has been running, when one is in flight.
+    pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
+        self.turn_started_at.map(|start| start.elapsed())
     }
 
     /// Get the per-conversation working directory override currently shown in the input UI
@@ -477,6 +506,34 @@ pub(crate) fn resolve_selected_model_id(
     default_id
         .filter(|id| models.iter().any(|model| model.id == *id))
         .or_else(|| models.first().map(|model| model.id.clone()))
+}
+
+/// Format the active response's live status for the composer: turn count,
+/// this turn's own token total (when at least one round-trip has completed),
+/// and elapsed time (once a second has passed, so a near-instant first token
+/// doesn't render "0s"). `None` when there is nothing worth showing yet.
+fn format_run_status(
+    turn_progress: Option<(u32, u32)>,
+    elapsed: Option<std::time::Duration>,
+) -> Option<String> {
+    let elapsed_secs = elapsed.filter(|d| d.as_secs() >= 1).map(|d| d.as_secs());
+    let (turn, tokens) = turn_progress.unzip();
+
+    if turn.is_none() && elapsed_secs.is_none() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(turn) = turn {
+        parts.push(format!("Turn {turn}"));
+    }
+    if let Some(tokens) = tokens {
+        parts.push(format!("{tokens} tok"));
+    }
+    if let Some(secs) = elapsed_secs {
+        parts.push(format!("{}:{:02}", secs / 60, secs % 60));
+    }
+    Some(parts.join(" \u{b7} "))
 }
 
 /// Chat input component for rendering
