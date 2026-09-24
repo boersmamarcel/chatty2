@@ -128,21 +128,165 @@ fn keeps_plain_text_payload_lines() {
 
 #[test]
 fn detects_answer_file_requirement() {
-    assert!(prompt_requires_answer_file(
-        "write ONLY the final answer to `/app/answer.txt`"
-    ));
-    assert!(prompt_requires_answer_file(
-        "Create ANSWER.TXT once you are done"
-    ));
-    assert!(!prompt_requires_answer_file(
-        "Explain the result in the terminal"
-    ));
+    assert!(prompt_requires_answer_file(&[
+        "write ONLY the final answer to `/app/answer.txt`",
+        ""
+    ]));
+    assert!(prompt_requires_answer_file(&[
+        "Create ANSWER.TXT once you are done",
+        ""
+    ]));
+    assert!(!prompt_requires_answer_file(&[
+        "Explain the result in the terminal",
+        ""
+    ]));
+}
+
+#[test]
+fn detects_answer_file_requirement_from_preamble_only() {
+    // AGE evidence: the instruction to write /app/answer.txt sometimes
+    // arrives via --preamble rather than --message; detection must look at
+    // both instead of only the message.
+    assert!(prompt_requires_answer_file(&[
+        "What is the total revenue?",
+        "You are FinanceAgent. Write your final answer to /app/answer.txt."
+    ]));
+    assert!(!prompt_requires_answer_file(&[
+        "What is the total revenue?",
+        "You are FinanceAgent. Be concise."
+    ]));
 }
 
 #[test]
 fn tool_budget_stop_only_applies_to_answer_file_tasks() {
-    assert!(!prompt_requires_answer_file("Explain the result"));
-    assert_eq!(MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION, 16);
+    assert!(!prompt_requires_answer_file(&["Explain the result", ""]));
+}
+
+/// The exploration budget follows the run's turn cap: GAIA runs at 50
+/// turns were cut at 16 tool results while still exploring (one needed ~27
+/// calls to reach its API answer).
+#[test]
+fn answer_file_tool_budget_scales_with_the_turn_cap() {
+    assert_eq!(answer_file_tool_budget(50), 40, "80 % of a 50-turn cap");
+    assert_eq!(answer_file_tool_budget(30), 24);
+    assert_eq!(answer_file_tool_budget(51), 41, "rounds up");
+    assert_eq!(
+        answer_file_tool_budget(10),
+        MIN_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION,
+        "a small cap ends through TurnBudget first; the budget keeps its floor"
+    );
+    assert_eq!(
+        answer_file_tool_budget(0),
+        UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION
+    );
+    const {
+        assert!(UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION > 16);
+        // Stops after TurnBudget's 75 % wrap-up note, not before it.
+        assert!(ANSWER_FILE_TOOL_BUDGET_PERCENT > 75);
+    }
+}
+
+fn failed_tool(name: &str, output: &str) -> ToolCallInfo {
+    ToolCallInfo {
+        id: "t1".to_string(),
+        name: name.to_string(),
+        input: "{}".to_string(),
+        output: Some(output.to_string()),
+        state: ToolCallState::Error,
+        source: ToolSource::Local,
+        execution_engine: None,
+    }
+}
+
+/// A single `read_file` outside the workspace used to count toward the
+/// 3-failure budget and trip finalization; the harness's own policy saying
+/// no is not the model being stuck.
+#[test]
+fn sandbox_and_path_policy_refusals_are_not_counted_as_failures() {
+    let refused = failed_tool(
+        "read_file",
+        "Error: read_file: Access denied: path '/etc/passwd' is outside the workspace root",
+    );
+    assert!(tool_result_looks_failed(&refused));
+    assert!(tool_result_is_policy_refusal(&refused));
+
+    let crashed = failed_tool("shell_execute", "Traceback (most recent call last): ...");
+    assert!(tool_result_looks_failed(&crashed));
+    assert!(!tool_result_is_policy_refusal(&crashed));
+    const { assert!(MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION > 3) };
+}
+
+/// "not allowed" is ordinary program and page text; matching it hid real
+/// failures from the failure budget. Only the harness's own refusal of a
+/// non-command tool is exempt.
+#[test]
+fn program_output_that_says_not_allowed_is_still_a_failure() {
+    for (name, output) in [
+        (
+            "execute_code",
+            "Traceback (most recent call last):\nValueError: negative dimensions are not allowed",
+        ),
+        (
+            "shell_execute",
+            "{\"exit_code\": 22, \"stdout\": \"405 Method Not Allowed\"}",
+        ),
+        (
+            "shell_execute",
+            "{\"exit_code\": 1, \"stderr\": \"Access denied: path '/x' is outside the workspace root\"}",
+        ),
+        ("fetch", "Error: fetch: HTTP 405 Method Not Allowed"),
+    ] {
+        let tc = failed_tool(name, output);
+        assert!(tool_result_looks_failed(&tc), "{name}: {output}");
+        assert!(!tool_result_is_policy_refusal(&tc), "{name}: {output}");
+    }
+    for refusal in [
+        "Error: write_file: Output path '/etc/x' is outside the workspace directory",
+        "Error: list_directory: Access denied: glob pattern '/**' is outside the workspace root",
+        "Error: query_data: Path not allowed: /etc/data.csv",
+    ] {
+        assert!(
+            tool_result_is_policy_refusal(&failed_tool("read_file", refusal)),
+            "{refusal}"
+        );
+    }
+}
+
+/// `python3 count.py; echo -n 5 > /app/answer.txt` wrote 5 while the script
+/// printed 7: a command-written answer earns one more model turn, then the
+/// next tool result stops the run. Dedicated writes stop at once.
+#[test]
+fn a_command_written_answer_gets_one_more_turn_and_dedicated_writes_stop_at_once() {
+    let is_command = |name: &str| COMMAND_TOOLS.contains(&name);
+    assert_eq!(
+        answer_file_stop(false, is_command("shell_execute")),
+        AnswerFileStop::AfterNextTurn
+    );
+    assert_eq!(
+        answer_file_stop(false, is_command("execute_code")),
+        AnswerFileStop::AfterNextTurn
+    );
+    assert_eq!(
+        answer_file_stop(true, is_command("shell_execute")),
+        AnswerFileStop::Now,
+        "the grace turn is given once; its rewrite then ends the run"
+    );
+    for dedicated in ["final_answer", "write_file", "apply_diff"] {
+        assert_eq!(
+            answer_file_stop(false, is_command(dedicated)),
+            AnswerFileStop::Now,
+            "{dedicated}"
+        );
+    }
+}
+
+#[test]
+fn the_finalization_prompt_asks_for_an_answer_from_gathered_evidence() {
+    let prompt = build_answer_file_finalization_prompt("Task:\nHow many?", None);
+    assert!(prompt.contains("evidence you have gathered"));
+    assert!(prompt.contains("one quick check"));
+    assert!(!prompt.contains("Do not keep researching"));
+    assert!(prompt.contains("How many?"));
 }
 
 #[test]
@@ -293,7 +437,9 @@ fn unknown_tool_call_recovery_prompt_echoes_the_rig_error_and_asks_for_a_real_to
 mod runner {
     use super::*;
     use crate::engine::{ChatEngineConfig, MessageRole};
+    use crate::headless::runner::FINAL_PASS_TOOL_TURNS;
     use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
+    use chatty_core::services::turn_budget::TurnBudget;
     use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
     use chatty_core::settings::models::models_store::{ModelConfig, ModelsModel};
     use chatty_core::settings::models::module_settings::ModuleSettingsModel;
@@ -686,80 +832,505 @@ mod runner {
         );
     }
 
-    /// AGE-503 regression: `max_agent_turns` is rig's per-`stream_prompt`-call
-    /// budget (a fresh `AgentRun` per call, `current_turn` starting at 0
-    /// every time) — not a cumulative total across the run. Finalization
-    /// used to narrow that per-call budget down to an absolute
-    /// `FINALIZATION_MAX_AGENT_TURNS` (12) via `.min()`, even when the
-    /// operator had configured a larger one (e.g. `--max-agent-turns 30`),
-    /// so a wrap-up prompt that legitimately needed more than 12 model
-    /// calls died with `MaxTurnsError`. A configured budget already at or
-    /// above the floor must be left untouched.
+    /// `n` model calls that each made one tool call, as the runner sees them.
+    fn spend_tool_turns(runner: &mut HeadlessRunner, n: usize) {
+        for i in 0..n {
+            runner.handle_event(AppEvent::ToolCallStarted {
+                id: format!("call_{i}"),
+                name: "shell_execute".into(),
+            });
+            runner.handle_event(AppEvent::ToolCallResult {
+                id: format!("call_{i}"),
+                result: "ok".into(),
+            });
+        }
+    }
+
+    /// The 76-minute run: `--max-agent-turns 50`, yet 101 shell calls,
+    /// because every follow-up pass got a fresh 50. Across the first pass,
+    /// stall resumes, pivots and finalizations that each spend all they are
+    /// given, the run stays within `max_agent_turns + FINAL_PASS_TOOL_TURNS`.
     #[tokio::test]
-    async fn finalization_never_narrows_a_configured_budget_below_the_floor() {
+    async fn follow_up_passes_share_the_runs_turn_budget() {
         let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 50;
+
+        let first = runner.pass_turn_budget(false).unwrap();
+        assert_eq!(first, TurnBudget::run_share(50, 50, 0));
+        let mut total = 0;
+        let mut past_ceiling = 0;
+        for final_pass in [false, false, false, true, false, true, true] {
+            let budget = runner.pass_turn_budget(final_pass).unwrap();
+            if final_pass {
+                assert!(budget.tool_turns() <= FINAL_PASS_TOOL_TURNS);
+            }
+            // The first of these is the first pass: it gets the whole run.
+            if total == 0 {
+                assert_eq!(budget, first);
+            }
+            if runner.tool_turns_spent >= 50 + FINAL_PASS_TOOL_TURNS {
+                // Past the ceiling only a finalization gets a tool turn:
+                // the one it needs for `final_answer`.
+                assert_eq!(budget.tool_turns(), usize::from(final_pass));
+                if final_pass {
+                    past_ceiling += 1;
+                }
+            }
+            spend_tool_turns(&mut runner, budget.tool_turns());
+            total += budget.tool_turns();
+        }
+        assert_eq!(runner.tool_turns_spent, total);
+        assert_eq!(past_ceiling, 3);
+        assert_eq!(total, 50 + FINAL_PASS_TOOL_TURNS + past_ceiling);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(0, 50, total)),
+            "a spent run still gets its tool-free last word, and no tools"
+        );
+    }
+
+    /// A follow-up after a partly spent pass gets what is left; one after a
+    /// nearly spent pass still gets the floor, so it can write the answer.
+    #[tokio::test]
+    async fn a_follow_up_gets_the_rest_of_the_run_or_the_floor() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 50;
+        spend_tool_turns(&mut runner, 30);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(20, 50, 30))
+        );
+        spend_tool_turns(&mut runner, 19);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 50, 49))
+        );
+    }
+
+    /// A finalization pass on a run past its ceiling still gets the one
+    /// tool turn `final_answer` needs: with none it could only answer in
+    /// text, and no answer file would be written.
+    #[tokio::test]
+    async fn a_finalization_past_the_ceiling_can_still_call_final_answer() {
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.execution_settings.max_agent_turns = 10;
+        spend_tool_turns(&mut runner, 10 + FINAL_PASS_TOOL_TURNS);
+        let spent = 10 + FINAL_PASS_TOOL_TURNS;
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            Some(TurnBudget::run_share(0, 10, spent))
+        );
+        assert_eq!(
+            runner.pass_turn_budget(true),
+            Some(TurnBudget::run_share(1, 10, spent))
+        );
+    }
+
+    /// A parallel batch is one model call, so one tool turn.
+    #[tokio::test]
+    async fn a_parallel_tool_batch_counts_as_one_turn() {
+        let (mut runner, _event_rx) = test_runner().await;
+        for id in ["a", "b"] {
+            runner.handle_event(AppEvent::ToolCallStarted {
+                id: id.into(),
+                name: "shell_execute".into(),
+            });
+        }
+        for id in ["a", "b"] {
+            runner.handle_event(AppEvent::ToolCallResult {
+                id: id.into(),
+                result: "ok".into(),
+            });
+        }
+        assert_eq!(runner.tool_turns_spent, 1);
+    }
+
+    /// A finalization pass exists to write the answer: it gets the floor,
+    /// not a fresh `max_agent_turns` (AGE-503 used to raise it to 12 and
+    /// leave every later pass there too).
+    #[tokio::test]
+    async fn a_finalization_pass_gets_only_the_floor() {
+        let (mut runner, mut event_rx) = test_runner().await;
         runner.execution_settings.max_agent_turns = 30;
-        for _ in 0..20 {
-            runner.transcript.start_assistant();
-        }
+        runner.scripted_turns = vec![answer_turn("7")].into();
 
         send_answer_file_finalization_prompt(
             &mut runner,
             "Write ONLY the final answer to /app/answer.txt",
+            false,
         );
-
-        assert_eq!(
-            runner.execution_settings.max_agent_turns, 30,
-            "a configured budget already above the floor must be left untouched \
-             (the old `.min()` code would have narrowed this to 12)"
-        );
-    }
-
-    /// AGE-503: there is no cumulative "turns used" accounting anywhere in
-    /// the real turn-limit path, so the finalization budget must not depend
-    /// on how many assistant rows the transcript already has. A runner with
-    /// 0 prior rows and one with 20 must land on the exact same budget.
-    #[tokio::test]
-    async fn finalization_budget_is_independent_of_turns_already_used() {
-        let (mut fresh, _event_rx) = test_runner().await;
-        fresh.execution_settings.max_agent_turns = 30;
-        send_answer_file_finalization_prompt(
-            &mut fresh,
-            "Write ONLY the final answer to /app/answer.txt",
-        );
-
-        let (mut used, _event_rx2) = test_runner().await;
-        used.execution_settings.max_agent_turns = 30;
-        for _ in 0..20 {
-            used.transcript.start_assistant();
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
         }
-        send_answer_file_finalization_prompt(
-            &mut used,
-            "Write ONLY the final answer to /app/answer.txt",
-        );
 
         assert_eq!(
-            fresh.execution_settings.max_agent_turns, used.execution_settings.max_agent_turns,
-            "the finalization budget must be identical regardless of turns already used"
+            runner.scripted_budgets,
+            vec![Some(TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 30, 0))]
         );
+        assert_eq!(runner.execution_settings.max_agent_turns, 30, "untouched");
+        assert!(!runner.next_pass_is_final, "only the one pass");
     }
 
-    /// AGE-503: a configured budget smaller than `FINALIZATION_MAX_AGENT_TURNS`
-    /// is raised to the floor so the wrap-up pass always gets at least 12
-    /// model calls.
+    /// The finalization turn runs on the history the model built, not on a
+    /// wiped conversation plus a digest: a history-less pass on GAIA
+    /// invented an ID after 16 calls of real exploration were thrown away.
     #[tokio::test]
-    async fn finalization_raises_a_too_small_configured_budget_to_the_floor() {
-        let (mut runner, _event_rx) = test_runner().await;
-        runner.execution_settings.max_agent_turns = 5;
+    async fn finalization_keeps_the_conversation_history() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![answer_turn("EXPLORED-EVIDENCE-7"), answer_turn("7")].into();
+        runner.send_message("How many? Write ONLY the answer to /app/answer.txt".to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
 
         send_answer_file_finalization_prompt(
             &mut runner,
-            "Write ONLY the final answer to /app/answer.txt",
+            "How many? Write ONLY the answer to /app/answer.txt",
+            false,
         );
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(history.contains("EXPLORED-EVIDENCE-7"), "{history}");
+        assert!(history.contains("Time to finish"), "{history}");
+    }
+
+    /// The tool and failure budgets end the stream mid-turn, and rig hands
+    /// back a turn's tool round-trips only with its final response: the cut
+    /// turn is in the history as text alone. A finalization that only
+    /// pointed at "the evidence gathered above" then had none, so after a
+    /// cut the prompt carries the transcript's digest of the tool results.
+    #[tokio::test]
+    async fn finalization_after_a_cut_turn_carries_the_tool_evidence() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![
+            Scenario {
+                name: "cut_after_a_tool",
+                progress: Vec::new(),
+                items: vec![
+                    ScriptedItem::Chunk(StreamChunk::Text("Querying the API.".into())),
+                    ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                        id: "call_1".into(),
+                        name: "fetch".into(),
+                    }),
+                    ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                        id: "call_1".into(),
+                        arguments: "{}".into(),
+                    }),
+                    ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                        id: "call_1".into(),
+                        result: "record id UNIQUE-API-ID-42".into(),
+                    }),
+                    ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                        StreamErrorKind::Stalled,
+                        stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+                    ))),
+                ],
+            },
+            answer_turn("42"),
+        ]
+        .into();
+        let task = "Which id? Write ONLY the answer to /app/answer.txt";
+        runner.send_message(task.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(!history.contains("UNIQUE-API-ID-42"), "{history}");
+
+        send_answer_file_finalization_prompt(&mut runner, task, true);
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let sent = runner.scripted_inputs.lock().unwrap().clone();
+        let finalization = sent.last().expect("finalization prompt sent");
+        assert!(finalization.contains("Time to finish"), "{finalization}");
+        assert!(finalization.contains("UNIQUE-API-ID-42"), "{finalization}");
+        assert!(
+            !build_answer_file_finalization_prompt(task, None).contains("digest"),
+            "a turn that ended on its own keeps its round-trips; no digest"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Stall auto-resume: `run_headless` end to end on scripted turns.
+    // -------------------------------------------------------------------
+
+    use chatty_core::services::{
+        HEADLESS_STALL_RESUME_ATTEMPTS, Scenario, ScriptedItem, StreamChunk, stalled_stream_message,
+    };
+
+    fn stalled_turn() -> Scenario {
+        Scenario {
+            name: "stalled",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Working on it".into())),
+                // What the watchdog hands the handler when it fires.
+                ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Stalled,
+                    stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+                ))),
+            ],
+        }
+    }
+
+    fn answer_turn(text: &str) -> Scenario {
+        Scenario {
+            name: "answer",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text(text.to_string())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    /// A runner that plays `turns` in order, in a scratch workspace (so no
+    /// stray answer.txt ends the run), counting the turns that start.
+    async fn scripted_runner(
+        turns: Vec<Scenario>,
+    ) -> (
+        HeadlessRunner,
+        mpsc::UnboundedReceiver<AppEvent>,
+        Arc<Mutex<usize>>,
+        tempfile::TempDir,
+    ) {
+        let (mut runner, event_rx) = test_runner().await;
+        let workspace = tempfile::tempdir().unwrap();
+        runner.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        runner.scripted_turns = turns.into();
+        let started: Arc<Mutex<usize>> = Arc::default();
+        let counter = started.clone();
+        runner.set_event_observer(Arc::new(move |event| {
+            if matches!(event, chatty_core::session::SessionEvent::TurnStarted) {
+                *counter.lock().unwrap() += 1;
+            }
+        }));
+        (runner, event_rx, started, workspace)
+    }
+
+    /// A local server that goes quiet for longer than the stall timeout and
+    /// then recovers: headless sends the continuation itself and the run
+    /// succeeds, instead of exiting non-zero with the work lost.
+    #[tokio::test]
+    async fn a_stalled_turn_is_resumed_and_the_run_succeeds() {
+        let (runner, event_rx, started, _workspace) =
+            scripted_runner(vec![stalled_turn(), answer_turn("Resumed and done.")]).await;
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect("the resumed run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2, "one stalled turn, one resume");
+    }
+
+    /// The resume prompt goes on the same history as a protocol follow-up,
+    /// not a human turn, so it cannot refill its own budget.
+    #[tokio::test]
+    async fn the_resume_prompt_continues_the_same_conversation() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![answer_turn("ok")].into();
+        let attempts_before = runner.session.recovery_attempts(StreamErrorKind::Stalled);
+        let error = StreamError::new(StreamErrorKind::Stalled, "stalled");
+        assert!(matches!(
+            runner.session.recovery_action(&error),
+            RecoveryAction::Retry { .. }
+        ));
+
+        runner.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let conversation = runner.session.conversation().unwrap();
+        assert!(
+            conversation
+                .messages()
+                .iter()
+                .any(|m| format!("{m:?}").contains("interrupted by a stall")),
+            "the continuation is part of the history the model sees"
+        );
+        assert_eq!(
+            runner.session.recovery_attempts(StreamErrorKind::Stalled),
+            attempts_before + 1,
+            "a protocol follow-up keeps the stall budget it spent"
+        );
+    }
+
+    /// A server that never recovers: the run resumes a bounded number of
+    /// times, then fails as before.
+    #[tokio::test]
+    async fn stall_resumes_are_bounded() {
+        let mut turns: Vec<Scenario> = (0..=HEADLESS_STALL_RESUME_ATTEMPTS + 2)
+            .map(|_| stalled_turn())
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+
+        let error = run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect_err("a server that never recovers still fails the run");
+
+        assert!(error.to_string().contains("stopped responding"), "{error}");
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + HEADLESS_STALL_RESUME_ATTEMPTS,
+            "the first turn plus the bounded resumes"
+        );
+    }
+
+    /// What the resume prompt tells the model: a stalled turn keeps its
+    /// text, but rig hands back its tool round-trips only when a turn
+    /// finishes, so they are not in the history the resume runs on.
+    #[tokio::test]
+    async fn a_stalled_turn_keeps_its_text_but_not_its_tool_results() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![Scenario {
+            name: "stall_after_a_tool",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Listing files.".into())),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: "list_directory".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_1".into(),
+                    arguments: "{}".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_1".into(),
+                    result: "UNIQUE-TOOL-OUTPUT".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Stalled,
+                    stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+                ))),
+            ],
+        }]
+        .into();
+
+        runner.send_message("the task".to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(history.contains("the task"), "{history}");
+        assert!(history.contains("Listing files."), "{history}");
+        assert!(!history.contains("UNIQUE-TOOL-OUTPUT"), "{history}");
+        assert!(STALL_RESUME_PROMPT.contains("not in the history"));
+    }
+
+    /// A stall before the model said anything: the empty turn is rolled
+    /// back (AGE-243), taking the task's own message with it, so a
+    /// "continue" on that history would ask the model to continue nothing.
+    /// The retry re-sends the rolled-back message instead.
+    #[tokio::test]
+    async fn a_turn_that_stalls_before_any_output_is_retried_with_its_own_message() {
+        let silent_stall = Scenario {
+            name: "silent_stall",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Stalled,
+                stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+            )))],
+        };
+        let (runner, event_rx, started, _workspace) =
+            scripted_runner(vec![silent_stall, answer_turn("Done.")]).await;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, "Count the files in /data".to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1], "Count the files in /data", "got {sent:?}");
+    }
+
+    /// A stall resume runs on what the stalled pass left of the run's budget.
+    #[tokio::test]
+    async fn a_stall_resume_gets_only_the_rest_of_the_runs_budget() {
+        let tool = |i: usize| {
+            [
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: format!("call_{i}"),
+                    name: "shell_execute".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: format!("call_{i}"),
+                    result: "ok".into(),
+                }),
+            ]
+        };
+        let mut items: Vec<ScriptedItem> = (0..3).flat_map(tool).collect();
+        items.push(ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+            StreamErrorKind::Stalled,
+            stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+        ))));
+        let stalled = Scenario {
+            name: "stall_after_three_tools",
+            progress: Vec::new(),
+            items,
+        };
+        let (mut runner, mut event_rx, _started, _workspace) =
+            scripted_runner(vec![stalled, answer_turn("Done.")]).await;
+        runner.execution_settings.max_agent_turns = 10;
+
+        runner.send_message("summarize the repo".to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+        runner.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
 
         assert_eq!(
-            runner.execution_settings.max_agent_turns,
-            FINALIZATION_MAX_AGENT_TURNS
+            runner.scripted_budgets,
+            vec![
+                Some(TurnBudget::run_share(10, 10, 0)),
+                Some(TurnBudget::run_share(7, 10, 3)),
+            ]
         );
+    }
+
+    /// Other errors keep their behaviour: one that is not retried ends the
+    /// run on the spot, with no resume.
+    #[tokio::test]
+    async fn a_non_stall_error_is_not_resumed() {
+        let other = Scenario {
+            name: "other_error",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Other,
+                "max turns reached",
+            )))],
+        };
+        let (runner, event_rx, started, _workspace) =
+            scripted_runner(vec![other, answer_turn("never reached")]).await;
+
+        let error = run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect_err("an unrecovered error fails the run");
+
+        assert!(error.to_string().contains("max turns reached"), "{error}");
+        assert_eq!(*started.lock().unwrap(), 1);
     }
 }

@@ -2,13 +2,37 @@
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 use crate::tools::ToolError;
 
-/// Default maximum response length, in bytes of UTF-8 text
-const DEFAULT_MAX_LENGTH: usize = 50_000;
+/// Default and largest window of page text one call returns, in bytes of
+/// UTF-8 text.
+///
+/// Sized like `read_file`'s cap: on a 32k-token window the context shaper
+/// records a tool result whole only up to two fifths of the history budget
+/// (~7k tokens), and cuts anything larger from the tail — which is where the
+/// "continue with start_index" note lives. The old 50 KB default (~13k
+/// tokens) was always cut there, so the model got a third of the window and
+/// no way to page on; it re-downloaded the page with `curl` instead. 20k is
+/// ~5-6k tokens of prose, a little more for number-dense tables.
+const MAX_WINDOW: usize = 20_000;
+
+/// Text kept around each `find` match: less before (the lead-in), more after
+/// (the figures a heading or label introduces usually follow it).
+const FIND_CONTEXT_BEFORE: usize = 300;
+const FIND_CONTEXT_AFTER: usize = 900;
+
+/// Passages shown when `find` has no exact match and falls back to ranking.
+const FIND_FALLBACK_PASSAGES: usize = 3;
+
+/// Pages kept in a session's page cache, and the most text they may hold
+/// together; the oldest page is dropped first.
+const MAX_CACHED_PAGES: usize = 16;
+const MAX_CACHED_BYTES: usize = 32 * 1024 * 1024;
 
 /// Maximum binary response size in bytes (10 MB)
 const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
@@ -31,7 +55,7 @@ pub struct FetchToolArgs {
     /// The URL to fetch
     pub url: String,
     /// Maximum length of the returned content, in bytes of UTF-8 text
-    /// (default: 50000)
+    /// (default and maximum: [`MAX_WINDOW`])
     #[serde(default)]
     pub max_length: Option<usize>,
     /// Byte offset into the *extracted* text to start the returned window at
@@ -39,6 +63,10 @@ pub struct FetchToolArgs {
     /// re-fetching from the top (AGE-507).
     #[serde(default)]
     pub start_index: Option<usize>,
+    /// A word or phrase to look for: return the passages that contain it,
+    /// each with the `start_index` to read on from, instead of a window.
+    #[serde(default)]
+    pub find: Option<String>,
     /// Override the User-Agent header for this request. Useful when a site's
     /// automated-traffic policy asks for a specific declared identity (e.g.
     /// SEC EDGAR — AGE-496) that the default Chatty user-agent doesn't satisfy.
@@ -57,6 +85,10 @@ pub struct FetchToolOutput {
     pub content_type: String,
     /// Whether the content was truncated due to max_length
     pub truncated: bool,
+    /// Length of the page's whole extracted text, so the model can tell how
+    /// much a window or a `find` covered (absent for saved binary files)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_length: Option<usize>,
     /// Path to the saved file (only present for binary content like images, PDFs, zips)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_to: Option<String>,
@@ -74,6 +106,10 @@ pub struct FetchTool {
     /// Optional workspace directory for saving downloaded binary files.
     /// When None, binary content returns an error asking the user to configure a workspace.
     workspace_dir: Option<PathBuf>,
+    /// Extracted text of the pages this session fetched, so paging and
+    /// `find` over a long document don't download it again. Shared by
+    /// clones, i.e. by the one agent the tool was built for.
+    pages: PageCache,
 }
 
 impl FetchTool {
@@ -82,6 +118,7 @@ impl FetchTool {
         Self {
             client,
             workspace_dir,
+            pages: PageCache::default(),
         }
     }
 
@@ -103,16 +140,16 @@ impl Tool for FetchTool {
     type Output = FetchToolOutput;
 
     fn description(&self) -> String {
-        "Fetch a URL and return its content. \
-                         HTML pages are automatically converted to plain text for readability, \
-                         with navigation chrome dropped and hyperlinks kept as `text (url)` so you can follow them. \
-                         A URL with a #fragment starts the text at that section of the page. \
-                         If the result says it was truncated, continue it with `start_index` \
-                         rather than fetching the same URL again. \
-                         Binary content (images, PDFs, zip files, etc.) is saved to the workspace directory. \
-                         Only performs GET requests (read-only). \
-                         Use this to look up documentation, read web pages, fetch API responses, or download files."
-                .to_string()
+        "Fetch a URL and return its content. HTML is converted to readable text, \
+         with links kept as `text (url)` and table cells separated by ` | `. \
+         A long page comes back one window at a time: continue with the `start_index` \
+         the result names, or pass `find` to get only the passages that mention a word \
+         or phrase, each with the start_index to read on from. Pages are cached for the \
+         session, so paging and find don't download again. \
+         A URL with a #fragment starts at that section. \
+         Binary content (images, PDFs, zip files, etc.) is saved to the workspace directory. \
+         Only performs GET requests (read-only)."
+            .to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -125,11 +162,15 @@ impl Tool for FetchTool {
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "Maximum length of returned content, in bytes of UTF-8 text. Defaults to 50000 — leave it unset unless you deliberately want a smaller window."
+                    "description": "Maximum length of returned content, in bytes of UTF-8 text. Defaults to (and is capped at) 20000 — leave it unset unless you deliberately want a smaller window."
                 },
                 "start_index": {
                     "type": "integer",
-                    "description": "Where to start the returned window in the extracted text, as a byte offset into it. Defaults to 0. When a response comes back truncated it names the start_index to continue from, so pass that instead of re-fetching the page."
+                    "description": "Where to start the returned window in the extracted text, as a byte offset into it. Defaults to 0. When a response comes back truncated it names the start_index to continue from, so pass that instead of re-fetching the page. With `find`, only text from here on is searched."
+                },
+                "find": {
+                    "type": "string",
+                    "description": "A word or phrase to look for in the page (case-insensitive). Returns only the passages that contain it, each labelled with its start_index. Use it on long documents instead of paging through them."
                 },
                 "user_agent": {
                     "type": "string",
@@ -152,8 +193,13 @@ impl Tool for FetchTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let url = args.url.trim().to_string();
-        let max_length = args.max_length.unwrap_or(DEFAULT_MAX_LENGTH);
+        let max_length = args.max_length.unwrap_or(MAX_WINDOW).min(MAX_WINDOW);
         let start_index = args.start_index.unwrap_or(0);
+        let find = args
+            .find
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty());
         // The fragment is a client-side instruction — it never reaches the
         // server, and a redirect can drop it — so read it off what was asked
         // for, not off the URL we ended up at.
@@ -172,13 +218,148 @@ impl Tool for FetchTool {
         // SSRF protection: block requests to private/internal networks
         validate_url_host(&url)?;
 
+        // A page is read from the cache only to page through it or search
+        // it (`start_index` or `find`); a plain fetch downloads it again, so
+        // a page that changes (a status endpoint, a live feed) is never
+        // served stale. The User-Agent is part of the key: a retry with the
+        // identity a site asked for must not get back the page it refused.
+        let cache_key = format!("{url}\n{}", args.user_agent.as_deref().unwrap_or(""));
+        let reuse = args.start_index.is_some() || find.is_some();
+        let cached = if reuse {
+            self.pages.get(&cache_key)
+        } else {
+            None
+        };
+        let page = match cached {
+            Some(page) => {
+                info!(url = %url, "Serving fetch from the session page cache");
+                page
+            }
+            None => match self
+                .download(
+                    &url,
+                    args.user_agent.as_deref(),
+                    fragment.as_deref(),
+                    start_index,
+                    max_length,
+                )
+                .await?
+            {
+                Download::Page(page) => {
+                    let page = Arc::new(page);
+                    self.pages.insert(cache_key, Arc::clone(&page));
+                    page
+                }
+                Download::Done(output) => return Ok(output),
+            },
+        };
+
+        let total_length = page.text.len();
+        let (content, truncated) = match find {
+            Some(find) => find_passages(&page.text, find, start_index, max_length),
+            None => window(&page.text, start_index, max_length, WINDOW_HINT),
+        };
+        if truncated {
+            warn!(
+                original_len = total_length,
+                start_index = start_index,
+                max_length = max_length,
+                "Truncating response content"
+            );
+        }
+
+        Ok(FetchToolOutput {
+            status: page.status,
+            content,
+            content_type: page.content_type.clone(),
+            truncated,
+            total_length: Some(total_length),
+            saved_to: None,
+        })
+    }
+}
+
+/// A successful text response, reduced to what paging and `find` read.
+struct CachedPage {
+    status: u16,
+    content_type: String,
+    /// The extracted text: HTML already converted, starting at the
+    /// requested #fragment when the page had it.
+    text: String,
+}
+
+/// What one download produced: a text page to window (and cache), or an
+/// answer that is already final — an error status or a saved binary file.
+enum Download {
+    Page(CachedPage),
+    Done(FetchToolOutput),
+}
+
+/// The session's recently fetched pages, keyed by the URL as asked for
+/// (fragment included, since it decides where the text starts) and the
+/// User-Agent override, least recently used first. Bounded by [`MAX_CACHED_PAGES`] and [`MAX_CACHED_BYTES`].
+#[derive(Clone, Default)]
+struct PageCache(Arc<Mutex<CachedPages>>);
+
+/// `(url, page)`, least recently used first.
+type CachedPages = VecDeque<(String, Arc<CachedPage>)>;
+
+impl PageCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CachedPages> {
+        // The data is a plain cache; a panic mid-insert leaves nothing a
+        // later reader can't use.
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The cached page for `url`, marked most recently used.
+    fn get(&self, url: &str) -> Option<Arc<CachedPage>> {
+        let mut pages = self.lock();
+        let ix = pages.iter().position(|(key, _)| key == url)?;
+        let entry = pages.remove(ix)?;
+        let page = Arc::clone(&entry.1);
+        pages.push_back(entry);
+        Some(page)
+    }
+
+    fn insert(&self, url: String, page: Arc<CachedPage>) {
+        if page.text.len() > MAX_CACHED_BYTES {
+            return;
+        }
+        let mut pages = self.lock();
+        pages.retain(|(key, _)| *key != url);
+        pages.push_back((url, page));
+        let mut bytes: usize = pages.iter().map(|(_, page)| page.text.len()).sum();
+        while pages.len() > MAX_CACHED_PAGES || bytes > MAX_CACHED_BYTES {
+            let Some((_, dropped)) = pages.pop_front() else {
+                break;
+            };
+            bytes -= dropped.text.len();
+        }
+    }
+}
+
+impl FetchTool {
+    /// GET `url`, following redirects, and turn the response into either a
+    /// page of extracted text or a final answer (an error status's body, or
+    /// a binary file saved to the workspace).
+    async fn download(
+        &self,
+        url: &str,
+        user_agent: Option<&str>,
+        fragment: Option<&str>,
+        start_index: usize,
+        max_length: usize,
+    ) -> Result<Download, ToolError> {
+        let url = url.to_string();
         info!(url = %url, max_length = max_length, "Fetching URL");
 
         // Perform GET request, following redirects manually (max 10 hops)
         // to validate each redirect target against the private-host denylist.
         let mut current_url = url.clone();
         let mut response = self
-            .request(&current_url, args.user_agent.as_deref())
+            .request(&current_url, user_agent)
             .send()
             .await
             .map_err(|e| ToolError::OperationFailed(format!("Request failed: {}", e)))?;
@@ -220,7 +401,7 @@ impl Tool for FetchTool {
             current_url = next_url;
 
             response = self
-                .request(&current_url, args.user_agent.as_deref())
+                .request(&current_url, user_agent)
                 .send()
                 .await
                 .map_err(|e| ToolError::OperationFailed(format!("Redirect failed: {}", e)))?;
@@ -245,24 +426,26 @@ impl Tool for FetchTool {
                 &body,
                 &content_type,
                 Some(&current_url),
-                fragment.as_deref(),
+                fragment,
                 start_index,
                 max_length,
             );
-            return Ok(FetchToolOutput {
+            return Ok(Download::Done(FetchToolOutput {
                 status,
                 content,
                 content_type,
                 truncated,
+                total_length: None,
                 saved_to: None,
-            });
+            }));
         }
 
         // Determine if this is binary content that should be saved to disk
         if is_binary_content_type(&content_type) {
             return self
                 .handle_binary_response(response, &url, status, &content_type)
-                .await;
+                .await
+                .map(Download::Done);
         }
 
         // Read body text
@@ -273,31 +456,17 @@ impl Tool for FetchTool {
         // Convert HTML to readable text if appropriate. Relative links resolve
         // against the URL the body actually came from, i.e. after redirects.
         let is_html = content_type.contains("text/html") || looks_like_html(&body);
-        let content = if is_html {
-            html_to_text(&body, Some(&current_url), fragment.as_deref())
+        let text = if is_html {
+            html_to_text(&body, Some(&current_url), fragment)
         } else {
             body
         };
 
-        // Return the requested window of it
-        let extracted_len = content.len();
-        let (content, truncated) = window(&content, start_index, max_length);
-        if truncated {
-            warn!(
-                original_len = extracted_len,
-                start_index = start_index,
-                max_length = max_length,
-                "Truncating response content"
-            );
-        }
-
-        Ok(FetchToolOutput {
+        Ok(Download::Page(CachedPage {
             status,
-            content,
             content_type,
-            truncated,
-            saved_to: None,
-        })
+            text,
+        }))
     }
 }
 
@@ -363,6 +532,7 @@ impl FetchTool {
             ),
             content_type: content_type.to_string(),
             truncated: false,
+            total_length: None,
             saved_to: Some(save_path.to_string_lossy().to_string()),
         })
     }
@@ -482,14 +652,19 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     end
 }
 
+/// Appended to the truncation note of a page window: the page is cached, so
+/// `find` is a cheap way to the part that matters.
+const WINDOW_HINT: &str = ", or pass `find` to jump to the passage you need";
+
 /// Take the `max_length` window of `s` that starts at `start_index`, returning
 /// it with a flag saying whether anything was left over.
 ///
-/// Truncation is not a dead end: the note names the `start_index` to continue
-/// from, and because both the end of one window and the start of the next are
-/// snapped with `floor_char_boundary`, `(0, n)` followed by `(n, n)` reproduce
-/// `s` with no gap and no overlap (AGE-507).
-fn window(s: &str, start_index: usize, max_length: usize) -> (String, bool) {
+/// Truncation is not a dead end: the note says where the window sits in the
+/// whole text and names the `start_index` to continue from (then `hint`), and
+/// because both the end of one window and the start of the next are snapped
+/// with `floor_char_boundary`, `(0, n)` followed by `(n, n)` reproduce `s`
+/// with no gap and no overlap (AGE-507).
+fn window(s: &str, start_index: usize, max_length: usize, hint: &str) -> (String, bool) {
     let start = floor_char_boundary(s, start_index);
     let rest = &s[start..];
     if rest.len() <= max_length {
@@ -506,7 +681,9 @@ fn window(s: &str, start_index: usize, max_length: usize) -> (String, bool) {
     };
     let mut result = rest[..end].to_string();
     result.push_str(&format!(
-        "\n\n[Content truncated. Continue with start_index={}]",
+        "\n\n[Content truncated: showing {start}-{} of {}. Continue with start_index={}{hint}.]",
+        start + end,
+        s.len(),
         start + end
     ));
     (result, true)
@@ -533,7 +710,174 @@ fn error_body_window(
     } else {
         body.to_string()
     };
-    window(&content, start_index, max_length.min(ERROR_MAX_LENGTH))
+    window(&content, start_index, max_length.min(ERROR_MAX_LENGTH), "")
+}
+
+/// The passages of `text` from `start_index` on that contain `query`, each
+/// headed by the `start_index` it begins at, within `max_length` bytes.
+///
+/// The query's words match case-insensitively with any whitespace between
+/// them, so a phrase split across a line or a table cell still matches.
+/// Neighbouring matches share one passage. When the passages don't all fit,
+/// the summary line names the `start_index` to repeat the `find` from.
+/// With no exact match, the closest passages by word overlap (BM25, as
+/// `search_web` ranks page text) are shown instead, marked as such.
+///
+/// Returns the content and whether matches were left out.
+fn find_passages(text: &str, query: &str, start_index: usize, max_length: usize) -> (String, bool) {
+    let from = floor_char_boundary(text, start_index);
+    let pattern = query
+        .split_whitespace()
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(r"\s+");
+    let hits: Vec<(usize, usize)> = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+        .map(|re| {
+            re.find_iter(&text[from..])
+                .map(|m| (from + m.start(), from + m.end()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if hits.is_empty() {
+        return (closest_passages(text, query, from, max_length), false);
+    }
+
+    // One passage per run of nearby matches.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for &(start, end) in &hits {
+        let span_start = floor_char_boundary(text, start.saturating_sub(FIND_CONTEXT_BEFORE));
+        let span_end = floor_char_boundary(text, end + FIND_CONTEXT_AFTER);
+        match spans.last_mut() {
+            Some(last) if span_start <= last.1 => last.1 = last.1.max(span_end),
+            _ => spans.push((span_start, span_end)),
+        }
+    }
+
+    let mut body = String::new();
+    // Where the next `find` should resume, when not every passage fit.
+    let mut resume_at: Option<usize> = None;
+    for &(start, end) in &spans {
+        let label = format!("\n--- start_index={start} ---\n");
+        let room = max_length.saturating_sub(body.len() + label.len());
+        if end - start <= room {
+            body.push_str(&label);
+            body.push_str(&text[start..end]);
+            continue;
+        }
+        if body.is_empty() {
+            // Not even the first passage fits: show its head, resume after.
+            // Always make progress, or a model following the note would
+            // repeat the same call forever.
+            let cut = floor_char_boundary(text, start + room.max(1));
+            let cut = if cut <= start {
+                text[start..]
+                    .char_indices()
+                    .nth(1)
+                    .map_or(text.len(), |(i, _)| start + i)
+            } else {
+                cut
+            };
+            body.push_str(&label);
+            body.push_str(&text[start..cut]);
+            resume_at = Some(cut);
+        } else {
+            resume_at = Some(start);
+        }
+        break;
+    }
+
+    let shown = hits
+        .iter()
+        .filter(|(start, _)| resume_at.is_none_or(|resume| *start < resume))
+        .count();
+    let mut summary = format!(
+        "[find \"{query}\": {} match{} from start_index={from} of {}",
+        hits.len(),
+        if hits.len() == 1 { "" } else { "es" },
+        text.len()
+    );
+    match resume_at {
+        Some(resume) => summary.push_str(&format!(
+            ", showing the first {shown}. For the rest, repeat this find with start_index={resume}. \
+             To read on from a passage, fetch without find at its start_index.]"
+        )),
+        None => summary.push_str(". To read on from a passage, fetch without find at its start_index.]"),
+    }
+    (format!("{summary}\n{body}"), resume_at.is_some())
+}
+
+/// The passages of `text` from `from` on that share the most words with
+/// `query` (BM25), for a `find` with no exact match: a model's phrasing of
+/// what it is looking for is rarely the document's own.
+fn closest_passages(text: &str, query: &str, from: usize, max_length: usize) -> String {
+    use crate::tools::passages::{PASSAGE_STRIDE, PASSAGE_WORDS, score_passages, tokenize};
+
+    let no_match = format!(
+        "[find \"{query}\": no match from start_index={from} of {}. \
+         Try other words, or page through with start_index.]",
+        text.len()
+    );
+    let query_terms = tokenize(query);
+    let words: Vec<(usize, usize)> = regex::Regex::new(r"\S+")
+        .map(|re| {
+            re.find_iter(&text[from..])
+                .map(|m| (from + m.start(), from + m.end()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if query_terms.is_empty() || words.is_empty() {
+        return no_match;
+    }
+
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut first = 0;
+    loop {
+        let last = (first + PASSAGE_WORDS).min(words.len()) - 1;
+        spans.push((words[first].0, words[last].1));
+        if last + 1 == words.len() {
+            break;
+        }
+        first += PASSAGE_STRIDE;
+    }
+    let tokens: Vec<Vec<String>> = spans
+        .iter()
+        .map(|&(start, end)| tokenize(&text[start..end]))
+        .collect();
+    let scores = score_passages(&query_terms, &tokens);
+    let mut ranked: Vec<usize> = (0..spans.len()).filter(|&i| scores[i] > 0.0).collect();
+    ranked.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+
+    let mut chosen: Vec<(usize, usize)> = Vec::new();
+    for i in ranked {
+        let (start, end) = spans[i];
+        if chosen.iter().all(|&(s, e)| end <= s || start >= e) {
+            chosen.push((start, end));
+        }
+        if chosen.len() == FIND_FALLBACK_PASSAGES {
+            break;
+        }
+    }
+    if chosen.is_empty() {
+        return no_match;
+    }
+
+    let mut out = format!(
+        "[find \"{query}\": no exact match from start_index={from} of {}. \
+         Closest passages by shared words, best first:]\n",
+        text.len()
+    );
+    let share = max_length.saturating_sub(out.len()) / chosen.len();
+    for (start, end) in chosen {
+        let label = format!("\n--- start_index={start} ---\n");
+        let end = (end + FIND_CONTEXT_AFTER).min(start + share.saturating_sub(label.len()));
+        let end = floor_char_boundary(text, end);
+        out.push_str(&label);
+        out.push_str(&text[start..end]);
+    }
+    out
 }
 
 /// Elements whose text is site furniture rather than page content. Skipped
@@ -541,6 +885,190 @@ fn error_body_window(
 /// "Jump to content / Main menu / …" preamble that used to fill a small
 /// `max_length` window before the article body was ever reached (AGE-507).
 const CHROME_TAGS: [&str; 4] = ["nav", "header", "footer", "aside"];
+
+/// Elements that never have a closing tag, so can't open a skipped block.
+const VOID_TAGS: [&str; 14] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Placeholder between table cells while extracting; `tidy_table_rows`
+/// turns it into ` | ` once the row's cells are known.
+const CELL_BREAK: char = '\u{1F}';
+
+/// Whether tag `element` (a closing tag when `closing`) ends an open
+/// `hidden` element whose end tag may be omitted, per HTML's implied end
+/// tags: a `<p>` ends at the next block, an `<li>` at the next item or the
+/// end of its list, a cell at the next cell or row, and so on.
+fn implicitly_closes(hidden: &str, element: &str, closing: bool) -> bool {
+    const P_ENDERS: [&str; 22] = [
+        "p",
+        "div",
+        "table",
+        "ul",
+        "ol",
+        "dl",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "section",
+        "article",
+        "blockquote",
+        "pre",
+        "hr",
+        "main",
+        "header",
+        "footer",
+        "nav",
+        "form",
+    ];
+    const P_CONTAINERS: [&str; 10] = [
+        "div",
+        "td",
+        "th",
+        "li",
+        "dd",
+        "section",
+        "article",
+        "blockquote",
+        "main",
+        "body",
+    ];
+    match hidden {
+        "p" if closing => P_CONTAINERS.contains(&element),
+        "p" => P_ENDERS.contains(&element),
+        "li" if closing => matches!(element, "ul" | "ol" | "menu" | "body"),
+        "li" => element == "li",
+        "td" | "th" if closing => matches!(
+            element,
+            "tr" | "table" | "tbody" | "thead" | "tfoot" | "body"
+        ),
+        "td" | "th" => matches!(element, "td" | "th" | "tr"),
+        "tr" if closing => matches!(element, "table" | "tbody" | "thead" | "tfoot" | "body"),
+        "tr" => element == "tr",
+        "dt" | "dd" if closing => matches!(element, "dl" | "body"),
+        "dt" | "dd" => matches!(element, "dt" | "dd"),
+        "option" if closing => matches!(element, "select" | "datalist" | "optgroup" | "body"),
+        "option" => matches!(element, "option" | "optgroup"),
+        _ => false,
+    }
+}
+
+/// Placeholder for a block element inside a table cell; see
+/// `resolve_cell_breaks`.
+const SOFT_BREAK: char = '\u{1E}';
+
+/// A line of extracted text longer than this is not a table row but a page
+/// laid out as a table (a Paul Graham essay, Hacker News, older sites): its
+/// block elements go back to being line breaks.
+const MAX_ROW_BYTES: usize = 2_000;
+
+/// Settle the [`SOFT_BREAK`]s block elements inside table cells left behind.
+/// On a table row they become spaces, so a filing that wraps each cell's
+/// value in a `<p>` still reads as one row; on a line longer than
+/// [`MAX_ROW_BYTES`] they become newlines, or a page laid out as one big
+/// cell would come out as a single line of tens of KB. Neighbouring
+/// whitespace folds into the break either way.
+fn resolve_cell_breaks(text: &str) -> String {
+    if !text.contains(SOFT_BREAK) {
+        return text.to_string();
+    }
+    text.split('\n')
+        .map(|line| {
+            if !line.contains(SOFT_BREAK) {
+                return line.to_string();
+            }
+            let brk = if line.len() > MAX_ROW_BYTES {
+                '\n'
+            } else {
+                ' '
+            };
+            let mut out = String::with_capacity(line.len());
+            let mut pending_break = false;
+            for ch in line.chars() {
+                if ch == SOFT_BREAK {
+                    pending_break = true;
+                    continue;
+                }
+                if pending_break && ch == ' ' {
+                    continue;
+                }
+                if pending_break {
+                    let kept = out.trim_end_matches(' ').len();
+                    out.truncate(kept);
+                    if !out.is_empty() && !out.ends_with(CELL_BREAK) {
+                        out.push(brk);
+                    }
+                    pending_break = false;
+                }
+                out.push(ch);
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether a raw opening tag hides its element (`style="display: none"`):
+/// a browser shows none of that text, and documents use such blocks for
+/// machine-readable data — an inline-XBRL filing opens with tens of KB of
+/// it — that would otherwise fill the first window.
+fn hides_element(tag: &str) -> bool {
+    attr_value(tag, "style").is_some_and(|style| {
+        style
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase()
+            .contains("display:none")
+    })
+}
+
+/// Rebuild the table rows of extracted text: drop empty cells (layout
+/// spacers), glue a cell holding only a currency sign or bracket onto its
+/// neighbour (`$` and `(` open the number after them, `)` and `%` close the
+/// one before), and separate what is left with ` | `. Any other cell stays
+/// its own, a lone `—` included: tables use it for a nil value. Financial tables put each of those
+/// in a cell of its own, which read as `$ | | 1,234 | ) | |` before.
+fn tidy_table_rows(text: &str) -> String {
+    if !text.contains(CELL_BREAK) {
+        return text.to_string();
+    }
+    let opens_next = |cell: &str| cell.chars().all(|ch| "$(€£¥".contains(ch));
+    let closes_previous = |cell: &str| cell.chars().all(|ch| ")%".contains(ch));
+    text.split('\n')
+        .map(|line| {
+            if !line.contains(CELL_BREAK) {
+                return line.to_string();
+            }
+            let mut cells: Vec<String> = Vec::new();
+            let mut pending = String::new();
+            for cell in line
+                .split(CELL_BREAK)
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                if opens_next(cell) {
+                    pending.push_str(cell);
+                } else if closes_previous(cell) && pending.is_empty() && !cells.is_empty() {
+                    if let Some(last) = cells.last_mut() {
+                        last.push_str(cell);
+                    }
+                } else {
+                    cells.push(format!("{}{cell}", std::mem::take(&mut pending)));
+                }
+            }
+            if !pending.is_empty() {
+                cells.push(pending);
+            }
+            cells.join(" | ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// The lowercase tag name of a raw tag body (`a href="/x"` → `a`,
 /// `/div ` → `/div`), keeping the leading slash of a closing tag.
@@ -667,6 +1195,12 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
     // written when the link opened — a link with no text gets no URL.
     let mut open_links: Vec<(String, usize)> = Vec::new();
     let mut fragment_start: Option<usize> = None;
+    // The hidden element being skipped, and how deeply elements of its name
+    // nest inside it, so the skip ends at its own closing tag.
+    let mut hidden: Option<(String, usize)> = None;
+    // Inside a table cell, block elements (a `<p>` or `<div>` per cell is
+    // common) must not break the row onto one line per value.
+    let mut in_cell = false;
 
     for ch in html.chars() {
         if ch == '<' {
@@ -686,6 +1220,30 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
             let closing = name.starts_with('/');
             let element = name.trim_start_matches('/');
 
+            // Inside a hidden element, only track where it ends. One whose
+            // end tag HTML lets a page leave out also ends where a browser
+            // would close it, and this tag is then read as usual; otherwise
+            // an unclosed hidden `<p>` or `<li>` would hide the rest of the
+            // page.
+            if let Some((hidden_name, 1)) = hidden.as_ref()
+                && implicitly_closes(hidden_name, element, closing)
+            {
+                hidden = None;
+            }
+            if let Some((hidden_name, depth)) = hidden.as_mut() {
+                if element == hidden_name.as_str() {
+                    if closing {
+                        *depth -= 1;
+                    } else if !tag.ends_with('/') {
+                        *depth += 1;
+                    }
+                }
+                if *depth == 0 {
+                    hidden = None;
+                }
+                continue;
+            }
+
             // Blocks whose content is skipped entirely
             match element {
                 "script" => in_script = !closing,
@@ -700,6 +1258,14 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
                 _ => {}
             }
             if in_script || in_style || chrome_depth > 0 {
+                continue;
+            }
+            if !closing
+                && !VOID_TAGS.contains(&element)
+                && !tag.ends_with('/')
+                && hides_element(&tag)
+            {
+                hidden = Some((element.to_string(), 1));
                 continue;
             }
 
@@ -731,11 +1297,16 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
 
             // Table cells: keep neighbouring cells apart whatever whitespace
             // the source HTML happens to have between them
+            match element {
+                "td" | "th" => in_cell = !closing && !tag.ends_with('/'),
+                "tr" | "table" => in_cell = false,
+                _ => {}
+            }
             if !closing && matches!(element, "td" | "th") {
                 let line = result.trim_end_matches(' ');
                 if !line.is_empty() && !line.ends_with('\n') {
                     result.truncate(line.len());
-                    result.push_str(" | ");
+                    result.push(CELL_BREAK);
                     last_was_whitespace = true;
                 }
             }
@@ -764,15 +1335,23 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
                     | "nav"
                     | "main"
             );
-            if is_block && !result.ends_with('\n') {
+            if is_block && in_cell {
+                // A break that `resolve_cell_breaks` settles once the whole
+                // row is known: a space on a table row, a newline on a page
+                // laid out as one big cell.
+                if !result.ends_with([SOFT_BREAK, CELL_BREAK, '\n']) {
+                    result.push(SOFT_BREAK);
+                    last_was_whitespace = true;
+                }
+            } else if is_block && !result.ends_with('\n') {
                 result.push('\n');
                 last_was_whitespace = true;
             }
             continue;
         }
 
-        // Skip content inside script, style and navigation-chrome blocks
-        if in_script || in_style || chrome_depth > 0 {
+        // Skip content inside script, style, navigation-chrome and hidden blocks
+        if in_script || in_style || chrome_depth > 0 || hidden.is_some() {
             continue;
         }
 
@@ -795,20 +1374,24 @@ pub(crate) fn html_to_text(html: &str, base_url: Option<&str>, fragment: Option<
 
     // Decode HTML entities, once (`html_entities::decode_html_entities`)
     let result = crate::tools::html_entities::decode_html_entities(&result);
+    let result = resolve_cell_breaks(&result);
+    let result = tidy_table_rows(&result);
 
-    // Clean up excessive newlines
+    // Trim each line (a decoded `&nbsp;` spacer leaves lines of only
+    // whitespace) and keep at most one blank line in a row
     let mut cleaned = String::with_capacity(result.len());
-    let mut consecutive_newlines = 0;
-    for ch in result.chars() {
-        if ch == '\n' {
-            consecutive_newlines += 1;
-            if consecutive_newlines <= 2 {
-                cleaned.push(ch);
+    let mut blank_run = 0;
+    for line in result.split('\n').map(str::trim) {
+        if line.is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
             }
         } else {
-            consecutive_newlines = 0;
-            cleaned.push(ch);
+            blank_run = 0;
         }
+        cleaned.push_str(line);
+        cleaned.push('\n');
     }
 
     cleaned.trim().to_string()
@@ -870,7 +1453,7 @@ mod tests {
         let args: FetchToolArgs =
             serde_json::from_value(serde_json::json!({ "url": "https://example.com" })).unwrap();
         assert_eq!(args.max_length, None);
-        assert_eq!(args.max_length.unwrap_or(DEFAULT_MAX_LENGTH), 50_000);
+        assert_eq!(args.max_length.unwrap_or(MAX_WINDOW), 20_000);
     }
 
     // --- AGE-507 criterion 2: start_index continues a truncated fetch ---
@@ -897,12 +1480,12 @@ mod tests {
         let text: String = (0..500).map(|i| format!("line {i}\n")).collect();
         let size = 1000;
 
-        let (first, truncated) = window(&text, 0, size);
+        let (first, truncated) = window(&text, 0, size, "");
         assert!(truncated);
         let first_body = first.split("\n\n[Content truncated").next().unwrap();
         assert_eq!(first_body.len(), size);
 
-        let (second, _) = window(&text, size, size);
+        let (second, _) = window(&text, size, size, "");
         let second_body = second.split("\n\n[Content truncated").next().unwrap();
 
         assert_eq!(format!("{first_body}{second_body}"), text[..2 * size]);
@@ -917,7 +1500,7 @@ mod tests {
         let mut rebuilt = String::new();
         let mut start = 0;
         loop {
-            let (chunk, truncated) = window(&text, start, size);
+            let (chunk, truncated) = window(&text, start, size, "");
             let body = chunk.split("\n\n[Content truncated").next().unwrap();
             rebuilt.push_str(body);
             if !truncated {
@@ -933,13 +1516,13 @@ mod tests {
     #[test]
     fn test_window_note_names_the_next_start_index() {
         let text = "abcdefghij";
-        let (chunk, truncated) = window(text, 0, 4);
+        let (chunk, truncated) = window(text, 0, 4, "");
         assert!(truncated);
         assert_eq!(
             chunk,
-            "abcd\n\n[Content truncated. Continue with start_index=4]"
+            "abcd\n\n[Content truncated: showing 0-4 of 10. Continue with start_index=4.]"
         );
-        let (rest, truncated) = window(text, 4, 4);
+        let (rest, truncated) = window(text, 4, 4, "");
         assert!(truncated);
         assert!(rest.starts_with("efgh"));
     }
@@ -955,7 +1538,7 @@ mod tests {
             let mut rebuilt = String::new();
             let mut steps = 0;
             loop {
-                let (chunk, truncated) = window(text, start, size);
+                let (chunk, truncated) = window(text, start, size, "");
                 let body = chunk.split("\n\n[Content truncated").next().unwrap();
                 assert!(
                     !body.is_empty(),
@@ -975,7 +1558,7 @@ mod tests {
 
     #[test]
     fn test_window_past_the_end_is_empty() {
-        let (chunk, truncated) = window("short", 100, 10);
+        let (chunk, truncated) = window("short", 100, 10, "");
         assert_eq!(chunk, "");
         assert!(!truncated);
     }
@@ -1012,14 +1595,13 @@ mod tests {
     }
 
     /// The error cap (2KB) applies even when the caller's `max_length` is
-    /// larger (the default is 50000) — an error page's useful content is
+    /// larger (the default is 20000) — an error page's useful content is
     /// rarely more than a short message.
     #[test]
     fn test_error_body_window_caps_below_default_max_length() {
         let long_message: String = std::iter::repeat_n('a', ERROR_MAX_LENGTH * 5).collect();
         let body = format!("<p>{long_message}</p>");
-        let (content, truncated) =
-            error_body_window(&body, "text/html", None, None, 0, DEFAULT_MAX_LENGTH);
+        let (content, truncated) = error_body_window(&body, "text/html", None, None, 0, MAX_WINDOW);
         assert!(truncated);
         assert!(
             content.len() <= ERROR_MAX_LENGTH + 100, // + the truncation note
@@ -1235,6 +1817,336 @@ mod tests {
         assert_eq!(text, "it's — fine");
     }
 
+    // --- long documents: conversion, windows, find, cache ---
+
+    /// A browser shows nothing of a `display:none` block; an inline-XBRL
+    /// filing opens with tens of KB of such data, which filled the first
+    /// window before any of the document was reached.
+    #[test]
+    fn test_html_to_text_skips_hidden_elements() {
+        let html = "<body><div style=\"display: none\"><div>0001973266 2025-01-01</div>\
+                    <ix:header>facts</ix:header></div>\
+                    <img style=\"display:none\" src=\"x.png\"><p>Visible text</p>\
+                    <div STYLE='DISPLAY:NONE'/><p>Still visible</p></body>";
+        let text = extract(html);
+        assert!(!text.contains("0001973266"), "got {text:?}");
+        assert!(!text.contains("facts"), "got {text:?}");
+        assert!(text.contains("Visible text"), "got {text:?}");
+        assert!(text.contains("Still visible"), "got {text:?}");
+    }
+
+    #[test]
+    fn test_html_to_text_financial_table_cells_read_as_values() {
+        let html = "<table><tr><td>Revenue</td><td></td><td>$</td><td>1,234</td><td>&#160;</td>\
+                    <td>(</td><td>56</td><td>)</td><td>12.5</td><td>%</td><td>—</td></tr>\
+                    <tr><td></td><td>Total</td><td>$</td><td>(</td><td>7</td><td>)</td></tr></table>";
+        let text = extract(html);
+        assert_eq!(text, "Revenue | $1,234 | (56) | 12.5% | —\nTotal | $(7)");
+    }
+
+    /// Filings wrap every cell's value in a `<p>`; a block element inside a
+    /// cell must not put each value on a line of its own.
+    #[test]
+    fn test_html_to_text_block_elements_inside_cells_stay_on_the_row() {
+        let html = "<table><tr><td><p>Total revenue</p></td><td><p>$</p></td>\
+                    <td><div>359,747</div></td></tr>\
+                    <tr><td><p>Net loss</p></td><td><p>(</p></td><td><p>12</p></td>\
+                    <td><p>)</p></td></tr></table><p>After</p><p>the table</p>";
+        let text = extract(html);
+        assert_eq!(
+            text,
+            "Total revenue | $359,747\nNet loss | (12)\nAfter\nthe table"
+        );
+    }
+
+    /// A page laid out as one big table cell (Paul Graham's essays, Hacker
+    /// News, older sites) keeps its paragraphs: only a row short enough to
+    /// be a table row reads its blocks as spaces.
+    #[test]
+    fn test_html_to_text_page_laid_out_in_a_table_keeps_its_paragraphs() {
+        let paragraph = "word ".repeat(150);
+        let html = format!(
+            "<table><tr><td><img src=\"x.gif\"></td><td><font>Title<br><br>{p}<br><br>{p}\
+             <p>{p}</p><p>Last paragraph.</p></font></td></tr></table>",
+            p = paragraph
+        );
+        let text = extract(&html);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "got {text:?}");
+        assert_eq!(lines[0], "Title");
+        assert_eq!(lines[1], paragraph.trim());
+        assert_eq!(lines[4], "Last paragraph.");
+        assert!(!text.contains(SOFT_BREAK));
+    }
+
+    /// A hidden element whose end tag the page left out ends where a
+    /// browser would close it, instead of hiding the rest of the page.
+    #[test]
+    fn test_html_to_text_unclosed_hidden_element_does_not_hide_the_page() {
+        let html = "<body><p style=\"display:none\">secret<p>First visible\
+                    <ul><li style=\"display:none\">hidden item<li>Shown item</ul>\
+                    <table><tr><td style=\"display:none\">x<td>Cell</table>\
+                    <div>After</div></body>";
+        let text = extract(html);
+        assert!(!text.contains("secret"), "got {text:?}");
+        assert!(!text.contains("hidden item"), "got {text:?}");
+        assert!(text.contains("First visible"), "got {text:?}");
+        assert!(text.contains("Shown item"), "got {text:?}");
+        assert!(text.contains("Cell"), "got {text:?}");
+        assert!(text.contains("After"), "got {text:?}");
+        // A closed one still hides all of itself, nested tags included.
+        let closed = extract(
+            "<p style=\"display:none\">a <b>b</b> c</p><p>Shown</p>\
+             <div style=\"display:none\"><p>x<div>y</div>z</div><p>Also shown</p>",
+        );
+        assert_eq!(closed, "Shown\nAlso shown");
+    }
+
+    /// A long page made of numbered lines, for the find tests.
+    fn long_page() -> String {
+        (0..2000)
+            .map(|i| match i {
+                700 => "Note 3. The total\nconsideration was $3.25 billion.\n".to_string(),
+                1500 => "Later the TOTAL CONSIDERATION was adjusted.\n".to_string(),
+                _ => format!("Filler line {i} about nothing in particular.\n"),
+            })
+            .collect()
+    }
+
+    /// Each passage is labelled with the offset its text starts at, so
+    /// `start_index` from a label reads on from exactly that passage.
+    #[test]
+    fn test_find_returns_labelled_passages_across_whitespace_and_case() {
+        let text = long_page();
+        let (content, more) = find_passages(&text, "total consideration", 0, MAX_WINDOW);
+        assert!(!more);
+        assert!(
+            content.starts_with("[find \"total consideration\": 2 matches from start_index=0 of "),
+            "got {content:?}"
+        );
+        assert!(content.contains("$3.25 billion"), "got {content:?}");
+        assert!(content.contains("TOTAL CONSIDERATION was adjusted"));
+        assert!(
+            content.len() < 4_000,
+            "passages should be local, got {}",
+            content.len()
+        );
+        let labels: Vec<usize> = content
+            .split("--- start_index=")
+            .skip(1)
+            .map(|rest| rest.split(' ').next().unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(labels.len(), 2);
+        for (label, passage) in labels.iter().zip(content.split(" ---\n").skip(1)) {
+            let passage = passage.split("\n--- start_index=").next().unwrap();
+            assert!(text[*label..].starts_with(passage), "label {label} is off");
+        }
+    }
+
+    #[test]
+    fn test_find_searches_from_start_index() {
+        let text = long_page();
+        let second = text.find("Later the TOTAL").unwrap();
+        let (content, _) = find_passages(&text, "total consideration", second - 10, MAX_WINDOW);
+        assert!(
+            content.contains(": 1 match from start_index="),
+            "got {content:?}"
+        );
+        assert!(!content.contains("$3.25 billion"));
+    }
+
+    /// Matches that don't fit the window are not lost: the summary names
+    /// where to repeat the find, and repeating it walks every match.
+    #[test]
+    fn test_find_pages_through_matches_that_do_not_fit() {
+        let text: String = (0..300)
+            .map(|i| {
+                format!(
+                    "Row {i}: segment revenue was {i} million.\n{}\n",
+                    "x ".repeat(700)
+                )
+            })
+            .collect();
+        let mut start = 0;
+        let mut seen = 0;
+        for _ in 0..300 {
+            let (content, more) = find_passages(&text, "segment revenue", start, 5_000);
+            assert!(
+                content.len() <= 5_000 + 300,
+                "window overrun: {}",
+                content.len()
+            );
+            seen += content.matches("segment revenue was").count();
+            if !more {
+                break;
+            }
+            let resume: usize = content
+                .split("repeat this find with start_index=")
+                .nth(1)
+                .unwrap()
+                .split('.')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(resume > start, "find did not advance");
+            start = resume;
+        }
+        assert_eq!(seen, 300);
+    }
+
+    /// With no exact match, the passages sharing the most words come back,
+    /// marked as such — the model's phrasing is rarely the document's own.
+    #[test]
+    fn test_find_without_exact_match_ranks_passages() {
+        let text = long_page();
+        let (content, more) =
+            find_passages(&text, "consideration measured at closing", 0, MAX_WINDOW);
+        assert!(!more);
+        assert!(content.contains("no exact match"), "got {content:?}");
+        assert!(
+            content.contains("consideration was $3.25 billion"),
+            "got {content:?}"
+        );
+        assert!(content.len() <= MAX_WINDOW);
+
+        let (content, _) = find_passages(&text, "zebra quokka", 0, MAX_WINDOW);
+        assert!(content.contains("no match"), "got {content:?}");
+        assert!(content.contains("page through with start_index"));
+    }
+
+    #[test]
+    fn test_find_handles_regex_metacharacters_and_tiny_windows() {
+        let text = "Price (USD): $3.25 [approx.]\n".repeat(3);
+        let (content, _) = find_passages(&text, "$3.25 [approx.]", 0, MAX_WINDOW);
+        assert!(content.contains(": 3 matches"), "got {content:?}");
+        let (content, more) = find_passages(&text, "(USD)", 0, 1);
+        assert!(more);
+        assert!(content.contains("start_index=0 ---\nP"), "got {content:?}");
+    }
+
+    /// The truncation note of a page says where the window sits and how to
+    /// get the rest — the model gave up on pages whose note it never saw.
+    #[test]
+    fn test_window_note_offers_find() {
+        let text = "a".repeat(100);
+        let (content, truncated) = window(&text, 10, 20, WINDOW_HINT);
+        assert!(truncated);
+        assert!(
+            content.ends_with(
+                "[Content truncated: showing 10-30 of 100. Continue with start_index=30, \
+                 or pass `find` to jump to the passage you need.]"
+            ),
+            "got {content:?}"
+        );
+    }
+
+    fn page(text: &str) -> Arc<CachedPage> {
+        Arc::new(CachedPage {
+            status: 200,
+            content_type: "text/html".to_string(),
+            text: text.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_page_cache_evicts_least_recently_used() {
+        let cache = PageCache::default();
+        for i in 0..MAX_CACHED_PAGES {
+            cache.insert(format!("https://example.com/{i}"), page("x"));
+        }
+        // Touch the oldest so the second-oldest goes first.
+        assert!(cache.get("https://example.com/0").is_some());
+        cache.insert("https://example.com/new".to_string(), page("y"));
+        assert!(cache.get("https://example.com/0").is_some());
+        assert!(cache.get("https://example.com/1").is_none());
+        assert!(cache.get("https://example.com/new").is_some());
+        assert_eq!(cache.lock().len(), MAX_CACHED_PAGES);
+    }
+
+    #[test]
+    fn test_page_cache_is_bounded_by_bytes() {
+        let cache = PageCache::default();
+        let big = "x".repeat(MAX_CACHED_BYTES / 2 + 1);
+        cache.insert("https://example.com/a".to_string(), page(&big));
+        cache.insert("https://example.com/b".to_string(), page(&big));
+        assert!(cache.get("https://example.com/a").is_none());
+        assert!(cache.get("https://example.com/b").is_some());
+        let huge = "x".repeat(MAX_CACHED_BYTES + 1);
+        cache.insert("https://example.com/huge".to_string(), page(&huge));
+        assert!(cache.get("https://example.com/huge").is_none());
+    }
+
+    /// Paging and find over a cached page never touch the network: the URL
+    /// here does not resolve, so any download would fail the call.
+    #[tokio::test]
+    async fn test_call_pages_and_finds_in_the_session_cache() {
+        let tool = FetchTool::new(None);
+        let url = "https://doc.example.invalid/10-q.htm";
+        tool.pages.insert(format!("{url}\n"), page(&long_page()));
+        let try_call = |start_index: Option<usize>,
+                        max_length: Option<usize>,
+                        find: Option<&str>,
+                        user_agent: Option<&str>| {
+            let tool = tool.clone();
+            let find = find.map(str::to_string);
+            let user_agent = user_agent.map(str::to_string);
+            async move {
+                tool.call(
+                    &mut ToolContext::new(),
+                    FetchToolArgs {
+                        url: url.to_string(),
+                        max_length,
+                        start_index,
+                        find,
+                        user_agent,
+                    },
+                )
+                .await
+            }
+        };
+        let call = |start_index: Option<usize>, max_length: Option<usize>, find: Option<&str>| {
+            let call = try_call(start_index, max_length, find, None);
+            async move { call.await.expect("served from the cache") }
+        };
+
+        // A plain fetch downloads again (here: fails, the host doesn't
+        // resolve), so a changing page is never served stale; so does a
+        // different User-Agent, even when paging.
+        assert!(try_call(None, None, None, None).await.is_err());
+        assert!(
+            try_call(Some(0), None, None, Some("Research bot admin@example.com"))
+                .await
+                .is_err()
+        );
+
+        let first = call(Some(0), None, None).await;
+        assert!(first.truncated);
+        assert_eq!(first.total_length, Some(long_page().len()));
+        assert!(
+            first
+                .content
+                .contains("Continue with start_index=20000, or pass `find`")
+        );
+
+        // max_length can't take a window past what the context shaper keeps.
+        let clamped = call(Some(0), Some(200_000), None).await;
+        assert_eq!(clamped.content, first.content);
+
+        let found = call(None, None, Some("total consideration")).await;
+        assert!(
+            found.content.contains("$3.25 billion"),
+            "got {:?}",
+            found.content
+        );
+        assert!(!found.truncated);
+
+        let next = call(Some(20_000), None, None).await;
+        assert!(
+            long_page()[20_000..].starts_with(next.content.split("\n\n[Content").next().unwrap())
+        );
+    }
+
     // --- helpers ---
 
     #[test]
@@ -1275,7 +2187,7 @@ mod tests {
 
     #[test]
     fn test_truncate_at_char_boundary() {
-        let (truncated, flagged) = window("Hello, World!", 0, 5);
+        let (truncated, flagged) = window("Hello, World!", 0, 5, "");
         assert!(truncated.starts_with("Hello"));
         assert!(truncated.contains("[Content truncated"));
         assert!(flagged);
@@ -1283,7 +2195,7 @@ mod tests {
 
     #[test]
     fn test_truncate_no_truncation_needed() {
-        let (result, truncated) = window("short", 0, 100);
+        let (result, truncated) = window("short", 0, 100, "");
         assert_eq!(result, "short");
         assert!(!truncated);
     }
@@ -1291,7 +2203,7 @@ mod tests {
     #[test]
     fn test_truncate_multibyte_chars() {
         // Ensure we don't split in the middle of a multi-byte character
-        let (truncated, _) = window("Hello 🌍 World", 0, 7);
+        let (truncated, _) = window("Hello 🌍 World", 0, 7, "");
         // Should not panic and should produce valid UTF-8
         assert!(truncated.starts_with("Hello "));
         assert!(truncated.contains("[Content truncated"));
@@ -1303,10 +2215,10 @@ mod tests {
     #[test]
     fn test_window_start_snaps_to_char_boundary() {
         let text = "a🌍b";
-        let (first, _) = window(text, 0, 3);
+        let (first, _) = window(text, 0, 3, "");
         let first_body = first.split("\n\n[Content truncated").next().unwrap();
         assert_eq!(first_body, "a");
-        let (second, _) = window(text, 3, 10);
+        let (second, _) = window(text, 3, 10, "");
         assert_eq!(format!("{first_body}{second}"), text);
     }
 
@@ -1365,6 +2277,7 @@ mod tests {
             url: "https://data.sec.gov/submissions/CIK0001408198.json".to_string(),
             max_length: None,
             start_index: None,
+            find: None,
             user_agent: None,
         };
         let result = tool
@@ -1381,6 +2294,7 @@ mod tests {
             url: "not-a-url".to_string(),
             max_length: None,
             start_index: None,
+            find: None,
             user_agent: None,
         };
         let result = tool.call(&mut ToolContext::new(), args).await;
@@ -1416,6 +2330,7 @@ mod tests {
                     url: URL.to_string(),
                     max_length,
                     start_index,
+                    find: None,
                     user_agent: None,
                 },
             )
@@ -1449,7 +2364,7 @@ mod tests {
 
     /// AGE-508 criterion 3, end to end: a live 404 HTML error page comes back
     /// through `call()` as extracted text, not raw markup, and capped well
-    /// under the 50000-byte default.
+    /// under the 20000-byte default.
     ///
     /// ```
     /// cargo test -p chatty-core --lib fetch_of_a_404_page_returns_extracted_text -- --ignored
@@ -1463,6 +2378,7 @@ mod tests {
                 .to_string(),
             max_length: None,
             start_index: None,
+            find: None,
             user_agent: None,
         };
         let result = tool
@@ -1552,6 +2468,7 @@ mod tests {
             url: "http://169.254.169.254/latest/meta-data/".to_string(),
             max_length: None,
             start_index: None,
+            find: None,
             user_agent: None,
         };
         let result = tool.call(&mut ToolContext::new(), args).await;

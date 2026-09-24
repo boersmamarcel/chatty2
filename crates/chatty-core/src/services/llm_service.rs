@@ -15,6 +15,7 @@ use crate::models::clarification_store::{ClarificationNotification, ClarifyingQu
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::ApiCallUsage;
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
+use crate::services::turn_budget::TurnBudget;
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
@@ -357,6 +358,8 @@ fn map_stream_result(
 /// * `approval_rx` - Optional receiver for approval notifications
 /// * `resolution_rx` - Optional receiver for approval resolution notifications
 /// * `clarification_rx` - Optional receiver for clarifying-question notifications
+/// * `turn_budget` - The tool-turn budget of this call (`TurnBudget::new(max_agent_turns)`
+///   unless the caller runs it as one pass of a longer run)
 ///
 /// # Returns
 /// The response stream. The caller already owns the `Vec<Message>` it built
@@ -369,16 +372,15 @@ pub async fn stream_prompt(
     approval_rx: Option<mpsc::UnboundedReceiver<ApprovalNotification>>,
     resolution_rx: Option<mpsc::UnboundedReceiver<ApprovalResolution>>,
     clarification_rx: Option<mpsc::UnboundedReceiver<ClarificationNotification>>,
-    max_agent_turns: usize,
+    turn_budget: TurnBudget,
 ) -> Result<ResponseStream> {
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
 
-    let mut agent_stream = agent
-        .agent
-        .stream_prompt(user_message)
-        .history(history)
-        .max_turns(max_agent_turns)
+    // The turn budget sets rig's call cap (the tool turns plus one tool-free
+    // wrap-up call) and tells the model how many tool turns it has left.
+    let mut agent_stream = turn_budget
+        .apply(agent.agent.stream_prompt(user_message).history(history))
         .await;
 
     // A caller that does not wire a channel is treated the same as one whose

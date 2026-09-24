@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::models::message_types::ExecutionEngine;
-use crate::services::shell_service::{ShellOutput, ShellSession, ShellStatus};
+use crate::services::shell_service::{
+    MAX_SHELL_CALL_TIMEOUT_SECONDS, ShellOutput, ShellSession, ShellStatus,
+};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::tools::ToolError;
 
@@ -13,6 +15,36 @@ use crate::tools::ToolError;
 #[derive(Deserialize, Serialize)]
 pub struct ShellExecuteArgs {
     pub command: String,
+    /// Optional per-call timeout override in seconds, bounded by
+    /// [`MAX_SHELL_CALL_TIMEOUT_SECONDS`]. Defaults to the configured
+    /// execution timeout when omitted. Read leniently (see
+    /// [`lenient_timeout_seconds`]): a malformed value must not fail the call.
+    #[serde(
+        default,
+        deserialize_with = "lenient_timeout_seconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout_seconds: Option<u32>,
+}
+
+/// `timeout_seconds` as the model wrote it: an integer, a float (`300.0`),
+/// or a numeric string (`"300"`) all count; anything else (`"5m"`, a
+/// negative number, `null`) is treated as absent, so the command still runs
+/// with the default timeout instead of the whole call failing on argument
+/// parsing.
+fn lenient_timeout_seconds<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let seconds = match value {
+        Some(serde_json::Value::Number(n)) => n.as_f64(),
+        Some(serde_json::Value::String(s)) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    Ok(seconds
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(|s| s.ceil().min(u32::MAX as f64) as u32))
 }
 
 #[derive(Debug, Serialize)]
@@ -20,6 +52,10 @@ pub struct ShellExecuteOutput {
     pub stdout: String,
     pub exit_code: i32,
     pub truncated: bool,
+    /// Left out when false, so an ordinary command's result is the same
+    /// bytes it was before timeouts returned partial output.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
     pub execution_engine: ExecutionEngine,
 }
 
@@ -29,6 +65,7 @@ impl From<ShellOutput> for ShellExecuteOutput {
             stdout: o.stdout,
             exit_code: o.exit_code,
             truncated: o.truncated,
+            timed_out: o.timed_out,
             execution_engine: ExecutionEngine::Shell,
         }
     }
@@ -93,7 +130,12 @@ impl Tool for ShellExecuteTool {
                          - Run commands that depend on previous shell state\n\
                          - Work in a specific directory across multiple operations\n\
                          \
-                         The session is per-conversation and automatically cleaned up when the conversation ends."
+                         The session is per-conversation and automatically cleaned up when the conversation ends. \
+                         \
+                         For a command you expect to run long (a test suite, a data script, a build), pass \
+                         `timeout_seconds` instead of wrapping the command in your own `timeout ... &` — a \
+                         command that still times out returns whatever output it produced so far instead of \
+                         discarding it."
                 .to_string()
     }
 
@@ -104,6 +146,14 @@ impl Tool for ShellExecuteTool {
                 "command": {
                     "type": "string",
                     "description": "The command to execute in the persistent shell session"
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": format!(
+                        "Optional timeout for this command in seconds, overriding the configured default. \
+                         Capped at {} seconds.",
+                        MAX_SHELL_CALL_TIMEOUT_SECONDS
+                    )
                 }
             },
             "required": ["command"]
@@ -134,8 +184,15 @@ impl Tool for ShellExecuteTool {
             ));
         }
 
-        tracing::debug!(command = %args.command, "Executing in shell session");
-        let output = self.session.execute(&args.command).await?;
+        tracing::debug!(
+            command = %args.command,
+            timeout_seconds = ?args.timeout_seconds,
+            "Executing in shell session"
+        );
+        let output = self
+            .session
+            .execute_with_timeout(&args.command, args.timeout_seconds)
+            .await?;
         Ok(output.into())
     }
 }
@@ -416,5 +473,66 @@ impl Tool for ShellStatusTool {
             pid: status.pid,
             uptime_seconds: status.uptime_seconds,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeout_of(args: serde_json::Value) -> Option<u32> {
+        serde_json::from_value::<ShellExecuteArgs>(args)
+            .expect("shell_execute args parse")
+            .timeout_seconds
+    }
+
+    #[test]
+    fn timeout_seconds_is_read_leniently() {
+        assert_eq!(timeout_of(serde_json::json!({"command": "ls"})), None);
+        assert_eq!(
+            timeout_of(serde_json::json!({"command": "ls", "timeout_seconds": 120})),
+            Some(120)
+        );
+        assert_eq!(
+            timeout_of(serde_json::json!({"command": "ls", "timeout_seconds": 300.0})),
+            Some(300)
+        );
+        assert_eq!(
+            timeout_of(serde_json::json!({"command": "ls", "timeout_seconds": "90"})),
+            Some(90)
+        );
+        // Malformed values never fail the call; the default applies.
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!("5m"),
+            serde_json::json!(-3),
+            serde_json::json!({"s": 1}),
+        ] {
+            assert_eq!(
+                timeout_of(serde_json::json!({"command": "ls", "timeout_seconds": bad})),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_result_does_not_mention_timeouts() {
+        let output = ShellExecuteOutput::from(ShellOutput {
+            stdout: "hi".into(),
+            exit_code: 0,
+            truncated: false,
+            timed_out: false,
+        });
+        let json = serde_json::to_value(&output).unwrap();
+        assert!(json.get("timed_out").is_none(), "{json}");
+
+        let timed_out = ShellExecuteOutput::from(ShellOutput {
+            stdout: "partial".into(),
+            exit_code: -1,
+            truncated: false,
+            timed_out: true,
+        });
+        let json = serde_json::to_value(&timed_out).unwrap();
+        assert_eq!(json["timed_out"], serde_json::json!(true));
     }
 }

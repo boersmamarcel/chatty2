@@ -474,6 +474,7 @@ impl ChattyApp {
                             } else {
                                 TurnKind::ProtocolFollowUp
                             },
+                            turn_budget: None,
                         },
                         chat_view,
                         stream_manager,

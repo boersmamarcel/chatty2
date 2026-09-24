@@ -58,6 +58,32 @@ pub struct DefinitionResult {
     pub count: usize,
 }
 
+/// Map a common language name to ripgrep's `--type` name.
+///
+/// Models frequently pass a language name (e.g. "python") rather than
+/// ripgrep's own type name (e.g. "py"), which ripgrep rejects with
+/// "unrecognized file type". Unrecognized names are passed through
+/// unchanged so ripgrep's own error still surfaces if the mapping misses.
+fn normalize_ripgrep_file_type(file_type: &str) -> String {
+    // ripgrep's type names are lowercase and have no leading dot; models
+    // also write "Python" or ".py".
+    let file_type = file_type
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    match file_type.as_str() {
+        "python" => "py",
+        "javascript" => "js",
+        "typescript" => "ts",
+        "golang" => "go",
+        "c++" | "cpp" => "cpp",
+        "markdown" => "md",
+        "shell" | "bash" => "sh",
+        other => other,
+    }
+    .to_string()
+}
+
 /// Service for code search and navigation operations.
 ///
 /// Provides full-text search via ripgrep, glob-based file finding,
@@ -104,7 +130,7 @@ impl CodeSearchService {
 
         if let Some(ft) = file_type {
             args.push("--type".to_string());
-            args.push(ft.to_string());
+            args.push(normalize_ripgrep_file_type(ft));
         }
 
         args.push(pattern.to_string());
@@ -564,6 +590,28 @@ type UserId = string;
             result.is_err(),
             "expected access denied for sibling directory"
         );
+    }
+
+    #[test]
+    fn test_normalize_ripgrep_file_type_maps_common_language_names() {
+        assert_eq!(normalize_ripgrep_file_type("python"), "py");
+        assert_eq!(normalize_ripgrep_file_type("javascript"), "js");
+        assert_eq!(normalize_ripgrep_file_type("typescript"), "ts");
+        assert_eq!(normalize_ripgrep_file_type("golang"), "go");
+        assert_eq!(normalize_ripgrep_file_type("c++"), "cpp");
+        assert_eq!(normalize_ripgrep_file_type("cpp"), "cpp");
+        assert_eq!(normalize_ripgrep_file_type("markdown"), "md");
+        assert_eq!(normalize_ripgrep_file_type("shell"), "sh");
+        assert_eq!(normalize_ripgrep_file_type("bash"), "sh");
+        // Already-correct ripgrep type names pass through unchanged.
+        assert_eq!(normalize_ripgrep_file_type("rust"), "rust");
+        assert_eq!(normalize_ripgrep_file_type("yaml"), "yaml");
+        // Unknown names pass through so ripgrep's own error still surfaces.
+        assert_eq!(normalize_ripgrep_file_type("cobol"), "cobol");
+        // Case and a leading dot are not ripgrep's.
+        assert_eq!(normalize_ripgrep_file_type("Python"), "py");
+        assert_eq!(normalize_ripgrep_file_type(".py"), "py");
+        assert_eq!(normalize_ripgrep_file_type(" Rust "), "rust");
     }
 
     /// parse_ripgrep_json: verifies truncation flag and exact result count.

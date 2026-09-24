@@ -34,7 +34,16 @@ pub struct ShellOutput {
     pub stdout: String,
     pub exit_code: i32,
     pub truncated: bool,
+    /// True when the command hit the timeout and was killed. `stdout` still
+    /// carries whatever output was captured before the kill, followed by a
+    /// note saying so, rather than being discarded.
+    pub timed_out: bool,
 }
+
+/// Upper bound on the per-call `timeout_seconds` a model can request via
+/// `shell_execute`, regardless of the configured default. Prevents a single
+/// tool call from blocking a turn indefinitely.
+pub const MAX_SHELL_CALL_TIMEOUT_SECONDS: u32 = 600;
 
 /// Current status of the shell session
 #[derive(Debug, Serialize)]
@@ -281,6 +290,11 @@ impl ShellSession {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Its own process group, so a timed-out command can be killed along
+        // with the shell: SIGKILL on bash alone leaves the command it was
+        // running (a test suite, a build) orphaned and still going.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if let Some(dir) = workspace_dir {
             cmd.current_dir(dir);
@@ -513,11 +527,33 @@ impl ShellSession {
         Ok(escaped)
     }
 
-    /// Execute a command in the persistent shell session.
+    /// Execute a command in the persistent shell session, using the
+    /// session's configured default timeout.
     ///
     /// The command's stdout and stderr are merged (stderr redirected to stdout).
     /// Returns the combined output and exit code.
     pub async fn execute(&self, command: &str) -> Result<ShellOutput> {
+        self.execute_with_timeout(command, None).await
+    }
+
+    /// Execute a command in the persistent shell session, optionally
+    /// overriding the session's configured default timeout for this one
+    /// call. The override is bounded by [`MAX_SHELL_CALL_TIMEOUT_SECONDS`].
+    ///
+    /// The command's stdout and stderr are merged (stderr redirected to stdout).
+    /// Returns the combined output and exit code. If the command times out,
+    /// this does not error: it returns whatever output was captured before
+    /// the session was killed, with a note appended saying the command timed
+    /// out (`timed_out: true`) so the caller sees the partial progress
+    /// instead of losing it.
+    pub async fn execute_with_timeout(
+        &self,
+        command: &str,
+        timeout_override: Option<u32>,
+    ) -> Result<ShellOutput> {
+        let effective_timeout_seconds =
+            resolve_call_timeout_seconds(self.timeout_seconds, timeout_override);
+
         let mut process = self.process.lock().await;
         Self::ensure_started(
             &mut process,
@@ -562,7 +598,7 @@ impl ShellSession {
 
         // Read output until we find the marker
         let mut output = String::new();
-        let timeout_duration = tokio::time::Duration::from_secs(self.timeout_seconds as u64);
+        let timeout_duration = tokio::time::Duration::from_secs(effective_timeout_seconds as u64);
 
         let read_result = tokio::time::timeout(timeout_duration, async {
             loop {
@@ -641,6 +677,7 @@ impl ShellSession {
                     stdout: output.trim_end().to_string(),
                     exit_code: result.exit_code,
                     truncated,
+                    timed_out: false,
                 })
             }
             Ok(Err(e)) => {
@@ -649,18 +686,48 @@ impl ShellSession {
                 Err(e)
             }
             Err(_) => {
-                // Timeout - the process may be stuck. Kill and respawn on next use.
+                // Timeout - the process may be stuck. Kill it and respawn on
+                // next use, but keep whatever output the command produced
+                // before that instead of discarding it (AGE evidence: models
+                // were retrying with hand-written `timeout N ... &`
+                // wrappers because the error swallowed all prior output).
                 warn!(
-                    timeout = self.timeout_seconds,
+                    timeout = effective_timeout_seconds,
                     "Shell command timed out, killing session"
                 );
                 if let Some(mut proc) = process.take() {
+                    // An unsandboxed shell leads its own process group (see
+                    // `spawn_unsandboxed`); take the command down with it.
+                    // bubblewrap's `--die-with-parent` and PID namespace do
+                    // the same for a sandboxed one.
+                    #[cfg(unix)]
+                    if !proc.is_sandboxed {
+                        kill_process_group(proc.child.id());
+                    }
                     let _ = proc.child.kill().await;
                 }
-                Err(anyhow!(
-                    "Command timed out after {} seconds",
-                    self.timeout_seconds
-                ))
+
+                let truncated = output.len() > self.max_output_bytes;
+                if truncated {
+                    Self::truncate_output_at_char_boundary(&mut output, self.max_output_bytes);
+                }
+                let mut stdout = output.trim_end().to_string();
+                if !stdout.is_empty() {
+                    stdout.push('\n');
+                }
+                stdout.push_str(&format!(
+                    "[shell_execute: command timed out after {} seconds and was killed; \
+                     output above is partial. The shell session was restarted: the working \
+                     directory and any exported variables are back to their defaults.]",
+                    effective_timeout_seconds
+                ));
+
+                Ok(ShellOutput {
+                    stdout,
+                    exit_code: -1,
+                    truncated,
+                    timed_out: true,
+                })
             }
         }
     }
@@ -800,6 +867,38 @@ impl Drop for ShellSession {
             // Child::kill_on_drop handles this, but be explicit
             let _ = proc.child.start_kill();
         }
+    }
+}
+
+/// Resolve the timeout to use for one `execute_with_timeout` call: the
+/// per-call override when given, bounded by [`MAX_SHELL_CALL_TIMEOUT_SECONDS`]
+/// so a single tool call can't block a turn indefinitely, else the session's
+/// configured default.
+fn resolve_call_timeout_seconds(
+    default_timeout_seconds: u32,
+    timeout_override: Option<u32>,
+) -> u32 {
+    timeout_override
+        // 0 reads as "no particular limit" to a model; as a Duration it would
+        // kill the command before it produced anything.
+        .filter(|t| *t > 0)
+        .map(|t| t.min(MAX_SHELL_CALL_TIMEOUT_SECONDS))
+        .unwrap_or(default_timeout_seconds)
+}
+
+/// SIGKILL the process group `group` leads. `ESRCH` means nothing is left.
+#[cfg(unix)]
+fn kill_process_group(group: Option<u32>) {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    let Some(group) = group.and_then(|g| i32::try_from(g).ok()) else {
+        return;
+    };
+    match killpg(Pid::from_raw(group), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(e) => warn!(group, error = %e, "Could not kill the timed-out shell's process group"),
     }
 }
 

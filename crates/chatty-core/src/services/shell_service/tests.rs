@@ -87,9 +87,119 @@ async fn test_command_sequence() {
 async fn test_timeout_enforcement() {
     let session = ShellSession::with_secrets(None, 1, 51200, false, vec![]); // 1 second timeout
 
+    // A timeout is not an error any more: the caller gets back whatever
+    // output was captured before the kill, plus a note, instead of losing it
+    // (AGE evidence: models were retrying with hand-written `timeout N ...
+    // &` wrappers because the old error swallowed all prior output).
     let result = session.execute("sleep 10").await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("timed out"));
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    assert!(output.timed_out);
+    assert!(output.stdout.contains("timed out"));
+}
+
+#[tokio::test]
+async fn test_timeout_preserves_partial_output() {
+    let session = ShellSession::with_secrets(None, 1, 51200, false, vec![]); // 1 second timeout
+
+    let result = session
+        .execute("echo before-timeout; sleep 10")
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+    assert!(
+        result.stdout.contains("before-timeout"),
+        "expected partial output to be preserved, got: {}",
+        result.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_per_call_timeout_override() {
+    // The session's configured default is generous; a short per-call
+    // override should still fire.
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+
+    let result = session
+        .execute_with_timeout("sleep 10", Some(1))
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+}
+
+/// A timeout kills the command, not just the shell running it: an orphaned
+/// test suite would otherwise keep running (and writing) behind the model's
+/// next commands.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_timeout_kills_the_running_command() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    if session.is_sandboxed().await {
+        // The sandbox's PID namespace hides the pid; bubblewrap's
+        // --die-with-parent covers this case.
+        return;
+    }
+
+    let result = session
+        .execute_with_timeout("sleep 30 & echo \"pid=$!\"; wait", Some(1))
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+    let pid: i32 = result
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|pid| pid.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no pid in output: {}", result.stdout));
+
+    // Gone, or a zombie waiting for a reaper (the test binary may be PID 1
+    // in a container) — either way no longer running.
+    let mut alive = true;
+    for _ in 0..50 {
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.trim_start().chars().next())
+            });
+        if matches!(state, None | Some('Z') | Some('X')) {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if alive && std::path::Path::new("/proc").exists() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("the timed-out command (pid {pid}) is still running");
+    }
+
+    // The session respawns and works after the kill.
+    let after = session.execute("echo still-here").await.unwrap();
+    assert!(!after.timed_out);
+    assert_eq!(after.stdout, "still-here");
+}
+
+#[test]
+fn test_resolve_call_timeout_seconds_bounds_override() {
+    // No override: falls back to the session's configured default.
+    assert_eq!(resolve_call_timeout_seconds(30, None), 30);
+    // A reasonable override is used as-is.
+    assert_eq!(resolve_call_timeout_seconds(30, Some(120)), 120);
+    // 0 is not "kill immediately": it falls back to the default.
+    assert_eq!(resolve_call_timeout_seconds(30, Some(0)), 30);
+    // A caller asking for more than the max is clamped down to it, rather
+    // than allowed to block a turn indefinitely.
+    assert_eq!(
+        resolve_call_timeout_seconds(30, Some(u32::MAX)),
+        MAX_SHELL_CALL_TIMEOUT_SECONDS
+    );
+    assert_eq!(
+        resolve_call_timeout_seconds(30, Some(MAX_SHELL_CALL_TIMEOUT_SECONDS + 1)),
+        MAX_SHELL_CALL_TIMEOUT_SECONDS
+    );
 }
 
 #[tokio::test]

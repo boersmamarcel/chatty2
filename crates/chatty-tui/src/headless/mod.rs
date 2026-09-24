@@ -25,7 +25,8 @@
 
 use anyhow::Result;
 use chatty_core::services::{
-    AgentLoopGuard, RecoveryAction, StreamError, StreamErrorKind, is_agent_todo_tool,
+    AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
+    is_agent_todo_tool,
 };
 use tokio::sync::mpsc;
 
@@ -37,14 +38,40 @@ pub use runner::HeadlessRunner;
 
 const MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS: usize = 5;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
-const MAX_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
-const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 3;
-const FINALIZATION_MAX_AGENT_TURNS: u32 = 12;
+/// Tool results an answer-file run may spend exploring before headless stops
+/// it for a finalization turn, as a share of the run's `max_agent_turns`
+/// (see `answer_file_tool_budget`). 80 % sits just after chatty-core's
+/// `TurnBudget` wrap-up note (75 %), so the model hears "start wrapping up"
+/// once, gets a few turns to act on it, and only then is handed the
+/// finalization turn — which, unlike TurnBudget's tool-free last word, can
+/// still write the answer file.
+const ANSWER_FILE_TOOL_BUDGET_PERCENT: usize = 80;
+/// The budget never drops below this: a small cap (the default is 10) ends
+/// the stream through TurnBudget first, and the post-stream finalization
+/// catches a missing answer file there.
+const MIN_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 16;
+/// The budget when the run has no turn cap (`max_agent_turns == 0`).
+const UNCAPPED_ANSWER_FILE_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 40;
+/// Failed tool results (not counting sandbox/path-policy refusals) before a
+/// finalization turn. Was 3, which one bad Python script plus a refusal
+/// tripped while the model was still converging.
+const MAX_FAILED_TOOL_RESULTS_BEFORE_FINALIZATION: usize = 8;
+/// Tools that run a command whose output the model has not seen yet when an
+/// answer file they wrote appears (`python3 count.py; echo -n 5 > answer.txt`).
+const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
 const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 6_000;
 const FINALIZATION_EVIDENCE_CHARS: usize = 16_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 4_000;
 const TEXT_HARD_STOP_BYTES: usize = 20_000;
 const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
+/// Sent on the same history after the stall watchdog ended a turn: the
+/// provider went quiet, not the task, so the model picks up where it was.
+/// rig hands back a turn's tool round-trips only when the turn finishes,
+/// so a stalled turn keeps its text but not its tool calls and results;
+/// the prompt says so, or the model trusts results it can no longer see.
+const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. Its tool \
+     calls and their results are not in the history, but files it wrote are still on disk. \
+     Continue the task from where you left off: check the current state before redoing work.";
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
 
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is
@@ -64,7 +91,10 @@ pub async fn run_headless(
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
     message: String,
 ) -> Result<()> {
-    let answer_file_required = prompt_requires_answer_file(&message);
+    let answer_file_required = prompt_requires_answer_file(&[
+        message.as_str(),
+        engine.role_preamble().unwrap_or_default(),
+    ]);
 
     // Send message
     engine.send_message(message.clone());
@@ -88,12 +118,9 @@ pub async fn run_headless(
     let mut pending_loop_pivot_prompt: Option<String> = None;
     let mut finalization_pending_after_cancel = false;
     // The session decides whether a stream error is retried and after how
-    // long (AGE-273); the delay is held here until the turn has ended.
-    let mut recovery_pending_after_error: Option<std::time::Duration> = None;
-    // AGE-497: rig's own `UnknownToolCall` message already lists the
-    // available/allowed tool names, so it is worth re-sending verbatim
-    // instead of the generic recovery prompt below.
-    let mut pending_unknown_tool_call_message: Option<String> = None;
+    // long (AGE-273); the delay and the error that earned it are held here
+    // until the turn has ended.
+    let mut recovery_pending_after_error: Option<(std::time::Duration, StreamError)> = None;
     // A stream error the session would not retry ends the run as a failure
     // (AGE-401): the exit code says so, not an empty stdout.
     let mut unrecovered_error: Option<StreamError> = None;
@@ -104,6 +131,10 @@ pub async fn run_headless(
     // and per-turn verbosity tracking.
     let max_agent_turns = engine.execution_settings.max_agent_turns as usize;
     let mut loop_guard = AgentLoopGuard::new(max_agent_turns, answer_file_required);
+    let tool_budget = answer_file_tool_budget(max_agent_turns);
+    // Set when a command tool wrote the answer file: the model gets one more
+    // turn to see that command's output before the run stops.
+    let mut answer_file_grace_turn = false;
     // Hard-stop flag set when loop_guard or the backstop threshold is exceeded.
     let mut text_overflow_stop_requested = false;
     let mut text_hard_stop_requested = false;
@@ -159,6 +190,7 @@ pub async fn run_headless(
                 let mut called_final_answer = false;
                 let mut pivot_msg: Option<String> = None;
                 let mut tool_failed = false;
+                let mut wrote_by_command = false;
                 let mut compact_file_extracted = false;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
@@ -187,7 +219,8 @@ pub async fn run_headless(
                         }
                         called_final_answer = true;
                     }
-                    tool_failed = status == "err";
+                    tool_failed = status == "err" && !tool_result_is_policy_refusal(tc);
+                    wrote_by_command = COMMAND_TOOLS.contains(&tc.name.as_str());
                     compact_file_extracted =
                         compact_file_extraction_tool_result(answer_file_required, tc);
                     // Check for repeated identical tool call (loop detection).
@@ -208,10 +241,27 @@ pub async fn run_headless(
                     eprintln!("final_answer completed and answer file exists; stopping stream.");
                     engine.stop_stream();
                 } else if stops_on_answer_file(&engine, answer_file_required) {
-                    // Answer file was written by a non-final_answer tool (e.g. echo via shell).
-                    // Stop the stream so the model doesn't loop writing the same answer repeatedly.
-                    eprintln!("Answer file exists after tool call; stopping stream early.");
-                    engine.stop_stream();
+                    match answer_file_stop(answer_file_grace_turn, wrote_by_command) {
+                        AnswerFileStop::Now => {
+                            // Written by a dedicated write (write_file & co.),
+                            // or the model has had its look at the command's
+                            // output and acted again: stop so it doesn't
+                            // loop rewriting the same answer.
+                            eprintln!("Answer file exists after tool call; stopping stream early.");
+                            engine.stop_stream();
+                        }
+                        AnswerFileStop::AfterNextTurn => {
+                            // `python3 count.py; echo -n 5 > answer.txt`: the
+                            // model has not seen what the command printed.
+                            // One more model turn to read it (and rewrite the
+                            // file if it disagrees); the next tool result, a
+                            // final_answer, or the turn ending stops the run.
+                            answer_file_grace_turn = true;
+                            eprintln!(
+                                "Answer file written by a command; letting the model see its output for one more turn."
+                            );
+                        }
+                    }
                 } else if !compact_file_finalization_sent
                     && compact_file_extracted
                     && !answer_file_exists(&engine)
@@ -250,6 +300,7 @@ pub async fn run_headless(
                 if should_stop_for_answer_file_tool_budget(
                     answer_file_required,
                     tool_results_since_finalization,
+                    tool_budget,
                     finalization_attempts,
                     tool_budget_stop_requested,
                     &engine,
@@ -276,17 +327,27 @@ pub async fn run_headless(
             AppEvent::ToolCallError { ref id, .. } => {
                 let id_str = id.clone();
                 engine.handle_event(event);
+                let mut refused = false;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
+                    refused = tool_result_is_policy_refusal(tc);
+                }
+                if answer_file_grace_turn && stops_on_answer_file(&engine, answer_file_required) {
+                    eprintln!("Answer file exists after the extra turn; stopping stream.");
+                    engine.stop_stream();
+                    continue;
                 }
                 tool_results_since_finalization += 1;
-                failed_tool_results_since_finalization += 1;
+                if !refused {
+                    failed_tool_results_since_finalization += 1;
+                }
                 if should_stop_for_answer_file_tool_budget(
                     answer_file_required,
                     tool_results_since_finalization,
+                    tool_budget,
                     finalization_attempts,
                     tool_budget_stop_requested,
                     &engine,
@@ -330,19 +391,30 @@ pub async fn run_headless(
                     engine.send_message(pivot);
                     continue;
                 }
-                if let Some(delay) = recovery_pending_after_error.take() {
+                if let Some((delay, error)) = recovery_pending_after_error.take() {
                     tool_results_since_finalization = 0;
                     failed_tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
                     failure_budget_stop_requested = false;
-                    eprintln!(
-                        "Retrying after stream error in {}s with a compact continuation prompt.",
-                        delay.as_secs()
-                    );
+                    if error.kind != StreamErrorKind::Stalled {
+                        eprintln!(
+                            "Retrying after stream error in {}s with a compact continuation prompt.",
+                            delay.as_secs()
+                        );
+                    }
                     tokio::time::sleep(delay).await;
-                    if let Some(error_message) = pending_unknown_tool_call_message.take() {
+                    if let Some(message) = engine.take_rolled_back_message() {
+                        // The turn failed before the model said anything, so
+                        // it was rolled back with its prompt: send that again.
+                        engine.send_recovery_prompt(message);
+                    } else if error.kind == StreamErrorKind::Stalled {
+                        engine.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+                    } else if error.kind == StreamErrorKind::UnknownToolCall {
+                        // AGE-497: rig's own message already lists the
+                        // available/allowed tool names, so it is worth
+                        // re-sending verbatim instead of the generic prompt.
                         engine.send_recovery_prompt(unknown_tool_call_recovery_prompt(
-                            &error_message,
+                            &error.message,
                         ));
                     } else if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
                         engine.send_recovery_prompt(build_compact_file_recovery_prompt(
@@ -393,7 +465,7 @@ pub async fn run_headless(
                         delay_secs
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                    send_answer_file_finalization_prompt(&mut engine, &message);
+                    send_answer_file_finalization_prompt(&mut engine, &message, true);
                     continue;
                 }
                 if should_request_answer_file_finalization(
@@ -409,7 +481,7 @@ pub async fn run_headless(
                     eprintln!(
                         "Answer file was not created; requesting a compact finalization pass."
                     );
-                    send_answer_file_finalization_prompt(&mut engine, &message);
+                    send_answer_file_finalization_prompt(&mut engine, &message, false);
                     continue;
                 }
                 break;
@@ -450,10 +522,17 @@ pub async fn run_headless(
                     RecoveryAction::Stop => None,
                 };
                 if let Some(after) = retry_after {
-                    if error.kind == StreamErrorKind::UnknownToolCall {
-                        pending_unknown_tool_call_message = Some(error.message.clone());
+                    if error.kind == StreamErrorKind::Stalled {
+                        // Nobody is here to "send a message to continue", so
+                        // this run sends it: the same history, one short
+                        // prompt, a bounded number of times per task.
+                        eprintln!(
+                            "Auto-resuming the stalled turn ({}/{}).",
+                            engine.session.recovery_attempts(error.kind),
+                            HEADLESS_STALL_RESUME_ATTEMPTS
+                        );
                     }
-                    recovery_pending_after_error = Some(after);
+                    recovery_pending_after_error = Some((after, error));
                     continue;
                 }
 
@@ -559,6 +638,30 @@ pub async fn run_headless(
 /// flow does, or its turns run out, never on a file somebody else wrote.
 fn stops_on_answer_file(engine: &HeadlessRunner, answer_file_required: bool) -> bool {
     answer_file_required && !engine.is_team_leader() && answer_file_exists(engine)
+}
+
+/// What an answer file that just appeared after a tool result means for
+/// the stream.
+#[derive(Debug, PartialEq, Eq)]
+enum AnswerFileStop {
+    /// Stop the stream now.
+    Now,
+    /// Let the model see this tool result for one more turn first.
+    AfterNextTurn,
+}
+
+/// A dedicated write of the answer (write_file, apply_diff, ...) holds no
+/// output the model has not seen, so it stops the run at once. A command
+/// (`shell_execute`, `execute_code`) that computes and writes in one go does
+/// — `python3 count.py; echo -n 5 > answer.txt` wrote 5 while the script
+/// printed 7 — so the model gets one more turn to read it. Once that grace
+/// turn has been given (`grace_given`), any further tool result stops.
+fn answer_file_stop(grace_given: bool, wrote_by_command: bool) -> AnswerFileStop {
+    if wrote_by_command && !grace_given {
+        AnswerFileStop::AfterNextTurn
+    } else {
+        AnswerFileStop::Now
+    }
 }
 
 fn should_infer_missing_answer(original_prompt: &str) -> bool {

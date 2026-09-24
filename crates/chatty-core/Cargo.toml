@@ -114,6 +114,9 @@ nix.workspace = true
 # Retrieval eval runner (examples/search_eval.rs): datasets + pure scoring.
 # chatty-optimize does not depend on chatty-core, so this is not a cycle.
 chatty-optimize = { path = "../chatty-optimize" }
+# Mock completion model + tools for rig-level hook tests (services::turn_budget).
+rig-core = { workspace = true, features = ["test-utils"] }
+rig-agent = { workspace = true, features = ["test-utils"] }
 
 [build-dependencies]
 # Pdfium library download

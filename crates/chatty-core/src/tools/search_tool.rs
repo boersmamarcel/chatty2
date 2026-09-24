@@ -45,6 +45,7 @@ impl Tool for SearchCodeTool {
                          - Search for a function: {\"pattern\": \"fn main\"}\n\
                          - Case-insensitive search: {\"pattern\": \"TODO\", \"case_insensitive\": true}\n\
                          - Search only Rust files: {\"pattern\": \"use std\", \"file_type\": \"rust\"}\n\
+                         - Search only Python files: {\"pattern\": \"def main\", \"file_type\": \"py\"}\n\
                          - Limit results: {\"pattern\": \"error\", \"max_results\": 20}"
                 .to_string()
     }
@@ -63,7 +64,7 @@ impl Tool for SearchCodeTool {
                 },
                 "file_type": {
                     "type": "string",
-                    "description": "Filter by file type (e.g., 'rust', 'python', 'js', 'ts', 'cpp', 'go'). Uses ripgrep's --type flag."
+                    "description": "Filter by file type (e.g., 'rust', 'py', 'js', 'ts', 'cpp', 'go'). Uses ripgrep's --type flag; common language names like 'python' or 'javascript' are also accepted."
                 },
                 "max_results": {
                     "type": "integer",

@@ -6,6 +6,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::services::llm_service::{ResponseStream, StreamChunk};
+use crate::services::shell_service::MAX_SHELL_CALL_TIMEOUT_SECONDS;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
 /// Outcome returned by [`StreamChunkHandler::on_chunk`] to control the stream loop.
@@ -102,6 +103,13 @@ pub enum RecoveryAction {
 pub const HEADLESS_TRANSPORT_RETRY_ATTEMPTS: usize = 5;
 pub const HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS: usize = 2;
 
+/// How many times headless resumes a turn the stall watchdog ended before it
+/// gives up. A briefly overloaded local server (vLLM, Ollama) goes quiet for
+/// minutes and then recovers; with nobody there to "send a message to
+/// continue", the run would otherwise end and lose its work. Each resume
+/// already cost a full [`STALL_TIMEOUT`] of silence, so the budget is small.
+pub const HEADLESS_STALL_RESUME_ATTEMPTS: usize = 2;
+
 /// Decide what to do about a stream-ending error, per the D5 policy table.
 ///
 /// `attempt` is how many recovery attempts have already been made for this
@@ -147,14 +155,24 @@ pub fn decide_recovery(
                 RecoveryAction::Stop
             }
         }
-        // Stalled: end the turn with the stall message (today). Cancelled:
-        // finalize per D4, handled outside this path. EmptyCompletion: the
-        // nudge already happened inside the turn (AGE-401); a second empty
-        // answer is the error. Other: surface as today.
-        StreamErrorKind::Stalled
-        | StreamErrorKind::Cancelled
-        | StreamErrorKind::EmptyCompletion
-        | StreamErrorKind::Other => RecoveryAction::Stop,
+        // Headless resumes a stalled turn right away (the silence was the
+        // wait); interactive surfaces show the stall message and a human
+        // decides whether to send "continue".
+        StreamErrorKind::Stalled => match surface {
+            StreamSurface::Headless if attempt < HEADLESS_STALL_RESUME_ATTEMPTS => {
+                RecoveryAction::Retry {
+                    after: std::time::Duration::ZERO,
+                }
+            }
+            _ => RecoveryAction::Stop,
+        },
+        // Cancelled: finalize per D4, handled outside this path.
+        // EmptyCompletion: the nudge already happened inside the turn
+        // (AGE-401); a second empty answer is the error. Other: surface as
+        // today.
+        StreamErrorKind::Cancelled | StreamErrorKind::EmptyCompletion | StreamErrorKind::Other => {
+            RecoveryAction::Stop
+        }
     }
 }
 
@@ -203,24 +221,75 @@ pub const STALL_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// than showing "working" for another minute.
 pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// How long a stream may yield nothing while a tool call it announced has not
+/// returned yet.
+///
+/// A tool runs between its `ToolCallStarted` chunk and its result, and the
+/// stream is silent the whole time. `shell_execute` lets the model ask for up
+/// to [`MAX_SHELL_CALL_TIMEOUT_SECONDS`] per command, so the plain
+/// [`STALL_TIMEOUT`] would end a live turn three minutes into a ten-minute
+/// test run. The shell's own timeout still bounds the command; this only
+/// keeps the watchdog from firing first.
+pub const TOOL_STALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(MAX_SHELL_CALL_TIMEOUT_SECONDS as u64 + STALL_TIMEOUT.as_secs());
+
 /// The watchdog's timing, so a test can run it in milliseconds; production
 /// callers go through [`run_stream_loop`], which uses the constants above.
 #[derive(Debug, Clone, Copy)]
 struct StallPolicy {
     tick: std::time::Duration,
     timeout: std::time::Duration,
+    /// The timeout while a tool call is running.
+    tool_timeout: std::time::Duration,
 }
 
 impl StallPolicy {
     const DEFAULT: Self = Self {
         tick: STALL_TICK,
         timeout: STALL_TIMEOUT,
+        tool_timeout: TOOL_STALL_TIMEOUT,
     };
 }
 
-/// Reported as a stream error when the watchdog above fires.
-pub const STALLED_STREAM_MESSAGE: &str = "The model stopped responding (no output for 3 minutes). The turn was ended \
-     — send a message to continue.";
+/// Whether `chunk` changes what the watchdog is waiting on: `Some(true)` once
+/// the model has handed off a tool call (the tool is running now), and
+/// `Some(false)` once a tool result or new model output shows the tool is
+/// done. Bookkeeping chunks (usage, input echoes) leave it as it was: rig
+/// reports a call's usage after its tool calls but before they run.
+fn tool_running_after(chunk: &StreamChunk) -> Option<bool> {
+    match chunk {
+        StreamChunk::ToolCallStarted { .. } => Some(true),
+        StreamChunk::ToolCallResult { .. }
+        | StreamChunk::ToolCallError { .. }
+        | StreamChunk::Text(_)
+        | StreamChunk::Reasoning(_)
+        | StreamChunk::ToolCallDelta => Some(false),
+        _ => None,
+    }
+}
+
+/// Reported as a stream error when the watchdog above fires; `timeout` is
+/// the one that fired ([`STALL_TIMEOUT`], or [`TOOL_STALL_TIMEOUT`] while a
+/// tool call was running).
+pub fn stalled_stream_message(timeout: std::time::Duration) -> String {
+    format!(
+        "The model stopped responding (no output for {}). The turn was ended \
+         — send a message to continue.",
+        describe_duration(timeout)
+    )
+}
+
+/// "3 minutes", "13 minutes", "90 seconds": whole minutes when it divides.
+fn describe_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    let (n, unit) = if secs >= 60 && secs.is_multiple_of(60) {
+        (secs / 60, "minute")
+    } else {
+        (secs, "second")
+    };
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{n} {unit}{plural}")
+}
 
 /// Install a fresh progress sender into the shared slot, returning the receiver.
 ///
@@ -270,6 +339,7 @@ async fn run_stream_loop_with(
     handler.on_stream_started();
 
     let mut last_activity = std::time::Instant::now();
+    let mut tool_running = false;
     let mut loop_result: Result<()> = Ok(());
 
     loop {
@@ -297,7 +367,8 @@ async fn run_stream_loop_with(
                     handler.on_cancelled();
                     break;
                 }
-                if last_activity.elapsed() >= stall.timeout {
+                let timeout = if tool_running { stall.tool_timeout } else { stall.timeout };
+                if last_activity.elapsed() >= timeout {
                     tracing::warn!(
                         idle_secs = last_activity.elapsed().as_secs(),
                         "Stream produced nothing for too long; ending the turn as stalled"
@@ -306,7 +377,7 @@ async fn run_stream_loop_with(
                     // `on_stream_ended` on this exit path (AGE-213).
                     if let Err(e) = handler.on_chunk(Ok(StreamChunk::Error(StreamError::new(
                         StreamErrorKind::Stalled,
-                        STALLED_STREAM_MESSAGE,
+                        stalled_stream_message(timeout),
                     )))) {
                         loop_result = Err(e);
                     }
@@ -321,6 +392,11 @@ async fn run_stream_loop_with(
                 last_activity = std::time::Instant::now();
                 match chunk_result {
                     Some(result) => {
+                        if let Ok(chunk) = &result
+                            && let Some(running) = tool_running_after(chunk)
+                        {
+                            tool_running = running;
+                        }
                         // Capture rather than `?`, so a handler error still
                         // reaches `on_stream_ended` (AGE-213).
                         match handler.on_chunk(result) {
@@ -374,8 +450,10 @@ mod tests {
 
     #[test]
     fn stalled_stream_message_says_what_happened_and_what_to_do() {
-        assert!(STALLED_STREAM_MESSAGE.contains("stopped responding"));
-        assert!(STALLED_STREAM_MESSAGE.contains("send a message"));
+        let message = stalled_stream_message(STALL_TIMEOUT);
+        assert!(message.contains("stopped responding"));
+        assert!(message.contains("(no output for 3 minutes)"));
+        assert!(message.contains("send a message"));
     }
 
     struct TestHandler {
@@ -461,6 +539,7 @@ mod tests {
         let stall = StallPolicy {
             tick: std::time::Duration::from_millis(10),
             timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_millis(60),
         };
         // 20 deltas, 10 ms apart: 200 ms of nothing but reasoning, more
         // than three timeouts long, then the answer.
@@ -514,6 +593,7 @@ mod tests {
         let stall = StallPolicy {
             tick: std::time::Duration::from_millis(10),
             timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_millis(60),
         };
         let mut stream: ResponseStream = Box::pin(futures::stream::pending());
         let (_, mut progress_rx) = mpsc::unbounded_channel();
@@ -534,6 +614,168 @@ mod tests {
             handler.chunks.last(),
             Some(StreamChunk::Error(e)) if e.kind == StreamErrorKind::Stalled
         ));
+    }
+
+    /// A tool that runs longer than the stall timeout (a long
+    /// `shell_execute` with its own `timeout_seconds`) is a busy turn, not
+    /// a stalled one: between `ToolCallStarted` and the result the watchdog
+    /// waits for `tool_timeout` instead.
+    #[tokio::test]
+    async fn a_running_tool_gets_the_tool_timeout() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_secs(10),
+        };
+        let chunks = futures::stream::iter(vec![
+            Ok(StreamChunk::ToolCallStarted {
+                id: "call_1".into(),
+                name: "shell_execute".into(),
+            }),
+            Ok(StreamChunk::ToolCallInput {
+                id: "call_1".into(),
+                arguments: "{}".into(),
+            }),
+        ])
+        .chain(futures::stream::once(async {
+            // Four stall timeouts of silence while the tool runs.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            Ok(StreamChunk::ToolCallResult {
+                id: "call_1".into(),
+                result: "ok".into(),
+            })
+        }))
+        .chain(futures::stream::iter(vec![
+            Ok(StreamChunk::Text("done".into())),
+            Ok(StreamChunk::Done),
+        ]));
+        let mut stream: ResponseStream = Box::pin(chunks);
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        run_stream_loop_with(
+            &mut stream,
+            &mut progress_rx,
+            &cancel_flag,
+            &mut handler,
+            stall,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(handler.chunks.last(), Some(StreamChunk::Done)),
+            "a long-running tool was ended as stalled: {:?}",
+            handler.chunks
+        );
+    }
+
+    /// Once the tool has answered, silence is measured against the normal
+    /// timeout again.
+    #[tokio::test]
+    async fn silence_after_a_tool_result_is_still_a_stall() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_secs(3600),
+        };
+        let chunks = futures::stream::iter(vec![
+            Ok(StreamChunk::ToolCallStarted {
+                id: "call_1".into(),
+                name: "shell_execute".into(),
+            }),
+            Ok(StreamChunk::ToolCallResult {
+                id: "call_1".into(),
+                result: "ok".into(),
+            }),
+        ])
+        .chain(futures::stream::pending());
+        let mut stream: ResponseStream = Box::pin(chunks);
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_stream_loop_with(
+                &mut stream,
+                &mut progress_rx,
+                &cancel_flag,
+                &mut handler,
+                stall,
+            ),
+        )
+        .await
+        .expect("the watchdog fell back to the tool timeout after the result")
+        .unwrap();
+
+        assert!(matches!(
+            handler.chunks.last(),
+            Some(StreamChunk::Error(e)) if e.kind == StreamErrorKind::Stalled
+        ));
+    }
+
+    /// The message names the timeout that fired: a stall inside the
+    /// extended tool-call window used to say "3 minutes" after thirteen.
+    #[test]
+    fn stalled_stream_message_names_the_tool_timeout() {
+        let message = stalled_stream_message(TOOL_STALL_TIMEOUT);
+        assert!(message.contains("(no output for 13 minutes)"), "{message}");
+        assert!(stalled_stream_message(std::time::Duration::from_secs(90)).contains("90 seconds"));
+        assert!(stalled_stream_message(std::time::Duration::from_secs(60)).contains("1 minute)"));
+    }
+
+    /// A tool that never answers stalls on the tool timeout, and the error
+    /// says so rather than quoting the plain one.
+    #[tokio::test]
+    async fn a_stall_during_a_tool_call_reports_the_tool_timeout() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_secs(1),
+        };
+        let chunks = futures::stream::iter(vec![Ok(StreamChunk::ToolCallStarted {
+            id: "call_1".into(),
+            name: "shell_execute".into(),
+        })])
+        .chain(futures::stream::pending());
+        let mut stream: ResponseStream = Box::pin(chunks);
+        let (_, mut progress_rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let mut handler = TestHandler::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_stream_loop_with(
+                &mut stream,
+                &mut progress_rx,
+                &cancel_flag,
+                &mut handler,
+                stall,
+            ),
+        )
+        .await
+        .expect("the watchdog fires on the tool timeout")
+        .unwrap();
+
+        match handler.chunks.last() {
+            Some(StreamChunk::Error(e)) => {
+                assert_eq!(e.kind, StreamErrorKind::Stalled);
+                assert_eq!(e.message, stalled_stream_message(stall.tool_timeout));
+                assert!(e.message.contains("1 second"), "{}", e.message);
+            }
+            other => panic!("expected a stall error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_tool_timeout_outlasts_the_longest_shell_call() {
+        assert!(
+            TOOL_STALL_TIMEOUT
+                > std::time::Duration::from_secs(MAX_SHELL_CALL_TIMEOUT_SECONDS as u64),
+            "the watchdog must not end a turn before shell_execute's own timeout fires"
+        );
     }
 
     #[tokio::test]
@@ -917,6 +1159,34 @@ mod tests {
         }
     }
 
+    /// A stall resumes the turn only where nobody is there to type
+    /// "continue", and only a bounded number of times.
+    #[test]
+    fn stall_resumes_only_on_headless_and_only_within_its_budget() {
+        for surface in [StreamSurface::Desktop, StreamSurface::InteractiveTui] {
+            assert_eq!(
+                decide_recovery(StreamErrorKind::Stalled, surface, 0),
+                RecoveryAction::Stop
+            );
+        }
+        for attempt in 0..HEADLESS_STALL_RESUME_ATTEMPTS {
+            assert_eq!(
+                decide_recovery(StreamErrorKind::Stalled, StreamSurface::Headless, attempt),
+                RecoveryAction::Retry {
+                    after: std::time::Duration::ZERO
+                }
+            );
+        }
+        assert_eq!(
+            decide_recovery(
+                StreamErrorKind::Stalled,
+                StreamSurface::Headless,
+                HEADLESS_STALL_RESUME_ATTEMPTS
+            ),
+            RecoveryAction::Stop
+        );
+    }
+
     /// AGE-497: an unknown-tool call used to fall into `Other` (always
     /// `Stop`), ending the run outright on a one-token tool-name mistake.
     #[test]
@@ -928,9 +1198,8 @@ mod tests {
     }
 
     #[test]
-    fn stalled_cancelled_empty_and_other_always_stop() {
+    fn cancelled_empty_and_other_always_stop() {
         for kind in [
-            StreamErrorKind::Stalled,
             StreamErrorKind::Cancelled,
             StreamErrorKind::EmptyCompletion,
             StreamErrorKind::Other,

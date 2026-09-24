@@ -67,6 +67,9 @@ pub mod stream_processor;
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
 pub mod title_generator;
+/// The model's view of its tool-turn budget and the tool-free wrap-up call
+/// that replaces `MaxTurnsError`.
+pub mod turn_budget;
 #[cfg(feature = "math-render")]
 pub mod typst_compiler_service;
 /// The broker's named virtual agents — each worker's argv and endpoint —
@@ -109,9 +112,9 @@ pub use stream_fixtures::{
     Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
 };
 pub use stream_processor::{
-    ChunkAction, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_TRANSPORT_RETRY_ATTEMPTS,
-    RecoveryAction, STALL_TICK, STALL_TIMEOUT, STALLED_STREAM_MESSAGE, StreamChunkHandler,
-    StreamError, StreamErrorKind, StreamSurface, decide_recovery, install_progress_channel,
-    run_stream_loop,
+    ChunkAction, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_STALL_RESUME_ATTEMPTS,
+    HEADLESS_TRANSPORT_RETRY_ATTEMPTS, RecoveryAction, STALL_TICK, STALL_TIMEOUT,
+    StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+    install_progress_channel, run_stream_loop, stalled_stream_message,
 };
 pub use title_generator::generate_title;
