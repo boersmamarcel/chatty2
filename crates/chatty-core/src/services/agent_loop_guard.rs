@@ -125,6 +125,20 @@ const TEST_RUNNER_MARKERS: &[&str] = &[
     "phpunit",
 ];
 
+/// Research tools, with the argument that names what they look at: a URL
+/// fetched, a query searched, a code snippet run. The first call on a target
+/// is progress: a GAIA run reading one new page after another is working,
+/// not spinning.
+const RESEARCH_TOOLS: &[(&str, &str)] = &[
+    ("fetch", "url"),
+    ("browser_navigate", "url"),
+    ("browser_use", "task"),
+    ("search_web", "query"),
+    ("doc_retriever", "query"),
+    ("query_data", "query"),
+    ("execute_code", "code"),
+];
+
 /// Shell commands whose file arguments are a read.
 const SHELL_READERS: &[&str] = &["cat", "head", "tail", "sed", "nl", "less", "more", "bat"];
 
@@ -186,6 +200,8 @@ pub struct AgentLoopGuard {
     /// Files read so far, and test commands run so far.
     seen_files: HashSet<String>,
     seen_test_commands: HashSet<String>,
+    /// URLs fetched, queries searched and code run so far, as `tool:target`.
+    seen_targets: HashSet<String>,
 }
 
 impl AgentLoopGuard {
@@ -208,6 +224,7 @@ impl AgentLoopGuard {
             progress_nudged: false,
             seen_files: HashSet::new(),
             seen_test_commands: HashSet::new(),
+            seen_targets: HashSet::new(),
         }
     }
 
@@ -248,12 +265,18 @@ impl AgentLoopGuard {
     }
 
     /// Whether this call moved the run forward: it wrote a file, ran a test
-    /// command not run before, or read a file not read before.
+    /// command not run before, read a file not read before, or fetched,
+    /// searched or ran something new ([`RESEARCH_TOOLS`]).
     fn made_progress(&mut self, name: &str, input: &str) -> bool {
         if FILE_WRITE_TOOLS.contains(&name) {
             return true;
         }
         let args: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+        if let Some(target) = research_target(name, &args)
+            && self.seen_targets.insert(format!("{name}:{target}"))
+        {
+            return true;
+        }
         if COMMAND_TOOLS.contains(&name) {
             let command = args
                 .get("command")
@@ -388,6 +411,26 @@ impl AgentLoopGuard {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// What a research tool call looks at, normalised so the same page or query
+/// is recognised again; `None` for any other tool. A `fetch` further into a
+/// page (`start_index`) is a new target: it reads what was not read yet.
+fn research_target(name: &str, args: &serde_json::Value) -> Option<String> {
+    let (_, key) = RESEARCH_TOOLS.iter().find(|(tool, _)| *tool == name)?;
+    let value = args.get(*key)?.as_str()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut target = if *key == "code" {
+        value.to_string()
+    } else {
+        value.to_lowercase()
+    };
+    if let Some(start) = args.get("start_index").and_then(|v| v.as_u64()) {
+        target.push_str(&format!("@{start}"));
+    }
+    Some(target)
+}
 
 /// The file arguments of the reading commands (`cat`, `sed -n`, `head` …)
 /// in a shell command line, split on the usual separators.
@@ -613,6 +656,41 @@ mod tests {
                 "{input} restarts the window"
             );
         }
+    }
+
+    #[test]
+    fn new_pages_queries_and_code_are_progress_repeats_are_not() {
+        let mut g = progress_guard();
+        let calls = [
+            ("search_web", r#"{"query": "1928 Olympics flag bearers"}"#),
+            ("fetch", r#"{"url": "https://en.wikipedia.org/wiki/A"}"#),
+            (
+                "fetch",
+                r#"{"url": "https://en.wikipedia.org/wiki/A", "start_index": 5000}"#,
+            ),
+            ("browser_navigate", r#"{"url": "https://example.org/b"}"#),
+            ("execute_code", r#"{"code": "print(sum(range(10)))"}"#),
+        ];
+        for (name, input) in calls {
+            search_without_progress(&mut g, PROGRESS_WINDOW_TOOL_CALLS - 1);
+            assert_eq!(
+                g.on_tool_progress(name, input),
+                ProgressCheck::Fine,
+                "{input}"
+            );
+        }
+        // A research run that keeps reading new pages is never stopped.
+        for i in 0..PROGRESS_WINDOW_TOOL_CALLS * 3 {
+            let url = format!(r#"{{"url": "https://example.org/page{i}"}}"#);
+            assert_eq!(g.on_tool_progress("fetch", &url), ProgressCheck::Fine);
+        }
+        // The same page, query or snippet again is not progress.
+        let mut last = ProgressCheck::Fine;
+        for i in 0..PROGRESS_WINDOW_TOOL_CALLS {
+            let (name, input) = calls[i % calls.len()];
+            last = g.on_tool_progress(name, input);
+        }
+        assert!(matches!(last, ProgressCheck::Nudge(_)), "{last:?}");
     }
 
     #[test]
