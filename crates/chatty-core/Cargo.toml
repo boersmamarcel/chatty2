@@ -54,6 +54,7 @@ azure_core.workspace = true
 # PDF and image (optional — enable with "pdf" feature)
 pdfium-render = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
 
 # Excel (optional — enable with "excel" feature)
 calamine = { workspace = true, optional = true }
@@ -139,7 +140,7 @@ gpui-globals = ["dep:gpui"]
 # Optional tool/service feature groups
 excel = ["dep:calamine", "dep:rust_xlsxwriter", "dep:umya-spreadsheet"]
 docx = ["dep:docx-rs"]
-pdf = ["dep:pdfium-render", "dep:image"]
+pdf = ["dep:pdfium-render", "dep:image", "dep:lopdf"]
 # Slide rasterisation renders the deck to a PDF and pages it with pdfium,
 # so "pptx" pulls in "pdf" rather than silently degrading without it.
 pptx = ["dep:rpptx", "dep:pptx_writer", "pdf"]

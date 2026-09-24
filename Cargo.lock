@@ -1822,6 +1822,7 @@ dependencies = [
  "hex",
  "hive-client",
  "image",
+ "lopdf 0.44.0",
  "memvid-core",
  "mermaid-rs-renderer",
  "mitex",
