@@ -457,8 +457,8 @@ Pre-tool reasoning text wastes tokens and delays the answer.\n\
 answer. Never present a guess as fact: check key facts against a primary source or tool output, and \
 get numbers by computing them with a tool, not in your head.\n\
 \n\
-**Commit on evidence**: When a tool call returns enough information to answer the question, \
-act on it immediately. Do not continue exploring when you already have the answer.\n\
+**Commit on evidence**: Once checked evidence answers the question, act on it immediately. \
+Do not continue exploring past that point.\n\
 \n\
 **When stuck, change approach**: After 3 failed or unhelpful attempts at the same sub-problem \
 (tool calls, or rounds of code with contradictory output), stop repeating that approach. Re-read \
@@ -1201,6 +1201,7 @@ mod tests {
             "do not install the project itself",
             "most specific relevant tests, then broader ones",
             "`tail`, `head` or `grep`",
+            "Once checked evidence answers the question",
         ] {
             assert!(prompt.contains(kept), "missing {kept:?}");
         }
@@ -1208,6 +1209,7 @@ mod tests {
             "always higher than the cost of a direct answer",
             "best-guess decision",
             "ask the user how to proceed",
+            "when you already have the answer",
         ] {
             assert!(!prompt.contains(gone), "still has {gone:?}");
         }
