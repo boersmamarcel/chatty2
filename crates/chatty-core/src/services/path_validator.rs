@@ -64,6 +64,31 @@ impl PathValidator {
         Ok(canonical)
     }
 
+    /// [`validate`](Self::validate) for a read-only text read, which may
+    /// also reach the system temp directory (`/tmp`): the model writes
+    /// scratch files there from the shell (`python ... > /tmp/out.txt`) and
+    /// then could not read them back. Read-only: writes, listings and
+    /// deletes still go through `validate`, and a symlink out of the temp
+    /// dir is resolved and refused like any other outside path. What can be
+    /// read there is only what this user's OS permissions already allow the
+    /// shell tool to read.
+    pub async fn validate_readable(&self, path: &str) -> Result<PathBuf> {
+        let error = match self.validate(path).await {
+            Ok(canonical) => return Ok(canonical),
+            Err(error) => error,
+        };
+        if !Path::new(path).is_absolute() {
+            return Err(error);
+        }
+        let Ok(canonical) = fs::canonicalize(path).await else {
+            return Err(error);
+        };
+        match fs::canonicalize(std::env::temp_dir()).await {
+            Ok(temp) if temp.parent().is_some() && canonical.starts_with(&temp) => Ok(canonical),
+            _ => Err(error),
+        }
+    }
+
     /// Validate a path for a file that may not yet exist (write operations).
     /// Ensures the parent directory exists and is within the workspace root.
     /// Returns the resolved absolute path.
@@ -217,6 +242,39 @@ impl PathValidator {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Scratch files the model wrote to /tmp can be read back, but only
+    /// read: `validate` (writes, listings) still refuses them, and a
+    /// symlink from /tmp to outside it is refused.
+    #[tokio::test]
+    async fn test_validate_readable_allows_the_temp_dir_read_only() {
+        let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let note = scratch.path().join("out.txt");
+        fs::write(&note, "42").unwrap();
+        let validator = PathValidator::new(workspace.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let note_path = note.to_str().unwrap();
+        assert!(validator.validate_readable(note_path).await.is_ok());
+        assert!(validator.validate(note_path).await.is_err());
+
+        let outside = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        assert!(validator.validate_readable(outside).await.is_err());
+
+        #[cfg(unix)]
+        {
+            let link = scratch.path().join("escape");
+            std::os::unix::fs::symlink(outside, &link).unwrap();
+            assert!(
+                validator
+                    .validate_readable(link.to_str().unwrap())
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_validate_relative_path() {
