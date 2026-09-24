@@ -13,6 +13,7 @@ mod request_recorder;
 mod tool_block_determinism;
 mod tool_collector;
 mod tool_loading;
+mod tool_name_repair;
 mod tool_profile;
 mod tool_registry;
 
