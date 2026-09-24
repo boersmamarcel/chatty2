@@ -653,6 +653,15 @@ async fn main() -> Result<()> {
         );
 
         engine.set_max_duration(max_duration);
+        // A --headless run knows its task before its agent exists; pipe
+        // and participant runs read theirs later.
+        if cli.headless
+            && !cli.pipe
+            && !participant_mode
+            && let Some(message) = cli.message.as_deref()
+        {
+            engine.note_task(message);
+        }
         engine.init_conversation().await?;
         if let Some(socket) = cli.participant_socket.as_deref() {
             #[cfg(unix)]
