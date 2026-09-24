@@ -1165,9 +1165,17 @@ impl AgentClient {
         let verify_completion_tool = VerifyCompletionTool::new(agent_task_controller.clone());
 
         // Ask-the-user tool: only offered when a frontend is listening for the
-        // question. Without a pending store the call would block until it
-        // times out, so the model must not see the tool at all.
-        let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
+        // question, and when execution settings have not turned it off
+        // (`chatty-tui --disable ask-user`, e.g. an unattended benchmark
+        // harness with no one to answer). Without a pending store the call
+        // would block until it times out, so the model must not see the
+        // tool at all.
+        let ask_user_tool = exec_settings
+            .as_ref()
+            .is_none_or(|settings| settings.ask_user_enabled)
+            .then(|| pending_clarifications.clone())
+            .flatten()
+            .map(AskUserTool::new);
 
         // The broker's local workers exist exactly when the gateway that
         // serves them does (ADR-0011 C2); the gateway publishes them
