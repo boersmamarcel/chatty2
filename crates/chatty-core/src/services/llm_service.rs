@@ -5,7 +5,7 @@ use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
 use rig_agent::completion::PromptError;
 use rig_agent::streaming::StreamingPrompt;
 use rig_core::completion::{CompletionError, Message};
-use rig_core::message::UserContent;
+use rig_core::message::{Text, ToolResultContent, UserContent};
 use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -418,6 +418,65 @@ fn failed_run_messages(
     Some(StreamChunk::TurnMessages(messages.to_vec()))
 }
 
+/// The text a dropped image is replaced with, so the model knows content
+/// was removed instead of silently seeing fewer items than it sent/expects.
+const IMAGE_UNSUPPORTED_NOTE: &str =
+    "[Image omitted: the current model does not accept image input.]";
+
+/// Strip image content from a request the configured model cannot accept,
+/// replacing each dropped image with a text note so the model (and a human
+/// reading the transcript) can tell content was removed rather than just
+/// silently missing. Covers images in the new message, in prior turns'
+/// history (e.g. after switching mid-conversation to a text-only model),
+/// and inside tool results (e.g. `pdf_to_image`, a screenshot attached on a
+/// later turn). A no-op, and free of any clone, when `supports_images` is
+/// true.
+fn strip_unsupported_images(
+    history: Vec<Message>,
+    contents: Vec<UserContent>,
+    supports_images: bool,
+) -> (Vec<Message>, Vec<UserContent>) {
+    if supports_images {
+        return (history, contents);
+    }
+
+    let strip_user_content = |items: Vec<UserContent>| -> Vec<UserContent> {
+        items
+            .into_iter()
+            .map(|item| match item {
+                UserContent::Image(_) => UserContent::Text(Text::new(IMAGE_UNSUPPORTED_NOTE)),
+                UserContent::ToolResult(mut result) => {
+                    result.content = result
+                        .content
+                        .into_iter()
+                        .map(|c| match c {
+                            ToolResultContent::Image(_) => {
+                                ToolResultContent::Text(Text::new(IMAGE_UNSUPPORTED_NOTE))
+                            }
+                            other => other,
+                        })
+                        .collect();
+                    UserContent::ToolResult(result)
+                }
+                other => other,
+            })
+            .collect()
+    };
+
+    let history = history
+        .into_iter()
+        .map(|message| match message {
+            Message::User { content } => Message::User {
+                content: strip_user_content(content),
+            },
+            other => other,
+        })
+        .collect();
+    let contents = strip_user_content(contents);
+
+    (history, contents)
+}
+
 /// Stream a prompt with an agent
 ///
 /// # Arguments
@@ -443,6 +502,13 @@ pub async fn stream_prompt(
     clarification_rx: Option<mpsc::UnboundedReceiver<ClarificationNotification>>,
     turn_budget: TurnBudget,
 ) -> Result<ResponseStream> {
+    // A stale `ModelConfig::supports_images` (OpenRouter's blanket default is
+    // "true" for every model behind it) or a model switch mid-conversation
+    // (history built for a vision model, now sent to a text-only one) would
+    // otherwise reach the provider as-is and come back as a raw 400 (e.g.
+    // "At most 0 image(s) may be provided") instead of something the model or
+    // the user can act on. Strip images up front and tell the model instead.
+    let (history, contents) = strip_unsupported_images(history, contents, agent.supports_images());
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
     let history_len = history.len();
@@ -566,12 +632,87 @@ mod tests {
     use rig_core::streaming::ToolCallDeltaContent;
 
     use super::{
-        BUDGET_SPENT_NOTE, Message, MultiTurnStreamItem, PromptError, RequestRecorder, StreamChunk,
-        StreamErrorKind, StreamedAssistantContent, StreamedUserContent, StreamingError,
-        UsageSemantics, WRAP_UP_TOOL_CALL_STOP, budget_spent_end, classify_completion_error,
-        classify_streaming_error, failed_run_messages, map_item, map_stream_result,
-        normalize_usage, streamed_tool_result_to_text, tool_result_looks_like_error,
+        BUDGET_SPENT_NOTE, IMAGE_UNSUPPORTED_NOTE, Message, MultiTurnStreamItem, PromptError,
+        RequestRecorder, StreamChunk, StreamErrorKind, StreamedAssistantContent,
+        StreamedUserContent, StreamingError, UsageSemantics, WRAP_UP_TOOL_CALL_STOP,
+        budget_spent_end, classify_completion_error, classify_streaming_error, failed_run_messages,
+        map_item, map_stream_result, normalize_usage, streamed_tool_result_to_text,
+        strip_unsupported_images, tool_result_looks_like_error,
     };
+    use rig_core::message::{Image, UserContent};
+
+    // ── AGE image-input-on-text-only-model guard ─────────────────────────────
+
+    #[test]
+    fn supported_model_passes_images_through_unchanged() {
+        let contents = vec![UserContent::Image(Image::default())];
+        let history = vec![Message::User {
+            content: vec![UserContent::Image(Image::default())],
+        }];
+
+        let (history, contents) = strip_unsupported_images(history, contents, true);
+
+        assert!(matches!(contents[0], UserContent::Image(_)));
+        let Message::User { content } = &history[0] else {
+            panic!("expected a user message");
+        };
+        assert!(matches!(content[0], UserContent::Image(_)));
+    }
+
+    #[test]
+    fn unsupported_model_replaces_a_new_message_image_with_a_note() {
+        let contents = vec![UserContent::Image(Image::default())];
+
+        let (_, contents) = strip_unsupported_images(Vec::new(), contents, false);
+
+        match &contents[0] {
+            UserContent::Text(text) => assert_eq!(text.text, IMAGE_UNSUPPORTED_NOTE),
+            other => panic!("expected the image to become a text note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_model_replaces_a_history_image_with_a_note() {
+        let history = vec![Message::User {
+            content: vec![UserContent::Image(Image::default())],
+        }];
+
+        let (history, _) = strip_unsupported_images(history, Vec::new(), false);
+
+        let Message::User { content } = &history[0] else {
+            panic!("expected a user message");
+        };
+        match &content[0] {
+            UserContent::Text(text) => assert_eq!(text.text, IMAGE_UNSUPPORTED_NOTE),
+            other => panic!("expected the image to become a text note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_model_replaces_a_tool_result_image_with_a_note() {
+        let tool_result = ToolResult {
+            call: ToolCallId::new("call-1").unwrap(),
+            provider: None,
+            name: "pdf_to_image".to_string(),
+            content: vec![ToolResultContent::Image(Image::default())],
+        };
+        let history = vec![Message::User {
+            content: vec![UserContent::ToolResult(tool_result)],
+        }];
+
+        let (history, _) = strip_unsupported_images(history, Vec::new(), false);
+
+        let Message::User { content } = &history[0] else {
+            panic!("expected a user message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("expected a tool result");
+        };
+        match &result.content[0] {
+            ToolResultContent::Text(text) => assert_eq!(text.text, IMAGE_UNSUPPORTED_NOTE),
+            other => panic!("expected the image to become a text note, got {other:?}"),
+        }
+    }
 
     /// Anthropic reports `input_tokens` without the cached share; OpenAI-style
     /// usage reports it inside `prompt_tokens`. The same activity must yield
