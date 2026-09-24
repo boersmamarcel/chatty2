@@ -49,6 +49,17 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// asks for a smaller window still gets it.
 const ERROR_MAX_LENGTH: usize = 2_048;
 
+/// Times a 429 is retried before its answer is returned as is.
+const MAX_RATE_LIMIT_RETRIES: u32 = 2;
+
+/// Longest `Retry-After` the tool waits out; a server asking for longer gets
+/// its 429 passed back to the model instead of stalling the turn.
+const MAX_RETRY_AFTER_SECS: u64 = 10;
+
+/// Where the Wayback Machine fallback looks up and reads archived copies.
+const WAYBACK_AVAILABLE_URL: &str = "https://archive.org/wayback/available";
+const WAYBACK_WEB_URL: &str = "https://web.archive.org";
+
 /// Arguments for the fetch tool
 #[derive(Deserialize, Serialize)]
 pub struct FetchToolArgs {
@@ -92,6 +103,11 @@ pub struct FetchToolOutput {
     /// Path to the saved file (only present for binary content like images, PDFs, zips)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_to: Option<String>,
+    /// What the tool did on the way to this answer: waited out a rate
+    /// limit, retried with a browser User-Agent, or served an archived copy
+    /// (with its capture date) because the live page was blocked or gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Native fetch tool that provides read-only HTTP GET access to web content.
@@ -110,6 +126,10 @@ pub struct FetchTool {
     /// `find` over a long document don't download it again. Shared by
     /// clones, i.e. by the one agent the tool was built for.
     pages: PageCache,
+    /// Wayback Machine endpoints: the availability lookup and the snapshot
+    /// host. Fields so tests can point them at a local server.
+    wayback_available_url: String,
+    wayback_web_url: String,
 }
 
 impl FetchTool {
@@ -119,6 +139,8 @@ impl FetchTool {
             client,
             workspace_dir,
             pages: PageCache::default(),
+            wayback_available_url: WAYBACK_AVAILABLE_URL.to_string(),
+            wayback_web_url: WAYBACK_WEB_URL.to_string(),
         }
     }
 
@@ -148,6 +170,8 @@ impl Tool for FetchTool {
          session, so paging and find don't download again. \
          A URL with a #fragment starts at that section. \
          Binary content (images, PDFs, zip files, etc.) is saved to the workspace directory. \
+         Rate limits are waited out; a page that is blocked or gone is served from the \
+         Wayback Machine when an archived copy exists, and the result's `note` says so. \
          Only performs GET requests (read-only)."
             .to_string()
     }
@@ -275,6 +299,7 @@ impl Tool for FetchTool {
             truncated,
             total_length: Some(total_length),
             saved_to: None,
+            note: page.note.clone(),
         })
     }
 }
@@ -286,6 +311,9 @@ struct CachedPage {
     /// The extracted text: HTML already converted, starting at the
     /// requested #fragment when the page had it.
     text: String,
+    /// How the page was obtained when that was not a plain GET (see
+    /// [`FetchToolOutput::note`]).
+    note: Option<String>,
 }
 
 /// What one download produced: a text page to window (and cache), or an
@@ -341,9 +369,15 @@ impl PageCache {
 }
 
 impl FetchTool {
-    /// GET `url`, following redirects, and turn the response into either a
-    /// page of extracted text or a final answer (an error status's body, or
-    /// a binary file saved to the workspace).
+    /// GET `url` and turn the response into either a page of extracted
+    /// text or a final answer (an error status's body, or a binary file
+    /// saved to the workspace).
+    ///
+    /// Recovers from the failures a person at a browser would work around:
+    /// 1. 429: wait out `Retry-After` (or a short backoff) and try again.
+    /// 2. 403 with the default User-Agent: retry once as a browser.
+    /// 3. Still blocked, or 404/410: serve the Wayback Machine's closest
+    ///    archived copy, labelled with its capture date.
     async fn download(
         &self,
         url: &str,
@@ -352,12 +386,101 @@ impl FetchTool {
         start_index: usize,
         max_length: usize,
     ) -> Result<Download, ToolError> {
-        let url = url.to_string();
         info!(url = %url, max_length = max_length, "Fetching URL");
 
-        // Perform GET request, following redirects manually (max 10 hops)
-        // to validate each redirect target against the private-host denylist.
-        let mut current_url = url.clone();
+        let mut notes: Vec<String> = Vec::new();
+        let mut agent = user_agent.map(str::to_string);
+        let mut rate_limit_retries = 0;
+        let (response, current_url) = loop {
+            let (response, current_url) = self.send(url, agent.as_deref()).await?;
+            let status = response.status().as_u16();
+            if status == 429 && rate_limit_retries < MAX_RATE_LIMIT_RETRIES {
+                match retry_delay(response.headers(), rate_limit_retries) {
+                    Ok(delay) => {
+                        info!(url = %url, delay_secs = delay.as_secs(), "Rate limited; retrying");
+                        notes.push(format!(
+                            "Rate limited (429); waited {} s and retried.",
+                            delay.as_secs()
+                        ));
+                        tokio::time::sleep(delay).await;
+                        rate_limit_retries += 1;
+                        continue;
+                    }
+                    Err(asked) => notes.push(format!(
+                        "Rate limited (429); the server asks to wait {asked} s, longer than \
+                         this tool waits. Try again later or use another source."
+                    )),
+                }
+            }
+            if status == 403 && user_agent.is_none() && agent.is_none() {
+                info!(url = %url, "Forbidden with the default User-Agent; retrying as a browser");
+                notes.push(
+                    "The default User-Agent got 403; retried with a browser User-Agent."
+                        .to_string(),
+                );
+                agent = Some(crate::services::http_client::BROWSER_USER_AGENT.to_string());
+                continue;
+            }
+            break (response, current_url);
+        };
+
+        let status = response.status().as_u16();
+        if matches!(status, 403 | 404 | 410) && !is_archive_url(url) {
+            match self.archived_copy(url).await {
+                Some((snapshot_url, captured)) => {
+                    notes.push(format!(
+                        "The live page returned {status}. This is an ARCHIVED copy from the \
+                         Wayback Machine, captured {captured} ({snapshot_url}); it may differ \
+                         from the current page."
+                    ));
+                    let (snapshot, snapshot_final) = self.send(&snapshot_url, None).await?;
+                    if snapshot.status().is_success() {
+                        return self
+                            .read_response(
+                                snapshot,
+                                &snapshot_final,
+                                url,
+                                fragment,
+                                start_index,
+                                max_length,
+                                notes,
+                            )
+                            .await;
+                    }
+                    notes.pop();
+                    notes.push(format!(
+                        "The Wayback Machine lists a copy captured {captured}, but reading it \
+                         returned {}.",
+                        snapshot.status().as_u16()
+                    ));
+                }
+                None => notes.push(format!(
+                    "The live page returned {status} and the Wayback Machine has no archived copy."
+                )),
+            }
+        }
+
+        self.read_response(
+            response,
+            &current_url,
+            url,
+            fragment,
+            start_index,
+            max_length,
+            notes,
+        )
+        .await
+    }
+
+    /// GET `url`, following redirects manually (max 10 hops) to validate
+    /// each redirect target against the private-host denylist. Returns the
+    /// final response and the URL it came from.
+    async fn send(
+        &self,
+        url: &str,
+        user_agent: Option<&str>,
+    ) -> Result<(reqwest::Response, String), ToolError> {
+        let mut current_url = url.to_string();
         let mut response = self
             .request(&current_url, user_agent)
             .send()
@@ -406,7 +529,72 @@ impl FetchTool {
                 .await
                 .map_err(|e| ToolError::OperationFailed(format!("Redirect failed: {}", e)))?;
         }
+        Ok((response, current_url))
+    }
 
+    /// The Wayback Machine's closest good capture of `url`, as the snapshot
+    /// URL to read (raw, without the archive's toolbar) and a readable
+    /// capture date. `None` when there is none or the lookup fails — the
+    /// fallback is best-effort and never hides the live answer.
+    async fn archived_copy(&self, url: &str) -> Option<(String, String)> {
+        #[derive(Deserialize)]
+        struct Available {
+            archived_snapshots: Snapshots,
+        }
+        #[derive(Deserialize)]
+        struct Snapshots {
+            closest: Option<Closest>,
+        }
+        #[derive(Deserialize)]
+        struct Closest {
+            available: bool,
+            status: String,
+            timestamp: String,
+        }
+
+        let lookup =
+            reqwest::Url::parse_with_params(&self.wayback_available_url, &[("url", url)]).ok()?;
+        let response = self
+            .client
+            .get(lookup)
+            .send()
+            .await
+            .map_err(|e| warn!(error = %e, "Wayback availability lookup failed"))
+            .ok()?;
+        if !response.status().is_success() {
+            warn!(
+                status = response.status().as_u16(),
+                "Wayback availability lookup failed"
+            );
+            return None;
+        }
+        let available: Available = response
+            .json()
+            .await
+            .map_err(|e| warn!(error = %e, "Unreadable Wayback availability answer"))
+            .ok()?;
+        let closest = available.archived_snapshots.closest?;
+        if !closest.available || closest.status != "200" {
+            return None;
+        }
+        let timestamp = closest.timestamp;
+        let snapshot = format!("{}/web/{timestamp}id_/{url}", self.wayback_web_url);
+        Some((snapshot, capture_date(&timestamp)))
+    }
+
+    /// Turn a final response into a [`Download`], attaching `notes`.
+    #[allow(clippy::too_many_arguments)]
+    async fn read_response(
+        &self,
+        response: reqwest::Response,
+        current_url: &str,
+        url: &str,
+        fragment: Option<&str>,
+        start_index: usize,
+        max_length: usize,
+        notes: Vec<String>,
+    ) -> Result<Download, ToolError> {
+        let note = (!notes.is_empty()).then(|| notes.join(" "));
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -425,7 +613,7 @@ impl FetchTool {
             let (content, truncated) = error_body_window(
                 &body,
                 &content_type,
-                Some(&current_url),
+                Some(current_url),
                 fragment,
                 start_index,
                 max_length,
@@ -437,15 +625,16 @@ impl FetchTool {
                 truncated,
                 total_length: None,
                 saved_to: None,
+                note,
             }));
         }
 
         // Determine if this is binary content that should be saved to disk
         if is_binary_content_type(&content_type) {
             return self
-                .handle_binary_response(response, &url, status, &content_type)
+                .handle_binary_response(response, url, status, &content_type)
                 .await
-                .map(Download::Done);
+                .map(|output| Download::Done(FetchToolOutput { note, ..output }));
         }
 
         // Read body text
@@ -457,7 +646,7 @@ impl FetchTool {
         // against the URL the body actually came from, i.e. after redirects.
         let is_html = content_type.contains("text/html") || looks_like_html(&body);
         let text = if is_html {
-            html_to_text(&body, Some(&current_url), fragment)
+            html_to_text(&body, Some(current_url), fragment)
         } else {
             body
         };
@@ -466,7 +655,54 @@ impl FetchTool {
             status,
             content_type,
             text,
+            note,
         }))
+    }
+}
+
+/// How long to wait before retrying a 429: the server's `Retry-After` in
+/// seconds when it gives one, else 2 s, 4 s, ... by attempt. `Err` carries
+/// a `Retry-After` longer than [`MAX_RETRY_AFTER_SECS`].
+fn retry_delay(
+    headers: &reqwest::header::HeaderMap,
+    attempt: u32,
+) -> Result<std::time::Duration, u64> {
+    let asked = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    match asked {
+        Some(secs) if secs > MAX_RETRY_AFTER_SECS => Err(secs),
+        Some(secs) => Ok(std::time::Duration::from_secs(secs)),
+        None => Ok(std::time::Duration::from_secs(2u64 << attempt)),
+    }
+}
+
+/// Whether `url` already points into the Internet Archive, where a Wayback
+/// fallback would only look itself up.
+fn is_archive_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .is_some_and(|host| host == "archive.org" || host.ends_with(".archive.org"))
+}
+
+/// A Wayback timestamp (`YYYYMMDDhhmmss`) as `YYYY-MM-DD hh:mm:ss UTC`;
+/// anything else is returned as is.
+fn capture_date(timestamp: &str) -> String {
+    if timestamp.len() == 14 && timestamp.bytes().all(|b| b.is_ascii_digit()) {
+        let t = timestamp;
+        format!(
+            "{}-{}-{} {}:{}:{} UTC",
+            &t[0..4],
+            &t[4..6],
+            &t[6..8],
+            &t[8..10],
+            &t[10..12],
+            &t[12..14]
+        )
+    } else {
+        timestamp.to_string()
     }
 }
 
@@ -534,6 +770,7 @@ impl FetchTool {
             truncated: false,
             total_length: None,
             saved_to: Some(save_path.to_string_lossy().to_string()),
+            note: None,
         })
     }
 }
@@ -2046,6 +2283,7 @@ mod tests {
             status: 200,
             content_type: "text/html".to_string(),
             text: text.to_string(),
+            note: None,
         })
     }
 
@@ -2220,6 +2458,193 @@ mod tests {
         assert_eq!(first_body, "a");
         let (second, _) = window(text, 3, 10, "");
         assert_eq!(format!("{first_body}{second}"), text);
+    }
+
+    /// A loopback HTTP server that answers each request with
+    /// `respond(path, user_agent, request_number)` = (status line, extra
+    /// headers, body), and records the `(path, user_agent)` it saw.
+    type Respond = fn(&str, &str, usize) -> (&'static str, String, String);
+    type Seen = Arc<Mutex<Vec<(String, String)>>>;
+
+    async fn mock_server(respond: Respond) -> (String, Seen) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Seen = Arc::default();
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 16 * 1024];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let agent = request
+                    .lines()
+                    .find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("user-agent")
+                            .then(|| value.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                let number = {
+                    let mut log = log.lock().unwrap();
+                    log.push((path.clone(), agent.clone()));
+                    log.len()
+                };
+                let (status, headers, body) = respond(&path, &agent, number);
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (base, seen)
+    }
+
+    fn tool_with_archive(base: &str) -> FetchTool {
+        FetchTool {
+            wayback_available_url: format!("{base}/wayback/available"),
+            wayback_web_url: base.to_string(),
+            ..FetchTool::new(None)
+        }
+    }
+
+    async fn fetch_page(tool: &FetchTool, url: &str) -> CachedPage {
+        match tool.download(url, None, None, 0, MAX_WINDOW).await.unwrap() {
+            Download::Page(page) => page,
+            Download::Done(output) => panic!("expected a page, got {output:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_is_waited_out_and_retried() {
+        let (base, seen) = mock_server(|_, _, n| match n {
+            1 => (
+                "429 Too Many Requests",
+                "retry-after: 0\r\n".into(),
+                "slow down".into(),
+            ),
+            _ => (
+                "200 OK",
+                "content-type: text/plain\r\n".into(),
+                "the data".into(),
+            ),
+        })
+        .await;
+        let page = fetch_page(&tool_with_archive(&base), &format!("{base}/data")).await;
+        assert_eq!(page.text, "the data");
+        assert!(page.note.unwrap().contains("Rate limited (429)"));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_longer_than_the_cap_is_returned() {
+        let (base, seen) = mock_server(|_, _, _| {
+            (
+                "429 Too Many Requests",
+                "retry-after: 3600\r\n".into(),
+                "later".into(),
+            )
+        })
+        .await;
+        let tool = tool_with_archive(&base);
+        let Download::Done(output) = tool
+            .download(&format!("{base}/data"), None, None, 0, MAX_WINDOW)
+            .await
+            .unwrap()
+        else {
+            panic!("expected the 429 back");
+        };
+        assert_eq!(output.status, 429);
+        assert!(output.note.unwrap().contains("3600 s"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_forbidden_default_agent_retries_as_a_browser() {
+        let (base, seen) = mock_server(|_, agent, _| {
+            if agent.starts_with("Mozilla/") {
+                (
+                    "200 OK",
+                    "content-type: text/plain\r\n".into(),
+                    "welcome".into(),
+                )
+            } else {
+                ("403 Forbidden", String::new(), "bots not allowed".into())
+            }
+        })
+        .await;
+        let page = fetch_page(&tool_with_archive(&base), &format!("{base}/page")).await;
+        assert_eq!(page.text, "welcome");
+        assert!(page.note.unwrap().contains("browser User-Agent"));
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].1.starts_with("Chatty/"));
+        assert!(seen[1].1.starts_with("Mozilla/"));
+    }
+
+    #[tokio::test]
+    async fn test_gone_page_is_served_from_the_archive_with_its_date() {
+        let (base, seen) = mock_server(|path, _, _| {
+            if path.starts_with("/wayback/available") {
+                (
+                    "200 OK",
+                    "content-type: application/json\r\n".into(),
+                    r#"{"archived_snapshots":{"closest":{"available":true,"status":"200","timestamp":"20190304120000","url":"x"}}}"#.into(),
+                )
+            } else if path.starts_with("/web/") {
+                ("200 OK", "content-type: text/plain\r\n".into(), "old text".into())
+            } else {
+                ("404 Not Found", String::new(), "gone".into())
+            }
+        })
+        .await;
+        let url = format!("{base}/old");
+        let page = fetch_page(&tool_with_archive(&base), &url).await;
+        assert_eq!(page.text, "old text");
+        let note = page.note.unwrap();
+        assert!(note.contains("ARCHIVED copy"), "{note}");
+        assert!(note.contains("2019-03-04 12:00:00 UTC"), "{note}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[2].0, format!("/web/20190304120000id_/{url}"));
+    }
+
+    #[tokio::test]
+    async fn test_missing_page_without_archive_copy_says_so() {
+        let (base, _) = mock_server(|path, _, _| {
+            if path.starts_with("/wayback/available") {
+                (
+                    "200 OK",
+                    String::new(),
+                    r#"{"archived_snapshots":{}}"#.into(),
+                )
+            } else {
+                ("404 Not Found", String::new(), "no such page".into())
+            }
+        })
+        .await;
+        let tool = tool_with_archive(&base);
+        let Download::Done(output) = tool
+            .download(&format!("{base}/nope"), None, None, 0, MAX_WINDOW)
+            .await
+            .unwrap()
+        else {
+            panic!("expected the 404 back");
+        };
+        assert_eq!(output.status, 404);
+        assert_eq!(output.content, "no such page");
+        assert!(output.note.unwrap().contains("no archived copy"));
+    }
+
+    #[test]
+    fn test_capture_date_and_archive_hosts() {
+        assert_eq!(capture_date("20190304120000"), "2019-03-04 12:00:00 UTC");
+        assert_eq!(capture_date("2019"), "2019");
+        assert!(is_archive_url("https://web.archive.org/web/2019/x"));
+        assert!(!is_archive_url("https://example.org/archive.org"));
     }
 
     #[tokio::test]
