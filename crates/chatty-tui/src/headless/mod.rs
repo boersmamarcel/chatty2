@@ -74,6 +74,35 @@ const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a st
      Continue the task from where you left off: check the current state before redoing work.";
 const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
 
+/// The run's last pass after its time budget ran out mid-turn: tools are
+/// off, so the model answers from what it has.
+const TIME_UP_PROMPT: &str = "Agent protocol follow-up: the time budget for this run is used \
+     up and tools are now disabled. Reply now with your final answer, or with a short summary of \
+     what you did and what remains.";
+
+/// Where a run with a time budget (`--max-duration`) stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeBudget {
+    /// Before the deadline, or after it while the current pass ends by
+    /// itself (the budget hook makes its next model call tool-free).
+    Running,
+    /// The deadline passed and the pass was stopped or failed before the
+    /// model could answer; its last pass follows once the turn has ended.
+    Cut,
+    /// The last pass is out; whatever it ends with ends the run.
+    LastPass,
+}
+
+/// How long past the deadline a pass may run before headless stops it: a
+/// long tool call or model call can keep the budget hook from ever seeing
+/// the next call. A tenth of the budget, between 5 s and 2 min.
+fn deadline_grace(budget: std::time::Duration) -> std::time::Duration {
+    (budget / 10).clamp(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(120),
+    )
+}
+
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is
 /// rig's own `UnknownToolCall` display text, which already lists the
 /// available and allowed tool names for this turn, so it is echoed verbatim
@@ -95,6 +124,13 @@ pub async fn run_headless(
         message.as_str(),
         engine.role_preamble().unwrap_or_default(),
     ]);
+
+    // The run's clock starts with the run: `--max-duration` bounds the
+    // work, not the process's startup.
+    let deadline = engine.start_clock();
+    let mut time_budget = TimeBudget::Running;
+    // When headless itself stops a pass that overran the deadline.
+    let mut backstop = deadline.map(|d| d.end() + deadline_grace(d.budget()));
 
     // Send message
     engine.send_message(message.clone());
@@ -140,7 +176,34 @@ pub async fn run_headless(
     let mut text_hard_stop_requested = false;
     let mut text_bytes_this_turn = 0usize;
 
-    while let Some(event) = event_rx.recv().await {
+    loop {
+        let event = match backstop {
+            Some(at) => tokio::select! {
+                event = event_rx.recv() => event,
+                _ = tokio::time::sleep_until(at.into()) => {
+                    if time_budget == TimeBudget::Running && engine.is_streaming {
+                        eprintln!(
+                            "\nTime budget spent and the turn is still running; stopping it for a final answer."
+                        );
+                        time_budget = TimeBudget::Cut;
+                        backstop = deadline.map(|d| {
+                            std::time::Instant::now() + deadline_grace(d.budget())
+                        });
+                        engine.stop_stream();
+                        continue;
+                    }
+                    if engine.is_streaming {
+                        eprintln!("\nThe final pass overran the time budget; ending the run.");
+                        engine.stop_stream();
+                    }
+                    break;
+                }
+            },
+            None => event_rx.recv().await,
+        };
+        let Some(event) = event else {
+            break;
+        };
         match event {
             AppEvent::TextChunk(text) => {
                 engine.handle_event(AppEvent::TextChunk(text.clone()));
@@ -380,6 +443,40 @@ pub async fn run_headless(
                 text_overflow_stop_requested = false;
                 text_hard_stop_requested = false;
                 text_bytes_this_turn = 0;
+                // Out of time: no pivots, retries or nudges, only the run's
+                // last pass, and only if it still needs one.
+                if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {
+                    let cut = time_budget == TimeBudget::Cut
+                        || recovery_pending_after_error.take().is_some()
+                        || pending_loop_pivot_prompt.take().is_some()
+                        || pending_compact_file_prompt.take().is_some()
+                        || std::mem::take(&mut finalization_pending_after_cancel);
+                    if time_budget == TimeBudget::LastPass {
+                        break;
+                    }
+                    let needs_answer_file = answer_file_required && !answer_file_exists(&engine);
+                    if !needs_answer_file && !cut {
+                        // The pass ended by itself; its last model call was
+                        // the budget hook's tool-free one, or the model was
+                        // done anyway.
+                        break;
+                    }
+                    time_budget = TimeBudget::LastPass;
+                    backstop =
+                        deadline.map(|d| std::time::Instant::now() + deadline_grace(d.budget()));
+                    if needs_answer_file {
+                        eprintln!(
+                            "Time budget spent without an answer file; requesting a compact finalization pass."
+                        );
+                        send_answer_file_finalization_prompt(&mut engine, &message, cut);
+                    } else {
+                        eprintln!(
+                            "Time budget spent mid-turn; asking for a final answer with tools disabled."
+                        );
+                        engine.send_time_up_pass(TIME_UP_PROMPT.to_string());
+                    }
+                    continue;
+                }
                 // The stop that led here was requested specifically to send
                 // one of these; the cancellation has now gone through, so
                 // send_message() will actually take (AGE-242 / D3).
@@ -508,6 +605,15 @@ pub async fn run_headless(
                 engine.handle_event(AppEvent::StreamError(error.clone()));
                 eprintln!("Error: {}", error);
 
+                // Out of time: the run's last pass (or its end) follows once
+                // the turn has ended, not a retry.
+                if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {
+                    if time_budget == TimeBudget::Running {
+                        time_budget = TimeBudget::Cut;
+                    }
+                    continue;
+                }
+
                 if answer_file_exists(&engine) {
                     eprintln!(
                         "Answer file already exists; keeping the run for verifier evaluation."
@@ -550,6 +656,11 @@ pub async fn run_headless(
             }
             AppEvent::StreamCancelled => {
                 engine.handle_event(AppEvent::StreamCancelled);
+                // Stopped for the time budget: `StreamCompleted` sends the
+                // last pass.
+                if time_budget == TimeBudget::Cut {
+                    continue;
+                }
                 // A deferred prompt (loop-pivot or compact-file finalization)
                 // is waiting for `StreamCompleted` to confirm the
                 // cancellation went through (AGE-242 / D3). That arm fires

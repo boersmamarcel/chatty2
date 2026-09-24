@@ -855,12 +855,12 @@ mod runner {
         let (mut runner, _event_rx) = test_runner().await;
         runner.execution_settings.max_agent_turns = 50;
 
-        let first = runner.pass_turn_budget(false).unwrap();
+        let first = runner.pass_turn_budget(false);
         assert_eq!(first, TurnBudget::run_share(50, 50, 0));
         let mut total = 0;
         let mut past_ceiling = 0;
         for final_pass in [false, false, false, true, false, true, true] {
-            let budget = runner.pass_turn_budget(final_pass).unwrap();
+            let budget = runner.pass_turn_budget(final_pass);
             if final_pass {
                 assert!(budget.tool_turns() <= FINAL_PASS_TOOL_TURNS);
             }
@@ -884,7 +884,7 @@ mod runner {
         assert_eq!(total, 50 + FINAL_PASS_TOOL_TURNS + past_ceiling);
         assert_eq!(
             runner.pass_turn_budget(false),
-            Some(TurnBudget::run_share(0, 50, total)),
+            TurnBudget::run_share(0, 50, total),
             "a spent run still gets its tool-free last word, and no tools"
         );
     }
@@ -898,12 +898,12 @@ mod runner {
         spend_tool_turns(&mut runner, 30);
         assert_eq!(
             runner.pass_turn_budget(false),
-            Some(TurnBudget::run_share(20, 50, 30))
+            TurnBudget::run_share(20, 50, 30)
         );
         spend_tool_turns(&mut runner, 19);
         assert_eq!(
             runner.pass_turn_budget(false),
-            Some(TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 50, 49))
+            TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 50, 49)
         );
     }
 
@@ -918,11 +918,11 @@ mod runner {
         let spent = 10 + FINAL_PASS_TOOL_TURNS;
         assert_eq!(
             runner.pass_turn_budget(false),
-            Some(TurnBudget::run_share(0, 10, spent))
+            TurnBudget::run_share(0, 10, spent)
         );
         assert_eq!(
             runner.pass_turn_budget(true),
-            Some(TurnBudget::run_share(1, 10, spent))
+            TurnBudget::run_share(1, 10, spent)
         );
     }
 
@@ -1332,5 +1332,111 @@ mod runner {
 
         assert!(error.to_string().contains("max turns reached"), "{error}");
         assert_eq!(*started.lock().unwrap(), 1);
+    }
+
+    // -------------------------------------------------------------------
+    // The run's time budget (`--max-duration`)
+    // -------------------------------------------------------------------
+
+    /// Before the deadline every pass carries the run's clock, uncapped
+    /// passes included; past it, the last passes run on their own budgets.
+    #[tokio::test]
+    async fn passes_carry_the_clock_until_it_runs_out() {
+        use chatty_core::services::turn_budget::Deadline;
+        let (mut runner, _event_rx) = test_runner().await;
+        assert_eq!(runner.execution_settings.max_agent_turns, 0, "no cap");
+        let running = Deadline::starting_now(std::time::Duration::from_secs(3600));
+        runner.deadline = Some(running);
+        assert_eq!(
+            runner.pass_turn_budget(false),
+            TurnBudget::new(0).with_deadline(Some(running))
+        );
+        spend_tool_turns(&mut runner, 3);
+        assert_eq!(
+            runner.pass_turn_budget(true),
+            TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 0, 3).with_deadline(Some(running)),
+            "an uncapped run's finalization still gets only the floor"
+        );
+
+        let spent = Deadline::new(
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(1),
+        );
+        runner.deadline = Some(spent);
+        assert_eq!(runner.pass_turn_budget(false), TurnBudget::new(0));
+    }
+
+    #[test]
+    fn the_grace_after_the_deadline_is_a_tenth_within_bounds() {
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(deadline_grace(secs(1)), secs(5));
+        assert_eq!(deadline_grace(secs(600)), secs(60));
+        assert_eq!(deadline_grace(secs(7200)), secs(120));
+    }
+
+    /// A budget that has run out by the time the first pass ends.
+    const SPENT: Option<std::time::Duration> = Some(std::time::Duration::from_nanos(1));
+
+    /// Out of time after a pass that ended by itself: the run ends, with no
+    /// nudge after it (this 5 KB of text would otherwise get the brevity
+    /// prompt), and succeeds.
+    #[tokio::test]
+    async fn a_pass_that_ends_past_the_deadline_ends_the_run() {
+        let (mut runner, event_rx, started, _workspace) =
+            scripted_runner(vec![answer_turn(&"x".repeat(5_000)), answer_turn("never")]).await;
+        runner.set_max_duration(SPENT);
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect("running out of time is not a failure");
+        assert_eq!(*started.lock().unwrap(), 1);
+    }
+
+    /// A turn cut by a stall once time is up gets the tool-free last pass,
+    /// not a stall resume, and the run succeeds with its answer.
+    #[tokio::test]
+    async fn a_cut_turn_past_the_deadline_gets_one_tool_free_last_pass() {
+        let (mut runner, event_rx, started, _workspace) = scripted_runner(vec![
+            stalled_turn(),
+            answer_turn("final"),
+            answer_turn("never"),
+        ])
+        .await;
+        let inputs = runner.scripted_inputs.clone();
+        runner.set_max_duration(SPENT);
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect("the last pass ends the run cleanly");
+        assert_eq!(*started.lock().unwrap(), 2);
+        assert_eq!(inputs.lock().unwrap()[1], TIME_UP_PROMPT);
+    }
+
+    /// An answer-file run out of time without its file gets one compact
+    /// finalization pass (which may call final_answer), then ends.
+    #[tokio::test]
+    async fn an_answer_file_run_out_of_time_gets_one_finalization_pass() {
+        let (mut runner, event_rx, started, _workspace) = scripted_runner(vec![
+            answer_turn("thinking"),
+            answer_turn("7"),
+            answer_turn("never"),
+            answer_turn("never"),
+        ])
+        .await;
+        let inputs = runner.scripted_inputs.clone();
+        runner.set_max_duration(SPENT);
+
+        let _ = run_headless(
+            runner,
+            event_rx,
+            "Write ONLY the final answer to /app/answer.txt".to_string(),
+        )
+        .await;
+        assert_eq!(*started.lock().unwrap(), 2);
+        assert!(
+            inputs.lock().unwrap()[1].starts_with("Time to finish"),
+            "{:?}",
+            inputs.lock().unwrap()
+        );
     }
 }

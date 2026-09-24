@@ -20,7 +20,7 @@ use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::services::StreamSurface;
 use chatty_core::services::team::Team;
-use chatty_core::services::turn_budget::TurnBudget;
+use chatty_core::services::turn_budget::{Deadline, TurnBudget};
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, Arrival, Decision, Mailbox, SessionEvent, TurnEnd, TurnInput,
     TurnKind,
@@ -86,6 +86,11 @@ pub struct HeadlessRunner {
     in_tool_turn: bool,
     /// The next pass is a finalization and gets [`FINAL_PASS_TOOL_TURNS`].
     pub(super) next_pass_is_final: bool,
+    /// The run's wall-clock budget (`--max-duration`), started by
+    /// `run_headless` when the run begins.
+    pub(super) max_duration: Option<std::time::Duration>,
+    /// The running clock of that budget, once started.
+    pub(super) deadline: Option<Deadline>,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -126,6 +131,8 @@ impl HeadlessRunner {
             tool_turns_spent: 0,
             in_tool_turn: false,
             next_pass_is_final: false,
+            max_duration: None,
+            deadline: None,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
@@ -133,6 +140,33 @@ impl HeadlessRunner {
             #[cfg(test)]
             scripted_inputs: Default::default(),
         }
+    }
+
+    /// Give the run a wall-clock budget (`--max-duration`); the clock
+    /// starts with the run, not here.
+    pub fn set_max_duration(&mut self, budget: Option<std::time::Duration>) {
+        self.max_duration = budget;
+    }
+
+    /// Start the run's clock, if it has a budget.
+    pub(super) fn start_clock(&mut self) -> Option<Deadline> {
+        self.deadline = self.max_duration.map(Deadline::starting_now);
+        self.deadline
+    }
+
+    /// Send the run's last pass after its time ran out mid-turn: one
+    /// tool-free call on the same history, so the model answers with what
+    /// it has. Its tool turns count as spent, so the pass has none.
+    pub(super) fn send_time_up_pass(&mut self, prompt: String) {
+        let Some(input) = self.prepare_send(prompt, false) else {
+            return;
+        };
+        let total = self.execution_settings.max_agent_turns as usize;
+        self.spawn_turn(TurnInput {
+            kind: TurnKind::ProtocolFollowUp,
+            turn_budget: Some(TurnBudget::run_share(0, total, self.tool_turns_spent)),
+            ..input
+        });
     }
 
     /// Send the turn's events to `observer` as they happen (AGE-301).
@@ -276,7 +310,7 @@ impl HeadlessRunner {
         let final_pass = std::mem::take(&mut self.next_pass_is_final);
         Some(TurnInput {
             kind,
-            turn_budget: self.pass_turn_budget(final_pass),
+            turn_budget: Some(self.pass_turn_budget(final_pass)),
             ..TurnInput::text(message)
         })
     }
@@ -286,12 +320,23 @@ impl HeadlessRunner {
     /// spent any (so a follow-up can still write the answer), never more
     /// than `max_agent_turns + FINAL_PASS_TOOL_TURNS` over the whole run,
     /// and at most [`FINAL_PASS_TOOL_TURNS`] (at least one, for
-    /// `final_answer`, even past that ceiling) for a finalization pass. `None`
-    /// for an uncapped (`0`) run, which rig refuses as before.
-    pub(super) fn pass_turn_budget(&self, final_pass: bool) -> Option<TurnBudget> {
+    /// `final_answer`, even past that ceiling) for a finalization pass. An
+    /// uncapped (`0`) run's passes are uncapped too, but a finalization
+    /// still gets only [`FINAL_PASS_TOOL_TURNS`]. Every pass carries the
+    /// run's clock until it runs out; the passes after that are the run's
+    /// last and bounded by their own budgets.
+    pub(super) fn pass_turn_budget(&self, final_pass: bool) -> TurnBudget {
+        let deadline = self
+            .deadline
+            .filter(|d| !d.is_past(std::time::Instant::now()));
         let total = self.execution_settings.max_agent_turns as usize;
         if total == 0 {
-            return None;
+            let budget = if final_pass {
+                TurnBudget::run_share(FINAL_PASS_TOOL_TURNS, 0, self.tool_turns_spent)
+            } else {
+                TurnBudget::new(0)
+            };
+            return budget.with_deadline(deadline);
         }
         let spent = self.tool_turns_spent;
         let mut turns = if spent == 0 {
@@ -309,7 +354,7 @@ impl HeadlessRunner {
             // bounds what this adds past the run's ceiling.
             turns = turns.clamp(1, FINAL_PASS_TOOL_TURNS);
         }
-        Some(TurnBudget::run_share(turns, total, spent))
+        TurnBudget::run_share(turns, total, spent).with_deadline(deadline)
     }
 
     fn spawn_turn(&mut self, input: TurnInput) {

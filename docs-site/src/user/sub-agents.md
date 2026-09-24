@@ -98,7 +98,7 @@ Declare them in `module_settings.json` next to your other settings ([where that 
 | `model` | This worker's model, matched the way `chatty-tui --model` matches (id, name, or part of the id). Leave it out to use the default model. A worker on a different model server is queued on that server's budget, not the parent's. |
 | `tools` | A **role**: `coordinator`, `coder` or `reviewer`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
 | `preamble` | Standing instructions, added to the worker's system prompt. Its first sentence is what the parent reads on the card, so lead with the role. |
-| `max_agent_turns` | How many tool rounds this worker may take before it has to answer; the default of 10 is too few for a multi-step coding task. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
+| `max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
 | `disable_tools` | The older, coarser switch: tool groups to remove (`shell`, `fs-write`, `git`, …). Ignored when `tools` is set. |
 
 The three roles:

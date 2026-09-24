@@ -111,7 +111,7 @@ mod schema_docs {
         assert_eq!(exec["timeout_seconds"], 30);
         assert_eq!(exec["max_output_bytes"], 51200);
         assert_eq!(exec["network_isolation"], false);
-        assert_eq!(exec["max_agent_turns"], 10);
+        assert_eq!(exec["max_agent_turns"], 0);
         assert_eq!(exec["memory_enabled"], true);
         assert_eq!(exec["warn_on_external_agent"], false);
         assert_eq!(exec["embedding_enabled"], false);

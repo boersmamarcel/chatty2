@@ -15,7 +15,7 @@ use crate::models::clarification_store::{ClarificationNotification, ClarifyingQu
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::ApiCallUsage;
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
-use crate::services::turn_budget::TurnBudget;
+use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
@@ -349,6 +349,49 @@ fn map_stream_result(
     }
 }
 
+/// Shown when a run's tool-free last call asked for a tool instead of
+/// answering and produced no text of its own.
+pub const BUDGET_SPENT_NOTE: &str = "[Stopped: this response's turn or time budget is spent and \
+     tools were disabled for a final answer, but the model asked for another tool call instead \
+     of answering.]";
+
+/// The normal end of a run whose tool-free wrap-up call asked for a tool
+/// anyway (see [`crate::services::turn_budget`]): rig reports it as
+/// `MaxTurnsError` (a tool call left in the reasoning channel trips
+/// `EmptyTurnRetry` into one call past the budget; "reached max turns
+/// limit: 51" under `--max-agent-turns 50`) or as the budget hook's own
+/// stop. Either way the model had its last word, so the run ends with it:
+/// rig's record of this run's messages (past the `history_len` it started
+/// with), a note when the last call gave no text, then `Done`. `None` for
+/// every other error.
+fn budget_spent_end(
+    err: &StreamingError,
+    history_len: usize,
+    text_in_last_call: bool,
+) -> Option<Vec<StreamChunk>> {
+    let StreamingError::Prompt(e) = err else {
+        return None;
+    };
+    let history: &[Message] = match e.as_ref() {
+        PromptError::MaxTurnsError { chat_history, .. } => chat_history,
+        PromptError::PromptCancelled {
+            chat_history,
+            reason,
+        } if reason == WRAP_UP_TOOL_CALL_STOP => chat_history,
+        _ => return None,
+    };
+    warn!(error = %e, "Budget spent on a call that asked for a tool; ending the run normally");
+    let mut chunks = Vec::new();
+    if let Some(messages) = history.get(history_len..).filter(|m| !m.is_empty()) {
+        chunks.push(StreamChunk::TurnMessages(messages.to_vec()));
+    }
+    if !text_in_last_call {
+        chunks.push(StreamChunk::Text(BUDGET_SPENT_NOTE.to_string()));
+    }
+    chunks.push(StreamChunk::Done);
+    Some(chunks)
+}
+
 /// Stream a prompt with an agent
 ///
 /// # Arguments
@@ -376,6 +419,7 @@ pub async fn stream_prompt(
 ) -> Result<ResponseStream> {
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
+    let history_len = history.len();
 
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
@@ -391,13 +435,34 @@ pub async fn stream_prompt(
     let mut clarification_rx = clarification_rx.unwrap_or_else(|| mpsc::unbounded_channel().1);
 
     let stream: ResponseStream = Box::pin(async_stream::stream! {
+        // Whether the model call in flight has said anything yet.
+        let mut text_in_last_call = false;
         loop {
             tokio::select! {
                 item = agent_stream.next() => {
                     match item {
                         Some(result) => {
+                            if let Err(e) = &result
+                                && let Some(chunks) = budget_spent_end(e, history_len, text_in_last_call)
+                            {
+                                for chunk in chunks {
+                                    yield Ok(chunk);
+                                }
+                                return;
+                            }
                             let (chunks, stop) = map_stream_result(result, semantics);
                             for chunk in chunks {
+                                match &chunk {
+                                    StreamChunk::Text(text) if !text.trim().is_empty() => {
+                                        text_in_last_call = true;
+                                    }
+                                    // The next call starts after the results.
+                                    StreamChunk::ToolCallResult { .. }
+                                    | StreamChunk::ToolCallError { .. } => {
+                                        text_in_last_call = false;
+                                    }
+                                    _ => {}
+                                }
                                 yield Ok(chunk);
                             }
                             if stop {
@@ -468,10 +533,11 @@ mod tests {
     use rig_core::streaming::ToolCallDeltaContent;
 
     use super::{
-        Message, MultiTurnStreamItem, PromptError, StreamChunk, StreamErrorKind,
+        BUDGET_SPENT_NOTE, Message, MultiTurnStreamItem, PromptError, StreamChunk, StreamErrorKind,
         StreamedAssistantContent, StreamedUserContent, StreamingError, UsageSemantics,
-        classify_completion_error, classify_streaming_error, map_item, map_stream_result,
-        normalize_usage, streamed_tool_result_to_text, tool_result_looks_like_error,
+        WRAP_UP_TOOL_CALL_STOP, budget_spent_end, classify_completion_error,
+        classify_streaming_error, map_item, map_stream_result, normalize_usage,
+        streamed_tool_result_to_text, tool_result_looks_like_error,
     };
 
     /// Anthropic reports `input_tokens` without the cached share; OpenAI-style
@@ -875,5 +941,70 @@ mod tests {
     fn classifies_prompt_completion_error_by_delegating() {
         let err = StreamingError::Prompt(Box::new(PromptError::CompletionError(status_error(401))));
         assert_eq!(classify_streaming_error(&err), StreamErrorKind::Auth);
+    }
+
+    fn chunk_names(chunks: &[StreamChunk]) -> Vec<String> {
+        chunks
+            .iter()
+            .map(|c| match c {
+                StreamChunk::TurnMessages(m) => format!("TurnMessages({})", m.len()),
+                StreamChunk::Text(t) => format!("Text({t})"),
+                StreamChunk::Done => "Done".to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// "MaxTurnsError: reached max turns limit: 51" ended a
+    /// `--max-agent-turns 50` run as a failure when its tool-free last call
+    /// asked for a tool anyway. It now ends the run normally, with the
+    /// run's own messages (not the history it started with) and the
+    /// model's text, or a note when there was none.
+    #[test]
+    fn a_budget_spent_on_a_tool_call_ends_the_run_normally() {
+        let history = vec![
+            Message::user("earlier question"),
+            Message::assistant("earlier answer"),
+            Message::user("the task"),
+            Message::assistant("partial work"),
+        ];
+        let max_turns = StreamingError::Prompt(Box::new(PromptError::MaxTurnsError {
+            max_turns: 51,
+            chat_history: Box::new(history.clone()),
+            prompt: Box::new(Message::user("tool results")),
+        }));
+        assert_eq!(
+            chunk_names(&budget_spent_end(&max_turns, 2, true).unwrap()),
+            vec!["TurnMessages(2)", "Done"]
+        );
+        assert_eq!(
+            chunk_names(&budget_spent_end(&max_turns, 2, false).unwrap()),
+            vec![
+                "TurnMessages(2)".to_string(),
+                format!("Text({BUDGET_SPENT_NOTE})"),
+                "Done".to_string()
+            ]
+        );
+
+        let stopped = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+            chat_history: history,
+            reason: WRAP_UP_TOOL_CALL_STOP.to_string(),
+        }));
+        assert_eq!(
+            chunk_names(&budget_spent_end(&stopped, 4, true).unwrap()),
+            vec!["Done"]
+        );
+    }
+
+    /// Any other error, a user's cancel included, is still an error.
+    #[test]
+    fn other_errors_are_not_budget_ends() {
+        let cancelled = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+            chat_history: Vec::new(),
+            reason: "user stop".to_string(),
+        }));
+        assert!(budget_spent_end(&cancelled, 0, true).is_none());
+        let transport = StreamingError::Completion(CompletionError::ProviderError("boom".into()));
+        assert!(budget_spent_end(&transport, 0, true).is_none());
     }
 }

@@ -164,7 +164,11 @@ struct Cli {
     preamble: Option<String>,
 
     /// Override this process's turn budget, replacing the persisted
-    /// `execution_settings.max_agent_turns` (default 10) for this run.
+    /// `execution_settings.max_agent_turns` for this run. `0` is no cap.
+    ///
+    /// A run without a human (--headless, --pipe, a participant) ignores the
+    /// persisted value: it runs under this flag, else a team's budget, else
+    /// no turn cap and a --max-duration budget.
     ///
     /// Declared as a virtual agent's `max_agent_turns` in module settings
     /// and forwarded here so a delegated worker can run longer than the
@@ -175,6 +179,20 @@ struct Cli {
     /// Example: --max-agent-turns 30
     #[arg(long, value_name = "N")]
     max_agent_turns: Option<u32>,
+
+    /// Wall-clock budget of a run without a human (--headless, --pipe, a
+    /// participant): seconds, or numbers with `s`, `m` or `h` (`90`, `30m`,
+    /// `1h30m`). From 85 % of it on, tool results tell the model how much
+    /// time is left; once it is spent the model answers with tools
+    /// disabled, and a pass that overruns it is stopped for that answer.
+    ///
+    /// Defaults to 30m when neither this nor --max-agent-turns (or a
+    /// team's budget) is given. Ignored by the interactive TUI, which has
+    /// Stop.
+    ///
+    /// Example: --max-duration 2h
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    max_duration: Option<std::time::Duration>,
 
     /// Auto-approve all tool executions without prompting.
     ///
@@ -447,11 +465,23 @@ async fn main() -> Result<()> {
 
     // --max-agent-turns (AGE-440): a delegated worker's own turn budget,
     // set via its `VirtualAgentConfig`/`extra_args`. Applied after --team
-    // so it wins over a team's persisted (leader) budget too, and never
-    // changes anything when unset.
-    if let Some(turns) = cli.max_agent_turns {
+    // so it wins over a team's persisted (leader) budget too. A run without
+    // a human never takes the persisted cap (see `unattended_run_limits`).
+    let unattended = cli.headless || cli.pipe || cli.participant_socket.is_some();
+    let max_duration = if unattended {
+        let (turns, duration) = unattended_run_limits(
+            cli.max_agent_turns,
+            team.as_ref().and_then(|t| t.file.max_agent_turns),
+            cli.max_duration,
+        );
         execution_settings.max_agent_turns = turns;
-    }
+        duration
+    } else {
+        if let Some(turns) = cli.max_agent_turns {
+            execution_settings.max_agent_turns = turns;
+        }
+        None
+    };
 
     // Apply CLI tool overrides
     apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
@@ -622,6 +652,7 @@ async fn main() -> Result<()> {
             event_tx,
         );
 
+        engine.set_max_duration(max_duration);
         engine.init_conversation().await?;
         if let Some(socket) = cli.participant_socket.as_deref() {
             #[cfg(unix)]
@@ -1224,9 +1255,77 @@ fn inject_discovered(
     }
 }
 
+/// A headless run's time budget when neither --max-duration nor a turn cap
+/// is given.
+const DEFAULT_UNATTENDED_MAX_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
+/// The turn cap and time budget of a run without a human: the turn cap is
+/// `--max-agent-turns`, else the team's budget, else none (`0`) -- never the
+/// persisted interactive setting. The time budget is `--max-duration`, else
+/// [`DEFAULT_UNATTENDED_MAX_DURATION`] when no turn cap was given either;
+/// with a cap and no --max-duration the run keeps its old, cap-only shape.
+fn unattended_run_limits(
+    turns_flag: Option<u32>,
+    team_turns: Option<u32>,
+    duration_flag: Option<std::time::Duration>,
+) -> (u32, Option<std::time::Duration>) {
+    let turns = turns_flag.or(team_turns);
+    let duration = duration_flag.or(turns.is_none().then_some(DEFAULT_UNATTENDED_MAX_DURATION));
+    (turns.unwrap_or(0), duration)
+}
+
+/// `--max-duration`: seconds (`90`), or numbers with `s`/`m`/`h` units
+/// (`45s`, `30m`, `2h`, `1h30m`). Zero is refused.
+fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
+    let text = text.trim();
+    let invalid = || format!("invalid duration '{text}': use seconds or e.g. 90s, 30m, 2h, 1h30m");
+    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+        let secs: u64 = text.parse().map_err(|_| invalid())?;
+        return match secs {
+            0 => Err(format!(
+                "--max-duration must be more than zero, got '{text}'"
+            )),
+            secs => Ok(std::time::Duration::from_secs(secs)),
+        };
+    }
+    let mut total = 0u64;
+    let mut number = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return Err(invalid()),
+        };
+        let value: u64 = number.parse().map_err(|_| invalid())?;
+        total = value
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(invalid)?;
+        number.clear();
+    }
+    // `1h30` has a number with no unit; an empty text has nothing at all.
+    if !number.is_empty() || text.is_empty() {
+        return Err(invalid());
+    }
+    if total == 0 {
+        return Err(format!(
+            "--max-duration must be more than zero, got '{text}'"
+        ));
+    }
+    Ok(std::time::Duration::from_secs(total))
+}
+
 #[cfg(test)]
 mod resolve_model_tests {
-    use super::{Cli, resolve_model};
+    use super::{
+        Cli, DEFAULT_UNATTENDED_MAX_DURATION, parse_duration, resolve_model, unattended_run_limits,
+    };
     use chatty_core::settings::models::ModelsModel;
     use chatty_core::settings::models::models_store::ModelConfig;
     use chatty_core::settings::models::providers_store::ProviderType;
@@ -1288,6 +1387,43 @@ mod resolve_model_tests {
     #[test]
     fn no_models_configured_is_an_error() {
         assert!(resolve_model(cli(&[]).model.as_deref(), &ModelsModel::new()).is_err());
+    }
+
+    #[test]
+    fn max_duration_accepts_seconds_and_unit_suffixes() {
+        let secs = |s: &str| parse_duration(s).map(|d| d.as_secs());
+        assert_eq!(secs("90"), Ok(90));
+        assert_eq!(secs("45s"), Ok(45));
+        assert_eq!(secs("30m"), Ok(1800));
+        assert_eq!(secs("2h"), Ok(7200));
+        assert_eq!(secs("1h30m"), Ok(5400));
+        for bad in ["", "0", "0m", "m", "1h30", "10x", "-5", "1.5h"] {
+            assert!(parse_duration(bad).is_err(), "{bad:?} should be refused");
+        }
+        let cli = cli(&["--headless", "-m", "hi", "--max-duration", "30m"]);
+        assert_eq!(cli.max_duration, Some(std::time::Duration::from_secs(1800)));
+    }
+
+    /// A run without a human: a given cap keeps the old cap-only shape
+    /// (`0` is no cap); with no cap it gets no cap and a time budget,
+    /// whatever the persisted setting says.
+    #[test]
+    fn unattended_runs_get_a_turn_cap_or_a_time_budget() {
+        let thirty = DEFAULT_UNATTENDED_MAX_DURATION;
+        let hour = std::time::Duration::from_secs(3600);
+        assert_eq!(unattended_run_limits(None, None, None), (0, Some(thirty)));
+        assert_eq!(unattended_run_limits(Some(50), None, None), (50, None));
+        assert_eq!(unattended_run_limits(Some(0), None, None), (0, None));
+        assert_eq!(unattended_run_limits(None, Some(40), None), (40, None));
+        assert_eq!(unattended_run_limits(Some(50), Some(40), None), (50, None));
+        assert_eq!(
+            unattended_run_limits(None, None, Some(hour)),
+            (0, Some(hour))
+        );
+        assert_eq!(
+            unattended_run_limits(Some(20), None, Some(hour)),
+            (20, Some(hour))
+        );
     }
 
     /// AGE-440: unset leaves `execution_settings.max_agent_turns` at
