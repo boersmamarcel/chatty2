@@ -5,7 +5,32 @@
 //! without a window. The rendering side supplies the measurement and applies
 //! the decision (AGE-180).
 
-use gpui::{Bounds, Pixels, px};
+use gpui::{Bounds, ListState, Pixels, px};
+
+/// Tell the list the rows in `old_range` were replaced by `count` new rows,
+/// without moving the reader.
+///
+/// gpui's `ListState::splice` resets the scroll anchor to the top of the
+/// replaced range when the anchor sits inside it. The transcript replaces the
+/// streaming turn's row every time its content changes, so a reader scrolled
+/// up into a long reply was yanked to the reply's top on every update. Turns
+/// only grow at their bottom while streaming, so the old anchor (row index
+/// and offset into it) still points at the same content: put it back.
+///
+/// Following the bottom anchors past the last row, never inside a replaced
+/// range, so this leaves sticky scroll alone.
+pub(super) fn splice_keeping_anchor(
+    list: &ListState,
+    old_range: std::ops::Range<usize>,
+    count: usize,
+) {
+    let anchor = list.logical_scroll_top();
+    list.splice(old_range.clone(), count);
+    let replaced = old_range.start..old_range.start + count;
+    if old_range.contains(&anchor.item_ix) && replaced.contains(&anchor.item_ix) {
+        list.scroll_to(anchor);
+    }
+}
 
 /// How close to the bottom still counts as "at the bottom" for sticky scroll.
 ///
@@ -197,6 +222,52 @@ mod plan_strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn anchor(list: &ListState) -> (usize, Pixels) {
+        let top = list.logical_scroll_top();
+        (top.item_ix, top.offset_in_item)
+    }
+
+    /// A reader scrolled into the streaming turn stays where they are when
+    /// that turn's row is replaced; gpui alone would reset them to its top.
+    #[test]
+    fn replacing_the_row_the_reader_is_in_keeps_their_place() {
+        let list = ListState::new(3, gpui::ListAlignment::Top, px(0.));
+        list.scroll_to(gpui::ListOffset {
+            item_ix: 2,
+            offset_in_item: px(640.),
+        });
+        splice_keeping_anchor(&list, 2..3, 1);
+        assert_eq!(anchor(&list), (2, px(640.)));
+
+        // What the bare splice does, for contrast.
+        list.splice(2..3, 1);
+        assert_eq!(anchor(&list), (2, px(0.)));
+    }
+
+    #[test]
+    fn replacing_a_row_above_the_reader_leaves_them_alone() {
+        let list = ListState::new(3, gpui::ListAlignment::Top, px(0.));
+        list.scroll_to(gpui::ListOffset {
+            item_ix: 2,
+            offset_in_item: px(40.),
+        });
+        splice_keeping_anchor(&list, 1..2, 1);
+        assert_eq!(anchor(&list), (2, px(40.)));
+    }
+
+    /// Following the bottom anchors past the last row; a new turn arriving
+    /// must not turn that into a fixed position.
+    #[test]
+    fn the_bottom_anchor_survives_an_appended_turn() {
+        let list = ListState::new(3, gpui::ListAlignment::Top, px(0.));
+        list.scroll_to(gpui::ListOffset {
+            item_ix: 3,
+            offset_in_item: px(0.),
+        });
+        splice_keeping_anchor(&list, 2..3, 2);
+        assert_eq!(anchor(&list), (4, px(0.)));
+    }
 
     /// The reported case: a single-turn conversation with everything on
     /// screen. Nothing is scrolled away, so no pin.

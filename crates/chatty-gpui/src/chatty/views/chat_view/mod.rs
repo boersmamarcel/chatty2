@@ -1886,14 +1886,17 @@ impl ChatView {
         if previous.len() == next.len() {
             for ix in common..next.len() {
                 if previous[ix] != next[ix] {
-                    self.transcript_list.splice(ix..ix + 1, 1);
+                    scroll::splice_keeping_anchor(&self.transcript_list, ix..ix + 1, 1);
                 }
             }
         } else {
             // Appends splice past the anchor, so the user's scroll position
             // survives a new turn arriving.
-            self.transcript_list
-                .splice(common..previous.len(), next.len() - common);
+            scroll::splice_keeping_anchor(
+                &self.transcript_list,
+                common..previous.len(),
+                next.len() - common,
+            );
         }
     }
 
