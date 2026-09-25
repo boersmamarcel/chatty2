@@ -64,7 +64,7 @@ Shell commands and code runs follow your approval mode; sandboxed commands run w
 
 ### Data and documents
 
-The agent can run SQL over CSV, Parquet and JSON files in the workspace and describe their schema, read and write Excel, Word and PowerPoint files, extract text and page images from PDFs, typeset PDFs and draw charts. Results open as [artifacts](./chatting.md) beside the chat.
+The agent can run SQL over CSV, Parquet and JSON files in the workspace and describe their schema — Excel and ODS files too — read and write Excel, Word and PowerPoint files, extract text and page images from PDFs, typeset PDFs and draw charts. Results open as [artifacts](./chatting.md) beside the chat.
 
 *Load `sales.parquet`, chart revenue by region for the last four quarters, and write a two-page PDF summary.*
 
@@ -72,7 +72,7 @@ Reading and querying never ask. Writing spreadsheets and other files follows you
 
 ### Web and the built-in browser
 
-With **Settings → Internet** on, the agent can search the web (Tavily or Brave if you add a key, a basic fallback otherwise) and fetch any public page as readable text. The same page also holds optional cloud services — a hosted browser agent and a cloud code sandbox — which need their own API keys and stay off until you add one.
+With **Settings → Internet** on, the agent can search the web (Tavily or Brave if you add a key, a basic fallback otherwise) and fetch any public page as readable text. A rate-limited fetch is retried automatically, and a page that's blocked or gone is served from the Wayback Machine's closest archived copy instead, labelled with its capture date. The same page also holds optional cloud services — a hosted browser agent and a cloud code sandbox — which need their own API keys and stay off until you add one.
 
 **Better keyless results with a local reranker.** Without a search API key, you can have the results reordered by a small cross-encoder model on your own machine. Fill in **Rerank Endpoint** and **Rerank Model** under **Settings → Internet → Keyless search**, then press **Test**. In our evaluation this took the right page in the top five from 48 % to 57 % of questions, and the right page at the very top from 27 % to 49 %. The cost is about one second per search (p95 went from ~2.3 s to ~3.2 s). If the endpoint is down, search keeps working and returns results in their normal order. The reranker is not used when a Tavily or Brave key is set.
 
