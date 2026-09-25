@@ -197,7 +197,10 @@ impl FileSystemService {
     /// The file must be within the workspace root (or, read-only, the
     /// system temp directory) and under 10MB.
     pub async fn read_file(&self, path: &str) -> Result<String> {
-        let canonical = self.validator.validate_readable(path).await?;
+        let canonical = match self.validator.validate_readable(path).await {
+            Ok(canonical) => canonical,
+            Err(error) => return Err(self.with_similar_paths(path, error).await),
+        };
         self.validator.validate_file_size(&canonical).await?;
 
         debug!(path = %canonical.display(), "Reading text file");
@@ -209,6 +212,35 @@ impl FileSystemService {
                 e
             )
         })
+    }
+
+    /// `error` for a read of `path`, plus the closest existing paths when
+    /// `path` does not exist inside the workspace
+    /// ([`similar_existing_paths`](super::similar_paths::similar_existing_paths),
+    /// a bounded search that stays under the root).
+    async fn with_similar_paths(&self, path: &str, error: anyhow::Error) -> anyhow::Error {
+        let root = self.validator.workspace_root().to_path_buf();
+        let requested = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            root.join(path)
+        };
+        if path.is_empty() || tokio::fs::try_exists(&requested).await.unwrap_or(true) {
+            return error;
+        }
+        let path = path.to_string();
+        let similar = tokio::task::spawn_blocking(move || {
+            super::similar_paths::similar_existing_paths(&root, &path)
+        })
+        .await
+        .unwrap_or_default();
+        if similar.is_empty() {
+            return error;
+        }
+        anyhow!(
+            "{error}\nSimilar existing paths in the workspace: {}",
+            similar.join(", ")
+        )
     }
 
     /// Read a text file and optionally return only a line range.
@@ -838,6 +870,43 @@ mod tests {
             .unwrap();
         let result = service.read_file("nonexistent.txt").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_error_lists_similar_existing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("src/pkg")).unwrap();
+        fs::write(tmp.path().join("src/pkg/models.py"), "x").unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let error = service
+            .read_file("pkg/models.py")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("may not exist"), "{error}");
+        assert!(
+            error.contains("Similar existing paths in the workspace: src/pkg/models.py"),
+            "{error}"
+        );
+        let error = service
+            .read_file_range("src/pkg/model.py", Some(1), Some(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("src/pkg/models.py"), "{error}");
+
+        // Nothing close, or a path outside the workspace: the plain error.
+        let error = service.read_file("zzz.rs").await.unwrap_err().to_string();
+        assert!(!error.contains("Similar existing paths"), "{error}");
+        let error = service
+            .read_file("../elsewhere/models.py")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("Similar existing paths"), "{error}");
     }
 
     // ─── Write operation tests ───
