@@ -17,7 +17,7 @@ You send a message
        │
        ▼
   Agent reads the result → reasons again
-       │        ...repeats up to Max Agent Turns (default 10)...
+       │        ...repeats until done, or up to Max Agent Turns (default: no limit)...
        ▼
   Agent streams its final answer to you
 ```

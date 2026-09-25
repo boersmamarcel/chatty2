@@ -121,7 +121,10 @@ impl ToolProfile {
 /// [`ToolProfile::narrow`], over any predicate — the tests probe it one tool
 /// name at a time to prove the table below covers every name the registry can
 /// produce.
-fn narrow_availability(tools: &ToolAvailability, allow: impl Fn(&str) -> bool) -> ToolAvailability {
+pub(super) fn narrow_availability(
+    tools: &ToolAvailability,
+    allow: impl Fn(&str) -> bool,
+) -> ToolAvailability {
     let keep = |flag: bool, names: &[&str]| flag && names.iter().any(|name| allow(name));
     ToolAvailability {
         fs_read: keep(

@@ -22,6 +22,7 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -45,6 +46,13 @@ pub struct ShellOutput {
 /// tool call from blocking a turn indefinitely.
 pub const MAX_SHELL_CALL_TIMEOUT_SECONDS: u32 = 600;
 
+/// Shell output the model sees whole. Longer output keeps its head and tail
+/// around an omission line, whatever larger `max_output_bytes` is configured
+/// (a smaller one still wins). 8 KB is about 2k tokens: a whole 51 KB dump,
+/// the old cap, filled a sixth of a 32k window in one call, and on SWE-bench
+/// runs the model paged through such dumps instead of filtering them.
+pub const SHELL_OUTPUT_DEFAULT_CAP_BYTES: usize = 8_192;
+
 /// Current status of the shell session
 #[derive(Debug, Serialize)]
 pub struct ShellStatus {
@@ -62,6 +70,49 @@ struct ShellProcess {
     reader: BufReader<ChildStdout>,
     is_sandboxed: bool,
 }
+
+/// How long the login-profile init may take before the session gives up on
+/// it and runs without the profile (see [`LOGIN_PROFILE_INIT`]).
+const LOGIN_PROFILE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+
+/// Loads what a login shell (`bash -l`, the way other agent harnesses run
+/// commands) would: `/etc/profile`, then the first of `~/.bash_profile`,
+/// `~/.bash_login`, `~/.profile` (Debian/Ubuntu's `~/.profile` sources
+/// `~/.bashrc` in turn). The shell itself starts with `--norc --noprofile`
+/// and runs this as its first command instead, because a profile sourced by
+/// bash at startup would share the command pipe: output it prints would land
+/// in the first command's result, a `read` in it would swallow queued
+/// commands, and a hang would wedge every command after. Here its stdin is
+/// `/dev/null`, its output is discarded, `set -e`/`-u` it may leave behind
+/// are undone (either would end the persistent shell on the model's first
+/// failing command), as is `set -x`/`-v` (the trace would land in every
+/// command's output), the starting directory is restored, and the caller
+/// bounds the whole thing with [`LOGIN_PROFILE_TIMEOUT`].
+///
+/// `PATH` entries the shell inherited but the profile dropped are appended
+/// back: Debian's `/etc/profile` resets `PATH` to the system directories,
+/// which would otherwise lose a container's `ENV PATH` additions
+/// (`/usr/local/cargo/bin`, `/usr/local/go/bin`, a venv). What the profile
+/// prepends still comes first.
+///
+/// Without it the project's environment — a conda env activated in the
+/// login profile, PATH additions — was missing: "No module named …" in
+/// 20/20 SWE-bench trials, 3–10 turns lost each.
+const LOGIN_PROFILE_INIT: &str = r#"__chatty_cwd=$PWD
+__chatty_path=$PATH
+{ if [ -r /etc/profile ]; then . /etc/profile; fi
+for __chatty_f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+if [ -r "$__chatty_f" ]; then . "$__chatty_f"; break; fi
+done; } </dev/null >/dev/null 2>&1
+set +euxv
+cd "$__chatty_cwd" 2>/dev/null
+IFS=: read -r -a __chatty_pa <<<"$__chatty_path"
+for __chatty_p in "${__chatty_pa[@]}"; do
+case ":$PATH:" in *":$__chatty_p:"*) ;; *) [ -n "$__chatty_p" ] && PATH=${PATH:+$PATH:}$__chatty_p ;; esac
+done
+export PATH
+unset __chatty_cwd __chatty_f __chatty_path __chatty_pa __chatty_p
+"#;
 
 /// How long to wait for the shell to become waitable after its stdout hit
 /// EOF. Exit is near-instant; this only bounds the pathological case of a
@@ -93,6 +144,12 @@ pub struct ShellSession {
     startup_env_vars: Vec<(String, String)>,
     /// Key names of user secrets, for masking in status output.
     secret_key_names: Vec<String>,
+    /// Whether a (re)spawned shell loads the login profile. Cleared once a
+    /// profile hangs or kills the shell, so a respawn doesn't pay for it
+    /// again.
+    load_login_profile: AtomicBool,
+    /// `HOME` for the shell when set; tests point it at a scratch profile.
+    home_override: Option<String>,
 }
 
 impl ShellSession {
@@ -119,7 +176,16 @@ impl ShellSession {
             created_at: SystemTime::now(),
             startup_env_vars: secrets,
             secret_key_names,
+            load_login_profile: AtomicBool::new(true),
+            home_override: None,
         }
+    }
+
+    /// Run the shell with `HOME` set to `home` (tests: a scratch profile).
+    #[cfg(test)]
+    fn with_home(mut self, home: &str) -> Self {
+        self.home_override = Some(home.to_string());
+        self
     }
 
     /// Return the key names of user secrets (for masking in tool output).
@@ -161,18 +227,32 @@ impl ShellSession {
         self.workspace_dir.as_ref()
     }
 
-    fn truncate_output_at_char_boundary(output: &mut String, max_output_bytes: usize) {
-        if output.len() <= max_output_bytes {
-            return;
+    /// Cut `output` to its head and tail when it is over the effective cap:
+    /// the smaller of [`SHELL_OUTPUT_DEFAULT_CAP_BYTES`] and the configured
+    /// `max_output_bytes`. The middle gives way, not one end: a build or test
+    /// run says what it is doing at the top and how it ended at the bottom.
+    /// The omission line tells the model how to get the rest. Returns whether
+    /// anything was cut.
+    fn bound_output(output: &mut String, max_output_bytes: usize) -> bool {
+        let cap = max_output_bytes.min(SHELL_OUTPUT_DEFAULT_CAP_BYTES);
+        if output.len() <= cap {
+            return false;
         }
-
-        let original_len = output.len();
-        let mut end = max_output_bytes;
-        while end > 0 && !output.is_char_boundary(end) {
-            end -= 1;
+        let mut head_end = cap / 2;
+        while head_end > 0 && !output.is_char_boundary(head_end) {
+            head_end -= 1;
         }
-        output.truncate(end);
-        output.push_str(&format!("\n... [truncated {} bytes]", original_len - end));
+        let mut tail_start = output.len() - (cap - cap / 2);
+        while tail_start < output.len() && !output.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let omitted = tail_start - head_end;
+        *output = format!(
+            "{}\n... [{omitted} bytes omitted; rerun with a filter (grep/tail) to see more] ...\n{}",
+            &output[..head_end],
+            &output[tail_start..]
+        );
+        true
     }
 
     fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
@@ -195,12 +275,17 @@ impl ShellSession {
     ///
     /// Attempts to spawn inside a sandbox (bubblewrap on Linux, sandbox-exec on macOS).
     /// Falls back to unsandboxed execution if sandboxing is unavailable.
-    /// After spawning, injects any `startup_env_vars` (user secrets) via export commands.
+    /// After spawning, loads the login profile ([`LOGIN_PROFILE_INIT`]; a
+    /// profile that fails respawns the shell without it), then injects any
+    /// `startup_env_vars` (user secrets) via export commands, so a profile
+    /// cannot override them.
     async fn ensure_started(
         process: &mut Option<ShellProcess>,
         workspace_dir: &Option<String>,
         network_isolation: bool,
         startup_env_vars: &[(String, String)],
+        load_login_profile: &AtomicBool,
+        home: Option<&str>,
     ) -> Result<()> {
         if process.is_some() {
             // Check if process is still alive
@@ -221,33 +306,37 @@ impl ShellSession {
 
         info!(workspace = ?workspace_dir, "Spawning persistent shell session");
 
-        // Try sandboxed spawn first, fall back to unsandboxed
-        let (mut child, is_sandboxed) = if Self::can_sandbox() {
-            match Self::spawn_sandboxed(workspace_dir, network_isolation) {
-                Ok(child) => {
-                    info!("Shell session spawned inside sandbox");
-                    (child, true)
-                }
+        let (child, is_sandboxed, mut stdin, reader) = loop {
+            let (mut child, is_sandboxed) =
+                Self::spawn_shell(workspace_dir, network_isolation, home)?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("Failed to capture shell stdin"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow!("Failed to capture shell stdout"))?;
+            let mut reader = BufReader::new(stdout);
+
+            if !load_login_profile.load(Ordering::Relaxed) {
+                break (child, is_sandboxed, stdin, reader);
+            }
+            match Self::run_login_profile(&mut stdin, &mut reader).await {
+                Ok(()) => break (child, is_sandboxed, stdin, reader),
                 Err(e) => {
-                    warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
-                    let child = Self::spawn_unsandboxed(workspace_dir)?;
-                    (child, false)
+                    // A profile that hangs, exits or execs: run this session
+                    // without it rather than lose the shell.
+                    warn!(error = %e, "Login profile did not load; continuing without it");
+                    load_login_profile.store(false, Ordering::Relaxed);
+                    #[cfg(unix)]
+                    if !is_sandboxed {
+                        kill_process_group(child.id());
+                    }
+                    let _ = child.kill().await;
                 }
             }
-        } else {
-            info!("Sandboxing not available, spawning unsandboxed shell session");
-            let child = Self::spawn_unsandboxed(workspace_dir)?;
-            (child, false)
         };
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("Failed to capture shell stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("Failed to capture shell stdout"))?;
 
         let pid = child.id();
         info!(pid = ?pid, sandboxed = is_sandboxed, "Shell session started");
@@ -275,15 +364,72 @@ impl ShellSession {
         *process = Some(ShellProcess {
             child,
             stdin,
-            reader: BufReader::new(stdout),
+            reader,
             is_sandboxed,
         });
 
         Ok(())
     }
 
+    /// Spawn the shell: inside a sandbox when one is available, else (or
+    /// when the sandboxed spawn fails) unsandboxed. Returns whether it is
+    /// sandboxed.
+    fn spawn_shell(
+        workspace_dir: &Option<String>,
+        network_isolation: bool,
+        home: Option<&str>,
+    ) -> Result<(Child, bool)> {
+        if Self::can_sandbox() {
+            match Self::spawn_sandboxed(workspace_dir, network_isolation, home) {
+                Ok(child) => {
+                    info!("Shell session spawned inside sandbox");
+                    return Ok((child, true));
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
+                }
+            }
+        } else {
+            info!("Sandboxing not available, spawning unsandboxed shell session");
+        }
+        Ok((Self::spawn_unsandboxed(workspace_dir, home)?, false))
+    }
+
+    /// Load the login profile into a freshly spawned shell
+    /// ([`LOGIN_PROFILE_INIT`]) and wait, up to [`LOGIN_PROFILE_TIMEOUT`],
+    /// for it to finish. An error means the shell is unusable (hung, exited)
+    /// and must be killed.
+    async fn run_login_profile(
+        stdin: &mut ChildStdin,
+        reader: &mut BufReader<ChildStdout>,
+    ) -> Result<()> {
+        let marker = format!("__CHATTY_SHELL_READY_{}__", uuid::Uuid::new_v4().simple());
+        let script = format!("{LOGIN_PROFILE_INIT}printf '\\n%s\\n' \"{marker}\"\n");
+        stdin.write_all(script.as_bytes()).await?;
+        stdin.flush().await?;
+
+        tokio::time::timeout(LOGIN_PROFILE_TIMEOUT, async {
+            loop {
+                let mut line = Vec::new();
+                if reader.read_until(b'\n', &mut line).await? == 0 {
+                    return Err(anyhow!("the shell exited while loading the login profile"));
+                }
+                if Self::decode_output_line(&line).trim_end() == marker {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "the login profile took longer than {}s",
+                LOGIN_PROFILE_TIMEOUT.as_secs()
+            )
+        })?
+    }
+
     /// Spawn an unsandboxed bash process (fallback)
-    fn spawn_unsandboxed(workspace_dir: &Option<String>) -> Result<Child> {
+    fn spawn_unsandboxed(workspace_dir: &Option<String>, home: Option<&str>) -> Result<Child> {
         let mut cmd = tokio::process::Command::new("/bin/bash");
         cmd.args(["--norc", "--noprofile"])
             .stdin(std::process::Stdio::piped())
@@ -299,6 +445,9 @@ impl ShellSession {
         if let Some(dir) = workspace_dir {
             cmd.current_dir(dir);
         }
+        if let Some(home) = home {
+            cmd.env("HOME", home);
+        }
 
         cmd.spawn()
             .map_err(|e| anyhow!("Failed to spawn shell process: {}", e))
@@ -309,20 +458,27 @@ impl ShellSession {
     /// The persistent bash process runs inside the sandbox, inheriting all
     /// restrictions (filesystem isolation, network isolation). State (env vars,
     /// cwd) is maintained within the sandboxed process between commands.
-    fn spawn_sandboxed(workspace_dir: &Option<String>, network_isolation: bool) -> Result<Child> {
+    ///
+    /// The login profile loads inside the sandbox too, so it only finds what
+    /// the sandbox exposes (bubblewrap binds neither `/etc` nor `HOME`).
+    fn spawn_sandboxed(
+        workspace_dir: &Option<String>,
+        network_isolation: bool,
+        home: Option<&str>,
+    ) -> Result<Child> {
         #[cfg(target_os = "linux")]
         {
-            Self::spawn_sandboxed_linux(workspace_dir, network_isolation)
+            Self::spawn_sandboxed_linux(workspace_dir, network_isolation, home)
         }
 
         #[cfg(target_os = "macos")]
         {
-            Self::spawn_sandboxed_macos(workspace_dir, network_isolation)
+            Self::spawn_sandboxed_macos(workspace_dir, network_isolation, home)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (workspace_dir, network_isolation);
+            let _ = (workspace_dir, network_isolation, home);
             Err(anyhow!("Sandboxing not supported on this platform"))
         }
     }
@@ -332,6 +488,7 @@ impl ShellSession {
     fn spawn_sandboxed_linux(
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        home: Option<&str>,
     ) -> Result<Child> {
         let mut cmd = tokio::process::Command::new("bwrap");
 
@@ -382,6 +539,9 @@ impl ShellSession {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        if let Some(home) = home {
+            cmd.env("HOME", home);
+        }
 
         cmd.spawn()
             .map_err(|e| anyhow!("Failed to spawn sandboxed shell: {}", e))
@@ -392,6 +552,7 @@ impl ShellSession {
     fn spawn_sandboxed_macos(
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        home: Option<&str>,
     ) -> Result<Child> {
         let profile = Self::build_macos_sandbox_profile(workspace_dir, network_isolation)?;
 
@@ -408,6 +569,9 @@ impl ShellSession {
 
         if let Some(workspace) = workspace_dir {
             cmd.current_dir(workspace);
+        }
+        if let Some(home) = home {
+            cmd.env("HOME", home);
         }
 
         cmd.spawn()
@@ -560,6 +724,8 @@ impl ShellSession {
             &self.workspace_dir,
             self.network_isolation,
             &self.startup_env_vars,
+            &self.load_login_profile,
+            self.home_override.as_deref(),
         )
         .await?;
 
@@ -668,10 +834,7 @@ impl ShellSession {
                     process.take();
                 }
 
-                let truncated = output.len() > self.max_output_bytes;
-                if truncated {
-                    Self::truncate_output_at_char_boundary(&mut output, self.max_output_bytes);
-                }
+                let truncated = Self::bound_output(&mut output, self.max_output_bytes);
 
                 Ok(ShellOutput {
                     stdout: output.trim_end().to_string(),
@@ -707,10 +870,7 @@ impl ShellSession {
                     let _ = proc.child.kill().await;
                 }
 
-                let truncated = output.len() > self.max_output_bytes;
-                if truncated {
-                    Self::truncate_output_at_char_boundary(&mut output, self.max_output_bytes);
-                }
+                let truncated = Self::bound_output(&mut output, self.max_output_bytes);
                 let mut stdout = output.trim_end().to_string();
                 if !stdout.is_empty() {
                     stdout.push('\n');

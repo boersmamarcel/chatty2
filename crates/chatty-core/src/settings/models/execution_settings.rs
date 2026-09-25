@@ -13,6 +13,38 @@ pub enum ApprovalMode {
     AutoApproveAll,
 }
 
+/// How an agent's tools are offered to the model.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolLoading {
+    /// Every tool the settings allow, on every request.
+    #[default]
+    All,
+    /// A small core of tools, plus groups the model loads with `load_tools`
+    /// when the task needs them (`agent_factory::tool_loading`).
+    Dynamic,
+}
+
+impl ToolLoading {
+    fn is_all(&self) -> bool {
+        *self == Self::All
+    }
+}
+
+impl std::str::FromStr for ToolLoading {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "dynamic" => Ok(Self::Dynamic),
+            other => Err(format!(
+                "unknown tool loading `{other}` (valid: all, dynamic)"
+            )),
+        }
+    }
+}
+
 /// Settings for code execution tool
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionSettingsModel {
@@ -70,7 +102,9 @@ pub struct ExecutionSettingsModel {
     pub max_output_bytes: usize,
     /// Enable network isolation in sandbox (when available)
     pub network_isolation: bool,
-    /// Maximum number of agentic turns (tool-call rounds) per response
+    /// Maximum number of agentic turns (tool-call rounds) per response;
+    /// `0` (the default) is no cap. An interactive user has Stop; headless
+    /// runs get a wall-clock budget instead (`chatty-tui --max-duration`).
     #[serde(default = "default_max_agent_turns")]
     pub max_agent_turns: u32,
     /// Enable persistent agent memory (remember/search_memory tools).
@@ -107,14 +141,23 @@ pub struct ExecutionSettingsModel {
     /// only the move UI.
     #[serde(default)]
     pub hosted_conversations_enabled: bool,
+    /// How the agent's tools are offered to the model: all of them on
+    /// every request, or a core plus groups loaded on demand. Absent from
+    /// the file while it is the default, so existing settings (and their
+    /// snapshots) do not change.
+    #[serde(default, skip_serializing_if = "ToolLoading::is_all")]
+    pub tool_loading: ToolLoading,
 }
 
 fn default_true() -> bool {
     true
 }
 
+/// No cap: a cap of 10 ended real tasks mid-way — the same local model
+/// through Codex CLI (which has none) needed more than 50 commands for 5 of
+/// its 8 SWE-bench wins.
 fn default_max_agent_turns() -> u32 {
-    10
+    0
 }
 
 impl Default for ExecutionSettingsModel {
@@ -142,6 +185,7 @@ impl Default for ExecutionSettingsModel {
             embedding_provider: None,
             embedding_model: None,
             hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
+            tool_loading: ToolLoading::All,
         }
     }
 }

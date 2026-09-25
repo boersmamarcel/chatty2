@@ -24,6 +24,7 @@
 //! - LLM streaming primitives — `chatty_core::services` and `factories`.
 
 use anyhow::Result;
+use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
@@ -72,7 +73,115 @@ const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool ca
 const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. Its tool \
      calls and their results are not in the history, but files it wrote are still on disk. \
      Continue the task from where you left off: check the current state before redoing work.";
-const STREAM_ERROR_RECOVERY_PROMPT: &str = "A provider stream error interrupted the prior response, but the conversation history and tool results above are still valid. Do not say you lack context. Continue the same benchmark task from the visible evidence. If a complete file extraction or final answer is visible, call final_answer with output_path=/app/answer.txt now. Otherwise use at most one compact tool call and keep output short.";
+/// Sent on the same history after a provider error (a dropped connection,
+/// an HTTP error status, a malformed tool call) ended a turn the model had
+/// already said something in. The failed run's tool round-trips were
+/// persisted with it (`failed_run_messages` in chatty-core), so the history
+/// holds the work; the task is restated all the same. This used to be a
+/// generic "continue the same benchmark task ... call final_answer with
+/// output_path=/app/answer.txt" prompt, and on a SWE-bench run with no
+/// answer file the model took it for a Q&A task and wrote /app/answer.txt
+/// instead of fixing the code.
+fn stream_error_recovery_prompt(original_prompt: &str, answer_file_required: bool) -> String {
+    let mut prompt = String::from(
+        "A provider error interrupted your last response. The tool calls and results above \
+         are still valid and files you wrote are still on disk. Continue the same task from \
+         where you left off: check the current state before redoing work.",
+    );
+    if answer_file_required {
+        prompt.push_str(
+            " When you have the answer, call final_answer with output_path=/app/answer.txt.",
+        );
+    }
+    prompt.push_str(&task_reminder(original_prompt));
+    prompt
+}
+
+/// Act on the progress check's verdict for a finished tool call; `true` when
+/// it stopped the stream (the caller skips the rest of the event). A nudge
+/// goes out the way a loop pivot does, once the cancelled turn has ended; a
+/// finalization is the answer-file finalization pass when the run needs an
+/// answer file, and a tool-free last pass otherwise.
+fn on_no_progress(
+    progress: ProgressCheck,
+    answer_file_required: bool,
+    engine: &mut HeadlessRunner,
+    pending_loop_pivot_prompt: &mut Option<String>,
+    finalization_pending_after_cancel: &mut bool,
+    no_progress_final_pass_pending: &mut bool,
+) -> bool {
+    match progress {
+        ProgressCheck::Fine => false,
+        ProgressCheck::Nudge(nudge) => {
+            eprintln!(
+                "No progress in {PROGRESS_WINDOW_TOOL_CALLS} tool calls: nudging the model to change approach or finish."
+            );
+            pending_loop_pivot_prompt.get_or_insert(nudge);
+            engine.stop_stream();
+            true
+        }
+        ProgressCheck::Finalize => {
+            eprintln!(
+                "Still no progress {PROGRESS_WINDOW_TOOL_CALLS} tool calls after the nudge: stopping exploration for a final pass."
+            );
+            if answer_file_required {
+                *finalization_pending_after_cancel = true;
+            } else {
+                *no_progress_final_pass_pending = true;
+            }
+            engine.stop_stream();
+            true
+        }
+    }
+}
+
+/// The run's task, restated at the end of every continuation headless sends
+/// after an error: a continuation that does not say what to continue left
+/// the model guessing at the task from whatever the history still showed.
+fn task_reminder(original_prompt: &str) -> String {
+    format!(
+        "\n\nThe task, unchanged:\n{}",
+        original_task_excerpt(original_prompt)
+    )
+}
+
+/// The run's last pass after its time budget ran out mid-turn: tools are
+/// off, so the model answers from what it has.
+const TIME_UP_PROMPT: &str = "Agent protocol follow-up: the time budget for this run is used \
+     up and tools are now disabled. Reply now with your final answer, or with a short summary of \
+     what you did and what remains.";
+
+/// The last pass of a run the progress check stopped: two windows of
+/// [`PROGRESS_WINDOW_TOOL_CALLS`] tool calls without a file written, a new
+/// test run or a new file read. Tools are off, so the model answers from
+/// what it has; the edits it made are on disk either way.
+const NO_PROGRESS_FINAL_PROMPT: &str = "Agent protocol follow-up: your recent tool calls made \
+     no progress (no file written, no new test run, no new file read), even after a nudge, so \
+     tools are now disabled. Reply now with your best final result: what you changed, what state \
+     the work is in, and what remains.";
+
+/// Where a run with a time budget (`--max-duration`) stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeBudget {
+    /// Before the deadline, or after it while the current pass ends by
+    /// itself (the budget hook makes its next model call tool-free).
+    Running,
+    /// The deadline passed and the pass was stopped or failed before the
+    /// model could answer; its last pass follows once the turn has ended.
+    Cut,
+    /// The last pass is out; whatever it ends with ends the run.
+    LastPass,
+}
+
+/// How long past the deadline a pass may run before headless stops it: a
+/// long tool call or model call can keep the budget hook from ever seeing
+/// the next call. A tenth of the budget, between 5 s and 2 min.
+fn deadline_grace(budget: std::time::Duration) -> std::time::Duration {
+    (budget / 10).clamp(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(120),
+    )
+}
 
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is
 /// rig's own `UnknownToolCall` display text, which already lists the
@@ -95,6 +204,13 @@ pub async fn run_headless(
         message.as_str(),
         engine.role_preamble().unwrap_or_default(),
     ]);
+
+    // The run's clock starts with the run: `--max-duration` bounds the
+    // work, not the process's startup.
+    let deadline = engine.start_clock();
+    let mut time_budget = TimeBudget::Running;
+    // When headless itself stops a pass that overran the deadline.
+    let mut backstop = deadline.map(|d| d.end() + deadline_grace(d.budget()));
 
     // Send message
     engine.send_message(message.clone());
@@ -130,7 +246,14 @@ pub async fn run_headless(
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.
     let max_agent_turns = engine.execution_settings.max_agent_turns as usize;
-    let mut loop_guard = AgentLoopGuard::new(max_agent_turns, answer_file_required);
+    // Headless is unattended, so it also runs the busy-without-progress check.
+    let mut loop_guard =
+        AgentLoopGuard::new(max_agent_turns, answer_file_required).with_progress_check();
+    // Set when the progress check asks for finalization on a run without an
+    // answer file: the run's tool-free last pass follows once the turn ends,
+    // and the run ends after it.
+    let mut no_progress_final_pass_pending = false;
+    let mut no_progress_final_pass_sent = false;
     let tool_budget = answer_file_tool_budget(max_agent_turns);
     // Set when a command tool wrote the answer file: the model gets one more
     // turn to see that command's output before the run stops.
@@ -140,7 +263,34 @@ pub async fn run_headless(
     let mut text_hard_stop_requested = false;
     let mut text_bytes_this_turn = 0usize;
 
-    while let Some(event) = event_rx.recv().await {
+    loop {
+        let event = match backstop {
+            Some(at) => tokio::select! {
+                event = event_rx.recv() => event,
+                _ = tokio::time::sleep_until(at.into()) => {
+                    if time_budget == TimeBudget::Running && engine.is_streaming {
+                        eprintln!(
+                            "\nTime budget spent and the turn is still running; stopping it for a final answer."
+                        );
+                        time_budget = TimeBudget::Cut;
+                        backstop = deadline.map(|d| {
+                            std::time::Instant::now() + deadline_grace(d.budget())
+                        });
+                        engine.stop_stream();
+                        continue;
+                    }
+                    if engine.is_streaming {
+                        eprintln!("\nThe final pass overran the time budget; ending the run.");
+                        engine.stop_stream();
+                    }
+                    break;
+                }
+            },
+            None => event_rx.recv().await,
+        };
+        let Some(event) = event else {
+            break;
+        };
         match event {
             AppEvent::TextChunk(text) => {
                 engine.handle_event(AppEvent::TextChunk(text.clone()));
@@ -192,6 +342,7 @@ pub async fn run_headless(
                 let mut tool_failed = false;
                 let mut wrote_by_command = false;
                 let mut compact_file_extracted = false;
+                let mut progress = ProgressCheck::Fine;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
@@ -211,7 +362,7 @@ pub async fn run_headless(
                     } else {
                         "ok"
                     };
-                    if tc.name == "final_answer" && answer_file_exists(&engine) {
+                    if final_answer_ends_run(answer_file_required, &tc.name, &engine) {
                         if let Err(error) =
                             normalize_existing_answer_file_for_prompt(&engine, &message)
                         {
@@ -225,6 +376,7 @@ pub async fn run_headless(
                         compact_file_extraction_tool_result(answer_file_required, tc);
                     // Check for repeated identical tool call (loop detection).
                     pivot_msg = loop_guard.on_tool_completed(&tc.name, &tc.input);
+                    progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
                 }
                 if !called_final_answer
                     && answer_file_required
@@ -292,6 +444,15 @@ pub async fn run_headless(
                     engine.stop_stream();
                     tool_results_since_finalization = 0;
                     continue;
+                } else if on_no_progress(
+                    progress,
+                    answer_file_required,
+                    &mut engine,
+                    &mut pending_loop_pivot_prompt,
+                    &mut finalization_pending_after_cancel,
+                    &mut no_progress_final_pass_pending,
+                ) {
+                    continue;
                 }
                 tool_results_since_finalization += 1;
                 if tool_failed {
@@ -328,16 +489,28 @@ pub async fn run_headless(
                 let id_str = id.clone();
                 engine.handle_event(event);
                 let mut refused = false;
+                let mut progress = ProgressCheck::Fine;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
                     refused = tool_result_is_policy_refusal(tc);
+                    progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
                 }
                 if answer_file_grace_turn && stops_on_answer_file(&engine, answer_file_required) {
                     eprintln!("Answer file exists after the extra turn; stopping stream.");
                     engine.stop_stream();
+                    continue;
+                }
+                if on_no_progress(
+                    progress,
+                    answer_file_required,
+                    &mut engine,
+                    &mut pending_loop_pivot_prompt,
+                    &mut finalization_pending_after_cancel,
+                    &mut no_progress_final_pass_pending,
+                ) {
                     continue;
                 }
                 tool_results_since_finalization += 1;
@@ -380,6 +553,40 @@ pub async fn run_headless(
                 text_overflow_stop_requested = false;
                 text_hard_stop_requested = false;
                 text_bytes_this_turn = 0;
+                // Out of time: no pivots, retries or nudges, only the run's
+                // last pass, and only if it still needs one.
+                if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {
+                    let cut = time_budget == TimeBudget::Cut
+                        || recovery_pending_after_error.take().is_some()
+                        || pending_loop_pivot_prompt.take().is_some()
+                        || pending_compact_file_prompt.take().is_some()
+                        || std::mem::take(&mut finalization_pending_after_cancel);
+                    if time_budget == TimeBudget::LastPass {
+                        break;
+                    }
+                    let needs_answer_file = answer_file_required && !answer_file_exists(&engine);
+                    if !needs_answer_file && !cut {
+                        // The pass ended by itself; its last model call was
+                        // the budget hook's tool-free one, or the model was
+                        // done anyway.
+                        break;
+                    }
+                    time_budget = TimeBudget::LastPass;
+                    backstop =
+                        deadline.map(|d| std::time::Instant::now() + deadline_grace(d.budget()));
+                    if needs_answer_file {
+                        eprintln!(
+                            "Time budget spent without an answer file; requesting a compact finalization pass."
+                        );
+                        send_answer_file_finalization_prompt(&mut engine, &message, cut);
+                    } else {
+                        eprintln!(
+                            "Time budget spent mid-turn; asking for a final answer with tools disabled."
+                        );
+                        engine.send_time_up_pass(TIME_UP_PROMPT.to_string());
+                    }
+                    continue;
+                }
                 // The stop that led here was requested specifically to send
                 // one of these; the cancellation has now gone through, so
                 // send_message() will actually take (AGE-242 / D3).
@@ -391,37 +598,62 @@ pub async fn run_headless(
                     engine.send_message(pivot);
                     continue;
                 }
+                if no_progress_final_pass_sent {
+                    // The run's last pass after the progress check stopped it.
+                    break;
+                }
+                if std::mem::take(&mut no_progress_final_pass_pending) {
+                    no_progress_final_pass_sent = true;
+                    engine.send_time_up_pass(NO_PROGRESS_FINAL_PROMPT.to_string());
+                    continue;
+                }
                 if let Some((delay, error)) = recovery_pending_after_error.take() {
                     tool_results_since_finalization = 0;
                     failed_tool_results_since_finalization = 0;
                     tool_budget_stop_requested = false;
                     failure_budget_stop_requested = false;
+                    #[cfg(test)]
+                    let delay = if engine.skip_recovery_delay {
+                        std::time::Duration::ZERO
+                    } else {
+                        delay
+                    };
                     if error.kind != StreamErrorKind::Stalled {
                         eprintln!(
-                            "Retrying after stream error in {}s with a compact continuation prompt.",
+                            "Retrying after stream error in {}s on the same history.",
                             delay.as_secs()
                         );
                     }
                     tokio::time::sleep(delay).await;
                     if let Some(message) = engine.take_rolled_back_message() {
                         // The turn failed before the model said anything, so
-                        // it was rolled back with its prompt: send that again.
+                        // it was rolled back with its prompt: send that
+                        // same message again.
                         engine.send_recovery_prompt(message);
                     } else if error.kind == StreamErrorKind::Stalled {
-                        engine.send_recovery_prompt(STALL_RESUME_PROMPT.to_string());
+                        engine.send_recovery_prompt(format!(
+                            "{STALL_RESUME_PROMPT}{}",
+                            task_reminder(&message)
+                        ));
                     } else if error.kind == StreamErrorKind::UnknownToolCall {
                         // AGE-497: rig's own message already lists the
                         // available/allowed tool names, so it is worth
                         // re-sending verbatim instead of the generic prompt.
-                        engine.send_recovery_prompt(unknown_tool_call_recovery_prompt(
-                            &error.message,
+                        engine.send_recovery_prompt(format!(
+                            "{}{}",
+                            unknown_tool_call_recovery_prompt(&error.message),
+                            task_reminder(&message)
                         ));
                     } else if let Some(compact_prompt) = last_compact_file_prompt.as_deref() {
+                        // Carries the original task itself.
                         engine.send_recovery_prompt(build_compact_file_recovery_prompt(
                             compact_prompt,
                         ));
                     } else {
-                        engine.send_recovery_prompt(STREAM_ERROR_RECOVERY_PROMPT.to_string());
+                        engine.send_recovery_prompt(stream_error_recovery_prompt(
+                            &message,
+                            answer_file_required,
+                        ));
                     }
                     continue;
                 }
@@ -508,7 +740,18 @@ pub async fn run_headless(
                 engine.handle_event(AppEvent::StreamError(error.clone()));
                 eprintln!("Error: {}", error);
 
-                if answer_file_exists(&engine) {
+                // Out of time: the run's last pass (or its end) follows once
+                // the turn has ended, not a retry.
+                if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {
+                    if time_budget == TimeBudget::Running {
+                        time_budget = TimeBudget::Cut;
+                    }
+                    continue;
+                }
+
+                // A stale answer.txt says nothing about a run that asks for
+                // none: it retries like any other.
+                if answer_file_required && answer_file_exists(&engine) {
                     eprintln!(
                         "Answer file already exists; keeping the run for verifier evaluation."
                     );
@@ -550,6 +793,11 @@ pub async fn run_headless(
             }
             AppEvent::StreamCancelled => {
                 engine.handle_event(AppEvent::StreamCancelled);
+                // Stopped for the time budget: `StreamCompleted` sends the
+                // last pass.
+                if time_budget == TimeBudget::Cut {
+                    continue;
+                }
                 // A deferred prompt (loop-pivot or compact-file finalization)
                 // is waiting for `StreamCompleted` to confirm the
                 // cancellation went through (AGE-242 / D3). That arm fires
@@ -626,6 +874,19 @@ pub async fn run_headless(
     println!("{}", response);
 
     Ok(())
+}
+
+/// Whether a `tool_name` result ends the run as its final answer: only in a
+/// run whose task asks for an answer file, and once that file exists. In a
+/// coding run with no answer file, a final_answer carrying a diagnosis
+/// (and an answer.txt left in the workspace) stopped the run before the fix
+/// was made.
+fn final_answer_ends_run(
+    answer_file_required: bool,
+    tool_name: &str,
+    engine: &HeadlessRunner,
+) -> bool {
+    answer_file_required && tool_name == "final_answer" && answer_file_exists(engine)
 }
 
 /// Whether a tool result ends the turn because the task's answer file now

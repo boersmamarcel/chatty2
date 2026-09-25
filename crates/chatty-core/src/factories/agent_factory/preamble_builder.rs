@@ -3,6 +3,7 @@ use crate::settings::models::search_settings::SearchSettingsModel;
 
 use super::build_context::AgentRole;
 use super::mcp_helpers::McpTools;
+use super::tool_loading::ToolLoader;
 use super::tool_registry::{ToolAvailability, active_native_tool_names};
 
 /// Build the augmented preamble with the role's standing instructions, tool
@@ -10,7 +11,9 @@ use super::tool_registry::{ToolAvailability, active_native_tool_names};
 ///
 /// `tools` is what the agent was actually built with — already narrowed by
 /// `role.profile`, so the summary never describes a family of tools the
-/// profile removed wholesale.
+/// profile removed wholesale — and, under dynamic tool loading
+/// (`tool_loader`), to what the first request advertises, followed by the
+/// catalog of groups the model can load.
 #[allow(clippy::too_many_arguments)] // one argument per prompt section
 pub(super) fn build_preamble(
     base_preamble: &str,
@@ -21,12 +24,16 @@ pub(super) fn build_preamble(
     mcp_tool_info: &[(String, String, String)],
     secret_key_names: &[String],
     role: &AgentRole,
+    tool_loader: Option<&ToolLoader>,
 ) -> String {
     // A tool profile (ADR-0011 C11) removes tools the settings would
     // otherwise have registered. Most sections below are already gated on
     // `tools`, which the caller narrowed; these are the always-on ones, which
     // a profile can take away too.
-    let allows = |name: &str| role.profile.is_none_or(|profile| profile.allows(name));
+    let allows = |name: &str| {
+        role.profile.is_none_or(|profile| profile.allows(name))
+            && tool_loader.is_none_or(|loader| loader.starts_active(name))
+    };
     let mut tool_sections: Vec<String> = Vec::new();
 
     if tools.fetch || tools.search_web {
@@ -390,6 +397,9 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         p.push_str(preamble);
     }
     p.push_str(&tool_summary);
+    if let Some(loader) = tool_loader {
+        p.push_str(&loader.catalog());
+    }
     p.push_str(formatting_guide);
     p.push_str(memory_instructions);
     p.push_str(skills_instructions);
@@ -403,6 +413,21 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         ));
     }
     p
+}
+
+/// Appended to the system prompt of a run nobody is watching (headless,
+/// pipe, a delegated worker): a model that ends with "Want me to apply
+/// this?" has done nothing there.
+pub(super) const UNATTENDED_RUN_NOTE: &str = "\n\n<run_mode>\nThis run is non-interactive: \
+     nobody will answer questions or confirm steps. Finish the work yourself instead of offering \
+     to do it.\n</run_mode>";
+
+/// `preamble` for a run that is `unattended`, or unchanged.
+pub(super) fn with_run_mode(mut preamble: String, unattended: bool) -> String {
+    if unattended {
+        preamble.push_str(UNATTENDED_RUN_NOTE);
+    }
+    preamble
 }
 
 fn default_system_prompt(provider_type: &ProviderType) -> String {
@@ -438,16 +463,25 @@ do yourself. Prefer doing over describing.\n\
 running code — begin with that tool call. Do not narrate what you are about to do; just do it. \
 Pre-tool reasoning text wastes tokens and delays the answer.\n\
 \n\
-**Commit on evidence**: When a tool call returns enough information to answer the question, \
-act on it immediately. Do not continue exploring when you already have the answer. The cost of \
-an extra tool call is always higher than the cost of a direct answer.\n\
+**See it through**: Stop only when the task is verifiably done, not at the first plausible-looking \
+answer. Never present a guess as fact: check key facts against a primary source or tool output, and \
+get numbers by computing them with a tool, not in your head.\n\
 \n\
-**Failure budget**: After 3 failed or unhelpful tool calls on the same sub-problem, stop trying \
-that approach. Switch strategy or make a best-guess decision. Infinite retries never converge.\n\
+**Commit on evidence**: Once checked evidence answers the question, act on it immediately. \
+Do not continue exploring past that point.\n\
 \n\
-**Code iteration limit**: After 3 rounds of code that give contradictory, confusing, or oscillating \
-output, stop iterating. Explain what you found so far, state your best conclusion, and ask the user \
-how to proceed. Continuing to rewrite code indefinitely does not converge.\n\
+**When stuck, change approach**: After 3 failed or unhelpful attempts at the same sub-problem \
+(tool calls, or rounds of code with contradictory output), stop repeating that approach. Re-read \
+what you have learned and try a different one (another tool, source or method) rather than stopping.\n\
+\n\
+**Code changes**: Reproduce the problem first. Make the smallest change that fixes the root cause, \
+in the workspace you were given; do not install the project itself from a package index. Run the \
+most specific relevant tests, then broader ones.\n\
+\n\
+**Bounded output**: Keep command output short: filter it with `tail`, `head` or `grep` rather \
+than printing whole logs or files. One shell command that finds, reads and checks at once, with \
+bounded output (`rg -n PATTERN src | head -20`, the tail of a test run), beats a string of small \
+read and search calls.\n\
 \n\
 **Binary and Office files**: Files with binary formats must not be read with `read_file` / `read_binary` (returns garbage). \
 Use the dedicated native tools instead: `read_docx` for Word (.docx), `read_excel` for spreadsheets (.xlsx/.xls/.ods), \
@@ -548,6 +582,7 @@ mod tests {
             &mcp_info,
             &secrets,
             &AgentRole::default(),
+            None,
         );
         assert!(result.starts_with("Base prompt."));
         assert!(result.contains("create_chart"));
@@ -571,6 +606,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("shell_execute"));
         assert!(result.contains("shell_cd"));
@@ -595,6 +631,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("doc_retriever"));
         assert!(result.contains("read_file"));
@@ -618,6 +655,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("git_status"));
         assert!(result.contains("git_diff"));
@@ -639,6 +677,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("## Memory"));
         assert!(result.contains("remember"));
@@ -658,6 +697,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(!result.contains("## Memory"));
     }
@@ -675,6 +715,7 @@ mod tests {
             &[],
             &secrets,
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("API_KEY"));
         assert!(result.contains("DB_PASSWORD"));
@@ -693,6 +734,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(!result.contains("environment variables with sensitive"));
     }
@@ -714,6 +756,7 @@ mod tests {
             &mcp_info,
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("MCP tools"));
         assert!(result.contains("my_tool"));
@@ -735,6 +778,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_excel"));
         assert!(!result.contains("write_excel"));
@@ -756,6 +800,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_excel"));
         assert!(result.contains("write_excel"));
@@ -778,6 +823,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("pdf_info"));
         assert!(result.contains("pdf_extract_text"));
@@ -799,6 +845,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_docx"));
         assert!(result.contains("write_docx"));
@@ -820,6 +867,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("read_pptx"));
         assert!(result.contains("write_pptx"));
@@ -840,6 +888,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("file_structure_detector"));
         assert!(result.contains("query_data"));
@@ -858,6 +907,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("## Skills"));
         assert!(result.contains("read_skill"));
@@ -882,6 +932,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("search_web"));
         assert!(result.contains("fetch"));
@@ -902,6 +953,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("compile_typst"));
         assert!(result.contains("Typst markup"));
@@ -922,6 +974,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("execute_code"));
         assert!(result.contains("Monty or Docker"));
@@ -942,6 +995,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("browser_use"));
     }
@@ -961,6 +1015,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("daytona_run"));
     }
@@ -980,6 +1035,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("publish_wasm_module"));
     }
@@ -996,6 +1052,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(result.contains("<identity>"));
         assert!(result.contains("Current model provider: OpenRouter."));
@@ -1013,6 +1070,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         let ollama = build_preamble(
             "",
@@ -1023,6 +1081,7 @@ mod tests {
             &[],
             &[],
             &AgentRole::default(),
+            None,
         );
         assert!(openrouter.contains("concise structured markdown"));
         assert!(ollama.contains("direct and efficient"));
@@ -1045,6 +1104,7 @@ mod tests {
             &[],
             &[],
             &role,
+            None,
         );
         assert!(result.contains("## Your Role"));
         assert!(result.contains("You are the reviewer. Never edit the tree."));
@@ -1071,6 +1131,7 @@ mod tests {
                 &[],
                 &[],
                 &AgentRole::default(),
+                None,
             )
         };
         let blank = AgentRole {
@@ -1086,6 +1147,7 @@ mod tests {
             &[],
             &[],
             &blank,
+            None,
         );
         assert!(!args().contains("## Your Role"));
         assert_eq!(args(), with_blank);
@@ -1109,6 +1171,7 @@ mod tests {
                     preamble: None,
                     profile,
                 },
+                None,
             )
         };
 
@@ -1148,6 +1211,7 @@ mod tests {
             &[],
             &[],
             &role,
+            None,
         );
         assert!(result.contains("You run the `reviewer` tool profile"));
         assert!(result.contains("git_diff"));
@@ -1159,5 +1223,50 @@ mod tests {
         assert!(!note.contains("git_commit"), "{note}");
         assert!(!note.contains("write_file"), "{note}");
         assert!(!note.contains("invoke_agent"), "{note}");
+    }
+
+    /// The agentic-behavior steering: finish the task, verify rather than
+    /// guess, change approach rather than stop, and the code-change
+    /// routine. The old lines that pushed a local model to answer early
+    /// ("the cost of an extra tool call is always higher…", "make a
+    /// best-guess decision", "ask the user how to proceed") are gone.
+    #[test]
+    fn the_default_prompt_steers_toward_finishing_and_verifying() {
+        let prompt = default_system_prompt(&ProviderType::Ollama);
+        for kept in [
+            "verifiably done",
+            "primary source or tool output",
+            "not in your head",
+            "rather than stopping",
+            "Reproduce the problem first",
+            "root cause",
+            "do not install the project itself",
+            "most specific relevant tests, then broader ones",
+            "`tail`, `head` or `grep`",
+            "beats a string of small read and search calls",
+            "Once checked evidence answers the question",
+        ] {
+            assert!(prompt.contains(kept), "missing {kept:?}");
+        }
+        for gone in [
+            "always higher than the cost of a direct answer",
+            "best-guess decision",
+            "ask the user how to proceed",
+            "when you already have the answer",
+        ] {
+            assert!(!prompt.contains(gone), "still has {gone:?}");
+        }
+        assert!(
+            !prompt.contains("non-interactive"),
+            "only unattended runs say so"
+        );
+    }
+
+    #[test]
+    fn an_unattended_run_is_told_nobody_will_answer() {
+        let prompt = with_run_mode("Base.".to_string(), true);
+        assert!(prompt.starts_with("Base."));
+        assert!(prompt.contains("nobody will answer questions"));
+        assert_eq!(with_run_mode("Base.".to_string(), false), "Base.");
     }
 }

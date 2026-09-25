@@ -460,6 +460,7 @@ mod tests {
                 embedding_provider: Some(ProviderType::OpenRouter),
                 embedding_model: Some("text-embedding-3-small".to_string()),
                 hosted_conversations_enabled: true,
+                tool_loading: Default::default(),
             },
             extensions: {
                 let mut model = ExtensionsModel::default();

@@ -143,9 +143,9 @@ What changed against the preset, and why:
 | Field | Here | Why |
 |-------|------|-----|
 | `agents[].model` | `qwen2.5-coder:14b` on both workers | A coding model for the code; the leader keeps `qwen3:14b` for planning. Each worker is metered on its own model's server, so a worker on another machine would not queue behind the leader. |
-| `agents[0].max_agent_turns` | `30` | A coder that writes three tests and runs them needs more than the default ten tool rounds. This is the coder's own budget. |
+| `agents[0].max_agent_turns` | `30` | A cap on the coder's tool rounds. Without one a worker has no turn cap and a 30-minute time budget (`--max-duration`). This is the coder's own budget. |
 | `verification` | in the file | So the task no longer has to say it. Chatty runs this in each worker's tree at the end and puts the result in the evidence block. |
-| `max_agent_turns` (top level) | `50` | The **leader's** budget for the run. A delegating leader burns a turn per hand-off and per tool call; the default ten is not enough. |
+| `max_agent_turns` (top level) | `50` | The **leader's** budget for the run. A delegating leader burns a turn per hand-off and per tool call. Without it the leader has no turn cap and a 30-minute time budget. |
 | `skill` | `bank-fix` | The playbook, next: the leader's first turn opens with *read_skill bank-fix and follow it*. |
 
 Now the playbook. This is the part worth iterating on — it is where a team's behaviour actually lives:

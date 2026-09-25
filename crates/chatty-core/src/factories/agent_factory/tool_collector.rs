@@ -28,6 +28,7 @@ use crate::tools::{ReadDocxTool, WriteDocxTool};
 use crate::tools::{ReadPptxTool, WritePptxTool};
 
 use super::mcp_helpers::McpTools;
+use super::tool_loading::LoadToolsTool;
 use super::tool_profile::ToolProfile;
 
 /// Filesystem read tool set
@@ -145,6 +146,9 @@ pub(super) struct NativeTools {
     pub invoke_agent_tool: InvokeAgentTool,
     pub publish_module_tool: Option<PublishModuleTool>,
     pub ask_user_tool: Option<AskUserTool>,
+    /// `load_tools`, under dynamic tool loading. Registered whatever the
+    /// profile says: it is how the agent reaches the rest of its tools.
+    pub load_tools_tool: Option<LoadToolsTool>,
 }
 
 /// Register `tool` unless the profile leaves its name out (ADR-0011 C11).
@@ -314,6 +318,9 @@ impl NativeTools {
         if let Some(t) = self.publish_module_tool {
             b = add(b, profile, t);
         }
+        if let Some(t) = self.load_tools_tool {
+            b = b.tool(t);
+        }
         b
     }
 }
@@ -362,7 +369,8 @@ macro_rules! native_tools {
         list_agents_tool: $list_agents_tool:expr,
         invoke_agent_tool: $invoke_agent_tool:expr,
         publish_module_tool: $publish_module_tool:expr,
-        ask_user_tool: $ask_user_tool:expr $(,)?
+        ask_user_tool: $ask_user_tool:expr,
+        load_tools_tool: $load_tools_tool:expr $(,)?
     ) => {
         NativeTools {
             tool_profile: $tool_profile,
@@ -416,6 +424,7 @@ macro_rules! native_tools {
             invoke_agent_tool: $invoke_agent_tool,
             publish_module_tool: $publish_module_tool,
             ask_user_tool: $ask_user_tool,
+            load_tools_tool: $load_tools_tool,
         }
     };
 }
