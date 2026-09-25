@@ -216,6 +216,7 @@ type ActivityToggle = Rc<dyn Fn(&mut App)>;
 pub struct ActivityGroup {
     tools: Vec<ToolCallBlock>,
     open: bool,
+    settled: bool,
     on_toggle: Option<ActivityToggle>,
 }
 
@@ -224,12 +225,21 @@ impl ActivityGroup {
         Self {
             tools,
             open: true,
+            settled: true,
             on_toggle: None,
         }
     }
 
     pub fn open(mut self, open: bool) -> Self {
         self.open = open;
+        self
+    }
+
+    /// Whether the turn this group belongs to has finished. The success
+    /// check waits for that: shown between tool calls, it came and went with
+    /// every call and slid the sentence sideways each time.
+    pub fn settled(mut self, settled: bool) -> Self {
+        self.settled = settled;
         self
     }
 
@@ -242,11 +252,8 @@ impl ActivityGroup {
 impl RenderOnce for ActivityGroup {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tally = RunTally::from_tools(&self.tools);
-        let running = self
-            .tools
-            .iter()
-            .any(|t| matches!(t.state, ToolCallState::Running));
         let open = self.open;
+        let show_check = self.settled && RunTally::all_success(&self.tools);
 
         let on_toggle = self.on_toggle.clone();
         let chevron = if open {
@@ -307,13 +314,14 @@ impl RenderOnce for ActivityGroup {
                     cb(cx);
                 }
             })
-            .when(!running && RunTally::all_success(&self.tools), |this| {
-                this.child(
+            // A fixed slot, filled or not, so the sentence never moves.
+            .child(div().flex_shrink_0().size_3().when(show_check, |slot| {
+                slot.child(
                     Icon::new(IconName::Check)
                         .size_3()
                         .text_color(cx.theme().success),
                 )
-            })
+            }))
             .child(sentence)
             .when(tally.added > 0, |this| {
                 this.child(Tag::success().small().child(format!("+{}", tally.added)))

@@ -2400,6 +2400,7 @@ impl ChatView {
                     Some(on_open_table.clone()),
                     plan.as_ref(),
                     activity_open,
+                    turn.streaming,
                     Some(on_activity_toggle.clone()),
                     open_artifact.as_deref(),
                     window,
