@@ -26,7 +26,6 @@ pub fn render_typed_block(
     on_open_table: Option<OpenTable>,
     plan: Option<&AgentTaskSnapshot>,
     activity_open: Option<bool>,
-    activity_live: bool,
     on_activity_toggle: Option<ActivityToggle>,
     open_artifact: Option<&std::path::Path>,
     _window: &mut Window,
@@ -56,9 +55,7 @@ pub fn render_typed_block(
         Block::Activity { id, tools } => {
             // Collapsed until the user opens it, failures included.
             let open = activity_open.unwrap_or(false);
-            let mut group = ActivityGroup::new(tools.clone())
-                .open(open)
-                .live(activity_live);
+            let mut group = ActivityGroup::new(tools.clone()).open(open);
             if let Some(toggle) = on_activity_toggle {
                 let block_id = id.0;
                 group = group.on_toggle(move |cx| toggle(block_id, cx));

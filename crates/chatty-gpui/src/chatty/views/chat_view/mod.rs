@@ -75,11 +75,11 @@ use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, ChosenOption,
-    ClarificationCard, FileChange, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING, PlanStrip,
-    RunPin, RunPinKind, SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole,
+    ClarificationCard, FileChange, LIVE_FADE_MS, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING,
+    PlanStrip, RunPin, RunPinKind, SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole,
     adapt_message_with_trace, attachment_image_path, block_visible_in_turn, extract_table_preview,
     file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
-    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, merge_file_changes,
+    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, live_headline, merge_file_changes,
     new_artifact_view, plan_turn_index, produced_path_is_openable, read_artifact_source,
     render_typed_block, resolve_artifact_path, tool_file_path, turn_has_work_fold,
 };
@@ -2371,28 +2371,14 @@ impl ChatView {
 
         // Folded turns keep receipts + the assistant message; only the
         // work trace (thinking / activity / diffs) is hidden.
-        // Only the newest activity group of a running turn narrates the
-        // current action; earlier groups show their settled tally.
-        let live_activity = turn
-            .streaming
-            .then(|| {
-                turn.blocks.iter().rev().find_map(|block| match block {
-                    Block::Activity { id, .. } => Some(id.0),
-                    _ => None,
-                })
-            })
-            .flatten();
         let typed: Vec<AnyElement> = turn
             .blocks
             .iter()
             .filter(|block| block_visible_in_turn(&turn, block))
             .map(|block| {
-                let (activity_open, activity_live) = match block {
-                    Block::Activity { id, .. } => (
-                        self.activity_expanded.get(&id.0).copied(),
-                        live_activity == Some(id.0),
-                    ),
-                    _ => (None, false),
+                let activity_open = match block {
+                    Block::Activity { id, .. } => self.activity_expanded.get(&id.0).copied(),
+                    _ => None,
                 };
                 render_typed_block(
                     block,
@@ -2401,7 +2387,6 @@ impl ChatView {
                     Some(on_open_table.clone()),
                     plan.as_ref(),
                     activity_open,
-                    activity_live,
                     Some(on_activity_toggle.clone()),
                     open_artifact.as_deref(),
                     window,
@@ -2418,6 +2403,18 @@ impl ChatView {
             } else {
                 format_worked_for(turn.elapsed)
             };
+            // While the turn runs, the fold line names the newest action,
+            // folded or not: one action at a time, each fading in over the
+            // last, whatever became of it. Failures wait in the group rows.
+            let live_action = streaming
+                .then(|| {
+                    turn.blocks.iter().rev().find_map(|block| match block {
+                        Block::Activity { tools, .. } => tools.last(),
+                        _ => None,
+                    })
+                })
+                .flatten()
+                .map(|tool| (tool.id.clone(), live_headline(tool)));
             let msg_index = turn.message_index;
             let entity = entity.clone();
             let collapsed = turn.collapsed;
@@ -2456,6 +2453,23 @@ impl ChatView {
                         .size_3()
                         .text_color(cx.theme().muted_foreground),
                 )
+                .when_some(live_action, |this, (tool_id, headline)| {
+                    this.child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_xs()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(headline)
+                            .with_animation(
+                                ElementId::Name(format!("turn-live-action-{tool_id}").into()),
+                                Animation::new(Duration::from_millis(LIVE_FADE_MS)),
+                                |this, delta| this.opacity(delta),
+                            ),
+                    )
+                })
                 .into_any_element()
         });
         let file_overview = (!turn.collapsed && show_work_fold).then(|| {

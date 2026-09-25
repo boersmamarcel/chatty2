@@ -1,5 +1,4 @@
 use std::rc::Rc;
-use std::time::Duration;
 
 use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
 use gpui::prelude::FluentBuilder;
@@ -142,12 +141,12 @@ impl RunTally {
 }
 
 /// How long a new live action takes to fade in over the previous one.
-const LIVE_FADE_MS: u64 = 300;
+pub const LIVE_FADE_MS: u64 = 300;
 
 /// "Reading src/main.rs": the present-tense label, even once the call has
 /// settled, because the header narrates what the agent is doing, not how
 /// each call ended.
-fn live_headline(tool: &ToolCallBlock) -> String {
+pub fn live_headline(tool: &ToolCallBlock) -> String {
     tool_row_label(
         &tool.display_name,
         &tool.tool_name,
@@ -180,7 +179,6 @@ type ActivityToggle = Rc<dyn Fn(&mut App)>;
 pub struct ActivityGroup {
     tools: Vec<ToolCallBlock>,
     open: bool,
-    live: bool,
     on_toggle: Option<ActivityToggle>,
 }
 
@@ -189,20 +187,12 @@ impl ActivityGroup {
         Self {
             tools,
             open: true,
-            live: false,
             on_toggle: None,
         }
     }
 
     pub fn open(mut self, open: bool) -> Self {
         self.open = open;
-        self
-    }
-
-    /// The group belongs to a turn that is still running: its header names
-    /// the newest action instead of the tally.
-    pub fn live(mut self, live: bool) -> Self {
-        self.live = live;
         self
     }
 
@@ -215,12 +205,11 @@ impl ActivityGroup {
 impl RenderOnce for ActivityGroup {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tally = RunTally::from_tools(&self.tools);
+        let running = self
+            .tools
+            .iter()
+            .any(|t| matches!(t.state, ToolCallState::Running));
         let open = self.open;
-        let live_headline = self
-            .live
-            .then(|| self.tools.last())
-            .flatten()
-            .map(|tool| (tool.id.clone(), live_headline(tool)));
 
         let on_toggle = self.on_toggle.clone();
         let chevron = if open {
@@ -281,32 +270,14 @@ impl RenderOnce for ActivityGroup {
                     cb(cx);
                 }
             })
-            .when(!self.live && RunTally::all_success(&self.tools), |this| {
+            .when(!running && RunTally::all_success(&self.tools), |this| {
                 this.child(
                     Icon::new(IconName::Check)
                         .size_3()
                         .text_color(cx.theme().success),
                 )
             })
-            .map(|this| match live_headline {
-                // One action at a time: each new call fades in over the last,
-                // whatever became of it. Failures wait in the rows below.
-                Some((tool_id, headline)) => this.child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(headline)
-                        .with_animation(
-                            ElementId::Name(format!("activity-live-{tool_id}").into()),
-                            Animation::new(Duration::from_millis(LIVE_FADE_MS)),
-                            |this, delta| this.opacity(delta),
-                        ),
-                ),
-                None => this.child(sentence),
-            })
+            .child(sentence)
             .when(tally.added > 0, |this| {
                 this.child(Tag::success().small().child(format!("+{}", tally.added)))
             })
