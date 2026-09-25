@@ -252,6 +252,7 @@ opt-in (`false`) for security.
 | `embedding_model` | `Option<String>` | `null` | e.g. `text-embedding-3-small` |
 | `hosted_conversations_enabled` | `bool` | `false` | Developer-only: offers the per-conversation move between local and hosted (AGE-308) |
 | `tool_loading` | `ToolLoading` | `"all"` | How tools are offered to the model. JSON: `all` (every allowed tool on every request) or `dynamic` (a small core, plus groups the model loads with `load_tools`). Omitted from the file while `all`. CLI override: `chatty-tui --tool-loading` |
+| `ask_user_enabled` | `bool` | `true` | Offer the `ask_user` tool (ADR-0011 C7). Omitted from the file while `true`. CLI override: `chatty-tui --disable ask-user` (unattended runs, so a stray call fails fast instead of blocking) |
 
 `ApprovalMode` has no `rename_all` — JSON uses the Rust variant names above.
 
@@ -693,6 +694,7 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | | `ApprovalResolved` | `conversation_id`, `id`, `approved` | `StreamManager` | `ChattyApp` → `ChatView` |
 | | `ClarificationRequested` | `conversation_id`, `id`, `questions` | `StreamManager` | `ChattyApp` → `ChatView` (ask-user card) |
 | | `TokenUsage` | `conversation_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | `StreamManager` | `ChattyApp` |
+| | `TurnProgress` | `conversation_id`, `turn`, `tokens` | `StreamManager` | `ChattyApp` → `ChatInputState` (live turn/token/elapsed indicator) |
 | | `StreamEnded` | `conversation_id`, `status`, `token_usage`, `trace_json`, … | `StreamManager` | `ChattyApp` (finalization) |
 | `SidebarEvent` | `NewChat` | — | `SidebarView` | `ChattyApp` |
 | | `OpenSettings` | — | `SidebarView` | `ChattyApp` |
