@@ -197,6 +197,12 @@ pub struct AgentClient {
     request_recorder: RequestRecorder,
     /// The loaded tool groups, when the agent loads its tools dynamically.
     tool_loader: Option<ToolLoader>,
+    /// Whether this agent's model accepts image input (`ModelConfig::supports_images`
+    /// at build time). `stream_prompt` strips images before sending a request
+    /// when this is false, so a stale capability flag or an image carried in
+    /// from history (e.g. after switching to a text-only model mid-conversation)
+    /// fails as a clear, model-visible note instead of a provider 400.
+    supports_images: bool,
 }
 
 impl AgentClient {
@@ -1166,9 +1172,17 @@ impl AgentClient {
         let verify_completion_tool = VerifyCompletionTool::new(agent_task_controller.clone());
 
         // Ask-the-user tool: only offered when a frontend is listening for the
-        // question. Without a pending store the call would block until it
-        // times out, so the model must not see the tool at all.
-        let ask_user_tool = pending_clarifications.clone().map(AskUserTool::new);
+        // question, and when execution settings have not turned it off
+        // (`chatty-tui --disable ask-user`, e.g. an unattended benchmark
+        // harness with no one to answer). Without a pending store the call
+        // would block until it times out, so the model must not see the
+        // tool at all.
+        let ask_user_tool = exec_settings
+            .as_ref()
+            .is_none_or(|settings| settings.ask_user_enabled)
+            .then(|| pending_clarifications.clone())
+            .flatten()
+            .map(AskUserTool::new);
 
         // The broker's local workers exist exactly when the gateway that
         // serves them does (ADR-0011 C2); the gateway publishes them
@@ -1394,6 +1408,13 @@ impl AgentClient {
     /// (AGE-212) and, later, per-provider auth are derived from.
     pub fn provider(&self) -> crate::settings::models::providers_store::ProviderType {
         self.provider.clone()
+    }
+
+    /// Whether this agent's model accepts image input, per `ModelConfig`
+    /// at build time. `stream_prompt` uses this to strip images from a
+    /// request rather than let the provider 400 on them.
+    pub fn supports_images(&self) -> bool {
+        self.supports_images
     }
 }
 

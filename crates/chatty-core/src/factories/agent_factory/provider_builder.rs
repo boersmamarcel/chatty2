@@ -132,6 +132,7 @@ pub(super) async fn build_provider_agent(
                 context_shaper,
                 request_recorder,
                 tool_loader,
+                supports_images: model_config.supports_images,
             })
         }
         ProviderType::Ollama => {
@@ -184,6 +185,7 @@ pub(super) async fn build_provider_agent(
                 context_shaper,
                 request_recorder,
                 tool_loader,
+                supports_images: model_config.supports_images,
             })
         }
         ProviderType::AzureOpenAI => {
@@ -347,6 +349,7 @@ async fn build_azure_agent(
         context_shaper,
         request_recorder,
         tool_loader,
+        supports_images: model_config.supports_images,
     })
 }
 

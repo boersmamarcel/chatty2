@@ -681,6 +681,20 @@ impl ChattyApp {
             StreamManagerEvent::TokenUsage { .. } => {
                 // Token usage is handled during stream finalization, not per-chunk
             }
+            StreamManagerEvent::TurnProgress {
+                conversation_id,
+                turn,
+                tokens,
+            } => {
+                let (turn, tokens) = (*turn, *tokens);
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.chat_input_state().update(cx, |input, cx| {
+                            input.record_turn_progress(turn, tokens, cx);
+                        });
+                    }
+                });
+            }
             StreamManagerEvent::StreamEnded {
                 conversation_id,
                 epoch,

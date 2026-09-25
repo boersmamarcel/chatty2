@@ -76,6 +76,10 @@ async fn run_loop(
     // engine event that reports `EngineAction::Redraw` sets it again — a bare
     // tick with nothing new to show does not force a rebuild (AGE-168).
     let mut dirty = true;
+    // The elapsed second the status bar's run indicator last drew. A long
+    // tool call or a slow first token sends no engine event, so without
+    // this the clock would freeze until the next chunk arrives.
+    let mut shown_run_second = None;
 
     loop {
         if dirty {
@@ -223,9 +227,26 @@ async fn run_loop(
             // Tick for animations (streaming cursor blink). Idle ticks are
             // free: `dirty` only flips back on when a terminal or engine
             // event actually changed something to show (AGE-168).
-            _ = tick_interval.tick() => {}
+            _ = tick_interval.tick() => {
+                if run_clock_advanced(engine, &mut shown_run_second) {
+                    dirty = true;
+                }
+            }
         }
     }
+}
+
+/// Whether the streaming run's elapsed clock has reached a new whole second
+/// since the status bar last drew it, so an idle tick redraws once a second
+/// while a response is in flight and never otherwise (AGE-168).
+fn run_clock_advanced(engine: &ChatEngine, shown: &mut Option<u64>) -> bool {
+    let second = engine
+        .is_streaming
+        .then(|| engine.turn_elapsed().map(|d| d.as_secs()))
+        .flatten();
+    let advanced = second.is_some() && second != *shown;
+    *shown = second;
+    advanced
 }
 
 /// Time budget for draining events already queued behind the one that woke
@@ -994,6 +1015,27 @@ mod tests {
             Some("a1"),
             "the approval must still be recorded, in order, alongside the text"
         );
+    }
+
+    /// The status bar's run clock has to tick on its own: an idle tick
+    /// redraws when the streaming run's elapsed second changes, once per
+    /// second, and never while nothing is streaming.
+    #[test]
+    fn idle_tick_redraws_once_per_new_run_second_only_while_streaming() {
+        let mut engine = test_engine(ExecutionSettingsModel::default());
+        let mut shown = None;
+        assert!(!run_clock_advanced(&engine, &mut shown));
+
+        engine.handle_event(AppEvent::StreamStarted);
+        assert!(run_clock_advanced(&engine, &mut shown));
+        assert!(
+            !run_clock_advanced(&engine, &mut shown),
+            "the same second must not redraw again"
+        );
+
+        engine.is_streaming = false;
+        assert!(!run_clock_advanced(&engine, &mut shown));
+        assert_eq!(shown, None);
     }
 
     /// AGE-168: events the engine reports no visible change for (here,

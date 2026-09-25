@@ -130,6 +130,9 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
         spans.push(Span::styled("● loading services…", theme::accent()));
     } else if engine.is_streaming {
         spans.push(Span::styled("● streaming", theme::warning()));
+        if let Some(suffix) = format_run_suffix(engine.current_turn, engine.turn_elapsed()) {
+            spans.push(Span::styled(suffix, theme::muted()));
+        }
         let queued = engine.queued_count();
         if queued > 0 {
             spans.push(Span::styled(
@@ -158,6 +161,26 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
     frame.render_widget(status_line, area);
 }
 
+/// Format the "streaming" status indicator's turn/elapsed suffix, e.g.
+/// " · turn 3 · 1:15". `None` while no round-trip has completed yet and less
+/// than a second has elapsed, so the indicator doesn't flicker into view for
+/// an instant reply.
+fn format_run_suffix(turn: Option<u32>, elapsed: Option<std::time::Duration>) -> Option<String> {
+    let elapsed_secs = elapsed.filter(|d| d.as_secs() >= 1).map(|d| d.as_secs());
+    if turn.is_none() && elapsed_secs.is_none() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(turn) = turn {
+        parts.push(format!("turn {turn}"));
+    }
+    if let Some(secs) = elapsed_secs {
+        parts.push(format!("{}:{:02}", secs / 60, secs % 60));
+    }
+    Some(format!(" · {}", parts.join(" · ")))
+}
+
 fn format_tokens(count: u32) -> String {
     if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)
@@ -184,4 +207,42 @@ fn truncate_middle(value: &str, max_len: usize) -> String {
         .rev()
         .collect();
     format!("{prefix}…{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_run_suffix;
+
+    #[test]
+    fn no_suffix_before_a_turn_or_a_full_second() {
+        assert_eq!(format_run_suffix(None, None), None);
+        assert_eq!(
+            format_run_suffix(None, Some(std::time::Duration::from_millis(200))),
+            None
+        );
+    }
+
+    #[test]
+    fn shows_turn_once_a_round_trip_completes() {
+        assert_eq!(
+            format_run_suffix(Some(2), None),
+            Some(" · turn 2".to_string())
+        );
+    }
+
+    #[test]
+    fn shows_elapsed_time_past_one_second() {
+        assert_eq!(
+            format_run_suffix(Some(1), Some(std::time::Duration::from_secs(65))),
+            Some(" · turn 1 · 1:05".to_string())
+        );
+    }
+
+    #[test]
+    fn shows_elapsed_alone_before_the_first_round_trip() {
+        assert_eq!(
+            format_run_suffix(None, Some(std::time::Duration::from_secs(3))),
+            Some(" · 0:03".to_string())
+        );
+    }
 }
