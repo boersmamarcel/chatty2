@@ -191,7 +191,11 @@ examples.
   is a rig hook every `stream_prompt` call registers: it tells the model
   how many tool turns are left once most of the budget is spent, and gives
   it one final tool-free call to answer instead of letting rig's
-  `MaxTurnsError` swallow an in-progress reply.
+  `MaxTurnsError` swallow an in-progress reply. `max_agent_turns` defaults
+  to `0` (no cap, not the old 10); an unattended run with no cap
+  (`--headless`, `--pipe`, a delegated worker) instead runs under a
+  wall-clock budget, `chatty-tui --max-duration <secs|30m|2h>` (default
+  30m).
 - **Error handling** — Don't `.ok()` away errors silently. Log as
   `warn!()` for non-critical paths; propagate with `?` for critical I/O.
 - **Tool errors** — Every `impl Tool`'s error path must go through
@@ -292,6 +296,14 @@ examples.
    update` will not move it off the fork; don't "fix" the patch block
    without checking whether upstream has actually shipped a release with
    those fixes. See CLAUDE.md.
+
+10. **The agent shell loads the login profile, but still starts
+    `--norc --noprofile`.** `shell_service` sources `/etc/profile` and the
+    first of `~/.bash_profile`/`~/.bash_login`/`~/.profile` into the shell's
+    first command (output discarded) so a project's conda env or `PATH`
+    additions reach the model's commands. If you're debugging a shell tool
+    that behaves differently interactively vs. under the agent, check what
+    the login profile does, not `.bashrc` (never sourced). See CLAUDE.md.
 
 ## Deeper reading
 
