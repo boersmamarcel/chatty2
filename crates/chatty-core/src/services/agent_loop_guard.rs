@@ -20,7 +20,9 @@
 //!    tool calls in a row that write no file, run no new test command and
 //!    read no file not read before earn one nudge to change approach or
 //!    finish; a second such window asks the frontend to finalize. SWE-bench
-//!    runs of a local model went 310–450 tool calls without either.
+//!    runs of a local model went 310–450 tool calls without either. Only a
+//!    write inside the working tree counts: a scratch script under `/tmp`,
+//!    written and rewritten again and again, is not progress on the task.
 //!
 //! ## Usage (in both frontends)
 //!
@@ -45,6 +47,7 @@
 //! ```
 
 use std::collections::{HashSet, VecDeque};
+use std::path::{Component, Path, PathBuf};
 
 // ── Tunables ──────────────────────────────────────────────────────────────────
 
@@ -87,18 +90,18 @@ const FILE_WRITE_TOOLS: &[&str] = &[
 /// Tools that run a command.
 const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
 
-/// A shell command containing one of these writes files.
-const SHELL_WRITE_MARKERS: &[&str] = &[
-    " > ",
-    ">>",
-    "sed -i",
-    "tee ",
-    "git apply",
-    "patch ",
-    "cat >",
-    "open(",
-    ".write(",
+/// Tools whose path argument names what they write; the rest of
+/// [`FILE_WRITE_TOOLS`] (answer files, documents) always count.
+const PATH_WRITE_TOOLS: &[(&str, &str)] = &[
+    ("write_file", "path"),
+    ("apply_diff", "path"),
+    ("delete_file", "path"),
+    ("create_directory", "path"),
+    ("move_file", "destination"),
 ];
+
+/// Scratch directories when the run has no workspace root to compare with.
+const SCRATCH_DIRS: &[&str] = &["/tmp", "/var/tmp", "/dev"];
 
 /// A command containing one of these runs tests.
 const TEST_RUNNER_MARKERS: &[&str] = &[
@@ -202,6 +205,9 @@ pub struct AgentLoopGuard {
     seen_test_commands: HashSet<String>,
     /// URLs fetched, queries searched and code run so far, as `tool:target`.
     seen_targets: HashSet<String>,
+    /// The working tree: a write outside it (a `/tmp` scratch script) is
+    /// not progress. Without one, only the scratch dirs count as outside.
+    workspace_root: Option<PathBuf>,
 }
 
 impl AgentLoopGuard {
@@ -225,6 +231,7 @@ impl AgentLoopGuard {
             seen_files: HashSet::new(),
             seen_test_commands: HashSet::new(),
             seen_targets: HashSet::new(),
+            workspace_root: None,
         }
     }
 
@@ -232,6 +239,16 @@ impl AgentLoopGuard {
     /// someone watching an interactive chat is its progress check.
     pub fn with_progress_check(mut self) -> Self {
         self.progress_check = true;
+        self
+    }
+
+    /// The run's working tree, for the progress check: writes outside it do
+    /// not count as progress. Relative paths are taken to be inside it.
+    pub fn with_workspace_root(mut self, root: Option<&Path>) -> Self {
+        self.workspace_root = root.map(|root| {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            normalize(&root)
+        });
         self
     }
 
@@ -264,14 +281,25 @@ impl AgentLoopGuard {
         ))
     }
 
-    /// Whether this call moved the run forward: it wrote a file, ran a test
-    /// command not run before, read a file not read before, or fetched,
-    /// searched or ran something new ([`RESEARCH_TOOLS`]).
+    /// Whether this call moved the run forward: it wrote a file inside the
+    /// working tree, ran a test command not run before, read a file not read
+    /// before, or fetched, searched or ran something new ([`RESEARCH_TOOLS`]).
+    ///
+    /// A write outside the working tree — a scratch script under `/tmp`, or
+    /// the tenth rewrite of one — is not progress: a run can write a new
+    /// debug script every call without getting any closer to the change.
     fn made_progress(&mut self, name: &str, input: &str) -> bool {
-        if FILE_WRITE_TOOLS.contains(&name) {
-            return true;
-        }
         let args: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+        if FILE_WRITE_TOOLS.contains(&name) {
+            let target = PATH_WRITE_TOOLS
+                .iter()
+                .find(|(tool, _)| *tool == name)
+                .and_then(|(_, key)| args.get(*key)?.as_str());
+            return match target {
+                Some(path) => self.note_write(path),
+                None => true,
+            };
+        }
         if let Some(target) = research_target(name, &args)
             && self.seen_targets.insert(format!("{name}:{target}"))
         {
@@ -283,7 +311,12 @@ impl AgentLoopGuard {
                 .or_else(|| args.get("code"))
                 .and_then(|v| v.as_str())
                 .unwrap_or(input);
-            if SHELL_WRITE_MARKERS.iter().any(|m| command.contains(m)) {
+            let writes = shell_writes(command);
+            let mut wrote_in_tree = writes.untargeted;
+            for target in &writes.targets {
+                wrote_in_tree |= self.note_write(target);
+            }
+            if wrote_in_tree {
                 return true;
             }
             if TEST_RUNNER_MARKERS.iter().any(|m| command.contains(m))
@@ -303,6 +336,41 @@ impl AgentLoopGuard {
             return self.seen_files.insert(path.to_string());
         }
         false
+    }
+
+    /// A write to `path`: whether it is inside the working tree. A scratch
+    /// file outside it is remembered as read, so reading it back is no new
+    /// read either.
+    fn note_write(&mut self, path: &str) -> bool {
+        if self.in_tree(path) {
+            return true;
+        }
+        self.seen_files.insert(path.to_string());
+        false
+    }
+
+    /// Whether `path` (as the model wrote it) is inside the working tree.
+    fn in_tree(&self, path: &str) -> bool {
+        let path = path.trim_matches(|c| c == '\'' || c == '"');
+        if path.is_empty() {
+            return true;
+        }
+        if path.starts_with('~') || path.starts_with('$') {
+            return false;
+        }
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            return true;
+        }
+        let path = normalize(path);
+        match &self.workspace_root {
+            Some(root) => path.starts_with(root),
+            None => {
+                let temp = normalize(&std::env::temp_dir());
+                !(SCRATCH_DIRS.iter().any(|dir| path.starts_with(dir))
+                    || (temp.parent().is_some() && path.starts_with(&temp)))
+            }
+        }
     }
 
     // ── Event handlers ────────────────────────────────────────────────────────
@@ -430,6 +498,318 @@ fn research_target(name: &str, args: &serde_json::Value) -> Option<String> {
         target.push_str(&format!("@{start}"));
     }
     Some(target)
+}
+
+/// `path` with `.` and `..` resolved lexically (nothing is looked up).
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// What a shell command (or a code snippet) writes.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ShellWrites {
+    /// The paths written: redirection targets, `tee`/`sed -i`/`cp`/`mv`
+    /// destinations, files a Python `open(..., "w")` names.
+    targets: Vec<String>,
+    /// A write whose target cannot be read off the command (`git apply`,
+    /// `patch`, `open(path_var, "w")`): counted as a write in the tree.
+    untargeted: bool,
+}
+
+/// Commands that feed a here-document to a file: its body is file content,
+/// not commands, so it is not searched for writes.
+const HEREDOC_DATA_COMMANDS: &[&str] = &["cat", "tee"];
+
+/// The writes in a shell command line. Quoted text is not taken for shell
+/// syntax (`python -c "if a > b: ..."` redirects nothing); it and the body
+/// of a here-document fed to an interpreter are searched for Python file
+/// writes instead.
+fn shell_writes(command: &str) -> ShellWrites {
+    let mut writes = ShellWrites::default();
+    let (shell, code) = split_heredocs(command);
+    for segment in shell_segments(&shell) {
+        segment_writes(&segment, &mut writes);
+    }
+    python_writes(&shell, &mut writes);
+    python_writes(&code, &mut writes);
+    writes
+}
+
+/// `command` without its here-document bodies, and the bodies that are
+/// code (fed to an interpreter rather than written to a file by `cat`).
+fn split_heredocs(command: &str) -> (String, String) {
+    let mut shell = String::new();
+    let mut code = String::new();
+    let mut lines = command.lines();
+    while let Some(line) = lines.next() {
+        shell.push_str(line);
+        shell.push('\n');
+        let Some(at) = line.find("<<") else {
+            continue;
+        };
+        let rest = line[at + 2..].trim_start_matches(['-', '~']).trim_start();
+        let delimiter: String = rest
+            .trim_start_matches(['\'', '"'])
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if delimiter.is_empty() {
+            continue; // `<<<` here-string, or not a here-document at all
+        }
+        let is_data = line
+            .split(['|', ';', '&'])
+            .find(|part| part.contains("<<"))
+            .and_then(|part| part.split_whitespace().next())
+            .is_some_and(|program| HEREDOC_DATA_COMMANDS.contains(&program));
+        for body in lines.by_ref() {
+            if body.trim() == delimiter {
+                break;
+            }
+            if !is_data {
+                code.push_str(body);
+                code.push('\n');
+            }
+        }
+    }
+    (shell, code)
+}
+
+/// A word of a shell command line, or a redirection of output to a file.
+#[derive(Debug, PartialEq, Eq)]
+enum ShellToken {
+    Word(String),
+    /// `>`, `>>`, `2>`, `&>`: the next word is the file written.
+    RedirectOut,
+    /// `<`, `<<`, `<<<`: the next word is read (or a here-document's
+    /// delimiter), not an argument.
+    RedirectIn,
+}
+
+/// The simple commands of a shell command line (split on unquoted `|`,
+/// `;`, `&` and newlines), as tokens. Quotes are removed from words; an
+/// output redirection to another descriptor (`2>&1`) is dropped.
+fn shell_segments(command: &str) -> Vec<Vec<ShellToken>> {
+    let mut segments = Vec::new();
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    let flush = |word: &mut String, tokens: &mut Vec<ShellToken>| {
+        if !word.is_empty() {
+            tokens.push(ShellToken::Word(std::mem::take(word)));
+        }
+    };
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => quote = Some(c),
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            '>' => {
+                // A descriptor number or `&` right before `>` belongs to it.
+                if word.chars().all(|c| c.is_ascii_digit()) || word == "&" {
+                    word.clear();
+                } else {
+                    flush(&mut word, &mut tokens);
+                }
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'&') {
+                    // `>&2`: to another descriptor, not a file.
+                    chars.next();
+                    while chars
+                        .peek()
+                        .is_some_and(|c| c.is_ascii_digit() || *c == '-')
+                    {
+                        chars.next();
+                    }
+                } else {
+                    tokens.push(ShellToken::RedirectOut);
+                }
+            }
+            '<' => {
+                flush(&mut word, &mut tokens);
+                while chars
+                    .peek()
+                    .is_some_and(|c| *c == '<' || *c == '-' || *c == '~')
+                {
+                    chars.next();
+                }
+                tokens.push(ShellToken::RedirectIn);
+            }
+            '&' if chars.peek() == Some(&'>') => {
+                flush(&mut word, &mut tokens);
+                word.push('&');
+            }
+            '|' | ';' | '&' | '\n' => {
+                flush(&mut word, &mut tokens);
+                if !tokens.is_empty() {
+                    segments.push(std::mem::take(&mut tokens));
+                }
+            }
+            c if c.is_whitespace() => flush(&mut word, &mut tokens),
+            c => word.push(c),
+        }
+    }
+    flush(&mut word, &mut tokens);
+    if !tokens.is_empty() {
+        segments.push(tokens);
+    }
+    segments
+}
+
+/// The writes of one simple command: its output redirections, and what
+/// `tee`, `sed -i`, `cp`, `mv`, `git apply` and `patch` write.
+fn segment_writes(tokens: &[ShellToken], writes: &mut ShellWrites) {
+    let mut words = Vec::new();
+    let mut pending: Option<&ShellToken> = None;
+    for token in tokens {
+        match (token, pending.take()) {
+            (ShellToken::Word(word), Some(ShellToken::RedirectOut)) => {
+                writes.targets.push(word.clone());
+            }
+            (ShellToken::Word(_), Some(_)) => {}
+            (ShellToken::Word(word), None) => words.push(word.as_str()),
+            (redirection, _) => pending = Some(redirection),
+        }
+    }
+    let Some((&program, args)) = words.split_first() else {
+        return;
+    };
+    let operands = || args.iter().copied().filter(|a| !a.starts_with('-'));
+    match program {
+        "tee" => writes.targets.extend(operands().map(str::to_string)),
+        "sed"
+            if args
+                .iter()
+                .any(|a| a.starts_with("-i") || *a == "--in-place") =>
+        {
+            // The files are the operands after the script: the first
+            // operand, unless `-e`/`-f` gave the script.
+            let mut files = Vec::new();
+            let mut script_given = false;
+            let mut args = args.iter();
+            while let Some(arg) = args.next() {
+                if matches!(*arg, "-e" | "-f" | "--expression" | "--file") {
+                    script_given = true;
+                    args.next();
+                } else if !arg.starts_with('-') {
+                    files.push(arg.to_string());
+                }
+            }
+            if !script_given && !files.is_empty() {
+                files.remove(0);
+            }
+            writes.targets.extend(files);
+        }
+        "cp" | "mv" | "install" => {
+            if let Some(destination) = operands().next_back()
+                && operands().count() >= 2
+            {
+                writes.targets.push(destination.to_string());
+            }
+        }
+        "patch" => writes.untargeted = true,
+        "git" if args.first() == Some(&"apply") => writes.untargeted = true,
+        _ => {}
+    }
+}
+
+/// Python file writes in `code`: `open(<path>, "w" | "a" | "x" ...)` and
+/// `Path(<path>).write_text(...)` / `.write_bytes(...)`. A write whose path
+/// is not a string literal marks the command `untargeted`.
+fn python_writes(code: &str, writes: &mut ShellWrites) {
+    let mut rest = code;
+    while let Some(at) = rest.find("open(") {
+        let preceded_by_ident = rest[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        rest = &rest[at + "open(".len()..];
+        if preceded_by_ident {
+            continue; // `os.popen(`, `urlopen(`
+        }
+        let call = &rest[..rest.find(')').unwrap_or(rest.len())];
+        let (path, after_path) = match string_literal(call) {
+            Some((path, after)) => (Some(path), after),
+            None => (None, call.split_once(',').map_or("", |(_, after)| after)),
+        };
+        let writes_file = string_literals(after_path).iter().any(|mode| {
+            !mode.is_empty()
+                && mode.chars().all(|c| "rwxabt+".contains(c))
+                && mode.chars().any(|c| "wax".contains(c))
+        });
+        if writes_file {
+            match path {
+                Some(path) => writes.targets.push(path),
+                None => writes.untargeted = true,
+            }
+        }
+    }
+    for method in [".write_text(", ".write_bytes("] {
+        let mut rest = code;
+        while let Some(at) = rest.find(method) {
+            let before = rest[..at].trim_end();
+            rest = &rest[at + method.len()..];
+            let path = before
+                .strip_suffix(')')
+                .and_then(|b| b.rfind("Path(").map(|p| &b[p + "Path(".len()..]))
+                .and_then(|inner| string_literal(inner))
+                .filter(|(_, after)| after.trim().is_empty())
+                .map(|(path, _)| path);
+            match path {
+                Some(path) => writes.targets.push(path),
+                None => writes.untargeted = true,
+            }
+        }
+    }
+}
+
+/// The string literal `text` starts with (after whitespace and a `r`/`b`
+/// prefix), and the text after it.
+fn string_literal(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start().trim_start_matches(['r', 'b']);
+    let quote = text.chars().next().filter(|c| *c == '\'' || *c == '"')?;
+    let body = &text[1..];
+    let end = body.find(quote)?;
+    Some((body[..end].to_string(), &body[end + 1..]))
+}
+
+/// Every string literal in `text`.
+fn string_literals(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(['\'', '"']) {
+        match string_literal(&rest[at..]) {
+            Some((literal, after)) => {
+                found.push(literal);
+                rest = after;
+            }
+            None => break,
+        }
+    }
+    found
 }
 
 /// The file arguments of the reading commands (`cat`, `sed -n`, `head` …)
@@ -707,6 +1087,167 @@ mod tests {
             };
         }
         assert!(matches!(last, ProgressCheck::Nudge(_)), "{last:?}");
+    }
+
+    /// Whether `input` to `name`, as the call that would complete a window
+    /// without progress, restarts the window instead.
+    fn counts_as_progress(g: &mut AgentLoopGuard, name: &str, input: &str) -> bool {
+        search_without_progress(g, PROGRESS_WINDOW_TOOL_CALLS - 1);
+        let verdict = g.on_tool_progress(name, input);
+        if verdict == ProgressCheck::Fine {
+            true
+        } else {
+            // Start the next case from a clean window.
+            *g = progress_guard().with_workspace_root(g.workspace_root.clone().as_deref());
+            false
+        }
+    }
+
+    fn shell(command: &str) -> String {
+        serde_json::json!({ "command": command }).to_string()
+    }
+
+    #[test]
+    fn scratch_writes_outside_the_tree_are_not_progress() {
+        let root = Path::new("/work/repo");
+        let mut g = progress_guard().with_workspace_root(Some(root));
+        for command in [
+            "cat > /tmp/repro.py <<'EOF'\nimport os\nprint(1 > 0)\nEOF",
+            "cat > /tmp/dbg2.py << EOF\nwith open('src/app.py', 'w') as f:\n    f.write('x')\nEOF\npython /tmp/dbg2.py",
+            "python /tmp/repro.py > /tmp/out.txt 2>&1",
+            "echo hi >> /tmp/log.txt",
+            "python -c \"open('/tmp/scratch.json', 'w').write('{}')\"",
+            "python -c \"print(open('src/app.py').read())\"",
+            "python -c \"import sys; sys.stdout.write('ok')\"",
+            "python -c \"print(3 > 2)\"",
+            "ls src > /dev/null",
+            "tee /tmp/a.txt < input.txt",
+            "cp src/app.py /tmp/app_backup.py",
+        ] {
+            assert!(
+                !counts_as_progress(&mut g, "shell_execute", &shell(command)),
+                "{command}"
+            );
+        }
+        for (name, input) in [
+            ("write_file", r#"{"path": "/tmp/check.py", "content": "x"}"#),
+            (
+                "write_file",
+                r#"{"path": "/work/repo/../elsewhere/x.py", "content": "x"}"#,
+            ),
+            (
+                "move_file",
+                r#"{"source": "a.py", "destination": "/tmp/a.py"}"#,
+            ),
+        ] {
+            assert!(!counts_as_progress(&mut g, name, input), "{input}");
+        }
+    }
+
+    #[test]
+    fn rewriting_the_same_scratch_script_never_resets_the_window() {
+        let mut g = progress_guard().with_workspace_root(Some(Path::new("/work/repo")));
+        let mut verdicts = Vec::new();
+        for i in 0..PROGRESS_WINDOW_TOOL_CALLS {
+            let command = if i % 2 == 0 {
+                format!("cat > /tmp/repro.py <<'EOF'\nprint({i})\nEOF")
+            } else {
+                // Reading the scratch file back is no new read either.
+                "cat /tmp/repro.py && python /tmp/repro.py".to_string()
+            };
+            verdicts.push(g.on_tool_progress("shell_execute", &shell(&command)));
+        }
+        assert!(
+            matches!(verdicts.last(), Some(ProgressCheck::Nudge(_))),
+            "{verdicts:?}"
+        );
+    }
+
+    #[test]
+    fn writes_inside_the_tree_are_progress() {
+        let root = Path::new("/work/repo");
+        let mut g = progress_guard().with_workspace_root(Some(root));
+        for command in [
+            "cat > src/fix.py <<'EOF'\nx = 1\nEOF",
+            "cat <<EOF > /work/repo/tests/test_fix.py\nx = 1\nEOF",
+            "echo x >> ./notes.txt",
+            "sed -i 's/a/b/' /work/repo/src/app.py",
+            "python - <<'EOF'\nwith open('src/app.py', 'w') as f:\n    f.write('x')\nEOF",
+            "python -c \"from pathlib import Path; Path('src/app.py').write_text('x')\"",
+            "python -c \"p = 'src/app.py'; open(p, 'w').write('x')\"",
+            "cp /tmp/fixed.py src/app.py",
+            "git apply /tmp/fix.patch",
+            "echo done 2>&1 > out.txt",
+        ] {
+            assert!(
+                counts_as_progress(&mut g, "shell_execute", &shell(command)),
+                "{command}"
+            );
+        }
+        for (name, input) in [
+            ("write_file", r#"{"path": "src/app.py", "content": "x"}"#),
+            (
+                "write_file",
+                r#"{"path": "/work/repo/src/app.py", "content": "x"}"#,
+            ),
+            ("apply_diff", r#"{"path": "src/app.py"}"#),
+            ("final_answer", r#"{"answer": "42"}"#),
+        ] {
+            assert!(counts_as_progress(&mut g, name, input), "{input}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_under_the_temp_dir_is_still_the_tree() {
+        let mut g = progress_guard().with_workspace_root(Some(Path::new("/tmp/job/repo")));
+        assert!(counts_as_progress(
+            &mut g,
+            "write_file",
+            r#"{"path": "/tmp/job/repo/a.py", "content": "x"}"#
+        ));
+        assert!(!counts_as_progress(
+            &mut g,
+            "write_file",
+            r#"{"path": "/tmp/job/scratch.py", "content": "x"}"#
+        ));
+    }
+
+    #[test]
+    fn without_a_workspace_root_only_scratch_dirs_are_outside() {
+        let mut g = progress_guard();
+        assert!(counts_as_progress(
+            &mut g,
+            "shell_execute",
+            &shell("echo x > /srv/app/a.py")
+        ));
+        assert!(!counts_as_progress(
+            &mut g,
+            "shell_execute",
+            &shell("echo x > /tmp/a.py")
+        ));
+        assert!(!counts_as_progress(
+            &mut g,
+            "shell_execute",
+            &shell("echo x > /var/tmp/a.py")
+        ));
+    }
+
+    #[test]
+    fn shell_writes_reads_redirections_and_python_writes() {
+        let w = shell_writes("python run.py 2>/dev/null >> log.txt && echo '> not.txt' 1>&2");
+        assert_eq!(
+            w.targets,
+            vec!["/dev/null".to_string(), "log.txt".to_string()]
+        );
+        assert!(!w.untargeted);
+        let w = shell_writes("python -c \"open('a.txt', mode='a').write('x'); open('b.txt')\"");
+        assert_eq!(w.targets, vec!["a.txt".to_string()]);
+        let w = shell_writes("sed -i -e 's/a/b/' x.py y.py");
+        assert_eq!(w.targets, vec!["x.py".to_string(), "y.py".to_string()]);
+        assert_eq!(
+            shell_writes("grep -rn foo src | head"),
+            ShellWrites::default()
+        );
     }
 
     #[test]
