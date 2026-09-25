@@ -643,9 +643,16 @@ impl RenderOnce for ChatInput {
                                         // there is no turn cap to watch for
                                         // anymore, so this is the only signal
                                         // the run is still making progress.
+                                        // A fixed minimum width, right-aligned,
+                                        // so the model selector does not jump
+                                        // when the turn count arrives or the
+                                        // clock gains a digit.
                                         row.child(
                                             div()
+                                                .flex()
+                                                .justify_end()
                                                 .flex_shrink_0()
+                                                .min_w(px(160.))
                                                 .px_2()
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
