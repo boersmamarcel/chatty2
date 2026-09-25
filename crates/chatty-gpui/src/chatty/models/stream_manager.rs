@@ -810,8 +810,15 @@ impl StreamManager {
                 StreamChunk::ClarificationRequested { id, questions },
                 cx,
             ),
-            // Folded into `TokenUsage` by the session.
-            SessionEvent::ApiCallUsage(_) => {}
+            // Folded into `TokenUsage` by the session; only the live run
+            // indicator reads it here.
+            SessionEvent::ApiCallUsage(call) => {
+                cx.emit(StreamManagerEvent::TurnProgress {
+                    conversation_id: conv_id.to_string(),
+                    turn: call.turn,
+                    tokens: call.input_tokens + call.output_tokens,
+                });
+            }
             SessionEvent::TokenUsage(usage) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.token_usage = Some(usage.clone());
