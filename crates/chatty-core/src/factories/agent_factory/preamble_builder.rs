@@ -469,6 +469,10 @@ get numbers by computing them with a tool, not in your head. For a web page as i
 date, read the raw revision (MediaWiki `action=raw`) or an archived copy: an old revision rendered \
 today uses today's templates.\n\
 \n\
+**Compute, don't reason**: For counting, matching, ordering, date or arithmetic questions over \
+data, check the answer with a short script before you give it; an answer worked out in prose alone \
+is where these go wrong.\n\
+\n\
 **Commit on evidence**: Once checked evidence answers the question, act on it immediately. \
 Do not continue exploring past that point.\n\
 \n\
@@ -1250,6 +1254,8 @@ mod tests {
             "Once checked evidence answers the question",
             "`action=raw`",
             "failing before the change and passing after it",
+            "counting, matching, ordering, date or arithmetic questions over data, check the \
+             answer with a short script before you give it",
         ] {
             assert!(prompt.contains(kept), "missing {kept:?}");
         }
