@@ -465,7 +465,9 @@ Pre-tool reasoning text wastes tokens and delays the answer.\n\
 \n\
 **See it through**: Stop only when the task is verifiably done, not at the first plausible-looking \
 answer. Never present a guess as fact: check key facts against a primary source or tool output, and \
-get numbers by computing them with a tool, not in your head.\n\
+get numbers by computing them with a tool, not in your head. For a web page as it stood at a past \
+date, read the raw revision (MediaWiki `action=raw`) or an archived copy: an old revision rendered \
+today uses today's templates.\n\
 \n\
 **Commit on evidence**: Once checked evidence answers the question, act on it immediately. \
 Do not continue exploring past that point.\n\
@@ -476,7 +478,8 @@ what you have learned and try a different one (another tool, source or method) r
 \n\
 **Code changes**: Reproduce the problem first. Make the smallest change that fixes the root cause, \
 in the workspace you were given; do not install the project itself from a package index. Run the \
-most specific relevant tests, then broader ones.\n\
+most specific relevant tests, then broader ones. Prove a fix: show the test that exposes the bug \
+failing before the change and passing after it.\n\
 \n\
 **Bounded output**: Keep command output short: filter it with `tail`, `head` or `grep` rather \
 than printing whole logs or files. One shell command that finds, reads and checks at once, with \
@@ -1245,6 +1248,8 @@ mod tests {
             "`tail`, `head` or `grep`",
             "beats a string of small read and search calls",
             "Once checked evidence answers the question",
+            "`action=raw`",
+            "failing before the change and passing after it",
         ] {
             assert!(prompt.contains(kept), "missing {kept:?}");
         }

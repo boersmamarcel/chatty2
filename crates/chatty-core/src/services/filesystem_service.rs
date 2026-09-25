@@ -194,9 +194,10 @@ impl FileSystemService {
 
     /// Read a text file and return its contents as a string.
     ///
-    /// The file must be within the workspace root and under 10MB.
+    /// The file must be within the workspace root (or, read-only, the
+    /// system temp directory) and under 10MB.
     pub async fn read_file(&self, path: &str) -> Result<String> {
-        let canonical = self.validator.validate(path).await?;
+        let canonical = self.validator.validate_readable(path).await?;
         self.validator.validate_file_size(&canonical).await?;
 
         debug!(path = %canonical.display(), "Reading text file");

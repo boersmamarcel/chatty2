@@ -656,7 +656,7 @@ fn guard_of(session: &AgentSession) -> crate::services::ContextShaper {
 /// the guard shapes them while the sixth — the prompt — goes out untouched.
 #[tokio::test]
 async fn the_context_guard_shapes_inside_the_tool_loop() {
-    let workspace = workspace_with_payload(150);
+    let workspace = workspace_with_payload(140);
     let daemon = FakeDaemon::ollama(vec![
         tool_call_response("payload"),
         tool_call_response("payload"),
