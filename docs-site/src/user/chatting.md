@@ -14,7 +14,7 @@
 
 **Send** (or **Enter**) doesn't wait for the current reply to finish — a message sent mid-stream is queued and appears as its own bubble below the reply in progress, with **×** in front to take it back and **↑** to send it now instead, which cancels the current reply and runs that message next. Up to 5 messages can queue at once; a sixth is refused with a notice under the queue. **Stop** cancels the reply but leaves anything queued in place — nothing runs until you send again, and that send runs the queued messages first, in order.
 
-Next to **Stop**, a small "Turn 3 · 512 tok · 1:15" indicator shows the running turn count, this turn's own token total, and elapsed time once a round-trip has completed — a way to see a long reply is still making progress now that replies have no default turn cap.
+The running indicator above the composer grows a "· 84s · turn 11 · 11254 tok" suffix — elapsed time once a second has passed, then the running turn count and this turn's own token total once a round-trip has completed — a way to see a long reply is still making progress now that replies have no default turn cap.
 
 ## Rich rendering
 
