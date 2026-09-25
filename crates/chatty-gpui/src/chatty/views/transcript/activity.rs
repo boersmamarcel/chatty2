@@ -50,7 +50,8 @@ pub fn classify_tool(name: &str) -> ToolKind {
     }
 }
 
-/// Counted sentence: edits → explore → searches → external → commands.
+/// Counted sentence: edits → explore → searches → external → commands, then
+/// how many of those calls failed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunTally {
     pub edits: usize,
@@ -59,6 +60,7 @@ pub struct RunTally {
     pub external: usize,
     pub commands: usize,
     pub handoffs: usize,
+    pub failed: usize,
     pub added: usize,
     pub removed: usize,
 }
@@ -74,6 +76,9 @@ impl RunTally {
                 ToolKind::External => tally.external += 1,
                 ToolKind::Command => tally.commands += 1,
                 ToolKind::Handoff => tally.handoffs += 1,
+            }
+            if matches!(tool.state, ToolCallState::Error(_)) {
+                tally.failed += 1;
             }
             if let Some(output) = tool.output.as_deref() {
                 let (a, r) = count_diff_lines(output);
@@ -119,6 +124,11 @@ impl RunTally {
         }
         if parts.is_empty() {
             parts.push((Some("Worked"), String::new()));
+        }
+        // A quiet count, not a verdict: agents probe paths that turn out not
+        // to exist all the time. The failures themselves are in the rows.
+        if self.failed > 0 {
+            parts.push((None, format!("{} failed", self.failed)));
         }
         parts
     }
@@ -374,6 +384,43 @@ mod tests {
         assert_eq!(
             live_headline(&tool),
             "Reading .opencode/skills/storytelling/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn failed_calls_are_counted_at_the_end_of_the_sentence() {
+        let tool = |name: &str, state: ToolCallState| ToolCallBlock {
+            id: name.into(),
+            tool_name: name.into(),
+            display_name: name.into(),
+            input: "{}".into(),
+            output: None,
+            output_preview: None,
+            state,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let missing = || ToolCallState::Error("No such file or directory".into());
+        let tools = vec![
+            tool("read_file", ToolCallState::Success),
+            tool("read_file", missing()),
+            tool("read_skill", missing()),
+        ];
+        let tally = RunTally::from_tools(&tools);
+        assert_eq!(tally.failed, 2);
+        assert_eq!(
+            tally.phrase_spans(),
+            vec![
+                (Some("explored"), " 3 files".to_string()),
+                (None, "2 failed".to_string()),
+            ]
+        );
+        let clean = RunTally::from_tools(&tools[..1]);
+        assert_eq!(
+            clean.phrase_spans(),
+            vec![(Some("explored"), " 1 file".to_string())]
         );
     }
 

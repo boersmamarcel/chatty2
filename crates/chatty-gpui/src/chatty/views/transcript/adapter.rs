@@ -1190,6 +1190,7 @@ mod tests {
             external: 1,
             commands: 1,
             handoffs: 0,
+            failed: 0,
             added: 0,
             removed: 0,
         }
