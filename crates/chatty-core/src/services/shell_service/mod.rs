@@ -46,6 +46,13 @@ pub struct ShellOutput {
 /// tool call from blocking a turn indefinitely.
 pub const MAX_SHELL_CALL_TIMEOUT_SECONDS: u32 = 600;
 
+/// Shell output the model sees whole. Longer output keeps its head and tail
+/// around an omission line, whatever larger `max_output_bytes` is configured
+/// (a smaller one still wins). 8 KB is about 2k tokens: a whole 51 KB dump,
+/// the old cap, filled a sixth of a 32k window in one call, and on SWE-bench
+/// runs the model paged through such dumps instead of filtering them.
+pub const SHELL_OUTPUT_DEFAULT_CAP_BYTES: usize = 8_192;
+
 /// Current status of the shell session
 #[derive(Debug, Serialize)]
 pub struct ShellStatus {
@@ -220,18 +227,32 @@ impl ShellSession {
         self.workspace_dir.as_ref()
     }
 
-    fn truncate_output_at_char_boundary(output: &mut String, max_output_bytes: usize) {
-        if output.len() <= max_output_bytes {
-            return;
+    /// Cut `output` to its head and tail when it is over the effective cap:
+    /// the smaller of [`SHELL_OUTPUT_DEFAULT_CAP_BYTES`] and the configured
+    /// `max_output_bytes`. The middle gives way, not one end: a build or test
+    /// run says what it is doing at the top and how it ended at the bottom.
+    /// The omission line tells the model how to get the rest. Returns whether
+    /// anything was cut.
+    fn bound_output(output: &mut String, max_output_bytes: usize) -> bool {
+        let cap = max_output_bytes.min(SHELL_OUTPUT_DEFAULT_CAP_BYTES);
+        if output.len() <= cap {
+            return false;
         }
-
-        let original_len = output.len();
-        let mut end = max_output_bytes;
-        while end > 0 && !output.is_char_boundary(end) {
-            end -= 1;
+        let mut head_end = cap / 2;
+        while head_end > 0 && !output.is_char_boundary(head_end) {
+            head_end -= 1;
         }
-        output.truncate(end);
-        output.push_str(&format!("\n... [truncated {} bytes]", original_len - end));
+        let mut tail_start = output.len() - (cap - cap / 2);
+        while tail_start < output.len() && !output.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let omitted = tail_start - head_end;
+        *output = format!(
+            "{}\n... [{omitted} bytes omitted; rerun with a filter (grep/tail) to see more] ...\n{}",
+            &output[..head_end],
+            &output[tail_start..]
+        );
+        true
     }
 
     fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
@@ -813,10 +834,7 @@ impl ShellSession {
                     process.take();
                 }
 
-                let truncated = output.len() > self.max_output_bytes;
-                if truncated {
-                    Self::truncate_output_at_char_boundary(&mut output, self.max_output_bytes);
-                }
+                let truncated = Self::bound_output(&mut output, self.max_output_bytes);
 
                 Ok(ShellOutput {
                     stdout: output.trim_end().to_string(),
@@ -852,10 +870,7 @@ impl ShellSession {
                     let _ = proc.child.kill().await;
                 }
 
-                let truncated = output.len() > self.max_output_bytes;
-                if truncated {
-                    Self::truncate_output_at_char_boundary(&mut output, self.max_output_bytes);
-                }
+                let truncated = Self::bound_output(&mut output, self.max_output_bytes);
                 let mut stdout = output.trim_end().to_string();
                 if !stdout.is_empty() {
                     stdout.push('\n');
