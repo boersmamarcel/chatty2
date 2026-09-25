@@ -791,6 +791,11 @@ impl ChatEngine {
                 label: "Docker Fallback".to_string(),
                 enabled: es.docker_code_execution_enabled,
             },
+            ToolPickerItem {
+                key: "ask-user".to_string(),
+                label: "Ask User".to_string(),
+                enabled: es.ask_user_enabled,
+            },
         ];
 
         self.tool_picker = Some(ToolPicker { items, selected: 0 });
@@ -808,22 +813,12 @@ impl ChatEngine {
             None => return,
         };
 
+        // The picker's keys are the --enable/--disable vocabulary, so the
+        // shared setter applies them (docker-exec's code-exec coupling
+        // included; code-exec is listed first, so docker-exec wins).
         for item in &picker.items {
-            match item.key.as_str() {
-                "shell" => self.execution_settings.enabled = item.enabled,
-                "fs-read" => self.execution_settings.filesystem_read_enabled = item.enabled,
-                "fs-write" => self.execution_settings.filesystem_write_enabled = item.enabled,
-                "fetch" => self.execution_settings.fetch_enabled = item.enabled,
-                "git" => self.execution_settings.git_enabled = item.enabled,
-                "code-exec" => self.execution_settings.execute_code_enabled = item.enabled,
-                "docker-exec" => {
-                    self.execution_settings.docker_code_execution_enabled = item.enabled
-                }
-                _ => {}
-            }
-        }
-        if self.execution_settings.docker_code_execution_enabled {
-            self.execution_settings.execute_code_enabled = true;
+            crate::set_tool_group(&mut self.execution_settings, &item.key, item.enabled)
+                .expect("tool picker keys are valid group names");
         }
 
         self.session.set_conversation(None);
@@ -833,53 +828,21 @@ impl ChatEngine {
         );
     }
 
-    /// Toggle a tool by name directly (for `/tools <name>`)
+    /// Toggle a tool group by name directly (for `/tools <name>`). Takes the
+    /// same names as `--enable`/`--disable` (any case, `_` for `-`).
     pub fn toggle_tool_by_name(&mut self, name: &str) -> bool {
-        match name {
-            "shell" => self.execution_settings.enabled = !self.execution_settings.enabled,
-            "fs-read" => {
-                self.execution_settings.filesystem_read_enabled =
-                    !self.execution_settings.filesystem_read_enabled
-            }
-            "fs-write" => {
-                self.execution_settings.filesystem_write_enabled =
-                    !self.execution_settings.filesystem_write_enabled
-            }
-            "fetch" => {
-                self.execution_settings.fetch_enabled = !self.execution_settings.fetch_enabled
-            }
-            "git" => self.execution_settings.git_enabled = !self.execution_settings.git_enabled,
-            "code-exec" => {
-                self.execution_settings.execute_code_enabled =
-                    !self.execution_settings.execute_code_enabled
-            }
-            "docker-exec" => {
-                self.execution_settings.docker_code_execution_enabled =
-                    !self.execution_settings.docker_code_execution_enabled;
-                if self.execution_settings.docker_code_execution_enabled {
-                    self.execution_settings.execute_code_enabled = true;
-                }
-            }
-            _ => {
-                self.add_system_message(format!(
-                    "Unknown tool '{}'. Valid: shell, fs-read, fs-write, fetch, git, code-exec, docker-exec",
-                    name
-                ));
-                return false;
-            }
-        }
-
-        let enabled = match name {
-            "shell" => self.execution_settings.enabled,
-            "fs-read" => self.execution_settings.filesystem_read_enabled,
-            "fs-write" => self.execution_settings.filesystem_write_enabled,
-            "fetch" => self.execution_settings.fetch_enabled,
-            "git" => self.execution_settings.git_enabled,
-            "code-exec" => self.execution_settings.execute_code_enabled,
-            "docker-exec" => self.execution_settings.docker_code_execution_enabled,
-            _ => false,
+        let Some(enabled) = crate::tool_group_enabled(&self.execution_settings, name) else {
+            self.add_system_message(format!(
+                "Unknown tool '{}'. Valid: {}",
+                name,
+                crate::VALID_TOOL_GROUPS
+            ));
+            return false;
         };
-        let state = if enabled { "enabled" } else { "disabled" };
+        crate::set_tool_group(&mut self.execution_settings, name, !enabled)
+            .expect("tool_group_enabled accepted the name");
+
+        let state = if enabled { "disabled" } else { "enabled" };
         self.add_system_message(format!("Tool '{}' {}. Reinitializing...", name, state));
         self.session.set_conversation(None);
         self.is_ready = false;

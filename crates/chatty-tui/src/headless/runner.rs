@@ -221,6 +221,8 @@ impl HeadlessRunner {
             team_skill: self.config.team.as_ref().and_then(Team::skill),
             unattended: true,
             answer_file: self.answer_file,
+            // Ungated: see `ChatEngine::build_agent_context`.
+            ask_user_enabled: self.execution_settings.ask_user_enabled,
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.config.user_secrets.clone(),

@@ -103,14 +103,20 @@ Gates the `ask_user` tool in `agent_factory` (`chatty-tui --disable
 ask-user`). Defaults to `true` and deserializes to `true` when absent, so
 persisted settings keep offering the tool. Like `tool_loading` it is skipped
 on serialization at its default, so settings files and `SettingsSnapshot`
-bytes are unchanged unless a run turns it off. The
-gate only applies when the agent gets execution settings at all:
-`gated_exec_settings` returns `None` when every execution group is off, and
-`None` offers `ask_user` whenever a clarification store exists.
+bytes are unchanged unless a run turns it off.
+
+Because `gated_exec_settings` returns `None` when every execution group is
+off, the same switch also travels on the build context as
+`AgentBuildContext::ask_user_enabled: bool` (`from_services` sets it `true`);
+the factory offers `ask_user` only when both allow it. chatty-tui sets the
+context field from its ungated settings.
 
 **Hive fix**: a struct-literal `ExecutionSettingsModel` needs
 `ask_user_enabled: true` (or `..Default::default()`). A hosted worker that
-must never park on a question can set it `false`.
+must never park on a question can set it `false` — and, since hive gates its
+settings too, set `ask_user_enabled: false` on the `AgentBuildContext` built
+on top of `from_services()`. A full `AgentBuildContext` struct literal needs
+the new field.
 
 ## `AgentClient::supports_images()` (new method)
 

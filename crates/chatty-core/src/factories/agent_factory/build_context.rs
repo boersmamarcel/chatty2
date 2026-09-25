@@ -92,6 +92,13 @@ pub struct AgentBuildContext {
     /// writes nothing, so a coding run cannot leave an answer.txt behind.
     /// `None` (every other host) keeps it writing as before.
     pub answer_file: Option<bool>,
+    /// The host's `ExecutionSettingsModel::ask_user_enabled`, carried
+    /// separately because a gating host (see [`gated_exec_settings`]) hands
+    /// the factory no execution settings at all when every tool group is off
+    /// — and a run with every group plus `ask-user` disabled must still
+    /// drop `ask_user`. `from_services` sets it `true`; the factory offers
+    /// the tool only when this and `exec_settings` (if any) both allow it.
+    pub ask_user_enabled: bool,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -212,6 +219,9 @@ impl AgentBuildContext {
             unattended: false,
             // Only chatty-tui's `--headless` knows its task up front.
             answer_file: None,
+            // chatty-tui overrides this with its own flag; everyone else
+            // leaves the decision to `exec_settings`.
+            ask_user_enabled: true,
         }
     }
 }

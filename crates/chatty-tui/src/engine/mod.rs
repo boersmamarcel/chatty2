@@ -643,6 +643,9 @@ impl ChatEngine {
         AgentBuildContext {
             role: self.role.clone(),
             team_skill: self.team.as_ref().and_then(Team::skill),
+            // Read off the ungated settings: the gate drops them all when
+            // every tool group is off, `--disable ask-user` included.
+            ask_user_enabled: self.execution_settings.ask_user_enabled,
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.user_secrets.clone(),
@@ -1843,6 +1846,50 @@ mod tests {
             },
             event_tx,
         )
+    }
+
+    /// `--only` with nothing left on plus `--disable ask-user`: the gate
+    /// withholds the execution settings, so the flag must travel on the
+    /// context itself or the factory never sees it.
+    #[test]
+    fn ask_user_off_reaches_the_context_when_every_tool_group_is_off() {
+        let mut engine = bare_engine();
+        for group in crate::ALL_TOOL_GROUPS {
+            crate::set_tool_group(&mut engine.execution_settings, group, false).unwrap();
+        }
+        let ctx = engine.build_agent_context();
+        assert!(ctx.exec_settings.is_none());
+        assert!(!ctx.ask_user_enabled);
+
+        engine.execution_settings.ask_user_enabled = true;
+        assert!(engine.build_agent_context().ask_user_enabled);
+    }
+
+    #[test]
+    fn tools_command_toggles_ask_user_in_any_spelling() {
+        let mut engine = bare_engine();
+        assert!(engine.execution_settings.ask_user_enabled);
+        assert!(engine.toggle_tool_by_name("ask-user"));
+        assert!(!engine.execution_settings.ask_user_enabled);
+        assert!(engine.toggle_tool_by_name("ask_user"));
+        assert!(engine.execution_settings.ask_user_enabled);
+        assert!(!engine.toggle_tool_by_name("not-a-group"));
+    }
+
+    #[test]
+    fn tool_picker_lists_and_applies_ask_user() {
+        let mut engine = bare_engine();
+        engine.open_tool_picker();
+        let picker = engine.tool_picker.as_mut().expect("picker is open");
+        let item = picker
+            .items
+            .iter_mut()
+            .find(|item| item.key == "ask-user")
+            .expect("ask-user is listed");
+        assert!(item.enabled);
+        item.enabled = false;
+        engine.apply_tool_picker();
+        assert!(!engine.execution_settings.ask_user_enabled);
     }
 
     /// AGE-223: the turn's usage arrives folded from the session; the engine
