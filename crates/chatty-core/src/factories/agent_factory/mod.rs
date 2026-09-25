@@ -272,6 +272,7 @@ impl AgentClient {
             team_skill,
             unattended,
             answer_file,
+            ask_user_enabled,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -1174,15 +1175,18 @@ impl AgentClient {
         // Ask-the-user tool: only offered when a frontend is listening for the
         // question, and when execution settings have not turned it off
         // (`chatty-tui --disable ask-user`, e.g. an unattended benchmark
-        // harness with no one to answer). Without a pending store the call
+        // harness with no one to answer). The context's own flag carries
+        // that switch when a gating host passed no execution settings
+        // because every tool group is off. Without a pending store the call
         // would block until it times out, so the model must not see the
         // tool at all.
-        let ask_user_tool = exec_settings
-            .as_ref()
-            .is_none_or(|settings| settings.ask_user_enabled)
-            .then(|| pending_clarifications.clone())
-            .flatten()
-            .map(AskUserTool::new);
+        let ask_user_tool = (ask_user_enabled
+            && exec_settings
+                .as_ref()
+                .is_none_or(|settings| settings.ask_user_enabled))
+        .then(|| pending_clarifications.clone())
+        .flatten()
+        .map(AskUserTool::new);
 
         // The broker's local workers exist exactly when the gateway that
         // serves them does (ADR-0011 C2); the gateway publishes them
@@ -1541,5 +1545,60 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "server-a");
         assert_eq!(filtered[0].1, "custom_lookup");
+    }
+
+    /// Tool names an Ollama agent (built without network or credentials)
+    /// sends, for a context with no execution settings — what a gating host
+    /// passes when every tool group is off — and a clarification store.
+    async fn tool_names_without_exec_settings(ask_user_enabled: bool) -> Vec<String> {
+        use super::{AgentBuildContext, AgentClient, AgentServices};
+        use crate::models::clarification_store::ClarificationStore;
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+
+        let _ = crate::init_repositories();
+        let ctx = AgentBuildContext {
+            pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
+            ask_user_enabled,
+            ..AgentBuildContext::from_services(AgentServices::default())
+        };
+        let built = AgentClient::from_model_config_with_tools(
+            &ModelConfig::new(
+                "m".to_string(),
+                "M".to_string(),
+                ProviderType::Ollama,
+                "llama3.2".to_string(),
+            ),
+            &ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+            ctx,
+        )
+        .await
+        .expect("agent builds without network access");
+        built
+            .client
+            .agent
+            .tool_definitions(None)
+            .await
+            .expect("tool definitions resolve")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    /// Disabling every tool group and `ask-user` leaves the agent with no
+    /// execution settings; the context's own flag must still keep
+    /// `ask_user` away from the model.
+    #[tokio::test]
+    async fn ask_user_follows_the_context_flag_without_exec_settings() {
+        assert!(
+            tool_names_without_exec_settings(true)
+                .await
+                .contains(&"ask_user".to_string())
+        );
+        assert!(
+            !tool_names_without_exec_settings(false)
+                .await
+                .contains(&"ask_user".to_string())
+        );
     }
 }

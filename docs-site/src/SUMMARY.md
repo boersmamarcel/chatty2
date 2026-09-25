@@ -50,6 +50,7 @@
   - [Agent memory](./dev/architecture/agent-memory.md)
   - [A2A and WASM modules](./dev/architecture/a2a-and-wasm-modules.md)
   - [Team smoke test](./dev/architecture/team-smoke-test.md)
+  - [hive API changes](./dev/architecture/hive-api-changes.md)
   - [Research notes](./dev/adrs/README.md)
     - [App ↔ research bridge](./dev/adrs/app-research-bridge.md)
     - [Paper → experiment → product](./dev/adrs/paper-to-product-pipeline.md)

@@ -1062,6 +1062,25 @@ fn set_tool_group(
     Ok(())
 }
 
+/// Whether the named tool group is on in `settings`, or `None` for a name
+/// that is not a group (an empty one included). For `/tools <name>`.
+fn tool_group_enabled(
+    settings: &chatty_core::settings::models::ExecutionSettingsModel,
+    name: &str,
+) -> Option<bool> {
+    Some(match canonical_tool_group(name).as_str() {
+        "shell" => settings.enabled,
+        "fs-read" => settings.filesystem_read_enabled,
+        "fs-write" => settings.filesystem_write_enabled,
+        "fetch" => settings.fetch_enabled,
+        "git" => settings.git_enabled,
+        "code-exec" => settings.execute_code_enabled,
+        "docker-exec" => settings.docker_code_execution_enabled,
+        "ask-user" => settings.ask_user_enabled,
+        _ => return None,
+    })
+}
+
 /// The group a --enable/--disable/--only entry names. Callers spell groups
 /// several ways — the Harbor benchmark adapter passes `--disable ask_user`
 /// (the tool's own name), and a team file's `disable_tools` may say
