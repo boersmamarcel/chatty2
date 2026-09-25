@@ -692,6 +692,8 @@ impl ChattyApp {
                         view.chat_input_state().update(cx, |input, cx| {
                             input.record_turn_progress(turn, tokens, cx);
                         });
+                        // The running indicator reads it on the next render.
+                        cx.notify();
                     }
                 });
             }

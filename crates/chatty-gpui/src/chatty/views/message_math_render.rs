@@ -33,11 +33,32 @@ pub(super) struct MarkdownContent {
 
 impl RenderOnce for MarkdownContent {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Use message index for stable ID during streaming
-        let id = ElementId::Name(format!("msg-{}-markdown", self.message_index).into());
+        // The id carries the content. gpui-component parses a TextView in
+        // the same frame only the first time it sees an id; new text under a
+        // known id goes to a background parser behind a 200 ms debounce, and
+        // the old parse stays up meanwhile. A streamed line promoted from the
+        // plain tail into this view therefore vanished until the parse
+        // landed (and stayed gone while tokens kept restarting the debounce),
+        // then snapped back restyled. Changed text now gets a fresh state,
+        // parsed synchronously; the old one is dropped with its element.
+        let id = ElementId::Name(
+            format!(
+                "msg-{}-markdown-{:x}",
+                self.message_index,
+                content_key(&self.content)
+            )
+            .into(),
+        );
 
         TextView::markdown(id, self.content, window, cx).selectable(true)
     }
+}
+
+fn content_key(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Resolve every equation's styled SVG path, once, at parse time.

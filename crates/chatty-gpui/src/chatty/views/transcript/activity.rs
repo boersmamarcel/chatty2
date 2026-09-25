@@ -1,14 +1,14 @@
 use std::rc::Rc;
 
-use chatty_core::models::message_types::{ToolCallBlock, ToolCallState};
+use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
-use super::ticker::HeadlineTicker;
 use super::tool_row::ToolRow;
+use super::verb::tool_row_label;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolKind {
@@ -49,7 +49,8 @@ pub fn classify_tool(name: &str) -> ToolKind {
     }
 }
 
-/// Counted sentence: edits → explore → searches → external → commands.
+/// Counted sentence: edits → explore → searches → external → commands, then
+/// how many of those calls failed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunTally {
     pub edits: usize,
@@ -58,12 +59,13 @@ pub struct RunTally {
     pub external: usize,
     pub commands: usize,
     pub handoffs: usize,
+    pub failed: usize,
     pub added: usize,
     pub removed: usize,
 }
 
 impl RunTally {
-    pub fn from_tools(tools: &[ToolCallBlock]) -> Self {
+    pub fn from_tools<'a>(tools: impl IntoIterator<Item = &'a ToolCallBlock>) -> Self {
         let mut tally = Self::default();
         for tool in tools {
             match classify_tool(&tool.tool_name) {
@@ -73,6 +75,9 @@ impl RunTally {
                 ToolKind::External => tally.external += 1,
                 ToolKind::Command => tally.commands += 1,
                 ToolKind::Handoff => tally.handoffs += 1,
+            }
+            if matches!(tool.state, ToolCallState::Error(_)) {
+                tally.failed += 1;
             }
             if let Some(output) = tool.output.as_deref() {
                 let (a, r) = count_diff_lines(output);
@@ -119,7 +124,34 @@ impl RunTally {
         if parts.is_empty() {
             parts.push((Some("Worked"), String::new()));
         }
+        // A quiet count, not a verdict: agents probe paths that turn out not
+        // to exist all the time. The failures themselves are in the rows.
+        if self.failed > 0 {
+            parts.push((None, format!("{} failed", self.failed)));
+        }
         parts
+    }
+
+    /// The tally as one plain sentence: "Explored 5 files, 3 failed".
+    pub fn sentence(&self) -> String {
+        let mut out = String::new();
+        for (ix, (verb, rest)) in self.phrase_spans().into_iter().enumerate() {
+            if ix > 0 {
+                out.push_str(", ");
+            }
+            if let Some(verb) = verb {
+                let mut chars = verb.chars();
+                match (ix, chars.next()) {
+                    (0, Some(first)) => {
+                        out.extend(first.to_uppercase());
+                        out.push_str(chars.as_str());
+                    }
+                    _ => out.push_str(verb),
+                }
+            }
+            out.push_str(&rest);
+        }
+        out
     }
 
     pub fn all_success(tools: &[ToolCallBlock]) -> bool {
@@ -128,12 +160,38 @@ impl RunTally {
                 .iter()
                 .all(|t| matches!(t.state, ToolCallState::Success))
     }
+}
 
-    pub fn has_failure(tools: &[ToolCallBlock]) -> bool {
-        tools
-            .iter()
-            .any(|t| matches!(t.state, ToolCallState::Error(_)))
+/// How long a new live action takes to fade in over the previous one. The
+/// fade starts part-way visible: from zero, the line blinked out for a frame
+/// at every new action.
+pub const LIVE_FADE_MS: u64 = 300;
+
+/// The kind of work a call belongs to, for the segment in front of the live
+/// action ("Exploring · Reading src/main.rs").
+pub fn phase_label(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Edit => "Editing",
+        ToolKind::Explore => "Exploring",
+        ToolKind::Search => "Searching",
+        ToolKind::External => "Calling tools",
+        ToolKind::Command => "Running",
+        ToolKind::Handoff => "Handing off",
     }
+}
+
+/// "Reading src/main.rs": the present-tense label, even once the call has
+/// settled, because the header narrates what the agent is doing, not how
+/// each call ended.
+pub fn live_headline(tool: &ToolCallBlock) -> String {
+    tool_row_label(
+        &tool.display_name,
+        &tool.tool_name,
+        &ToolCallState::Running,
+        &tool.input,
+        None,
+    )
+    .headline()
 }
 
 fn count_diff_lines(output: &str) -> (usize, usize) {
@@ -158,7 +216,7 @@ type ActivityToggle = Rc<dyn Fn(&mut App)>;
 pub struct ActivityGroup {
     tools: Vec<ToolCallBlock>,
     open: bool,
-    ticker: Option<Entity<HeadlineTicker>>,
+    settled: bool,
     on_toggle: Option<ActivityToggle>,
 }
 
@@ -167,7 +225,7 @@ impl ActivityGroup {
         Self {
             tools,
             open: true,
-            ticker: None,
+            settled: true,
             on_toggle: None,
         }
     }
@@ -177,8 +235,11 @@ impl ActivityGroup {
         self
     }
 
-    pub fn ticker(mut self, ticker: Entity<HeadlineTicker>) -> Self {
-        self.ticker = Some(ticker);
+    /// Whether the turn this group belongs to has finished. The success
+    /// check waits for that: shown between tool calls, it came and went with
+    /// every call and slid the sentence sideways each time.
+    pub fn settled(mut self, settled: bool) -> Self {
+        self.settled = settled;
         self
     }
 
@@ -191,16 +252,8 @@ impl ActivityGroup {
 impl RenderOnce for ActivityGroup {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tally = RunTally::from_tools(&self.tools);
-        let running = self
-            .tools
-            .iter()
-            .any(|t| matches!(t.state, ToolCallState::Running));
-        // Failures stay expanded; in-flight groups follow `open` (default collapsed).
-        let open = if RunTally::has_failure(&self.tools) {
-            true
-        } else {
-            self.open
-        };
+        let open = self.open;
+        let show_check = self.settled && RunTally::all_success(&self.tools);
 
         let on_toggle = self.on_toggle.clone();
         let chevron = if open {
@@ -261,21 +314,15 @@ impl RenderOnce for ActivityGroup {
                     cb(cx);
                 }
             })
-            .when(!running && RunTally::all_success(&self.tools), |this| {
-                this.child(
+            // A fixed slot, filled or not, so the sentence never moves.
+            .child(div().flex_shrink_0().size_3().when(show_check, |slot| {
+                slot.child(
                     Icon::new(IconName::Check)
                         .size_3()
                         .text_color(cx.theme().success),
                 )
-            })
+            }))
             .child(sentence)
-            .when(running, |this| {
-                if let Some(ticker) = self.ticker.clone() {
-                    this.child(ticker)
-                } else {
-                    this
-                }
-            })
             .when(tally.added > 0, |this| {
                 this.child(Tag::success().small().child(format!("+{}", tally.added)))
             })
@@ -332,8 +379,75 @@ impl RenderOnce for ActivityGroup {
 mod tests {
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
-    use super::{RunTally, ToolKind, classify_tool};
-    use chatty_core::models::message_types::ToolCallBlock;
+    use super::{RunTally, ToolKind, classify_tool, live_headline, phase_label};
+    use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+
+    #[test]
+    fn live_headline_narrates_a_failed_call_like_a_running_one() {
+        let tool = ToolCallBlock {
+            id: "r".into(),
+            tool_name: "read_file".into(),
+            display_name: "read_file".into(),
+            input: r#"{"path":".opencode/skills/storytelling/SKILL.md"}"#.into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Error("No such file or directory".into()),
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        assert_eq!(
+            live_headline(&tool),
+            "Reading .opencode/skills/storytelling/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn phase_follows_the_tool_kind() {
+        assert_eq!(phase_label(classify_tool("read_file")), "Exploring");
+        assert_eq!(phase_label(classify_tool("search_code")), "Searching");
+        assert_eq!(phase_label(classify_tool("apply_diff")), "Editing");
+        assert_eq!(phase_label(classify_tool("shell_execute")), "Running");
+    }
+
+    #[test]
+    fn failed_calls_are_counted_at_the_end_of_the_sentence() {
+        let tool = |name: &str, state: ToolCallState| ToolCallBlock {
+            id: name.into(),
+            tool_name: name.into(),
+            display_name: name.into(),
+            input: "{}".into(),
+            output: None,
+            output_preview: None,
+            state,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        let missing = || ToolCallState::Error("No such file or directory".into());
+        let tools = vec![
+            tool("read_file", ToolCallState::Success),
+            tool("read_file", missing()),
+            tool("read_skill", missing()),
+        ];
+        let tally = RunTally::from_tools(&tools);
+        assert_eq!(tally.failed, 2);
+        assert_eq!(
+            tally.phrase_spans(),
+            vec![
+                (Some("explored"), " 3 files".to_string()),
+                (None, "2 failed".to_string()),
+            ]
+        );
+        assert_eq!(tally.sentence(), "Explored 3 files, 2 failed");
+        let clean = RunTally::from_tools(&tools[..1]);
+        assert_eq!(
+            clean.phrase_spans(),
+            vec![(Some("explored"), " 1 file".to_string())]
+        );
+    }
 
     #[test]
     fn browser_handoffs_are_their_own_kind() {

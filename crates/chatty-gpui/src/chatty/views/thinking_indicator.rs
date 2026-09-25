@@ -50,6 +50,8 @@ pub struct ThinkingIndicator {
     attention: String,
     steps_done: usize,
     steps_total: usize,
+    /// The latest provider round-trip's index and its own token total.
+    turn_progress: Option<(u32, u32)>,
 }
 
 impl ThinkingIndicator {
@@ -64,6 +66,7 @@ impl ThinkingIndicator {
             attention: String::new(),
             steps_done: 0,
             steps_total: 0,
+            turn_progress: None,
         }
     }
 
@@ -83,6 +86,13 @@ impl ThinkingIndicator {
         if done != self.steps_done || total != self.steps_total {
             self.steps_done = done;
             self.steps_total = total;
+            cx.notify();
+        }
+    }
+
+    pub fn set_turn_progress(&mut self, progress: Option<(u32, u32)>, cx: &mut Context<Self>) {
+        if progress != self.turn_progress {
+            self.turn_progress = progress;
             cx.notify();
         }
     }
@@ -135,18 +145,13 @@ impl Render for ThinkingIndicator {
 
         let primary = cx.theme().primary;
         let muted = cx.theme().muted_foreground;
-        let elapsed = self.started_at.elapsed().as_secs();
-        let elapsed_label = if elapsed >= 1 {
-            format!(" · {elapsed}s")
-        } else {
-            String::new()
-        };
         let word = self.current_word();
-        let phrase = if self.attention.is_empty() {
-            format!("{word}{elapsed_label}")
-        } else {
-            format!("{word} {}{elapsed_label}", self.attention)
-        };
+        let phrase = format_phrase(
+            word,
+            &self.attention,
+            self.started_at.elapsed().as_secs(),
+            self.turn_progress,
+        );
         let (pip_filled, step_label) = if self.steps_total > 0 {
             let filled = ((self.steps_done * 7) / self.steps_total.max(1)).clamp(1, 7);
             (
@@ -186,9 +191,13 @@ impl Render for ThinkingIndicator {
                     ),
             )
             .child(
+                // One line, always: wrapping in a narrow column (artifact
+                // panel docked) flipped the row between one and two lines as
+                // the counters ticked, and the transcript moved with it.
                 div()
                     .flex_1()
                     .min_w_0()
+                    .truncate()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground)
@@ -233,6 +242,54 @@ impl Render for ThinkingIndicator {
     }
 }
 
+/// "Cooking · 84s", plus the running tool when there is one, and the turn
+/// count and that turn's tokens once a provider round-trip has completed.
+fn format_phrase(
+    word: &str,
+    attention: &str,
+    elapsed_secs: u64,
+    turn_progress: Option<(u32, u32)>,
+) -> String {
+    let mut phrase = if attention.is_empty() {
+        word.to_string()
+    } else {
+        format!("{word} {attention}")
+    };
+    if elapsed_secs >= 1 {
+        phrase.push_str(&format!(" · {elapsed_secs}s"));
+    }
+    if let Some((turn, tokens)) = turn_progress {
+        phrase.push_str(&format!(" · turn {turn} · {tokens} tok"));
+    }
+    phrase
+}
+
 pub fn new_thinking_indicator(cx: &mut App) -> Entity<ThinkingIndicator> {
     cx.new(ThinkingIndicator::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_phrase;
+
+    #[test]
+    fn phrase_is_the_word_alone_before_the_first_second() {
+        assert_eq!(format_phrase("Cooking", "", 0, None), "Cooking");
+    }
+
+    #[test]
+    fn phrase_adds_elapsed_then_turn_and_tokens() {
+        assert_eq!(
+            format_phrase("Cooking", "", 84, Some((11, 11254))),
+            "Cooking · 84s · turn 11 · 11254 tok"
+        );
+    }
+
+    #[test]
+    fn phrase_names_the_running_tool() {
+        assert_eq!(
+            format_phrase("Cooking", "read_file", 3, Some((2, 40))),
+            "Cooking read_file · 3s · turn 2 · 40 tok"
+        );
+    }
 }
