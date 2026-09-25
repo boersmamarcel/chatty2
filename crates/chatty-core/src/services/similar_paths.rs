@@ -60,7 +60,9 @@ pub fn similar_existing_paths(root: &Path, requested: &str) -> Vec<String> {
 
     let mut budget = SCAN_CAP;
     // (score, path): same-name files score above 1, near-miss siblings below.
-    let mut found: Vec<(f32, PathBuf)> = Vec::new();
+    // The near-miss search reads one directory and goes first, so a big
+    // workspace whose walk spends the whole budget still gets it.
+    let mut found: Vec<(f32, PathBuf)> = near_miss_siblings(root, &wanted, &mut budget);
     for path in same_name_files(root, file_name, &mut budget) {
         let rel = path.strip_prefix(root).unwrap_or(&path);
         let shared_tail = rel
@@ -71,7 +73,6 @@ pub fn similar_existing_paths(root: &Path, requested: &str) -> Vec<String> {
             .count();
         found.push((1.0 + shared_tail as f32, path));
     }
-    found.extend(near_miss_siblings(root, &wanted, &mut budget));
 
     found.sort_by(|a, b| {
         b.0.total_cmp(&a.0)
@@ -137,7 +138,11 @@ fn same_name_files(root: &Path, name: &str, budget: &mut usize) -> Vec<PathBuf> 
 fn near_miss_siblings(root: &Path, wanted: &[String], budget: &mut usize) -> Vec<(f32, PathBuf)> {
     let mut dir = root.to_path_buf();
     let mut depth = 0;
-    while depth + 1 < wanted.len() && dir.join(&wanted[depth]).is_dir() {
+    // `symlink_metadata` does not follow links: a symlinked directory would
+    // otherwise lead the search out of the root.
+    while depth + 1 < wanted.len()
+        && std::fs::symlink_metadata(dir.join(&wanted[depth])).is_ok_and(|m| m.is_dir())
+    {
         dir.push(&wanted[depth]);
         depth += 1;
     }
@@ -158,7 +163,8 @@ fn near_miss_siblings(root: &Path, wanted: &[String], budget: &mut usize) -> Vec
             continue;
         }
         let with_rest = entry.path().join(&rest);
-        let path = if !rest.as_os_str().is_empty() && with_rest.exists() {
+        let path = if !rest.as_os_str().is_empty() && !kind_is_symlink(&entry) && with_rest.exists()
+        {
             with_rest
         } else {
             entry.path()
@@ -166,6 +172,10 @@ fn near_miss_siblings(root: &Path, wanted: &[String], budget: &mut usize) -> Vec
         found.push((score, path));
     }
     found
+}
+
+fn kind_is_symlink(entry: &std::fs::DirEntry) -> bool {
+    entry.file_type().is_ok_and(|kind| kind.is_symlink())
 }
 
 /// How alike two file names are, 0..1: equal stems (`a.py` vs `a.txt`)
@@ -261,6 +271,37 @@ mod tests {
         assert_eq!(similar_existing_paths(&root, &inside), vec!["a/b/c.txt"]);
         assert!(similar_existing_paths(&root, "/definitely/elsewhere/c.txt").is_empty());
         assert!(similar_existing_paths(&root, "../c.txt").is_empty());
+    }
+
+    #[test]
+    fn the_near_miss_search_still_runs_when_the_walk_spends_the_budget() {
+        let files: Vec<String> = (0..SCAN_CAP + 10)
+            .map(|i| format!("big/f{i}.txt"))
+            .collect();
+        let mut refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        refs.push("src/utils.py");
+        let tmp = tree(&refs);
+        let got = similar_existing_paths(&root(&tmp), "src/util.py");
+        assert!(got.contains(&"src/utils.py".to_string()), "{got:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_not_followed_out_of_the_root() {
+        let outside = tempfile::tempdir().unwrap();
+        touch(outside.path(), "secrets/passwd");
+        let tmp = tree(&["src/a.py"]);
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("link")).unwrap();
+        let root = root(&tmp);
+        for requested in [
+            "link/secrets/passwd2",
+            "link/secret/passwd",
+            "lnk/secrets/passwd",
+        ] {
+            let got = similar_existing_paths(&root, requested);
+            // At most the link itself, never what lies behind it.
+            assert!(got.iter().all(|p| p == "link/"), "{requested}: {got:?}");
+        }
     }
 
     #[test]
