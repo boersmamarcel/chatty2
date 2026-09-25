@@ -10,8 +10,19 @@
 //! so the append-only prefix property (AGE-277) is untouched for every
 //! conversation that fits.
 //!
-//! This is a crash guard, not the compaction engine. It never calls a model;
-//! the generational, persisted, LLM-summarised compaction is AGE-248's.
+//! # Compaction
+//!
+//! In unattended runs, before any of the stages below, a history that has grown past
+//! [`COMPACTION_TRIGGER_FRACTION`] of the budget is *compacted*: its older
+//! part is replaced by one summary message ([`super::context_compaction`])
+//! carrying the task verbatim, the files written so far, a `git status`
+//! snapshot, the last command's output and a short progress note from one
+//! tool-free model call, and the most recent messages stay verbatim.
+//! Compaction is a rare, discrete event: the guard remembers it, and every
+//! later request of the agent sends the same summary followed by the history
+//! after it, so the request prefix stays stable (prompt caching) until the
+//! next compaction. Like the stages, it is never persisted: the conversation
+//! keeps every message.
 //!
 //! # Budget
 //!
@@ -68,8 +79,9 @@
 //! recorded whole.
 
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rig_agent::agent::{
     AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
@@ -81,6 +93,9 @@ use rig_core::message::UserContent;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
 
+use crate::services::context_compaction::{
+    Summarizer, SummaryInputs, build_summary, task_max_chars,
+};
 use crate::services::{call_ids, enforce_tool_round_trips, result_ids, tool_round_trips_intact};
 use crate::settings::models::models_store::ModelConfig;
 use crate::token_budget::counter::TokenCounter;
@@ -117,6 +132,21 @@ const COMPACT_PREVIEW_CHARS: usize = 120;
 /// result cut to nothing would hide why.
 pub const RECORDING_CAP_FLOOR_TOKENS: usize = 512;
 
+/// A history over this share of the budget is compacted. Early enough that
+/// the summary call and the next few turns still fit, late enough that a run
+/// which fits is never touched.
+pub const COMPACTION_TRIGGER_FRACTION: f64 = 0.85;
+
+/// Share of the budget the most recent messages may keep verbatim when the
+/// history is compacted.
+pub const COMPACTION_KEEP_RECENT_FRACTION: f64 = 0.40;
+
+/// A compaction must take at least this share of the budget out of the
+/// verbatim part, or it is not worth a model call: without the floor, a
+/// history whose tail alone sits near the trigger would compact on every
+/// request. What it cannot free is left to the stages.
+const COMPACTION_MIN_FREED_FRACTION: f64 = 0.25;
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Which stage was the last one applied.
@@ -152,6 +182,13 @@ pub struct ContextShaperSettings {
     /// Fraction of the window kept free for the chat template and the
     /// tokenizer mismatch.
     pub headroom_fraction: f64,
+
+    /// Share of the budget at which the history is compacted, once
+    /// [`ContextShaper::enable_compaction`] has turned compaction on.
+    pub compaction_trigger_fraction: f64,
+
+    /// Share of the budget the newest messages keep verbatim on compaction.
+    pub compaction_keep_recent_fraction: f64,
 }
 
 impl Default for ContextShaperSettings {
@@ -163,6 +200,8 @@ impl Default for ContextShaperSettings {
             assumed_context_window: ASSUMED_CONTEXT_WINDOW,
             response_reserve: RESPONSE_RESERVE,
             headroom_fraction: HEADROOM_FRACTION,
+            compaction_trigger_fraction: COMPACTION_TRIGGER_FRACTION,
+            compaction_keep_recent_fraction: COMPACTION_KEEP_RECENT_FRACTION,
         }
     }
 }
@@ -198,6 +237,38 @@ struct Inner {
     /// it, which only makes the guard more lenient, never wrong in the other
     /// direction.
     base_tokens: AtomicUsize,
+    /// The tool-free model call that writes a compaction's prose. Without
+    /// one, compaction falls back to the deterministic summary.
+    summarizer: OnceLock<Arc<dyn Summarizer>>,
+    /// Where `git status` is taken for a compaction summary.
+    workspace: OnceLock<PathBuf>,
+    /// The last compaction, reused by every request after it.
+    compaction: Mutex<Option<Compaction>>,
+    /// Set by [`ContextShaper::enable_compaction`].
+    compaction_enabled: AtomicBool,
+}
+
+/// A compaction in force: `history[..covered]` goes out as `summary`.
+#[derive(Clone)]
+struct Compaction {
+    covered: usize,
+    /// `history[covered - 1]` when the compaction was made: a history that
+    /// no longer carries it at that index is a different one.
+    boundary: Message,
+    summary: Message,
+    prose: String,
+}
+
+impl Compaction {
+    fn applies_to(&self, history: &[Message]) -> bool {
+        history.len() >= self.covered && history[self.covered - 1] == self.boundary
+    }
+
+    fn apply(&self, history: &[Message]) -> Vec<Message> {
+        std::iter::once(self.summary.clone())
+            .chain(history[self.covered..].iter().cloned())
+            .collect()
+    }
 }
 
 impl ContextShaper {
@@ -232,8 +303,31 @@ impl ContextShaper {
                 counter,
                 context_window,
                 base_tokens: AtomicUsize::new(0),
+                summarizer: OnceLock::new(),
+                workspace: OnceLock::new(),
+                compaction: Mutex::new(None),
+                compaction_enabled: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Turn compaction on for this agent: `summarizer` writes the prose (the
+    /// agent's tool-free utility agent; `None` keeps the deterministic
+    /// summary) and `workspace` is where `git status` is taken. Off until
+    /// called; the agent factory calls it for unattended runs only, so an
+    /// interactive chat never waits on a summary call mid-turn.
+    pub fn enable_compaction(
+        &self,
+        summarizer: Option<Arc<dyn Summarizer>>,
+        workspace: Option<PathBuf>,
+    ) {
+        if let Some(summarizer) = summarizer {
+            let _ = self.inner.summarizer.set(summarizer);
+        }
+        if let Some(dir) = workspace {
+            let _ = self.inner.workspace.set(dir);
+        }
+        self.inner.compaction_enabled.store(true, Ordering::Relaxed);
     }
 
     /// Record what every request carries before any history: the preamble
@@ -371,6 +465,116 @@ impl ContextShaper {
         Some(enforce_tool_round_trips(history, &answered_by_prompt))
     }
 
+    /// What the completion-call hook sends: [`Self::request_history`] over
+    /// the compacted history when there is a compaction in force (or one is
+    /// due now), over the recorded one otherwise.
+    pub async fn prepare_request(
+        &self,
+        history: &[Message],
+        prompt: &Message,
+        turn: usize,
+    ) -> Option<Vec<Message>> {
+        let prompt_tokens = self.inner.counter.count_message(prompt);
+        match self.compacted(history, prompt_tokens, turn).await {
+            None => self.request_history(history, prompt, turn),
+            Some(compacted) => Some(
+                self.request_history(&compacted, prompt, turn)
+                    .unwrap_or(compacted),
+            ),
+        }
+    }
+
+    /// The history with the compaction in force applied, compacting (again)
+    /// first when that is over the trigger. `None` when no compaction has
+    /// happened and none is due: the history goes on as recorded.
+    async fn compacted(
+        &self,
+        history: &[Message],
+        prompt_tokens: usize,
+        turn: usize,
+    ) -> Option<Vec<Message>> {
+        if !self.inner.compaction_enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let settings = &self.inner.settings;
+        let fraction = settings.compaction_trigger_fraction;
+        let counter = &self.inner.counter;
+        let budget = self.history_budget(prompt_tokens);
+        let trigger = (budget as f64 * fraction) as usize;
+
+        let previous = self
+            .inner
+            .compaction
+            .lock()
+            .ok()
+            .and_then(|state| state.clone())
+            .filter(|c| c.applies_to(history));
+        let current = match &previous {
+            Some(c) => c.apply(history),
+            None => history.to_vec(),
+        };
+        let current_tokens: usize = current.iter().map(|m| counter.count_message(m)).sum();
+        if current_tokens <= trigger {
+            return previous.map(|_| current);
+        }
+
+        // Keep the newest messages up to their share of the budget, at least
+        // the last one, and never half a round-trip (AGE-512).
+        let offset = previous.as_ref().map_or(0, |c| c.covered);
+        let keep_budget = (budget as f64 * settings.compaction_keep_recent_fraction) as usize;
+        let mut start = history.len();
+        let mut kept = 0usize;
+        while start > offset + 1 {
+            let tokens = counter.count_message(&history[start - 1]);
+            if start < history.len() && kept + tokens > keep_budget {
+                break;
+            }
+            kept += tokens;
+            start -= 1;
+        }
+        let start = offset + round_trip_safe_tail_start(&history[offset..], 0, start - offset);
+        let freed: usize = history[offset..start]
+            .iter()
+            .map(|m| counter.count_message(m))
+            .sum();
+        if start <= offset || (freed as f64) < budget as f64 * COMPACTION_MIN_FREED_FRACTION {
+            return previous.map(|_| current);
+        }
+
+        let transcript_max_chars = budget.saturating_mul(2);
+        let summary = build_summary(SummaryInputs {
+            history,
+            covered: start,
+            previous_prose: previous.as_ref().map(|c| c.prose.as_str()),
+            workspace: self.inner.workspace.get(),
+            summarizer: self.inner.summarizer.get().map(|s| s.as_ref()),
+            transcript_max_chars,
+            task_max_chars: task_max_chars(budget),
+        })
+        .await;
+        let compaction = Compaction {
+            covered: start,
+            boundary: history[start - 1].clone(),
+            summary: summary.message,
+            prose: summary.prose,
+        };
+        let compacted = compaction.apply(history);
+        let tokens_after: usize = compacted.iter().map(|m| counter.count_message(m)).sum();
+        tracing::info!(
+            turn,
+            replaced = start,
+            kept = history.len() - start,
+            tokens_before = current_tokens,
+            tokens_after,
+            budget,
+            "context shaper: history compacted"
+        );
+        if let Ok(mut state) = self.inner.compaction.lock() {
+            *state = Some(compaction);
+        }
+        Some(compacted)
+    }
+
     /// Shape `history` for a request whose prompt costs `prompt_tokens`.
     /// `None` when it already fits: the request goes out exactly as recorded.
     pub fn shape(&self, history: &[Message], prompt_tokens: usize) -> Option<ShapedContext> {
@@ -478,7 +682,10 @@ impl AgentHook for ContextShaper {
         _ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        match self.request_history(event.history, event.prompt, event.turn) {
+        match self
+            .prepare_request(event.history, event.prompt, event.turn)
+            .await
+        {
             Some(history) => CompletionCallAction::patch(RequestPatch::new().history(history)),
             None => CompletionCallAction::Continue,
         }
@@ -1096,5 +1303,286 @@ mod tests {
         ])
         .unwrap();
         assert!(shaper.record_tool_output(&output).is_none());
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use crate::services::context_compaction::COMPACTION_HEADER;
+    use futures::StreamExt;
+    use rig_agent::agent::AgentBuilder;
+    use rig_agent::streaming::StreamingPrompt;
+    use rig_agent::test_utils::MockAddTool;
+    use rig_core::completion::message::AssistantContent;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
+
+    const TASK: &str = "Fix the off-by-one in parser.py so test_parse_range passes.";
+
+    fn counter() -> TokenCounter {
+        TokenCounter::for_model("test")
+    }
+
+    fn settings() -> ContextShaperSettings {
+        ContextShaperSettings {
+            response_reserve: 0,
+            headroom_fraction: 0.0,
+            ..ContextShaperSettings::default()
+        }
+    }
+
+    fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::tool_call(id, name, args)],
+        }
+    }
+
+    fn result(id: &str, name: &str, text: String) -> Message {
+        Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new(id).unwrap(),
+                provider: None,
+                name: name.to_string(),
+                content: vec![ToolResultContent::Text(Text::new(text))],
+            })],
+        }
+    }
+
+    /// The task, then `n` round-trips of a coding run: reads, one file
+    /// write, and test runs whose output ends on a recognisable line.
+    fn coding_run(n: usize) -> Vec<Message> {
+        let mut history = vec![Message::user(TASK)];
+        for i in 0..n {
+            let id = format!("c{i}");
+            let (name, args, output) = match i % 4 {
+                0 => (
+                    "read_file",
+                    serde_json::json!({"path": format!("src/mod{i}.py")}),
+                    vec!["line"; 120].join(" "),
+                ),
+                1 if i == 1 => (
+                    "write_file",
+                    serde_json::json!({"path": "parser.py", "content": "..."}),
+                    "written".to_string(),
+                ),
+                _ => (
+                    "shell_execute",
+                    serde_json::json!({"command": format!("pytest -q tests/test_{i}.py")}),
+                    format!(
+                        "{} FAILED test_parse_range run {i}",
+                        vec!["dot"; 120].join(" ")
+                    ),
+                ),
+            };
+            history.push(call(&id, name, args));
+            history.push(result(&id, name, output));
+        }
+        history
+    }
+
+    fn tokens(history: &[Message]) -> usize {
+        let counter = counter();
+        history.iter().map(|m| counter.count_message(m)).sum()
+    }
+
+    fn text_of(message: &Message) -> String {
+        match message {
+            Message::User { content } => match content.first() {
+                Some(UserContent::Text(t)) => t.text.clone(),
+                other => panic!("expected text, got {other:?}"),
+            },
+            other => panic!("expected a user message, got {other:?}"),
+        }
+    }
+
+    fn assert_round_trips_intact(messages: &[Message], answered_outside: &[ToolCallId]) {
+        assert!(
+            tool_round_trips_intact(messages, answered_outside),
+            "a tool round-trip was split"
+        );
+    }
+
+    /// A shaper whose budget puts `history` at `share` of it.
+    fn shaper_at(history: &[Message], share: f64) -> ContextShaper {
+        let window = (tokens(history) as f64 / share) as usize;
+        ContextShaper::new(settings(), counter(), Some(window))
+    }
+
+    fn summarizer(model: &MockCompletionModel) -> Arc<dyn Summarizer> {
+        Arc::new(AgentBuilder::new(model.clone()).build())
+    }
+
+    const PROSE: &str = "Done so far: located the range check in parser.py.\n\
+        Findings: the end index is exclusive.\nOpen questions: none.\n\
+        Next step: rerun test_parse_range.";
+
+    #[tokio::test]
+    async fn below_the_threshold_nothing_is_compacted() {
+        let history = coding_run(12);
+        let shaper = shaper_at(&history, 0.80);
+        let model = MockCompletionModel::new([MockTurn::text(PROSE)]);
+        shaper.enable_compaction(Some(summarizer(&model)), None);
+
+        let prompt = Message::user("go on");
+        assert_eq!(shaper.prepare_request(&history, &prompt, 1).await, None);
+        assert_eq!(model.request_count(), 0, "no summary call");
+    }
+
+    #[tokio::test]
+    async fn over_the_threshold_the_old_part_becomes_a_grounded_summary() {
+        let history = coding_run(24);
+        let shaper = shaper_at(&history, 0.95);
+        let model = MockCompletionModel::new([MockTurn::text(format!("<think>x</think>{PROSE}"))]);
+        shaper.enable_compaction(Some(summarizer(&model)), None);
+
+        let sent = shaper
+            .prepare_request(&history, &Message::user("go on"), 1)
+            .await
+            .expect("compacted");
+
+        assert_eq!(model.request_count(), 1, "one summary call");
+        let summary = text_of(&sent[0]);
+        assert!(summary.starts_with(COMPACTION_HEADER));
+        assert!(summary.contains(TASK), "the task, verbatim");
+        assert!(summary.contains("- parser.py (write_file)"), "{summary}");
+        assert!(summary.contains("## Last command result"));
+        assert!(summary.contains("FAILED test_parse_range run"));
+        assert!(
+            summary.contains(PROSE),
+            "the model's prose, think block dropped"
+        );
+        assert!(!summary.contains("<think>"));
+        assert!(
+            summary.contains("re-check the current state first"),
+            "re-grounding step"
+        );
+
+        // The newest messages go out verbatim, and nothing else follows them.
+        let kept = sent.len() - 1;
+        assert!(kept >= 2 && kept < history.len() / 2, "kept {kept}");
+        assert_eq!(&sent[1..], &history[history.len() - kept..]);
+        assert!(
+            matches!(sent[1], Message::Assistant { .. }),
+            "starts on a call"
+        );
+        assert_round_trips_intact(&sent, &[]);
+        assert!(tokens(&sent) < tokens(&history) * 4 / 5);
+    }
+
+    #[tokio::test]
+    async fn a_failed_summary_call_falls_back_to_a_deterministic_summary() {
+        let history = coding_run(24);
+        let shaper = shaper_at(&history, 0.95);
+        let model = MockCompletionModel::new([MockTurn::error("provider down")]);
+        shaper.enable_compaction(Some(summarizer(&model)), None);
+
+        let sent = shaper
+            .prepare_request(&history, &Message::user("go on"), 1)
+            .await
+            .expect("compacted");
+
+        let summary = text_of(&sent[0]);
+        assert!(summary.contains("Model summary unavailable"));
+        assert!(summary.contains(TASK));
+        assert!(summary.contains("- parser.py (write_file)"));
+        assert!(summary.contains("FAILED test_parse_range run"));
+        assert!(summary.contains("shell_execute ×"));
+        assert_round_trips_intact(&sent, &[]);
+    }
+
+    /// Compaction is a discrete event: the requests after it reuse the same
+    /// summary, so their prefix is stable, and no further model call is made
+    /// until the history grows past the trigger again.
+    #[tokio::test]
+    async fn later_requests_reuse_the_compaction() {
+        let mut history = coding_run(24);
+        let shaper = shaper_at(&history, 0.95);
+        let model = MockCompletionModel::new([MockTurn::text(PROSE)]);
+        shaper.enable_compaction(Some(summarizer(&model)), None);
+        let first = shaper
+            .prepare_request(&history, &Message::user("go on"), 1)
+            .await
+            .expect("compacted");
+
+        history.push(call("next", "read_file", serde_json::json!({"path": "a"})));
+        let prompt = result("next", "read_file", "short".into());
+        let second = shaper
+            .prepare_request(&history, &prompt, 2)
+            .await
+            .expect("the compaction still applies");
+
+        assert_eq!(model.request_count(), 1, "no second summary call");
+        assert_eq!(second[..first.len()], first[..], "same prefix");
+        assert_eq!(second.last(), history.last());
+        assert_round_trips_intact(&second, &[ToolCallId::new("next").unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn the_summary_carries_a_git_status_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on this host
+        }
+        std::fs::write(dir.path().join("parser.py"), "fixed").unwrap();
+
+        let history = coding_run(24);
+        let shaper = shaper_at(&history, 0.95);
+        shaper.enable_compaction(None, Some(dir.path().to_path_buf()));
+        let sent = shaper
+            .prepare_request(&history, &Message::user("go on"), 1)
+            .await
+            .expect("compacted");
+
+        let summary = text_of(&sent[0]);
+        assert!(summary.contains("`git status --short` now:\n```\n?? parser.py\n```"));
+        assert!(summary.contains("`git status && git diff`"));
+    }
+
+    /// On rig's own loop with scripted streams: the request the model gets
+    /// carries the summary, then the recent messages, then the prompt.
+    #[tokio::test]
+    async fn the_hook_sends_the_compacted_history_to_the_model() {
+        let history = coding_run(24);
+        let prompt_text = "continue";
+        let counter = counter();
+        let total = tokens(&history) + counter.count_message(&Message::user(prompt_text));
+        let shaper = ContextShaper::new(settings(), counter, Some((total as f64 / 0.95) as usize));
+        let utility = MockCompletionModel::new([MockTurn::text(PROSE)]);
+        shaper.enable_compaction(Some(summarizer(&utility)), None);
+
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]]);
+        let agent = AgentBuilder::new(model.clone())
+            .tool(MockAddTool)
+            .add_hook(shaper.clone())
+            .build();
+        let mut stream = agent
+            .stream_prompt(prompt_text)
+            .history(history.clone())
+            .max_turns(2)
+            .await;
+        while let Some(item) = stream.next().await {
+            item.expect("the run succeeds");
+        }
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0].chat_history;
+        assert!(text_of(&sent[0]).starts_with(COMPACTION_HEADER));
+        assert!(sent.len() < history.len());
+        assert_eq!(text_of(sent.last().unwrap()), prompt_text);
+        assert_round_trips_intact(sent, &[]);
+        assert_eq!(utility.request_count(), 1);
     }
 }

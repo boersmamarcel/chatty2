@@ -1362,6 +1362,19 @@ impl AgentClient {
             agent.tool_loader.as_ref(),
         )
         .await;
+        // Unattended runs compact near the window (the guard's first step):
+        // the prose comes from the tool-free utility agent, `git status` from
+        // the workspace. Interactive chats keep the stages alone, so nobody
+        // waits on a summary call mid-turn.
+        if unattended {
+            agent.context_shaper.enable_compaction(
+                Some(std::sync::Arc::new(agent.utility.clone())),
+                exec_settings
+                    .as_ref()
+                    .and_then(|s| s.workspace_dir.as_ref())
+                    .map(std::path::PathBuf::from),
+            );
+        }
 
         tracing::info!(
             workspace = ?exec_settings.as_ref().and_then(|s| s.workspace_dir.as_ref()),

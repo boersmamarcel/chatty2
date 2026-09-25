@@ -666,7 +666,7 @@ async fn the_context_guard_shapes_inside_the_tool_loop() {
         tool_call_response("payload"),
         text_response("A lot of files, six times."),
     ]);
-    let mut session = session_with_window(&daemon, workspace.path(), 30_000).await;
+    let mut session = session_with_window(&daemon, workspace.path(), 32_000).await;
 
     let events = run_and_commit_turn(&mut session, "what is in payload?").await;
     assert_no_stream_error(&events, "the turn");
