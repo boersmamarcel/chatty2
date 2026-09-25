@@ -40,6 +40,24 @@ fn error_headline(error: &str) -> String {
     error.lines().next().unwrap_or(error).trim().to_string()
 }
 
+/// The error without the `Error:` and `<tool>:` prefixes the tool layer
+/// stacks in front of it, since the row names the tool itself. It used to
+/// read "read_file: Error: read_file: Failed to resolve path …".
+fn strip_error_prefixes<'a>(mut error: &'a str, tool_name: &str) -> &'a str {
+    loop {
+        let trimmed = error.trim_start();
+        let rest = trimmed.strip_prefix("Error:").or_else(|| {
+            trimmed
+                .strip_prefix(tool_name)
+                .and_then(|rest| rest.strip_prefix(':'))
+        });
+        match rest {
+            Some(rest) => error = rest,
+            None => return trimmed,
+        }
+    }
+}
+
 fn source_icon(source: &ToolSource) -> Option<IconName> {
     match source {
         ToolSource::Local => None,
@@ -144,8 +162,9 @@ impl RenderOnce for ToolRow {
         // A failure gets its own full-width line rather than a truncating chip
         // in the row: the message is the whole point of the card, and it names
         // the tool so two stacked failures are never ambiguous (AGE-187).
-        let headline = error_headline(&err);
-        let has_detail = err.trim() != headline;
+        let message = strip_error_prefixes(&err, &tool.tool_name);
+        let headline = error_headline(message);
+        let has_detail = message.trim() != headline;
         div()
             .flex()
             .flex_col()
@@ -183,7 +202,29 @@ impl RenderOnce for ToolRow {
 
 #[cfg(test)]
 mod tests {
-    use super::error_headline;
+    use super::{error_headline, strip_error_prefixes};
+
+    #[test]
+    fn the_tool_name_is_not_repeated() {
+        let err = "Error: read_file: Failed to resolve path 'x.md': No such file or directory";
+        assert_eq!(
+            strip_error_prefixes(err, "read_file"),
+            "Failed to resolve path 'x.md': No such file or directory"
+        );
+        assert_eq!(
+            strip_error_prefixes("read_file: Error: boom", "read_file"),
+            "boom"
+        );
+        // Another tool's name, or a colon later on, is part of the message.
+        assert_eq!(
+            strip_error_prefixes("list_directory: gone", "read_file"),
+            "list_directory: gone"
+        );
+        assert_eq!(
+            strip_error_prefixes("no prefix: here", "read_file"),
+            "no prefix: here"
+        );
+    }
 
     /// A tool that returns a stack or a multi-line payload must not stretch
     /// the row; the rest is behind the copy control (AGE-187).
