@@ -246,9 +246,17 @@ pub async fn run_headless(
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.
     let max_agent_turns = engine.execution_settings.max_agent_turns as usize;
-    // Headless is unattended, so it also runs the busy-without-progress check.
-    let mut loop_guard =
-        AgentLoopGuard::new(max_agent_turns, answer_file_required).with_progress_check();
+    // Headless is unattended, so it also runs the busy-without-progress check;
+    // only writes inside the workspace count as progress there.
+    let mut loop_guard = AgentLoopGuard::new(max_agent_turns, answer_file_required)
+        .with_progress_check()
+        .with_workspace_root(
+            engine
+                .execution_settings
+                .workspace_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        );
     // Set when the progress check asks for finalization on a run without an
     // answer file: the run's tool-free last pass follows once the turn ends,
     // and the run ends after it.
