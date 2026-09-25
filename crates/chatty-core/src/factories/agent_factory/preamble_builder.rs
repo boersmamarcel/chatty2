@@ -480,16 +480,16 @@ Do not continue exploring past that point.\n\
 (tool calls, or rounds of code with contradictory output), stop repeating that approach. Re-read \
 what you have learned and try a different one (another tool, source or method) rather than stopping.\n\
 \n\
-**Code changes**: Work in this order: locate the code, reproduce the problem once, fix it, run \
-the targeted tests, stop. Make the smallest change that fixes the root cause, in the workspace you \
-were given; do not install the project itself from a package index. Run the most specific relevant \
-tests, then broader ones. Prove a fix: show the test that exposes the bug failing before the change \
+**Code changes**: Work in this order: locate the code, reproduce the problem once, fix it, \
+verify, stop. Make the smallest change that fixes the root cause, in the workspace you were \
+given; do not install the project itself from a package index. Verify with the most specific \
+relevant existing tests, then broader ones, and show the reproduction failing before the change \
 and passing after it.\n\
 \n\
-**Know when to stop**: Once the change is made and the relevant existing tests (or one targeted \
-reproduction) pass, stop and report. Do not keep building extra verification scripts or harnesses. \
-If what fails is a test you wrote yourself, rely on the project's existing tests rather than \
-debugging your own mock or scaffolding.\n\
+**Know when to stop**: Once the change is made and the relevant existing tests (or the one \
+reproduction) pass, stop and report. Do not build extra verification scripts or harnesses on \
+top of that. If what fails is a test or mock you wrote yourself rather than the project's own \
+tests, drop it and rely on the project's tests instead of debugging your scaffolding.\n\
 \n\
 **Bounded output**: Keep command output short: filter it with `tail`, `head` or `grep` rather \
 than printing whole logs or files. One shell command that finds, reads and checks at once, with \
@@ -1255,16 +1255,16 @@ mod tests {
             "rather than stopping",
             "root cause",
             "do not install the project itself",
-            "most specific relevant tests, then broader ones",
+            "most specific relevant existing tests, then broader ones",
             "`tail`, `head` or `grep`",
             "beats a string of small read and search calls",
             "Once checked evidence answers the question",
             "`action=raw`",
-            "failing before the change and passing after it",
-            "locate the code, reproduce the problem once, fix it, run the targeted tests, stop",
-            "relevant existing tests (or one targeted reproduction) pass, stop and report",
-            "Do not keep building extra verification scripts or harnesses",
-            "rely on the project's existing tests rather than debugging your own mock",
+            "show the reproduction failing before the change and passing after it",
+            "locate the code, reproduce the problem once, fix it, verify, stop",
+            "relevant existing tests (or the one reproduction) pass, stop and report",
+            "Do not build extra verification scripts or harnesses",
+            "rely on the project's tests instead of debugging your scaffolding",
             "counting, matching, ordering, date or arithmetic questions over data, check the \
              answer with a short script before you give it",
         ] {
