@@ -56,6 +56,7 @@ pub mod pptx_render;
 pub mod project_instructions;
 pub mod search_service;
 pub mod shell_service;
+pub mod similar_paths;
 pub mod skill_service;
 /// The hosted per-user spend cap `invoke_agent` asks before delegating
 /// (AGE-416 / ADR-0010). chatty2 ships the trait; hive implements it.
