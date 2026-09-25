@@ -90,6 +90,26 @@ impl<'a> MathParser<'a> {
         true
     }
 
+    /// End (exclusive, in chars) of the code span or fence opening at `pos`,
+    /// if it is closed. A run of N backticks closes at the next run of
+    /// exactly N; an unclosed run is just text.
+    fn code_end(&self, pos: usize) -> Option<usize> {
+        let run = self.chars[pos..].iter().take_while(|&&c| c == '`').count();
+        let mut i = pos + run;
+        while i < self.chars.len() {
+            if self.chars[i] == '`' {
+                let close = self.chars[i..].iter().take_while(|&&c| c == '`').count();
+                if close == run {
+                    return Some(i + close);
+                }
+                i += close;
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+
     /// Check if there's a blank line (paragraph break) before position `pos`.
     ///
     /// Scans backwards from `pos`, skipping spaces/tabs and `\r`, counting
@@ -377,6 +397,16 @@ impl<'a> MathParser<'a> {
                 }
             }
 
+            // Code is never math: copy a code span or fence through untouched,
+            // so `echo $HOME` keeps its dollar. Math fences were taken above.
+            if self.chars[i] == '`'
+                && let Some(end) = self.code_end(i)
+            {
+                current_text.push_str(self.slice(i, end));
+                i = end;
+                continue;
+            }
+
             // Check for $$ (could be block or inline depending on context)
             if i + 1 < self.chars.len()
                 && self.chars[i] == '$'
@@ -458,14 +488,29 @@ impl<'a> MathParser<'a> {
                 continue;
             }
 
-            // Check for single $ (inline math)
-            if self.chars[i] == '$' && (i == 0 || self.chars[i - 1] != '\\') {
+            // Check for single $ (inline math), with Pandoc's rules so prices
+            // are not math: the opening `$` must be followed by a non-space,
+            // the closing `$` preceded by a non-space and not followed by a
+            // digit, and the span may not cross a blank line. Without them
+            // "$1,200 and the monitor $300" became math, and every later `$`
+            // paired with the wrong partner.
+            if self.chars[i] == '$'
+                && (i == 0 || self.chars[i - 1] != '\\')
+                && self.chars.get(i + 1).is_some_and(|c| !c.is_whitespace())
+            {
                 let mut j = i + 1;
                 let mut found_close = false;
 
                 while j < self.chars.len() {
+                    if self.chars[j] == '\n' && self.has_blank_line_after(j) {
+                        break;
+                    }
                     if self.chars[j] == '$' {
-                        if j > 0 && self.chars[j - 1] == '\\' {
+                        let escaped = self.chars[j - 1] == '\\';
+                        let after_space = self.chars[j - 1].is_whitespace();
+                        let before_digit =
+                            self.chars.get(j + 1).is_some_and(|c| c.is_ascii_digit());
+                        if escaped || after_space || before_digit {
                             j += 1;
                             continue;
                         }
@@ -517,6 +562,45 @@ pub fn parse_math_segments(content: &str) -> Vec<MathSegment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inline_math(content: &str) -> Vec<String> {
+        parse_math_segments(content)
+            .into_iter()
+            .filter_map(|s| match s {
+                MathSegment::InlineMath(m) => Some(m),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Prices are not math, and a stray one must not pair with a `$` further
+    /// down and swallow the text in between.
+    #[test]
+    fn prices_are_not_math() {
+        let text = "The laptop costs $1,200 and the monitor $300, so together $1,500.\n\nWhen $n \\to \\infty$ it converges.";
+        assert_eq!(inline_math(text), vec!["n \\to \\infty".to_string()]);
+    }
+
+    #[test]
+    fn closing_dollar_needs_a_non_space_before_it_and_no_digit_after() {
+        assert!(inline_math("costs $5 and $ 6").is_empty());
+        assert!(inline_math("between $a $1").is_empty());
+        assert_eq!(inline_math("so $x$, then"), vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn inline_math_does_not_cross_a_blank_line() {
+        assert!(inline_math("a $b\n\nc$ d").is_empty());
+        // A single line break inside is fine.
+        assert_eq!(inline_math("a $b +\nc$ d"), vec!["b +\nc".to_string()]);
+    }
+
+    #[test]
+    fn code_keeps_its_dollars() {
+        assert!(inline_math("Run `echo $HOME` and `cost $5$`.").is_empty());
+        assert!(inline_math("```sh\necho $PATH and $HOME\n```").is_empty());
+        assert_eq!(inline_math("`$a$` but $b$"), vec!["b".to_string()]);
+    }
 
     #[test]
     fn test_latex_code_block() {

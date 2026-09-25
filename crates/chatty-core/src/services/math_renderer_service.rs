@@ -34,13 +34,70 @@ use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
 // Typst margins for math rendering (in points)
-const INLINE_MARGIN_X: f64 = 4.0;
+// Inline math sits between words: the text's own spaces separate it, so any
+// horizontal margin here only widens the gap.
+const INLINE_MARGIN_X: f64 = 0.5;
+// Room for what overflows the line box: limits under a sum, a fraction's
+// denominator. Typst sizes the page to the line, so less than this clips them.
 const INLINE_MARGIN_Y: f64 = 6.0;
+// Inline math is set at this size so its glyphs match the transcript's text
+// once the SVG is scaled by `SVG_SCALE_FACTOR`. At Typst's default 11pt it
+// came out about half again as large as the words around it.
+const INLINE_FONT_SIZE_PT: f64 = 7.5;
 const BLOCK_MARGIN_X: f64 = 8.0;
 const BLOCK_MARGIN_Y: f64 = 10.0;
 
 // SVG scaling factor for high-DPI displays
 const SVG_SCALE_FACTOR: f64 = 1.5;
+
+/// Replace every `name( … )` call in MiTeX output with its argument. Escaped
+/// parentheses (`\(`, `\)`) are literal characters, not grouping. The name
+/// must stand alone, so `aligned` does not match inside `alignedat`.
+fn unwrap_call(code: &str, name: &str) -> String {
+    let pattern = format!("{name}(");
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(at) = rest.find(&pattern) {
+        let standalone = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '.');
+        let body_start = at + pattern.len();
+        let close = standalone
+            .then(|| matching_paren(&rest[body_start..]))
+            .flatten();
+        let Some(close) = close else {
+            out.push_str(&rest[..body_start]);
+            rest = &rest[body_start..];
+            continue;
+        };
+        out.push_str(&rest[..at]);
+        out.push_str(&rest[body_start..body_start + close]);
+        rest = &rest[body_start + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte index of the `)` closing an already-open group in `s`.
+fn matching_paren(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
 
 /// Typst's embedded fonts, parsed once per process. Every compile used to
 /// re-parse all of them in `MathWorld::new` (AGE-394); a `Font` is an `Arc`
@@ -241,7 +298,13 @@ impl MathRendererService {
         typst_code = typst_code.replace("tfrac", "frac");
         typst_code = typst_code.replace("dfrac", "frac");
         typst_code = typst_code.replace("pmatrix", "mat");
-        typst_code = typst_code.replace("aligned", "cases"); // Approximation for aligned environments
+        // MiTeX wraps `aligned` / `gathered` in helper functions Typst does
+        // not have. Typst math aligns on `&` and breaks on `\` by itself, so
+        // the body is all that is needed. (Swapping in `cases` drew a stray
+        // brace and ran the rows together.)
+        for env in ["aligned", "gathered"] {
+            typst_code = unwrap_call(&typst_code, env);
+        }
 
         // MiTeX 0.2.4 emits symbol names from an older Typst. Two of them no
         // longer resolve against the Typst we compile with, and each one kills
@@ -291,6 +354,7 @@ impl MathRendererService {
         // transcript and math rendered on a white card in dark themes.
         let doc_content = if is_inline {
             format!("#set page(width: auto, height: auto, fill: none, margin: (x: {INLINE_MARGIN_X}pt, y: {INLINE_MARGIN_Y}pt))
+#set text(size: {INLINE_FONT_SIZE_PT}pt)
 ${typst_code}$")
         } else {
             // Spaces around content make it display math
@@ -465,7 +529,7 @@ $ {typst_code} $")
     /// Base `{hash}.svg` files are written once and never cleaned (only the
     /// `.styled.` variants are), so without this a rendering fix reaches new
     /// installs only.
-    const CACHE_VERSION: &'static str = "v2";
+    const CACHE_VERSION: &'static str = "v4";
 
     fn make_cache_key(&self, latex: &str, is_inline: bool) -> String {
         let mut hasher = Sha256::new();
@@ -622,6 +686,34 @@ $ {typst_code} $")
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn aligned_is_unwrapped_not_turned_into_cases() {
+        let code = "aligned( \\(a + b \\)^(2 ) &=  a ^(2 ) \\  &=  b )";
+        assert_eq!(
+            super::unwrap_call(code, "aligned"),
+            " \\(a + b \\)^(2 ) &=  a ^(2 ) \\  &=  b "
+        );
+        // Not a standalone call: left alone.
+        assert_eq!(
+            super::unwrap_call("alignedat(x)", "aligned"),
+            "alignedat(x)"
+        );
+        // Unclosed: left alone.
+        assert_eq!(super::unwrap_call("aligned( x", "aligned"), "aligned( x");
+    }
+
+    #[test]
+    fn an_aligned_derivation_renders() {
+        let service = MathRendererService::new();
+        let svg = service
+            .render_to_svg(
+                "\\begin{aligned} (a+b)^2 &= (a+b)(a+b) \\\\ &= a^2 + 2ab + b^2 \\end{aligned}",
+                false,
+            )
+            .expect("aligned renders");
+        assert!(svg.contains("<svg"));
+    }
+
     use super::*;
 
     /// MiTeX targets an older Typst than we compile with, and a stale symbol
