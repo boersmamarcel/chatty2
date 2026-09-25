@@ -117,9 +117,11 @@ pub(super) async fn build_provider_agent(
             let utility_model = client
                 .completion_model(&model_config.model_identifier)
                 .with_prompt_caching();
-            let utility = AgentBuilder::new(utility_model)
-                .preamble(UTILITY_PREAMBLE)
-                .build();
+            let mut utility = AgentBuilder::new(utility_model).preamble(UTILITY_PREAMBLE);
+            if let Some(params) = openai_compat_utility_params(model_config) {
+                utility = utility.additional_params(params);
+            }
+            let utility = utility.build();
 
             Ok(AgentClient {
                 agent,
@@ -165,10 +167,13 @@ pub(super) async fn build_provider_agent(
             );
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
-            let utility = client
+            let mut utility = client
                 .agent(&model_config.model_identifier)
-                .preamble(UTILITY_PREAMBLE)
-                .build();
+                .preamble(UTILITY_PREAMBLE);
+            if let Some(params) = ollama_utility_params(model_config) {
+                utility = utility.additional_params(params);
+            }
+            let utility = utility.build();
 
             Ok(AgentClient {
                 agent,
@@ -424,9 +429,51 @@ pub(crate) fn openai_compat_think(model_config: &ModelConfig) -> Option<bool> {
         .and_then(|v| v.trim().parse::<bool>().ok())
 }
 
+/// The utility agent's request parameters on the OpenAI-compat arm: thinking
+/// off whenever the model's `think` switch is set at all (the server then
+/// understands it). Titles and compaction summaries need a short reply, and
+/// a summary that thinks first can run into its 90 s timeout on a local
+/// model; without a switch nothing is sent, as for the main agent.
+pub(crate) fn openai_compat_utility_params(
+    model_config: &ModelConfig,
+) -> Option<serde_json::Value> {
+    openai_compat_think(model_config)
+        .map(|_| serde_json::json!({ "chat_template_kwargs": { "enable_thinking": false } }))
+}
+
+/// [`openai_compat_utility_params`] for Ollama's `think` field.
+pub(crate) fn ollama_utility_params(model_config: &ModelConfig) -> Option<serde_json::Value> {
+    ollama_think(model_config).map(|_| serde_json::json!({ "think": false }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_utility_agent_never_thinks_when_the_switch_is_known() {
+        let mut model = ModelConfig::new(
+            "qwen".into(),
+            "qwen".into(),
+            ProviderType::OpenRouter,
+            "qwen".into(),
+        );
+        assert_eq!(openai_compat_utility_params(&model), None);
+        assert_eq!(ollama_utility_params(&model), None);
+        for think in ["true", "false"] {
+            model
+                .extra_params
+                .insert("think".to_string(), think.to_string());
+            assert_eq!(
+                openai_compat_utility_params(&model),
+                Some(serde_json::json!({ "chat_template_kwargs": { "enable_thinking": false } }))
+            );
+            assert_eq!(
+                ollama_utility_params(&model),
+                Some(serde_json::json!({ "think": false }))
+            );
+        }
+    }
 
     /// AGE-227: the utility agent must carry no tools. This mirrors the exact
     /// builder path used for the Ollama arm's `utility` field — no

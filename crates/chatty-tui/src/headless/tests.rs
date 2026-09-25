@@ -1505,6 +1505,62 @@ mod runner {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Busy without progress: nudge once, then a tool-free last pass.
+    // -------------------------------------------------------------------
+
+    /// A turn of `n` searches, each for a different pattern (so the repeat
+    /// guard stays quiet), none of which writes, tests or reads a new file.
+    fn searching_turn(turn: usize, n: usize) -> Scenario {
+        let mut items = Vec::new();
+        for i in 0..n {
+            let id = format!("call_{turn}_{i}");
+            items.push(ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                id: id.clone(),
+                name: "search_code".into(),
+            }));
+            items.push(ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                id: id.clone(),
+                arguments: format!(r#"{{"pattern":"needle_{turn}_{i}"}}"#),
+            }));
+            items.push(ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                id,
+                result: "no matches".into(),
+            }));
+        }
+        items.push(ScriptedItem::Chunk(StreamChunk::Done));
+        Scenario {
+            name: "searching",
+            progress: Vec::new(),
+            items,
+        }
+    }
+
+    /// The SWE-bench stall: hundreds of searches and re-reads with no edit
+    /// and no test run. The first window without progress earns a nudge,
+    /// the second a tool-free last pass, and the run ends after it.
+    #[tokio::test]
+    async fn a_run_busy_without_progress_is_nudged_then_finalized() {
+        use chatty_core::services::agent_loop_guard::PROGRESS_WINDOW_TOOL_CALLS;
+        let (runner, event_rx, started, _workspace) = scripted_runner(vec![
+            searching_turn(1, PROGRESS_WINDOW_TOOL_CALLS + 5),
+            searching_turn(2, PROGRESS_WINDOW_TOOL_CALLS + 5),
+            answer_turn("Best result: no fix found; the bug is not in codegen.py."),
+            answer_turn("never reached"),
+        ])
+        .await;
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            3,
+            "searching, nudged searching, then the last pass"
+        );
+    }
+
     /// An answer-file run still ends on final_answer once the file exists;
     /// no other run does, and no other tool does.
     #[tokio::test]
