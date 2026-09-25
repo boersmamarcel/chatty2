@@ -885,8 +885,11 @@ mod tests {
                 );
                 prev = Some(state);
             }
-            // Closing the fence promotes it to block math.
-            text.push_str("\n$$\n");
+            // Closing the fence promotes it to block math once the fence's
+            // line has settled. (This used to pass one step early for the
+            // wrong reason: the lone `$` ending the opening `$$` line paired
+            // with the `$` of `$5` as a bogus inline formula.)
+            text.push_str("\n$$\n\nAfter.");
             let state = build_streaming_parse_result(&text, prev.as_ref(), cx);
             assert!(has_math(last_mds(&state)), "{:?}", last_mds(&state));
         });

@@ -14,6 +14,7 @@
 //! multi-hundred-millisecond stalls (AGE-394).
 
 use crate::chatty::services::MathRendererService;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::text::TextView;
@@ -198,122 +199,38 @@ pub(super) fn render_math_segments(
 }
 
 /// Render an inline-math batch (a slice of [`CachedMathSegment`]s that contains
-/// at least one [`CachedMathSegment::InlineMath`]).
+/// at least one [`CachedMathSegment::InlineMath`]), one logical line at a time.
 ///
-/// **Two kinds of content are interleaved:**
+/// * **Text-only lines** accumulate into a single [`MarkdownContent`], so
+///   headings, lists and tables without math keep full markdown rendering.
+/// * **Lines with inline math** become a wrapping row of text runs and SVGs.
+///   gpui-component's markdown cannot hold an element inside a line of text
+///   (its inline images are blocks), so the row does the markdown a math line
+///   needs itself: the line's list marker, number, heading or quote, and
+///   `**bold**`, `*italic*` and `` `code` `` inside its text. Before, all of
+///   that showed as literal characters.
+/// * **Tables with math in a cell** render as a grid whose cells are rows of
+///   the same kind; a table row with math used to fall out of the table as
+///   `| … |` text.
 ///
-/// * **Math-containing lines** -- logical lines (delimited by `\n`) that have at
-///   least one [`CachedMathSegment::InlineMath`].  These are emitted as a full-width
-///   `flex_row` with `.min_w_0()` plain-text divs flanking the SVG so that long
-///   text wraps instead of overflowing.
-///
-/// * **Text-only runs** -- one or more consecutive logical lines that contain
-///   no math.  All such lines are accumulated into a *single* `MarkdownContent`
-///   element (with their `\n` characters preserved) and emitted together.
-///
-/// All output is collected into a local vector and wrapped in a **single
-/// container `div`** (`flex_col`, `w_full`) before being pushed to the parent
-/// `elements`.  This prevents the blank-space-during-streaming bug that occurred
-/// when multiple top-level elements (e.g. a heading `MarkdownContent` followed
-/// by a flex row) were emitted directly into the parent layout.
+/// Everything is wrapped in one container `div` so the parent sees a single
+/// element per batch (the blank-space-during-streaming fix).
 fn render_inline_math_batch(
     batch: &[CachedMathSegment],
     base_index: usize,
     batch_start: usize,
     elements: &mut Vec<AnyElement>,
 ) {
-    // Local vector: everything goes here first, then gets wrapped in ONE div.
-    let mut batch_elements: Vec<AnyElement> = Vec::new();
-
-    // `full_text_buf` accumulates consecutive text-only lines (including their
-    // `\n`) to be emitted as a single `MarkdownContent`.  It is flushed when
-    // an `InlineMath` is encountered (so the math can begin a new flex row) or
-    // at the end of the batch.
-    let mut full_text_buf = String::new();
-
-    // `text_buf` holds the text for the *current* logical line.
-    let mut text_buf = String::new();
-
-    // Children for the current math-containing flex row.
-    let mut math_row: Vec<AnyElement> = Vec::new();
-
-    // Whether the current logical line has seen at least one `InlineMath`.
-    let mut line_has_math = false;
-
-    // Counter for stable `MarkdownContent` element IDs within this batch.
+    let lines = split_lines(batch, base_index * 1000 + batch_start);
+    let mut out: Vec<AnyElement> = Vec::new();
+    let mut md_buf = String::new();
     let mut md_counter = 0usize;
-
-    for (batch_idx, segment) in batch.iter().enumerate() {
-        let element_index = base_index * 1000 + batch_start + batch_idx;
-        match segment {
-            CachedMathSegment::Text(text) => {
-                let mut remainder = text.as_str();
-                while let Some(nl_pos) = remainder.find('\n') {
-                    text_buf.push_str(&remainder[..nl_pos]);
-
-                    if line_has_math {
-                        flush_math_row(&mut text_buf, &mut math_row, &mut batch_elements);
-                        line_has_math = false;
-                    } else {
-                        full_text_buf.push_str(&text_buf);
-                        full_text_buf.push('\n');
-                        text_buf.clear();
-                    }
-
-                    remainder = &remainder[nl_pos + 1..];
-                }
-                text_buf.push_str(remainder);
-            }
-            CachedMathSegment::InlineMath { latex, svg_path } => {
-                // Flush any preceding text-only lines as ONE MarkdownContent.
-                let trimmed = full_text_buf.trim_end();
-                if !trimmed.is_empty() {
-                    let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
-                    md_counter += 1;
-                    batch_elements.push(
-                        MarkdownContent {
-                            content: trimmed.to_string(),
-                            message_index: md_idx,
-                        }
-                        .into_any_element(),
-                    );
-                }
-                full_text_buf.clear();
-                // Move the current line's plain-text prefix into the math row.
-                if !text_buf.is_empty() {
-                    math_row.push(
-                        div()
-                            .min_w_0()
-                            .child(std::mem::take(&mut text_buf))
-                            .into_any_element(),
-                    );
-                }
-                let element_id = ElementId::Name(format!("math-inline-{}", element_index).into());
-                math_row.push(
-                    make_math_component(latex, true, svg_path, element_id).into_any_element(),
-                );
-                line_has_math = true;
-            }
-            CachedMathSegment::BlockMath { .. } => {
-                unreachable!(
-                    "BlockMath segments are split out as batch boundaries in \
-                     render_math_segments and must never appear inside an inline batch"
-                )
-            }
-        }
-    }
-
-    // Final flush.
-    if line_has_math {
-        flush_math_row(&mut text_buf, &mut math_row, &mut batch_elements);
-    } else {
-        if !text_buf.is_empty() {
-            full_text_buf.push_str(&text_buf);
-        }
-        let trimmed = full_text_buf.trim_end();
+    let mut flush_md = |md_buf: &mut String, out: &mut Vec<AnyElement>| {
+        let trimmed = md_buf.trim_end();
         if !trimmed.is_empty() {
             let md_idx = base_index * 100_000 + batch_start * 100 + md_counter;
-            batch_elements.push(
+            md_counter += 1;
+            out.push(
                 MarkdownContent {
                     content: trimmed.to_string(),
                     message_index: md_idx,
@@ -321,52 +238,481 @@ fn render_inline_math_batch(
                 .into_any_element(),
             );
         }
-    }
+        md_buf.clear();
+    };
 
-    // Wrap all batch children in a single container div to prevent the
-    // blank-space-during-streaming bug.  The parent layout sees only ONE
-    // element for the entire inline-math batch.
-    if !batch_elements.is_empty() {
+    let mut i = 0;
+    while i < lines.len() {
+        if is_table_start(&lines, i) {
+            let end = i + lines[i..]
+                .iter()
+                .take_while(|line| line_text(line).trim_start().starts_with('|'))
+                .count();
+            let block = &lines[i..end];
+            if block.iter().any(|line| line_has_math(line)) {
+                flush_md(&mut md_buf, &mut out);
+                out.push(render_math_table(block));
+            } else {
+                for line in block {
+                    md_buf.push_str(&line_text(line));
+                    md_buf.push('\n');
+                }
+            }
+            i = end;
+            continue;
+        }
+        let line = &lines[i];
+        if line_has_math(line) {
+            flush_md(&mut md_buf, &mut out);
+            out.push(render_math_line(line));
+        } else {
+            md_buf.push_str(&line_text(line));
+            md_buf.push('\n');
+        }
+        i += 1;
+    }
+    flush_md(&mut md_buf, &mut out);
+
+    if !out.is_empty() {
         elements.push(
             div()
                 .flex()
                 .flex_col()
                 .w_full()
-                .children(batch_elements)
+                .children(out)
                 .into_any_element(),
         );
     }
 }
 
-/// Flush the current math-containing line as a full-width `flex_row`.
-///
-/// Any remaining plain text in `text_buf` is moved into the row first (as a
-/// `.min_w_0()` div so it can shrink and wrap), then all row children are
-/// wrapped in `div().w_full().flex().flex_row().flex_wrap().items_center()`.
-fn flush_math_row(
-    text_buf: &mut String,
-    math_row: &mut Vec<AnyElement>,
-    elements: &mut Vec<AnyElement>,
-) {
-    if !text_buf.is_empty() {
-        math_row.push(
-            div()
-                .min_w_0()
-                .child(std::mem::take(text_buf))
-                .into_any_element(),
-        );
+/// One piece of a logical line: a run of text or an inline equation.
+#[derive(Clone, Debug)]
+enum Piece<'a> {
+    Text(String),
+    Math {
+        latex: &'a str,
+        svg_path: &'a Option<PathBuf>,
+        element_index: usize,
+    },
+}
+
+/// Split a batch into logical lines at `\n`, keeping each equation's element
+/// index (its segment's position) for a stable id.
+fn split_lines(batch: &[CachedMathSegment], first_index: usize) -> Vec<Vec<Piece<'_>>> {
+    let mut lines: Vec<Vec<Piece>> = vec![Vec::new()];
+    for (offset, segment) in batch.iter().enumerate() {
+        match segment {
+            CachedMathSegment::Text(text) => {
+                for (n, part) in text.split('\n').enumerate() {
+                    if n > 0 {
+                        lines.push(Vec::new());
+                    }
+                    if !part.is_empty() {
+                        lines
+                            .last_mut()
+                            .expect("never empty")
+                            .push(Piece::Text(part.to_string()));
+                    }
+                }
+            }
+            CachedMathSegment::InlineMath { latex, svg_path } => {
+                lines.last_mut().expect("never empty").push(Piece::Math {
+                    latex,
+                    svg_path,
+                    element_index: first_index + offset,
+                });
+            }
+            CachedMathSegment::BlockMath { .. } => unreachable!(
+                "BlockMath segments are split out as batch boundaries in \
+                 render_math_segments and must never appear inside an inline batch"
+            ),
+        }
     }
-    if !math_row.is_empty() {
-        let children = std::mem::take(math_row);
-        elements.push(
+    lines
+}
+
+fn line_has_math(line: &[Piece]) -> bool {
+    line.iter().any(|piece| matches!(piece, Piece::Math { .. }))
+}
+
+/// The line as markdown source, equations back in `$…$`.
+fn line_text(line: &[Piece]) -> String {
+    line.iter()
+        .map(|piece| match piece {
+            Piece::Text(text) => text.clone(),
+            Piece::Math { latex, .. } => format!("${latex}$"),
+        })
+        .collect()
+}
+
+/// A `|` line followed by a `|---|` separator line.
+fn is_table_start(lines: &[Vec<Piece>], i: usize) -> bool {
+    let is_row = |line: &[Piece]| line_text(line).trim_start().starts_with('|');
+    let is_separator = |line: &[Piece]| {
+        let text = line_text(line);
+        let text = text.trim();
+        !line_has_math(line)
+            && text.contains("---")
+            && text.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    };
+    is_row(&lines[i]) && lines.get(i + 1).is_some_and(|next| is_separator(next))
+}
+
+/// How a math line starts, in markdown terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineKind {
+    Plain,
+    Bullet,
+    Ordered(u32),
+    Heading(u8),
+    Quote,
+}
+
+/// Read the markdown prefix off the start of a line: its kind, its indent in
+/// spaces, and how many bytes of the first text run the prefix used.
+fn line_prefix(first_text: &str) -> (LineKind, usize, usize) {
+    let indent = first_text.len() - first_text.trim_start().len();
+    let rest = &first_text[indent..];
+    let kind_and_len = if let Some(hashes) = rest.find(|c| c != '#').filter(|&n| n > 0 && n <= 6) {
+        rest[hashes..]
+            .starts_with(' ')
+            .then(|| (LineKind::Heading(hashes as u8), hashes + 1))
+    } else if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
+        Some((LineKind::Bullet, 2))
+    } else if rest.starts_with("> ") {
+        Some((LineKind::Quote, 2))
+    } else {
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        (digits > 0 && digits < 10)
+            .then(|| &rest[digits..])
+            .filter(|after| after.starts_with(". ") || after.starts_with(") "))
+            .and_then(|_| rest[..digits].parse().ok())
+            .map(|n| (LineKind::Ordered(n), digits + 2))
+    };
+    match kind_and_len {
+        Some((kind, len)) => (kind, indent, indent + len),
+        None => (LineKind::Plain, indent, 0),
+    }
+}
+
+/// A line with inline math: its markdown prefix as a gutter or style, then a
+/// wrapping row of text runs and equations.
+fn render_math_line(line: &[Piece]) -> AnyElement {
+    let mut pieces = line.to_vec();
+    let (kind, indent, consumed) = match pieces.first() {
+        Some(Piece::Text(text)) => line_prefix(text),
+        _ => (LineKind::Plain, 0, 0),
+    };
+    if consumed > 0
+        && let Some(Piece::Text(text)) = pieces.first_mut()
+    {
+        text.replace_range(..consumed, "");
+    }
+    let row = inline_row(&pieces);
+    let gutter = |label: String, row: AnyElement| {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .w_full()
+            .pl(px(indent as f32 * 6.0))
+            .child(div().flex_shrink_0().w(px(22.)).child(label))
+            .child(div().flex_1().min_w_0().child(row))
+            .into_any_element()
+    };
+    match kind {
+        LineKind::Plain => div()
+            .w_full()
+            .pl(px(indent as f32 * 6.0))
+            .child(row)
+            .into_any_element(),
+        LineKind::Bullet => gutter("\u{2022}".to_string(), row),
+        LineKind::Ordered(n) => gutter(format!("{n}."), row),
+        LineKind::Heading(level) => div()
+            .w_full()
+            .pt_2()
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(level <= 2, |this| this.text_xl())
+            .when(level > 2, |this| this.text_lg())
+            .child(row)
+            .into_any_element(),
+        LineKind::Quote => div()
+            .w_full()
+            .pl_3()
+            .border_l_2()
+            .border_color(hsla(0., 0., 0.5, 0.4))
+            .child(row)
+            .into_any_element(),
+    }
+}
+
+/// Text and equations in one wrapping row. Text goes in word by word, so the
+/// row wraps between words the way a paragraph does; a whole run as one box
+/// dropped to its own line as soon as it did not fit after an equation.
+fn inline_row(pieces: &[Piece]) -> AnyElement {
+    let children: Vec<AnyElement> = pieces
+        .iter()
+        .flat_map(|piece| match piece {
+            Piece::Text(text) => inline_words(text),
+            Piece::Math {
+                latex,
+                svg_path,
+                element_index,
+            } => vec![
+                make_math_component(
+                    latex,
+                    true,
+                    svg_path,
+                    ElementId::Name(format!("math-inline-{element_index}").into()),
+                )
+                .into_any_element(),
+            ],
+        })
+        .collect();
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .children(children)
+        .into_any_element()
+}
+
+/// A text run with its `**bold**`, `*italic*` and `` `code` `` applied, as
+/// one element per word (each keeping the spaces after it).
+fn inline_words(text: &str) -> Vec<AnyElement> {
+    let (plain, spans) = parse_emphasis(text);
+    let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = spans
+        .into_iter()
+        .map(|(range, style)| {
+            let highlight = match style {
+                Emphasis::Bold => HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+                Emphasis::Italic => HighlightStyle {
+                    font_style: Some(FontStyle::Italic),
+                    ..Default::default()
+                },
+                Emphasis::Code => HighlightStyle {
+                    background_color: Some(hsla(0., 0., 0.5, 0.15)),
+                    ..Default::default()
+                },
+            };
+            (range, highlight)
+        })
+        .collect();
+    word_ranges(&plain)
+        .into_iter()
+        .map(|word| {
+            let local: Vec<_> = highlights
+                .iter()
+                .filter_map(|(range, style)| {
+                    let start = range.start.max(word.start);
+                    let end = range.end.min(word.end);
+                    (start < end).then(|| (start - word.start..end - word.start, *style))
+                })
+                .collect();
+            StyledText::new(plain[word.clone()].to_string())
+                .with_highlights(local)
+                .into_any_element()
+        })
+        .collect()
+}
+
+/// Byte ranges of the words in `text`, each running through the whitespace
+/// after it; leading whitespace stays with the first word.
+fn word_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut in_space = false;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            in_space = true;
+        } else if in_space {
+            if !text[start..i].trim().is_empty() {
+                ranges.push(start..i);
+                start = i;
+            }
+            in_space = false;
+        }
+    }
+    if start < text.len() {
+        ranges.push(start..text.len());
+    }
+    ranges
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Emphasis {
+    Bold,
+    Italic,
+    Code,
+}
+
+/// Strip `**…**`, `*…*` and `` `…` `` markers from `text`, returning the plain
+/// text and the byte ranges each style covers in it. Unclosed markers stay as
+/// written. `_` is left alone: it is far more often part of a name.
+fn parse_emphasis(text: &str) -> (String, Vec<(std::ops::Range<usize>, Emphasis)>) {
+    let mut plain = String::with_capacity(text.len());
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (marker, style) = if rest.starts_with("**") {
+            ("**", Emphasis::Bold)
+        } else if rest.starts_with('*') {
+            ("*", Emphasis::Italic)
+        } else if rest.starts_with('`') {
+            ("`", Emphasis::Code)
+        } else {
+            let ch = rest.chars().next().expect("non-empty");
+            plain.push(ch);
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        };
+        let body = &rest[marker.len()..];
+        // CommonMark flanking, roughly: a marker opens only before a
+        // non-space and closes only after one, so `2 * 3 * 4` stays text.
+        let opens = style == Emphasis::Code || body.starts_with(|c: char| !c.is_whitespace());
+        let close = opens
+            .then(|| {
+                body.match_indices(marker).map(|(end, _)| end).find(|&end| {
+                    end > 0
+                        && (style == Emphasis::Code || !body[..end].ends_with(char::is_whitespace))
+                })
+            })
+            .flatten();
+        match close {
+            Some(end) => {
+                let start = plain.len();
+                plain.push_str(&body[..end]);
+                spans.push((start..plain.len(), style));
+                rest = &body[end + marker.len()..];
+            }
+            None => {
+                plain.push_str(marker);
+                rest = body;
+            }
+        }
+    }
+    (plain, spans)
+}
+
+/// A table with math in its cells: header row, separator skipped, body rows,
+/// each cell a wrapping row of text and equations.
+fn render_math_table(block: &[Vec<Piece>]) -> AnyElement {
+    let rows: Vec<Vec<Vec<Piece>>> = block
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| *n != 1)
+        .map(|(_, line)| split_cells(line))
+        .collect();
+    let border = hsla(0., 0., 0.5, 0.3);
+    div()
+        .my_2()
+        .w_full()
+        .flex()
+        .flex_col()
+        .border_1()
+        .border_color(border)
+        .rounded_md()
+        .children(rows.into_iter().enumerate().map(|(n, cells)| {
             div()
                 .w_full()
                 .flex()
                 .flex_row()
-                .flex_wrap()
-                .items_center()
-                .children(children)
-                .into_any_element(),
+                .when(n > 0, |this| this.border_t_1().border_color(border))
+                .when(n == 0, |this| this.font_weight(FontWeight::SEMIBOLD))
+                .children(cells.into_iter().map(|cell| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .child(inline_row(&cell))
+                }))
+        }))
+        .into_any_element()
+}
+
+/// Split a table line into cells at the `|`s in its text runs, dropping the
+/// empty cells outside a leading and trailing `|`.
+fn split_cells<'a>(line: &[Piece<'a>]) -> Vec<Vec<Piece<'a>>> {
+    let mut cells: Vec<Vec<Piece>> = vec![Vec::new()];
+    for piece in line {
+        match piece {
+            Piece::Text(text) => {
+                for (n, part) in text.split('|').enumerate() {
+                    if n > 0 {
+                        cells.push(Vec::new());
+                    }
+                    let part = part.trim();
+                    if !part.is_empty() {
+                        cells
+                            .last_mut()
+                            .expect("never empty")
+                            .push(Piece::Text(part.to_string()));
+                    }
+                }
+            }
+            math => cells.last_mut().expect("never empty").push(math.clone()),
+        }
+    }
+    if cells.first().is_some_and(|cell| cell.is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|cell| cell.is_empty()) {
+        cells.pop();
+    }
+    cells
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Emphasis, LineKind, line_prefix, parse_emphasis, word_ranges};
+
+    #[test]
+    fn words_keep_the_spaces_after_them() {
+        let text = " and the error ";
+        let words: Vec<&str> = word_ranges(text).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(words, vec![" and ", "the ", "error "]);
+        assert!(word_ranges("").is_empty());
+    }
+
+    #[test]
+    fn line_prefixes_are_read_off_the_first_run() {
+        assert_eq!(line_prefix("- The mean is "), (LineKind::Bullet, 0, 2));
+        assert_eq!(line_prefix("  * nested "), (LineKind::Bullet, 2, 4));
+        assert_eq!(line_prefix("12. Twelfth: "), (LineKind::Ordered(12), 0, 4));
+        assert_eq!(line_prefix("### Heading "), (LineKind::Heading(3), 0, 4));
+        assert_eq!(line_prefix("> quoted "), (LineKind::Quote, 0, 2));
+        assert_eq!(line_prefix("plain text "), (LineKind::Plain, 0, 0));
+        // A hash without a space, or a number without a dot, is text.
+        assert_eq!(line_prefix("#hashtag "), (LineKind::Plain, 0, 0));
+        assert_eq!(line_prefix("2024 was "), (LineKind::Plain, 0, 0));
+    }
+
+    #[test]
+    fn emphasis_markers_become_styles() {
+        let (plain, spans) = parse_emphasis("**Bold with math** and *italic* `x`");
+        assert_eq!(plain, "Bold with math and italic x");
+        assert_eq!(
+            spans,
+            vec![
+                (0..14, Emphasis::Bold),
+                (19..25, Emphasis::Italic),
+                (26..27, Emphasis::Code),
+            ]
         );
+    }
+
+    #[test]
+    fn unclosed_markers_stay_as_written() {
+        let (plain, spans) = parse_emphasis("2 * 3 and **open");
+        assert_eq!(plain, "2 * 3 and **open");
+        assert!(spans.is_empty());
     }
 }

@@ -8,8 +8,7 @@ use tracing::debug;
 use crate::assets::CustomIcon;
 
 // Inline math dimensions
-const INLINE_MATH_MAX_HEIGHT: f32 = 32.0;
-const INLINE_MATH_MAX_WIDTH: f32 = 200.0;
+const INLINE_MATH_MAX_HEIGHT: f32 = 56.0;
 
 // Block math dimensions
 const BLOCK_MATH_MAX_WIDTH: f32 = 800.0;
@@ -61,9 +60,11 @@ impl MathComponent {
 
         if self.is_inline {
             div().id(id.clone()).flex().flex_row().items_center().child(
+                // Natural size up to the row's width: a 200 px cap squeezed
+                // any long inline formula into unreadably small type.
                 img(svg_path)
                     .max_h(px(INLINE_MATH_MAX_HEIGHT))
-                    .max_w(px(INLINE_MATH_MAX_WIDTH))
+                    .max_w(relative(1.))
                     .object_fit(gpui::ObjectFit::Contain),
             )
         } else {
