@@ -22,10 +22,13 @@ use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, 
 
 use super::AgentClient;
 use super::azure_auth_http::AzureAuthHttpClient;
+use super::connect_retry_http::ConnectRetryHttpClient;
 use super::empty_turn_retry::EmptyTurnRetry;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::prompt_cache_http::PromptCachingHttpClient;
+use super::request_recorder::RequestRecorder;
 use super::tool_collector::NativeTools;
+use super::tool_loading::ToolLoader;
 
 static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
@@ -43,6 +46,7 @@ const UTILITY_PREAMBLE: &str = "You are a utility model. Reply only with the req
 ///
 /// All tool construction is done before this function — it only handles
 /// provider client creation, builder configuration, and MCP attachment.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn build_provider_agent(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
@@ -51,12 +55,14 @@ pub(super) async fn build_provider_agent(
     mcp_tools: Option<McpToolSet>,
     native_tool_names: &HashSet<String>,
     task_controller: AgentTaskController,
+    tool_loader: Option<ToolLoader>,
 ) -> Result<AgentClient> {
     let api_key = provider_config.api_key.clone();
     let base_url = provider_config.base_url.clone();
     // The context guard (AGE-504) is a hook on the agent, so it exists before
     // the agent does; the factory calibrates it once the agent is built.
     let context_shaper = ContextShaper::for_model(model_config);
+    let request_recorder = RequestRecorder::default();
 
     match &provider_config.provider_type {
         ProviderType::OpenRouter => {
@@ -99,7 +105,13 @@ pub(super) async fn build_provider_agent(
             }
 
             let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-            let builder = chat_agent_builder(native_tools, builder, context_shaper.clone());
+            let builder = chat_agent_builder(
+                native_tools,
+                builder,
+                context_shaper.clone(),
+                request_recorder.clone(),
+                tool_loader.clone(),
+            );
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
             let utility_model = client
@@ -115,6 +127,8 @@ pub(super) async fn build_provider_agent(
                 provider: ProviderType::OpenRouter,
                 utility,
                 context_shaper,
+                request_recorder,
+                tool_loader,
             })
         }
         ProviderType::Ollama => {
@@ -123,7 +137,7 @@ pub(super) async fn build_provider_agent(
             let client = rig_core::providers::ollama::Client::builder()
                 .api_key(rig_core::client::Nothing)
                 .base_url(&url)
-                .http_client(llm_client().clone())
+                .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
                 .build()?;
 
             let mut builder = client
@@ -142,7 +156,13 @@ pub(super) async fn build_provider_agent(
                 builder = builder.additional_params(serde_json::json!({ "think": think }));
             }
 
-            let builder = chat_agent_builder(native_tools, builder, context_shaper.clone());
+            let builder = chat_agent_builder(
+                native_tools,
+                builder,
+                context_shaper.clone(),
+                request_recorder.clone(),
+                tool_loader.clone(),
+            );
             let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
             let utility = client
@@ -156,6 +176,8 @@ pub(super) async fn build_provider_agent(
                 provider: ProviderType::Ollama,
                 utility,
                 context_shaper,
+                request_recorder,
+                tool_loader,
             })
         }
         ProviderType::AzureOpenAI => {
@@ -168,6 +190,8 @@ pub(super) async fn build_provider_agent(
                 native_tool_names,
                 task_controller,
                 context_shaper,
+                request_recorder,
+                tool_loader,
                 api_key,
                 base_url,
             )
@@ -188,6 +212,8 @@ async fn build_azure_agent(
     native_tool_names: &HashSet<String>,
     task_controller: AgentTaskController,
     context_shaper: ContextShaper,
+    request_recorder: RequestRecorder,
+    tool_loader: Option<ToolLoader>,
     api_key: Option<String>,
     base_url: Option<String>,
 ) -> Result<AgentClient> {
@@ -254,7 +280,7 @@ async fn build_azure_agent(
                     AZURE_ENTRA_PLACEHOLDER_TOKEN.to_string(),
                 ))
                 .http_client(AzureAuthHttpClient::new(
-                    llm_client().clone(),
+                    ConnectRetryHttpClient::new(llm_client().clone()),
                     Arc::new(cache),
                 ))
                 .azure_endpoint(endpoint.clone())
@@ -276,7 +302,7 @@ async fn build_azure_agent(
                 .api_key(AzureOpenAIAuth::ApiKey(key))
                 .azure_endpoint(endpoint.clone())
                 .api_version(api_version)
-                .http_client(llm_client().clone())
+                .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
                 .build()
                 .map_err(client_error)?;
             let utility = client
@@ -298,7 +324,13 @@ async fn build_azure_agent(
     }
 
     let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-    let builder = chat_agent_builder(native_tools, builder, context_shaper.clone());
+    let builder = chat_agent_builder(
+        native_tools,
+        builder,
+        context_shaper.clone(),
+        request_recorder.clone(),
+        tool_loader.clone(),
+    );
     let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
     Ok(AgentClient {
@@ -307,6 +339,8 @@ async fn build_azure_agent(
         provider: ProviderType::AzureOpenAI,
         utility,
         context_shaper,
+        request_recorder,
+        tool_loader,
     })
 }
 
@@ -338,20 +372,28 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
     endpoint
 }
 
-/// Every chat agent's builder: the native tools, plus the two in-turn hooks —
-/// the one that retries an empty completion once inside the turn (AGE-401)
-/// and the context guard that keeps every model call of the run inside the
-/// model's window (AGE-504). Utility agents (titles, summaries) carry none of
-/// them.
+/// Every chat agent's builder: the native tools, plus the in-turn hooks —
+/// the one that retries an empty completion once inside the turn (AGE-401),
+/// the context guard that keeps every model call of the run inside the
+/// model's window (AGE-504), and the recorder that keeps the last request
+/// for a run that fails. Under dynamic tool loading the loader goes ahead of
+/// the context guard, so a group it loads is counted in the same call.
+/// Utility agents (titles, summaries) carry none of them.
 fn chat_agent_builder(
     native_tools: NativeTools,
     builder: AgentBuilder,
     context_shaper: ContextShaper,
+    request_recorder: RequestRecorder,
+    tool_loader: Option<ToolLoader>,
 ) -> AgentBuilder<rig_agent::agent::WithBuilderTools> {
-    native_tools
+    let builder = native_tools
         .apply_to_builder(builder)
-        .add_hook(EmptyTurnRetry)
-        .add_hook(context_shaper)
+        .add_hook(EmptyTurnRetry);
+    let builder = match tool_loader {
+        Some(loader) => builder.add_hook(loader),
+        None => builder,
+    };
+    builder.add_hook(context_shaper).add_hook(request_recorder)
 }
 
 /// Ollama's per-request `think` switch, from the model's `extra_params.think`

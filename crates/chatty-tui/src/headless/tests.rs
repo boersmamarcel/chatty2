@@ -1065,7 +1065,8 @@ mod runner {
     // -------------------------------------------------------------------
 
     use chatty_core::services::{
-        HEADLESS_STALL_RESUME_ATTEMPTS, Scenario, ScriptedItem, StreamChunk, stalled_stream_message,
+        HEADLESS_STALL_RESUME_ATTEMPTS, HEADLESS_TRANSPORT_RETRY_ATTEMPTS, Scenario, ScriptedItem,
+        StreamChunk, stalled_stream_message,
     };
 
     fn stalled_turn() -> Scenario {
@@ -1260,6 +1261,498 @@ mod runner {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[1], "Count the files in /data", "got {sent:?}");
+    }
+
+    // -------------------------------------------------------------------
+    // Transport errors: the retry keeps the task.
+    // -------------------------------------------------------------------
+
+    const CODING_TASK: &str =
+        "Fix the bug in sympy/printing/codegen.py so the regression test passes.";
+
+    /// A turn that read a file, then lost its connection to the model:
+    /// what chatty-core's stream sends for a failed run — the round-trips
+    /// its last request carried, then the transport error.
+    fn transport_error_turn() -> Scenario {
+        use rig_core::completion::Message;
+        use rig_core::completion::message::{
+            AssistantContent, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+            UserContent,
+        };
+        let call = Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::ToolCall(ToolCall::new(
+                ToolCallId::new("call_1").unwrap(),
+                ToolFunction::new(
+                    "read_file".into(),
+                    serde_json::json!({"path": "codegen.py"}),
+                ),
+            ))],
+        };
+        let result = Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new("call_1").unwrap(),
+                name: "read_file".into(),
+                content: vec![ToolResultContent::text("UNIQUE-TOOL-OUTPUT")],
+                provider: None,
+            })],
+        };
+        Scenario {
+            name: "transport_error",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Reading the file.".into())),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_1".into(),
+                    arguments: r#"{"path":"codegen.py"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_1".into(),
+                    result: "UNIQUE-TOOL-OUTPUT".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::TurnMessages(vec![
+                    Message::user(CODING_TASK),
+                    call,
+                    result,
+                ])),
+                ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                    StreamErrorKind::Transport,
+                    "CompletionError: ProviderError: Http client error: error sending request for \
+                     url (http://127.0.0.1:8000/v1/chat/completions)",
+                ))),
+            ],
+        }
+    }
+
+    /// The failed turn's tool round-trips reach the history the retry runs
+    /// on, not just its text.
+    #[tokio::test]
+    async fn a_transport_error_keeps_the_turns_tool_results_in_the_history() {
+        let (mut runner, mut event_rx) = test_runner().await;
+        runner.scripted_turns = vec![transport_error_turn()].into();
+
+        runner.send_message(CODING_TASK.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+
+        let history = format!("{:?}", runner.session.conversation().unwrap().messages());
+        assert!(history.contains(CODING_TASK), "{history}");
+        assert!(history.contains("Reading the file."), "{history}");
+        assert!(history.contains("UNIQUE-TOOL-OUTPUT"), "{history}");
+    }
+
+    /// The offline benchmark's failure: a transport error mid-run, then a
+    /// continuation that no longer said what the task was and told the model
+    /// to write /app/answer.txt. The retry restates the task, and a run with
+    /// no answer file hears nothing about one.
+    #[tokio::test]
+    async fn a_transport_error_retry_restates_the_task() {
+        let (mut runner, event_rx, started, _workspace) =
+            scripted_runner(vec![transport_error_turn(), answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        let sent = sent.lock().unwrap();
+        assert!(sent[1].contains(CODING_TASK), "got {sent:?}");
+        assert!(!sent[1].contains("answer.txt"), "got {sent:?}");
+        assert!(!sent[1].contains("final_answer"), "got {sent:?}");
+    }
+
+    /// The same error before the model said anything: the turn is rolled
+    /// back with its message, and the retry is that same message.
+    #[tokio::test]
+    async fn a_transport_error_before_any_output_resends_the_same_message() {
+        let silent = Scenario {
+            name: "silent_transport_error",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Transport,
+                "error sending request for url",
+            )))],
+        };
+        let (mut runner, event_rx, started, _workspace) =
+            scripted_runner(vec![silent, answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        assert_eq!(sent.lock().unwrap()[1], CODING_TASK);
+    }
+
+    /// A provider that never comes back: the retries are bounded and the
+    /// run fails.
+    #[tokio::test]
+    async fn transport_error_retries_are_bounded() {
+        let mut turns: Vec<Scenario> = (0..HEADLESS_TRANSPORT_RETRY_ATTEMPTS + 3)
+            .map(|_| transport_error_turn())
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (mut runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+        runner.skip_recovery_delay = true;
+
+        let error = run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect_err("a provider that never recovers fails the run");
+
+        assert!(
+            error.to_string().contains("error sending request"),
+            "{error}"
+        );
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + HEADLESS_TRANSPORT_RETRY_ATTEMPTS,
+            "the first turn plus the bounded retries"
+        );
+    }
+
+    /// An answer-file run still hears where the answer goes, after the task.
+    #[test]
+    fn the_stream_error_prompt_names_the_answer_file_only_when_one_is_required() {
+        let coding = stream_error_recovery_prompt(CODING_TASK, false);
+        assert!(coding.contains(CODING_TASK));
+        assert!(!coding.contains("answer.txt"));
+        let qa = stream_error_recovery_prompt("Write the answer to /app/answer.txt", true);
+        assert!(qa.contains("output_path=/app/answer.txt"));
+        assert!(qa.contains("The task, unchanged:\nWrite the answer to /app/answer.txt"));
+    }
+
+    /// A stall resume restates the task too.
+    #[tokio::test]
+    async fn a_stall_resume_restates_the_task() {
+        let (mut runner, event_rx, _started, _workspace) =
+            scripted_runner(vec![stalled_turn(), answer_turn("Resumed and done.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the resumed run exits 0");
+
+        let sent = sent.lock().unwrap();
+        assert!(sent[1].starts_with(STALL_RESUME_PROMPT), "got {sent:?}");
+        assert!(sent[1].contains(CODING_TASK), "got {sent:?}");
+    }
+
+    // -------------------------------------------------------------------
+    // final_answer ends only an answer-file run.
+    // -------------------------------------------------------------------
+
+    /// A turn that calls final_answer with a diagnosis and then goes on.
+    fn final_answer_then_more_turn() -> Scenario {
+        Scenario {
+            name: "final_answer_then_more",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_1".into(),
+                    name: "final_answer".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_1".into(),
+                    arguments: r#"{"answer":"The bug is in codegen.py"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_1".into(),
+                    result: r#"{"path":"answer.txt"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text("Now making the fix.".into())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    /// The SWE-bench failure: a coding run's final_answer (and an answer.txt
+    /// in the workspace) stopped the run before the fix was made. It no
+    /// longer does, so the transport error after it is retried like any
+    /// other — which also no longer ends on the stale answer.txt.
+    #[tokio::test]
+    async fn final_answer_does_not_end_a_run_without_an_answer_file() {
+        let mut turn = final_answer_then_more_turn();
+        turn.items.pop();
+        turn.items
+            .push(ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Transport,
+                "error sending request for url",
+            ))));
+        let (mut runner, event_rx, started, workspace) =
+            scripted_runner(vec![turn, answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        std::fs::write(workspace.path().join("answer.txt"), "stale\n").unwrap();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            2,
+            "the run went on after final_answer"
+        );
+    }
+
+    /// An answer-file run still ends on final_answer once the file exists;
+    /// no other run does, and no other tool does.
+    #[tokio::test]
+    async fn final_answer_ends_only_an_answer_file_run() {
+        let (mut runner, _event_rx) = test_runner().await;
+        let workspace = tempfile::tempdir().unwrap();
+        runner.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        std::fs::write(workspace.path().join("answer.txt"), "42\n").unwrap();
+
+        assert!(final_answer_ends_run(true, "final_answer", &runner));
+        assert!(!final_answer_ends_run(false, "final_answer", &runner));
+        assert!(!final_answer_ends_run(true, "write_file", &runner));
+    }
+
+    /// `--headless` tells the agent whether the task asks for an answer
+    /// file before it is built; the preamble counts as the task too.
+    #[tokio::test]
+    async fn the_task_decides_whether_final_answer_writes_a_file() {
+        let (mut runner, _event_rx) = test_runner().await;
+        assert_eq!(runner.answer_file, None, "unknown until the task is seen");
+        runner.note_task(CODING_TASK);
+        assert_eq!(runner.answer_file, Some(false));
+        runner.note_task("Write the answer to /app/answer.txt");
+        assert_eq!(runner.answer_file, Some(true));
+    }
+
+    // -------------------------------------------------------------------
+    // Tool loading: what the first request of a headless coding run
+    // carries under `all` and `dynamic`.
+    // -------------------------------------------------------------------
+
+    /// A local OpenAI-compatible endpoint that answers every request with a
+    /// 400 and hands its JSON body over, so a turn can be sent and the
+    /// request it made read back without a model.
+    fn capture_requests() -> (String, std::sync::mpsc::Receiver<serde_json::Value>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; length];
+                if reader.read_exact(&mut body).is_ok()
+                    && let Ok(json) = serde_json::from_slice(&body)
+                {
+                    let _ = tx.send(json);
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
+                      Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+            }
+        });
+        (url, rx)
+    }
+
+    const BENCHMARK_TASK: &str = "Fix the failing test in the repository at /testbed.";
+
+    /// The first model request of a headless coding run as the benchmark
+    /// adapter starts it (`--enable shell,fs-read,fs-write,git,code-exec
+    /// --auto-approve`, fetch and search on by default, memory on, a git
+    /// workspace), under `tool_loading`.
+    async fn first_request_of_a_coding_run(
+        tool_loading: chatty_core::settings::models::ToolLoading,
+    ) -> serde_json::Value {
+        first_request_of_a_run(tool_loading, BENCHMARK_TASK).await
+    }
+
+    async fn first_request_of_a_run(
+        tool_loading: chatty_core::settings::models::ToolLoading,
+        task: &str,
+    ) -> serde_json::Value {
+        let _ = chatty_core::init_repositories();
+        let (url, requests) = capture_requests();
+        let workspace = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git is installed");
+        // The benchmark's runs have memory on. The store's index lock is
+        // process-wide (and may be held by another process on the machine),
+        // so one store serves the whole test process, and a store that
+        // cannot open only drops the three memory tools from both sides.
+        static MEMORY: tokio::sync::OnceCell<
+            Option<(chatty_core::services::MemoryService, tempfile::TempDir)>,
+        > = tokio::sync::OnceCell::const_new();
+        let memory = MEMORY
+            .get_or_init(|| async {
+                let dir = tempfile::tempdir().unwrap();
+                match chatty_core::services::MemoryService::open_or_create(dir.path()).await {
+                    Ok(memory) => Some((memory, dir)),
+                    Err(error) => {
+                        eprintln!("memory store did not open ({error:#}); measuring without it");
+                        None
+                    }
+                }
+            })
+            .await
+            .as_ref()
+            .map(|(memory, _)| memory.clone());
+        let execution_settings = ExecutionSettingsModel {
+            enabled: true,
+            filesystem_read_enabled: true,
+            filesystem_write_enabled: true,
+            git_enabled: true,
+            execute_code_enabled: true,
+            approval_mode:
+                chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll,
+            workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+            max_agent_turns: 0,
+            tool_loading,
+            ..ExecutionSettingsModel::default()
+        };
+        let model_config = ModelConfig::new(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            ProviderType::OpenRouter,
+            "qwen".to_string(),
+        );
+        let mut provider_config =
+            ProviderConfig::new("OpenAI-compat".to_string(), ProviderType::OpenRouter);
+        provider_config.base_url = Some(url);
+        provider_config.api_key = Some("no-key-required".to_string());
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut runner = HeadlessRunner::new(
+            ChatEngineConfig {
+                model_config,
+                provider_config,
+                execution_settings,
+                module_settings: ModuleSettingsModel::default(),
+                broker_port: None,
+                models: ModelsModel::default(),
+                providers: Vec::new(),
+                mcp_service: None,
+                memory_service: memory,
+                search_settings: None,
+                embedding_service: None,
+                user_secrets: Vec::new(),
+                remote_agents: Vec::new(),
+                module_agents: Vec::new(),
+                role: Default::default(),
+                team: None,
+                is_sub_agent: true,
+                services_loaded: true,
+                surface: chatty_core::services::StreamSurface::Headless,
+            },
+            event_tx,
+        );
+        runner.note_task(task);
+        runner.init_conversation().await.expect("the agent builds");
+
+        runner.send_message(task.to_string());
+        while runner.is_streaming {
+            let event = event_rx.recv().await.expect("turn events");
+            runner.handle_event(event);
+        }
+        requests
+            .try_iter()
+            .find(|body| body.get("tools").is_some())
+            .expect("the turn sent a request with tools")
+    }
+
+    fn tool_names(request: &serde_json::Value) -> Vec<String> {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn system_prompt(request: &serde_json::Value) -> String {
+        let content = &request["messages"][0]["content"];
+        match content.as_str() {
+            Some(text) => text.to_string(),
+            None => content.to_string(),
+        }
+    }
+
+    /// Under `dynamic` the first request carries the core and `load_tools`
+    /// only, and the system prompt lists the groups to load; under `all`
+    /// it carries every tool, as before, and no `load_tools`. Run with
+    /// `--nocapture` for the sizes.
+    #[tokio::test]
+    async fn dynamic_tool_loading_sends_only_the_core_up_front() {
+        use chatty_core::settings::models::ToolLoading;
+        let all = first_request_of_a_coding_run(ToolLoading::All).await;
+        let dynamic = first_request_of_a_coding_run(ToolLoading::Dynamic).await;
+
+        for (mode, request) in [("all", &all), ("dynamic", &dynamic)] {
+            let prompt = system_prompt(request).len();
+            let tools = serde_json::to_string(&request["tools"]).unwrap().len();
+            eprintln!(
+                "{mode:>7}: {n:>2} tools, schemas {tools:>6} B, system prompt {prompt:>6} B, \
+                 together {sum:>6} B (~{tokens} tokens at 4 B/token)",
+                n = tool_names(request).len(),
+                sum = tools + prompt,
+                tokens = (tools + prompt) / 4,
+            );
+        }
+
+        let all_tools = tool_names(&all);
+        assert!(all_tools.contains(&"search_web".to_string()));
+        assert!(all_tools.contains(&"git_commit".to_string()));
+        assert!(!all_tools.contains(&"load_tools".to_string()));
+        assert!(!system_prompt(&all).contains("## Tool Groups"));
+
+        let mut dynamic_tools = tool_names(&dynamic);
+        dynamic_tools.sort();
+        let mut core: Vec<String> = chatty_core::factories::agent_factory::CORE_TOOLS
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        core.sort();
+        assert_eq!(dynamic_tools, core, "the core, nothing else");
+        let prompt = system_prompt(&dynamic);
+        assert!(prompt.contains("## Tool Groups"), "{prompt}");
+        assert!(
+            prompt.contains("- **web** — load when the answer needs information from the internet")
+        );
+        assert!(!dynamic_tools.contains(&"final_answer".to_string()));
+    }
+
+    /// A run whose task asks for an answer file starts with final_answer
+    /// loaded; a coding run does not (the dynamic test above).
+    #[tokio::test]
+    async fn an_answer_file_run_starts_with_final_answer_loaded() {
+        let request = first_request_of_a_run(
+            chatty_core::settings::models::ToolLoading::Dynamic,
+            "How many rows are there? Write the answer to /app/answer.txt",
+        )
+        .await;
+        assert!(tool_names(&request).contains(&"final_answer".to_string()));
+        assert!(!system_prompt(&request).contains("- **answer**"));
     }
 
     /// A stall resume runs on what the stalled pass left of the run's budget.

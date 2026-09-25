@@ -13,7 +13,7 @@ pub mod training_settings;
 pub mod user_secrets_store;
 
 pub use a2a_store::A2aAgentsModel;
-pub use execution_settings::ExecutionSettingsModel;
+pub use execution_settings::{ExecutionSettingsModel, ToolLoading};
 pub use extensions_store::ExtensionsModel;
 pub use general_model::GeneralSettingsModel;
 pub use hive_settings::HiveSettingsModel;

@@ -91,6 +91,9 @@ pub struct HeadlessRunner {
     pub(super) max_duration: Option<std::time::Duration>,
     /// The running clock of that budget, once started.
     pub(super) deadline: Option<Deadline>,
+    /// Whether the task asks for an answer file, once `note_task` has seen
+    /// it; the agent is built with it (`AgentBuildContext::answer_file`).
+    pub(super) answer_file: Option<bool>,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -101,6 +104,10 @@ pub struct HeadlessRunner {
     /// Tests only: the text of every turn started, in order.
     #[cfg(test)]
     pub(super) scripted_inputs: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Tests only: retry a failed turn at once instead of after the
+    /// policy's delay.
+    #[cfg(test)]
+    pub(super) skip_recovery_delay: bool,
 }
 
 impl HeadlessRunner {
@@ -133,12 +140,15 @@ impl HeadlessRunner {
             next_pass_is_final: false,
             max_duration: None,
             deadline: None,
+            answer_file: None,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
             scripted_turns: Default::default(),
             #[cfg(test)]
             scripted_inputs: Default::default(),
+            #[cfg(test)]
+            skip_recovery_delay: false,
         }
     }
 
@@ -146,6 +156,16 @@ impl HeadlessRunner {
     /// starts with the run, not here.
     pub fn set_max_duration(&mut self, budget: Option<std::time::Duration>) {
         self.max_duration = budget;
+    }
+
+    /// Tell the runner its task before the agent is built (`--headless
+    /// --message`), so `final_answer` only writes an answer file when the
+    /// task asks for one — the same test `run_headless` applies.
+    pub fn note_task(&mut self, message: &str) {
+        self.answer_file = Some(super::answer_file::prompt_requires_answer_file(&[
+            message,
+            self.role_preamble().unwrap_or_default(),
+        ]));
     }
 
     /// Start the run's clock, if it has a budget.
@@ -200,6 +220,7 @@ impl HeadlessRunner {
             role: self.config.role.clone(),
             team_skill: self.config.team.as_ref().and_then(Team::skill),
             unattended: true,
+            answer_file: self.answer_file,
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.config.user_secrets.clone(),

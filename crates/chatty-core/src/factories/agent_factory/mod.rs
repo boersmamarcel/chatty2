@@ -2,14 +2,17 @@ mod azure_auth_http;
 mod build_context;
 #[cfg(test)]
 mod cache_breakpoint_probe;
+mod connect_retry_http;
 mod empty_turn_retry;
 mod mcp_helpers;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
+mod request_recorder;
 #[cfg(test)]
 mod tool_block_determinism;
 mod tool_collector;
+mod tool_loading;
 mod tool_profile;
 mod tool_registry;
 
@@ -23,6 +26,7 @@ use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
+use crate::settings::models::ToolLoading;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
@@ -57,6 +61,8 @@ use tool_registry::active_native_tool_names;
 pub use build_context::{AgentBuildContext, AgentRole, AgentServices, gated_exec_settings};
 pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
 pub(crate) use provider_builder::ollama_think;
+pub use request_recorder::RequestRecorder;
+pub use tool_loading::{ANSWER_GROUP, CORE_TOOLS, LoadToolsTool, ToolLoader};
 pub use tool_profile::{ToolProfile, tool_profile, tool_profile_names};
 pub use tool_registry::ToolAvailability;
 
@@ -186,6 +192,10 @@ pub struct AgentClient {
     utility: Agent,
     /// The in-loop context guard registered on `agent` (AGE-504).
     context_shaper: ContextShaper,
+    /// The last model request `agent` sent, for a run that fails.
+    request_recorder: RequestRecorder,
+    /// The loaded tool groups, when the agent loads its tools dynamically.
+    tool_loader: Option<ToolLoader>,
 }
 
 impl AgentClient {
@@ -205,6 +215,17 @@ impl AgentClient {
     /// The in-loop context guard this agent's requests go through (AGE-504).
     pub fn context_shaper(&self) -> &ContextShaper {
         &self.context_shaper
+    }
+
+    /// The record of the last model request `agent` sent.
+    pub fn request_recorder(&self) -> &RequestRecorder {
+        &self.request_recorder
+    }
+
+    /// The tool groups loaded so far, when the agent was built with
+    /// `ToolLoading::Dynamic`.
+    pub fn tool_loader(&self) -> Option<&ToolLoader> {
+        self.tool_loader.as_ref()
     }
 
     /// Create AgentClient from ModelConfig, ProviderConfig and build context
@@ -243,6 +264,7 @@ impl AgentClient {
             spend_gate,
             team_skill,
             unattended,
+            answer_file,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -471,7 +493,8 @@ impl AgentClient {
                                     service.clone(),
                                     write_approval_mode.clone(),
                                     approvals.clone(),
-                                ),
+                                )
+                                .with_answer_file(answer_file),
                                 CreateDirectoryTool::new(service.clone()),
                                 DeleteFileTool::new(
                                     service.clone(),
@@ -1219,17 +1242,58 @@ impl AgentClient {
             None => tool_availability,
         };
 
+        // Dynamic tool loading: a core up front, the rest in groups the
+        // model loads. The loader is built over the tools about to be
+        // registered; the catalog it renders goes into the preamble, which
+        // then describes only what the first request advertises.
+        let tool_loader = (exec_settings.as_ref().map(|s| s.tool_loading)
+            == Some(ToolLoading::Dynamic))
+        .then(|| {
+            let native: Vec<String> = active_native_tool_names(&tool_availability)
+                .into_iter()
+                .chain(["create_chart".to_string()])
+                .filter(|name| tool_profile.is_none_or(|p| p.allows(name)))
+                .collect();
+            let preload: &[&str] = if answer_file == Some(true) {
+                &[ANSWER_GROUP]
+            } else {
+                &[]
+            };
+            ToolLoader::new(
+                native.iter().map(String::as_str),
+                mcp_tool_info.iter().map(|(_, name, _)| name.clone()),
+                preload,
+            )
+        });
+        let (preamble_tools, preamble_mcp_tools) = match &tool_loader {
+            Some(loader) => (
+                tool_profile::narrow_availability(&tool_availability, |name| {
+                    loader.starts_active(name)
+                }),
+                mcp_tool_info
+                    .iter()
+                    .filter(|(_, name, _)| loader.starts_active(name))
+                    .cloned()
+                    .collect(),
+            ),
+            None => (tool_availability.clone(), mcp_tool_info.clone()),
+        };
+        if let Some(loader) = &tool_loader {
+            tracing::info!(groups = ?loader.group_names(), "Dynamic tool loading");
+        }
+
         // Build the augmented preamble
         let preamble = preamble_builder::with_run_mode(
             build_preamble(
                 &model_config.preamble,
                 &model_config.provider_type,
-                &tool_availability,
+                &preamble_tools,
                 &search_settings,
                 &mcp_mgmt_tools,
-                &mcp_tool_info,
+                &preamble_mcp_tools,
                 &secret_key_names,
                 &role,
+                tool_loader.as_ref(),
             ),
             unattended,
         );
@@ -1275,6 +1339,7 @@ impl AgentClient {
             invoke_agent_tool: invoke_agent_tool,
             publish_module_tool: publish_module_tool,
             ask_user_tool: ask_user_tool,
+            load_tools_tool: tool_loader.clone().map(LoadToolsTool::new),
         );
 
         let agent = provider_builder::build_provider_agent(
@@ -1285,11 +1350,18 @@ impl AgentClient {
             mcp_tools,
             &native_tool_names,
             agent_task_controller,
+            tool_loader,
         )
         .await?;
         // What every request carries before any history — the preamble and
         // the tool schemas — is only measurable once the agent exists.
-        calibrate_context_shaper(&agent.context_shaper, &agent.agent, &preamble).await;
+        calibrate_context_shaper(
+            &agent.context_shaper,
+            &agent.agent,
+            &preamble,
+            agent.tool_loader.as_ref(),
+        )
+        .await;
 
         tracing::info!(
             workspace = ?exec_settings.as_ref().and_then(|s| s.workspace_dir.as_ref()),
@@ -1316,25 +1388,41 @@ impl AgentClient {
 /// counts history. The schemas are read back from the built agent because
 /// that is the only place their provider-facing form exists. A failure to
 /// read them leaves the base at the preamble alone, which only makes the
-/// guard more lenient.
-async fn calibrate_context_shaper(shaper: &ContextShaper, agent: &Agent, preamble: &str) {
+/// guard more lenient. Under dynamic tool loading the loader learns every
+/// registered schema's size and keeps the base at the ones it advertises.
+async fn calibrate_context_shaper(
+    shaper: &ContextShaper,
+    agent: &Agent,
+    preamble: &str,
+    tool_loader: Option<&ToolLoader>,
+) {
     let counter = shaper.counter();
     let preamble_tokens = counter.count_preamble(preamble);
-    let tool_tokens = match agent.tool_definitions(None).await {
+    let per_tool: std::collections::BTreeMap<String, usize> = match agent
+        .tool_definitions(None)
+        .await
+    {
         Ok(definitions) => definitions
             .iter()
             .map(|definition| {
-                counter.count(&definition.name)
-                    + counter.count(&definition.description)
-                    + counter.count(&definition.parameters.to_string())
+                (
+                    definition.name.clone(),
+                    counter.count(&definition.name)
+                        + counter.count(&definition.description)
+                        + counter.count(&definition.parameters.to_string()),
+                )
             })
-            .sum(),
+            .collect(),
         Err(e) => {
             tracing::warn!(error = %e, "Context guard: could not read tool definitions; base is the preamble alone");
-            0
+            Default::default()
         }
     };
-    shaper.set_base_tokens(preamble_tokens + tool_tokens);
+    let tool_tokens: usize = per_tool.values().sum();
+    match tool_loader {
+        Some(loader) => loader.calibrate(shaper, preamble_tokens, per_tool),
+        None => shaper.set_base_tokens(preamble_tokens + tool_tokens),
+    }
     tracing::debug!(
         preamble_tokens,
         tool_tokens,
