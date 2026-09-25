@@ -147,6 +147,18 @@ pub struct ExecutionSettingsModel {
     /// snapshots) do not change.
     #[serde(default, skip_serializing_if = "ToolLoading::is_all")]
     pub tool_loading: ToolLoading,
+    /// Offer the `ask_user` tool (the input-required chain, ADR-0011 C7) to
+    /// the model. On by default; an unattended run (e.g. a benchmark
+    /// harness with no one to answer) sets this off via `chatty-tui
+    /// --disable ask-user` so a stray call fails fast instead of blocking.
+    /// Skipped when on, like `tool_loading`, so persisted settings files and
+    /// snapshots stay byte-for-byte what they were until a run turns it off.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub ask_user_enabled: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn default_true() -> bool {
@@ -186,6 +198,32 @@ impl Default for ExecutionSettingsModel {
             embedding_model: None,
             hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
             tool_loading: ToolLoading::All,
+            ask_user_enabled: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod ask_user_serde_tests {
+    use super::ExecutionSettingsModel;
+
+    /// A settings file or snapshot written before `ask_user_enabled` existed
+    /// must serialize to the same bytes, and a missing key reads as on.
+    #[test]
+    fn ask_user_enabled_is_absent_when_on_and_defaults_on() {
+        let json = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
+        assert!(json.get("ask_user_enabled").is_none());
+
+        let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
+        assert!(back.ask_user_enabled);
+
+        let off = ExecutionSettingsModel {
+            ask_user_enabled: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&off).unwrap();
+        assert_eq!(json["ask_user_enabled"], false);
+        let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
+        assert!(!back.ask_user_enabled);
     }
 }

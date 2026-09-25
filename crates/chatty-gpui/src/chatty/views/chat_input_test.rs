@@ -1,5 +1,44 @@
 #[cfg(test)]
-use super::{apply_at_to_input, at_menu_items_for, at_query_from, slash_menu_items_for};
+use super::{
+    apply_at_to_input, at_menu_items_for, at_query_from, format_run_status, slash_menu_items_for,
+};
+
+// -----------------------------------------------------------------------
+// Live run indicator formatting (AGE: turn count / tokens / elapsed)
+// -----------------------------------------------------------------------
+
+#[test]
+fn run_status_is_none_before_any_turn_or_elapsed_second() {
+    assert_eq!(format_run_status(None, None), None);
+    assert_eq!(
+        format_run_status(None, Some(std::time::Duration::from_millis(400))),
+        None
+    );
+}
+
+#[test]
+fn run_status_shows_turn_and_tokens_once_a_round_trip_completes() {
+    assert_eq!(
+        format_run_status(Some((3, 512)), None),
+        Some("Turn 3 \u{b7} 512 tok".to_string())
+    );
+}
+
+#[test]
+fn run_status_adds_elapsed_time_past_one_second() {
+    assert_eq!(
+        format_run_status(Some((1, 40)), Some(std::time::Duration::from_secs(75))),
+        Some("Turn 1 \u{b7} 40 tok \u{b7} 1:15".to_string())
+    );
+}
+
+#[test]
+fn run_status_shows_elapsed_alone_before_the_first_round_trip() {
+    assert_eq!(
+        format_run_status(None, Some(std::time::Duration::from_secs(4))),
+        Some("0:04".to_string())
+    );
+}
 
 // -----------------------------------------------------------------------
 // @ mention menu tests (pure, no GPUI context required)

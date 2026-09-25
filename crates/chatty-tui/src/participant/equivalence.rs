@@ -1057,7 +1057,8 @@ pub(super) mod named_virtual_agents {
             ..ExecutionSettingsModel::default()
         };
         let disable: Vec<String> = disable.iter().map(|s| s.to_string()).collect();
-        crate::apply_tool_overrides(&mut settings, &[], &disable);
+        crate::apply_tool_overrides(&mut settings, &[], &disable)
+            .expect("test-only disable list names valid groups");
 
         let ctx = AgentBuildContext {
             pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),

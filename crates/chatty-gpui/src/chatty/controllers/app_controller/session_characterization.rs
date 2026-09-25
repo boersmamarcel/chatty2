@@ -92,6 +92,9 @@ fn describe(event: &StreamManagerEvent) -> String {
         } => format!(
             "TokenUsage(in={input_tokens}, out={output_tokens}, cache_read={cache_read_tokens}, cache_write={cache_write_tokens})"
         ),
+        StreamManagerEvent::TurnProgress { turn, tokens, .. } => {
+            format!("TurnProgress(turn={turn}, tokens={tokens})")
+        }
         StreamManagerEvent::StreamEnded {
             status,
             token_usage,

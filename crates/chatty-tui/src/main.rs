@@ -69,9 +69,14 @@ TOOL GROUPS:
     git          Git operations (status, diff, log, add, branch, commit)
     code-exec    Expose the execute_code tool (Monty-backed Python fast path)
     docker-exec  Allow Docker fallback for execute_code (requires Docker)
+    ask-user     Allow the model to ask the user a clarifying question
+
+  Names are case-insensitive, `_` works for `-` (ask_user, fs_read), and an
+  unknown name is an error.
 
   Defaults come from the persisted Chatty execution settings. CLI flags override
-  those defaults for the session.
+  those defaults for the session. --only replaces the defaults outright with a
+  strict allow-list instead of adding to or subtracting from them.
 
 EXAMPLES:
   chatty-tui                                     # Interactive, default model
@@ -80,6 +85,7 @@ EXAMPLES:
   chatty-tui --ollama --model llama3.2           # Use a specific Ollama model
   chatty-tui --openai-compat-url http://localhost:8000  # Connect to vllm/llama.cpp
   chatty-tui --enable git,shell --disable fetch   # Custom tool set
+  chatty-tui --only fs-read,fs-write              # Strict allow-list
   chatty-tui --headless -m \"What is Rust?\"        # One-shot query
   cat src/main.rs | chatty-tui --pipe             # Pipe file contents as input"
 )]
@@ -123,7 +129,9 @@ struct Cli {
     ///
     /// Overrides the persisted Chatty execution settings. Multiple groups
     /// can be specified as a comma-separated list. Valid tool group names:
-    ///   shell, fs-read, fs-write, fetch, git, code-exec, docker-exec
+    ///   shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user
+    ///
+    /// An unknown name is a hard error, not a warning.
     ///
     /// Example: --enable shell,git,fetch
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
@@ -133,11 +141,26 @@ struct Cli {
     ///
     /// Overrides the persisted Chatty execution settings. Same valid group
     /// names as --enable. Applied after --enable, so if a group appears in
-    /// both, it will be disabled.
+    /// both, it will be disabled. An unknown name is a hard error.
     ///
     /// Example: --disable fetch,docker-exec
     #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
     disable: Vec<String>,
+
+    /// Run with exactly these tool groups and no others (comma-separated
+    /// strict allow-list). Same group names as --enable/--disable. Unlike
+    /// --enable, which adds to the persisted defaults, --only ignores them:
+    /// every unnamed group is turned off. Applied after --enable/--disable
+    /// (which are otherwise unaffected — --only just replaces their effect
+    /// for the groups it manages) and before --tools/--tool-loading.
+    ///
+    /// It covers the groups listed under TOOL GROUPS only; tools outside
+    /// them (web search, memory, browser, MCP servers) keep following their
+    /// own settings. Use --tools <profile> to narrow by tool name.
+    ///
+    /// Example: --only fs-read,fs-write
+    #[arg(long, value_delimiter = ',', value_name = "GROUPS")]
+    only: Vec<String>,
 
     /// How the model is offered its tools: `all` (default) sends every
     /// enabled tool's schema with every request; `dynamic` sends a small
@@ -497,7 +520,10 @@ async fn main() -> Result<()> {
     };
 
     // Apply CLI tool overrides
-    apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable);
+    apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable)?;
+    if !cli.only.is_empty() {
+        apply_tool_only(&mut execution_settings, &cli.only)?;
+    }
     if let Some(tool_loading) = cli.tool_loading {
         execution_settings.tool_loading = tool_loading;
     }
@@ -1001,47 +1027,226 @@ fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfi
     );
 }
 
+/// The tool group names recognized by --enable/--disable/--only.
+const VALID_TOOL_GROUPS: &str =
+    "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user";
+
+/// Flip one named tool group on `settings`. Shared by --enable, --disable
+/// and --only so the group vocabulary (and its docker-exec/code-exec
+/// coupling) is defined in exactly one place.
+fn set_tool_group(
+    settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
+    name: &str,
+    on: bool,
+) -> Result<()> {
+    let canonical = canonical_tool_group(name);
+    match canonical.as_str() {
+        // A stray empty entry (`--enable shell,`) names nothing.
+        "" => {}
+        "shell" => settings.enabled = on,
+        "fs-read" => settings.filesystem_read_enabled = on,
+        "fs-write" => settings.filesystem_write_enabled = on,
+        "fetch" => settings.fetch_enabled = on,
+        "git" => settings.git_enabled = on,
+        "code-exec" => settings.execute_code_enabled = on,
+        "docker-exec" => {
+            if on {
+                // Docker execution implies code-exec is on too.
+                settings.execute_code_enabled = true;
+            }
+            settings.docker_code_execution_enabled = on;
+        }
+        "ask-user" => settings.ask_user_enabled = on,
+        _ => bail!("Unknown tool group '{name}' (valid: {VALID_TOOL_GROUPS})"),
+    }
+    Ok(())
+}
+
+/// The group a --enable/--disable/--only entry names. Callers spell groups
+/// several ways — the Harbor benchmark adapter passes `--disable ask_user`
+/// (the tool's own name), and a team file's `disable_tools` may say
+/// `fs_write` — and an unknown name is a hard error, so accept any case,
+/// `_` for `-`, and the name of the one tool a group stands for.
+fn canonical_tool_group(name: &str) -> String {
+    let group = name.trim().to_ascii_lowercase().replace('_', "-");
+    match group.as_str() {
+        "shell-execute" => "shell".to_string(),
+        "execute-code" => "code-exec".to_string(),
+        _ => group,
+    }
+}
+
 fn apply_tool_overrides(
     settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
     enable: &[String],
     disable: &[String],
-) {
+) -> Result<()> {
     for name in enable {
-        match name.as_str() {
-            "shell" => settings.enabled = true,
-            "fs-read" => settings.filesystem_read_enabled = true,
-            "fs-write" => settings.filesystem_write_enabled = true,
-            "fetch" => settings.fetch_enabled = true,
-            "git" => settings.git_enabled = true,
-            "code-exec" => settings.execute_code_enabled = true,
-            "docker-exec" => {
-                settings.execute_code_enabled = true;
-                settings.docker_code_execution_enabled = true;
-            }
-            other => {
-                tracing::warn!(
-                    name = other,
-                    "Unknown tool group in --enable (valid: shell, fs-read, fs-write, fetch, git, code-exec, docker-exec)"
-                );
-            }
-        }
+        set_tool_group(settings, name, true)
+            .with_context(|| "invalid name in --enable".to_string())?;
     }
     for name in disable {
-        match name.as_str() {
-            "shell" => settings.enabled = false,
-            "fs-read" => settings.filesystem_read_enabled = false,
-            "fs-write" => settings.filesystem_write_enabled = false,
-            "fetch" => settings.fetch_enabled = false,
-            "git" => settings.git_enabled = false,
-            "code-exec" => settings.execute_code_enabled = false,
-            "docker-exec" => settings.docker_code_execution_enabled = false,
-            other => {
-                tracing::warn!(
-                    name = other,
-                    "Unknown tool group in --disable (valid: shell, fs-read, fs-write, fetch, git, code-exec, docker-exec)"
-                );
-            }
-        }
+        set_tool_group(settings, name, false)
+            .with_context(|| "invalid name in --disable".to_string())?;
+    }
+    Ok(())
+}
+
+/// All tool groups --only can turn off before turning the named ones back on.
+const ALL_TOOL_GROUPS: &[&str] = &[
+    "shell",
+    "fs-read",
+    "fs-write",
+    "fetch",
+    "git",
+    "code-exec",
+    "docker-exec",
+    "ask-user",
+];
+
+/// Strict allow-list: turn every known group off, then turn on exactly the
+/// ones named in `only`. Unlike --enable/--disable, which adjust the
+/// persisted defaults, this ignores them entirely for the groups it manages.
+fn apply_tool_only(
+    settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
+    only: &[String],
+) -> Result<()> {
+    for group in ALL_TOOL_GROUPS {
+        set_tool_group(settings, group, false)
+            .expect("ALL_TOOL_GROUPS entries are always valid group names");
+    }
+    for name in only {
+        set_tool_group(settings, name, true)
+            .with_context(|| "invalid name in --only".to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tool_override_tests {
+    use super::{apply_tool_only, apply_tool_overrides};
+    use chatty_core::settings::models::ExecutionSettingsModel;
+
+    #[test]
+    fn enable_ask_user_turns_the_group_on() {
+        let mut settings = ExecutionSettingsModel {
+            ask_user_enabled: false,
+            ..Default::default()
+        };
+        apply_tool_overrides(&mut settings, &["ask-user".to_string()], &[]).unwrap();
+        assert!(settings.ask_user_enabled);
+    }
+
+    #[test]
+    fn disable_ask_user_turns_the_group_off() {
+        let mut settings = ExecutionSettingsModel::default();
+        assert!(settings.ask_user_enabled);
+        apply_tool_overrides(&mut settings, &[], &["ask-user".to_string()]).unwrap();
+        assert!(!settings.ask_user_enabled);
+    }
+
+    #[test]
+    fn unknown_enable_name_is_a_hard_error() {
+        let mut settings = ExecutionSettingsModel::default();
+        let err = format!(
+            "{:#}",
+            apply_tool_overrides(&mut settings, &["not-a-group".to_string()], &[]).unwrap_err()
+        );
+        assert!(err.contains("not-a-group"), "error was: {err}");
+    }
+
+    #[test]
+    fn unknown_disable_name_is_a_hard_error() {
+        let mut settings = ExecutionSettingsModel::default();
+        let err = format!(
+            "{:#}",
+            apply_tool_overrides(&mut settings, &[], &["not-a-group".to_string()]).unwrap_err()
+        );
+        assert!(err.contains("not-a-group"), "error was: {err}");
+    }
+
+    #[test]
+    fn docker_exec_enable_implies_code_exec() {
+        let mut settings = ExecutionSettingsModel::default();
+        assert!(!settings.execute_code_enabled);
+        apply_tool_overrides(&mut settings, &["docker-exec".to_string()], &[]).unwrap();
+        assert!(settings.execute_code_enabled);
+        assert!(settings.docker_code_execution_enabled);
+    }
+
+    #[test]
+    fn only_turns_off_every_group_not_named() {
+        // A permissive baseline: --only must still cut it down.
+        let mut settings = ExecutionSettingsModel {
+            git_enabled: true,
+            browser_enabled: true,
+            ..Default::default()
+        };
+        assert!(settings.filesystem_read_enabled); // on by default
+
+        apply_tool_only(&mut settings, &["fs-read".to_string()]).unwrap();
+
+        assert!(settings.filesystem_read_enabled);
+        assert!(!settings.filesystem_write_enabled);
+        assert!(!settings.fetch_enabled);
+        assert!(!settings.git_enabled);
+        assert!(!settings.enabled);
+        assert!(!settings.ask_user_enabled);
+    }
+
+    /// The Harbor benchmark adapter starts every run with
+    /// `--enable shell,fs-read,fs-write,git,code-exec --disable ask_user`;
+    /// with unknown names a hard error, the underscore spelling must still
+    /// resolve or every benchmark run dies at startup.
+    #[test]
+    fn harbor_adapter_argv_parses_and_turns_ask_user_off() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "chatty-tui",
+            "--headless",
+            "--enable",
+            "shell,fs-read,fs-write,git,code-exec",
+            "--disable",
+            "ask_user",
+        ])
+        .unwrap();
+        let mut settings = ExecutionSettingsModel::default();
+        apply_tool_overrides(&mut settings, &cli.enable, &cli.disable).unwrap();
+        assert!(!settings.ask_user_enabled);
+        assert!(settings.enabled && settings.git_enabled && settings.execute_code_enabled);
+    }
+
+    #[test]
+    fn group_names_accept_underscores_case_tool_names_and_stray_commas() {
+        let mut settings = ExecutionSettingsModel {
+            ask_user_enabled: true,
+            ..Default::default()
+        };
+        apply_tool_overrides(
+            &mut settings,
+            &[
+                " Shell_Execute".to_string(),
+                "execute_code".to_string(),
+                "FS_WRITE".to_string(),
+                String::new(),
+            ],
+            &["ask_user".to_string()],
+        )
+        .unwrap();
+        assert!(settings.enabled);
+        assert!(settings.execute_code_enabled);
+        assert!(settings.filesystem_write_enabled);
+        assert!(!settings.ask_user_enabled);
+    }
+
+    #[test]
+    fn only_rejects_an_unknown_name() {
+        let mut settings = ExecutionSettingsModel::default();
+        let err = format!(
+            "{:#}",
+            apply_tool_only(&mut settings, &["not-a-group".to_string()]).unwrap_err()
+        );
+        assert!(err.contains("not-a-group"), "error was: {err}");
     }
 }
 

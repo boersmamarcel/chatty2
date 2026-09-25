@@ -68,6 +68,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Labels, version bump, changelog, GitHub Release |
 | [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
 | [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` team against Ollama, with the verifier's reward |
+| [`hive-api-changes.md`](hive-api-changes.md) | hive re-pin after this branch merges | Public `chatty-core` API changes hive must adapt to, one-line fix each |
 
 ## Research notes (`docs/research/`, synced to the site under Explanation)
 

@@ -241,6 +241,17 @@ pub enum StreamManagerEvent {
         cache_read_tokens: u32,
         cache_write_tokens: u32,
     },
+    /// One provider round-trip within the active response finished (AGE:
+    /// live run indicator). Fired per `ApiCallUsage`, ahead of the turn's
+    /// aggregate `TokenUsage`, so the UI can show a running turn count and
+    /// token total while a long, uncapped run is still in flight.
+    TurnProgress {
+        conversation_id: String,
+        /// One-based index of this request within the run (`ApiCallUsage::turn`).
+        turn: u32,
+        /// This request's own tokens (input + output), not the run's total.
+        tokens: u32,
+    },
     StreamEnded {
         conversation_id: String,
         /// Epoch of the stream that ended. Subscribers must ignore an event
@@ -658,6 +669,11 @@ impl StreamManager {
                 });
             }
             StreamChunk::ApiCallUsage(call) => {
+                cx.emit(StreamManagerEvent::TurnProgress {
+                    conversation_id: conv_id.to_string(),
+                    turn: call.turn,
+                    tokens: call.input_tokens + call.output_tokens,
+                });
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.calls.push(call);
                 }

@@ -131,6 +131,7 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
         context_shaper: ContextShaper::for_model(&model_config),
         request_recorder: Default::default(),
         tool_loader: None,
+        supports_images: model_config.supports_images,
     }
 }
 
