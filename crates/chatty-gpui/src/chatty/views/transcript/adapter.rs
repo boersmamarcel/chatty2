@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn pdf_tool_becomes_artifact_block() {
+    fn reading_a_pdf_does_not_become_an_artifact_block() {
         use chatty_core::models::message_types::{
             SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
         };
@@ -860,10 +860,16 @@ mod tests {
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
-            turn.blocks
+            !turn
+                .blocks
                 .iter()
-                .any(|block| matches!(block, Block::Artifact { path, .. } if path.ends_with("report.pdf"))),
-            "pdf_* tools that name a .pdf should open as artifact cards, got {:?}",
+                .any(|block| matches!(block, Block::Artifact { .. })),
+            "reading a PDF is exploration, not an artifact card, got {:?}",
+            turn.blocks
+        );
+        assert!(
+            matches!(turn.blocks.as_slice(), [Block::Activity { .. }]),
+            "the read stays a row in its activity group, got {:?}",
             turn.blocks
         );
     }

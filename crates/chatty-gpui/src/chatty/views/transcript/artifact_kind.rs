@@ -381,10 +381,11 @@ pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     if name == "compile_typst" || name.contains("typst") {
         return tool_file_path(input).is_some_and(|p| is_pdf_path(&p)) || name == "compile_typst";
     }
-    if name == "read_pptx" {
-        return tool_file_path(input).is_some_and(|p| is_pptx_path(&p));
-    }
-    name.starts_with("pdf_") && tool_file_path(input).is_some_and(|p| is_pdf_path(&p))
+    // Reading a document (`read_pptx`, `pdf_info`, `pdf_extract_text`,
+    // `pdf_to_image` on its source PDF) produces nothing: a card for the file
+    // the agent read cluttered the turn and auto-docked the panel. The file
+    // explorer is the route to open a file the agent did not write.
+    false
 }
 
 /// Verbatim basename. Never slugified — `agentic-chat-ui-gpui.md` stays that way.
@@ -659,22 +660,21 @@ mod tests {
         assert!(is_standalone_artifact_path(deck));
     }
 
-    /// Reading an existing deck should grow a card, the way a `pdf_*` tool
-    /// naming a `.pdf` does — that is the only route to the panel for a file
-    /// the agent did not write itself.
+    /// Cards are for what the agent produced. Reading a document it was given
+    /// is exploration, not an artifact.
     #[test]
-    fn read_pptx_on_a_deck_is_a_produced_file_tool() {
-        assert!(is_produced_file_tool(
-            "read_pptx",
-            r#"{"path":"decks/q3.pptx"}"#
-        ));
-        // Not every read_pptx call names a deck; a bad path must not mint a card.
-        assert!(!is_produced_file_tool(
-            "read_pptx",
-            r#"{"path":"notes.md"}"#
-        ));
-        assert!(!is_produced_file_tool("read_pptx", r#"{}"#));
-        // read_file on a deck is still not an artifact tool.
+    fn reading_a_document_is_not_a_produced_file_tool() {
+        for tool in ["read_pptx", "pdf_info", "pdf_extract_text", "pdf_to_image"] {
+            assert!(
+                !is_produced_file_tool(tool, r#"{"path":"docs/report.pdf"}"#),
+                "{tool}"
+            );
+            assert!(
+                !is_produced_file_tool(tool, r#"{"path":"decks/q3.pptx"}"#),
+                "{tool}"
+            );
+        }
+        // read_file on a deck is not an artifact tool either.
         assert!(!is_produced_file_tool(
             "read_file",
             r#"{"path":"decks/q3.pptx"}"#
@@ -893,7 +893,7 @@ mod tests {
             tool_file_path(r#"{"saved_path":"/tmp/out.pdf","page_count":2}"#),
             Some(PathBuf::from("/tmp/out.pdf"))
         );
-        assert!(is_produced_file_tool(
+        assert!(!is_produced_file_tool(
             "pdf_extract_text",
             r#"{"path":"docs/report.pdf"}"#
         ));
