@@ -1977,11 +1977,13 @@ impl ChatView {
                 })
             });
             let (steps_done, steps_total) = self.running_step_progress();
+            let turn_progress = self.chat_input_state.read(cx).turn_progress();
             self.thinking_indicator.update(cx, |indicator, cx| {
                 // Clear the name when no tool is running, rather than leaving
                 // the last one in place (AGE-188).
                 indicator.set_attention(attention.unwrap_or_default(), cx);
                 indicator.set_progress(steps_done, steps_total, cx);
+                indicator.set_turn_progress(turn_progress, cx);
             });
         }
         let thinking_indicator = self.thinking_indicator.clone();
