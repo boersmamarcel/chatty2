@@ -58,7 +58,9 @@ mod verb;
 mod artifact_header;
 
 pub use action_bar::MessageActionBar;
-pub use activity::{ActivityGroup, LIVE_FADE_MS, RunTally, classify_tool, live_headline};
+pub use activity::{
+    ActivityGroup, LIVE_FADE_MS, RunTally, classify_tool, live_headline, phase_label,
+};
 pub use adapter::{
     COLLAPSED_TURN_HEIGHT, adapt_message, adapt_message_with_trace, adapt_messages,
     adapt_messages_with_traces, attach_plan_block, block_visible_in_turn, format_worked_for,

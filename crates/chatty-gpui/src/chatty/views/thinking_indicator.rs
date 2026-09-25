@@ -191,9 +191,13 @@ impl Render for ThinkingIndicator {
                     ),
             )
             .child(
+                // One line, always: wrapping in a narrow column (artifact
+                // panel docked) flipped the row between one and two lines as
+                // the counters ticked, and the transcript moved with it.
                 div()
                     .flex_1()
                     .min_w_0()
+                    .truncate()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground)

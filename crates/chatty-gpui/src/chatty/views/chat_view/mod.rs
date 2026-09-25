@@ -76,12 +76,13 @@ use super::trace_components::SystemTraceView;
 use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, ChosenOption,
     ClarificationCard, FileChange, LIVE_FADE_MS, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING,
-    PlanStrip, RunPin, RunPinKind, SessionChangeBar, TableOpen, Turn, TurnFileOverview, TurnRole,
-    adapt_message_with_trace, attachment_image_path, block_visible_in_turn, extract_table_preview,
-    file_change_from_tool, file_changes_from_turn, format_worked_for, format_working_for,
-    is_lane_a_browser_tool, is_pdf_artifact_tool, is_pdf_path, live_headline, merge_file_changes,
-    new_artifact_view, plan_turn_index, produced_path_is_openable, read_artifact_source,
-    render_typed_block, resolve_artifact_path, tool_file_path, turn_has_work_fold,
+    PlanStrip, RunPin, RunPinKind, RunTally, SessionChangeBar, TableOpen, Turn, TurnFileOverview,
+    TurnRole, adapt_message_with_trace, attachment_image_path, block_visible_in_turn,
+    classify_tool, extract_table_preview, file_change_from_tool, file_changes_from_turn,
+    format_worked_for, format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool,
+    is_pdf_path, live_headline, merge_file_changes, new_artifact_view, phase_label,
+    plan_turn_index, produced_path_is_openable, read_artifact_source, render_typed_block,
+    resolve_artifact_path, tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -368,6 +369,18 @@ fn turn_fingerprint(
         }
     }
     hasher.finish()
+}
+
+/// The line under a turn's "Working for" fold.
+enum FoldLine {
+    /// The newest action of a running turn, behind its kind of work.
+    Live {
+        tool_id: String,
+        phase: &'static str,
+        action: String,
+    },
+    /// A settled turn's tally.
+    Settled(String),
 }
 
 /// Docked artifact panel width.
@@ -2403,18 +2416,33 @@ impl ChatView {
             } else {
                 format_worked_for(turn.elapsed)
             };
-            // While the turn runs, the fold line names the newest action,
-            // folded or not: one action at a time, each fading in over the
-            // last, whatever became of it. Failures wait in the group rows.
-            let live_action = streaming
-                .then(|| {
-                    turn.blocks.iter().rev().find_map(|block| match block {
+            // A line under the fold: while the turn runs it names the newest
+            // action behind a segment for its kind of work, one action at a
+            // time, each fading in over the last, whatever became of it
+            // (failures wait in the group rows). Once the turn settles the
+            // same line carries the tally, so the row keeps its height and
+            // the answer below it does not jump when the turn ends.
+            let fold_line = if streaming {
+                turn.blocks
+                    .iter()
+                    .rev()
+                    .find_map(|block| match block {
                         Block::Activity { tools, .. } => tools.last(),
                         _ => None,
                     })
-                })
-                .flatten()
-                .map(|tool| (tool.id.clone(), live_headline(tool)));
+                    .map(|tool| FoldLine::Live {
+                        tool_id: tool.id.clone(),
+                        phase: phase_label(classify_tool(&tool.tool_name)),
+                        action: live_headline(tool),
+                    })
+            } else {
+                let tools = turn.blocks.iter().flat_map(|block| match block {
+                    Block::Activity { tools, .. } => tools.as_slice(),
+                    _ => &[],
+                });
+                let tally = RunTally::from_tools(tools);
+                (tally != RunTally::default()).then(|| FoldLine::Settled(tally.sentence()))
+            };
             let msg_index = turn.message_index;
             let entity = entity.clone();
             let collapsed = turn.collapsed;
@@ -2423,7 +2451,7 @@ impl ChatView {
             } else {
                 IconName::ChevronDown
             };
-            div()
+            let header = div()
                 .id(ElementId::NamedInteger("turn-fold".into(), turn.id))
                 .h(px(super::transcript::COLLAPSED_TURN_HEIGHT))
                 .w_full()
@@ -2452,23 +2480,63 @@ impl ChatView {
                     Icon::new(chevron)
                         .size_3()
                         .text_color(cx.theme().muted_foreground),
-                )
-                .when_some(live_action, |this, (tool_id, headline)| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_xs()
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(cx.theme().muted_foreground)
-                            .child(headline)
+                );
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .child(header)
+                .when_some(fold_line, |this, line| {
+                    let row = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .pb_2()
+                        .min_w_0()
+                        .text_xs();
+                    this.child(match line {
+                        FoldLine::Live {
+                            tool_id,
+                            phase,
+                            action,
+                        } => row
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .rounded_md()
+                                    .bg(cx.theme().muted)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(cx.theme().foreground)
+                                    .child(phase),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(action),
+                            )
                             .with_animation(
                                 ElementId::Name(format!("turn-live-action-{tool_id}").into()),
                                 Animation::new(Duration::from_millis(LIVE_FADE_MS)),
-                                |this, delta| this.opacity(delta),
-                            ),
-                    )
+                                |this, delta| this.opacity(0.4 + 0.6 * delta),
+                            )
+                            .into_any_element(),
+                        FoldLine::Settled(sentence) => row
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(sentence),
+                            )
+                            .into_any_element(),
+                    })
                 })
                 .into_any_element()
         });

@@ -65,7 +65,7 @@ pub struct RunTally {
 }
 
 impl RunTally {
-    pub fn from_tools(tools: &[ToolCallBlock]) -> Self {
+    pub fn from_tools<'a>(tools: impl IntoIterator<Item = &'a ToolCallBlock>) -> Self {
         let mut tally = Self::default();
         for tool in tools {
             match classify_tool(&tool.tool_name) {
@@ -132,6 +132,28 @@ impl RunTally {
         parts
     }
 
+    /// The tally as one plain sentence: "Explored 5 files, 3 failed".
+    pub fn sentence(&self) -> String {
+        let mut out = String::new();
+        for (ix, (verb, rest)) in self.phrase_spans().into_iter().enumerate() {
+            if ix > 0 {
+                out.push_str(", ");
+            }
+            if let Some(verb) = verb {
+                let mut chars = verb.chars();
+                match (ix, chars.next()) {
+                    (0, Some(first)) => {
+                        out.extend(first.to_uppercase());
+                        out.push_str(chars.as_str());
+                    }
+                    _ => out.push_str(verb),
+                }
+            }
+            out.push_str(&rest);
+        }
+        out
+    }
+
     pub fn all_success(tools: &[ToolCallBlock]) -> bool {
         !tools.is_empty()
             && tools
@@ -140,8 +162,23 @@ impl RunTally {
     }
 }
 
-/// How long a new live action takes to fade in over the previous one.
+/// How long a new live action takes to fade in over the previous one. The
+/// fade starts part-way visible: from zero, the line blinked out for a frame
+/// at every new action.
 pub const LIVE_FADE_MS: u64 = 300;
+
+/// The kind of work a call belongs to, for the segment in front of the live
+/// action ("Exploring · Reading src/main.rs").
+pub fn phase_label(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Edit => "Editing",
+        ToolKind::Explore => "Exploring",
+        ToolKind::Search => "Searching",
+        ToolKind::External => "Calling tools",
+        ToolKind::Command => "Running",
+        ToolKind::Handoff => "Handing off",
+    }
+}
 
 /// "Reading src/main.rs": the present-tense label, even once the call has
 /// settled, because the header narrates what the agent is doing, not how
@@ -334,7 +371,7 @@ impl RenderOnce for ActivityGroup {
 mod tests {
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
-    use super::{RunTally, ToolKind, classify_tool, live_headline};
+    use super::{RunTally, ToolKind, classify_tool, live_headline, phase_label};
     use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
 
     #[test]
@@ -356,6 +393,14 @@ mod tests {
             live_headline(&tool),
             "Reading .opencode/skills/storytelling/SKILL.md"
         );
+    }
+
+    #[test]
+    fn phase_follows_the_tool_kind() {
+        assert_eq!(phase_label(classify_tool("read_file")), "Exploring");
+        assert_eq!(phase_label(classify_tool("search_code")), "Searching");
+        assert_eq!(phase_label(classify_tool("apply_diff")), "Editing");
+        assert_eq!(phase_label(classify_tool("shell_execute")), "Running");
     }
 
     #[test]
@@ -388,6 +433,7 @@ mod tests {
                 (None, "2 failed".to_string()),
             ]
         );
+        assert_eq!(tally.sentence(), "Explored 3 files, 2 failed");
         let clean = RunTally::from_tools(&tools[..1]);
         assert_eq!(
             clean.phrase_spans(),
