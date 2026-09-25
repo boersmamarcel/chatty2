@@ -57,7 +57,6 @@ use super::table::render_table_preview_view;
 use crate::chatty::views::chart_renderer::render_chart_panel;
 use crate::chatty::views::diff_view_component::diff_line_stats_fast;
 
-const IMAGE_DISPLAY_WIDTH: f32 = 348.0;
 /// PDF page rasters are requested in steps of this many device pixels
 /// (AGE-472), so a split drag settles on one pdfium render rather than one
 /// per pixel of travel; `PDF_RASTER_MAX_WIDTH` keeps a full-window page on a
@@ -2672,18 +2671,20 @@ fn image_rendered_body(path: &Path, cx: &App) -> AnyElement {
             .child(format!("Image not found: {}", path.display()))
             .into_any_element();
     }
+    // Fills the panel and follows it: the picture scales down to fit
+    // whatever room the panel has, and never past its own pixel size, so a
+    // small icon stays crisp instead of blowing up. It used to be capped at
+    // a fixed 348x520 whatever the panel's size.
     div()
         .id("artifact-image")
+        .flex()
         .flex_1()
         .min_h_0()
         .w_full()
-        .overflow_y_scroll()
         .child(
             img(path.to_path_buf())
-                .max_w(px(IMAGE_DISPLAY_WIDTH))
-                .max_h(px(520.0))
-                .object_fit(ObjectFit::Contain)
-                .rounded_md(),
+                .size_full()
+                .object_fit(ObjectFit::ScaleDown),
         )
         .into_any_element()
 }
