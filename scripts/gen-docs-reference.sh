@@ -244,13 +244,14 @@ opt-in (`false`) for security.
 | `timeout_seconds` | `u32` | `30` | Execution timeout |
 | `max_output_bytes` | `usize` | `51200` | 50 KiB cap |
 | `network_isolation` | `bool` | `false` | Sandbox network isolation when available |
-| `max_agent_turns` | `u32` | `10` | Tool-call rounds per response |
+| `max_agent_turns` | `u32` | `0` | Tool-call rounds per response; `0` = no cap (headless runs get a wall-clock budget instead, `chatty-tui --max-duration`) |
 | `memory_enabled` | `bool` | `true` | `remember` / `search_memory` |
 | `warn_on_external_agent` | `bool` | `false` | say so before `invoke_agent` sends a prompt outside the fleet (ADR-0011 C5) |
 | `embedding_enabled` | `bool` | `false` | Semantic memory search |
 | `embedding_provider` | `Option<ProviderType>` | `null` | Independent of chat provider |
 | `embedding_model` | `Option<String>` | `null` | e.g. `text-embedding-3-small` |
 | `hosted_conversations_enabled` | `bool` | `false` | Developer-only: offers the per-conversation move between local and hosted (AGE-308) |
+| `tool_loading` | `ToolLoading` | `"all"` | How tools are offered to the model. JSON: `all` (every allowed tool on every request) or `dynamic` (a small core, plus groups the model loads with `load_tools`). Omitted from the file while `all`. CLI override: `chatty-tui --tool-loading` |
 
 `ApprovalMode` has no `rename_all` — JSON uses the Rust variant names above.
 
