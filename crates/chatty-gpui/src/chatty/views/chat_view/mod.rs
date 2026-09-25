@@ -1277,7 +1277,7 @@ impl ChatView {
         .detach();
     }
 
-    /// Latest PDF produced by a tool (Typst / pdf_* / write…pdf). Used to auto-dock
+    /// Latest PDF produced by a tool (Typst / write…pdf). Used to auto-dock
     /// the artifact panel — non-PDF produced files stay click-to-open only.
     fn last_pdf_artifact(&self, cx: &App) -> Option<(PathBuf, String)> {
         let traces = self.history_traces(cx);
@@ -2387,11 +2387,26 @@ impl ChatView {
 
         // Folded turns keep receipts + the assistant message; only the
         // work trace (thinking / activity / diffs) is hidden.
-        let typed: Vec<AnyElement> = turn
+        //
+        // The to-do list goes above the "Working for" fold rather than inside
+        // the trace under it: the plan frames the work, so it reads first.
+        // A plan block with no todos yet renders nothing and is left out, so
+        // it cannot open an empty gap above the fold.
+        let plan_has_todos = plan
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.write_todos_called && !snapshot.todos.is_empty());
+        let mut plan_elements: Vec<AnyElement> = Vec::new();
+        let mut typed: Vec<AnyElement> = Vec::new();
+        for block in turn
             .blocks
             .iter()
             .filter(|block| block_visible_in_turn(&turn, block))
-            .map(|block| {
+        {
+            let is_plan = matches!(block, Block::Plan { .. });
+            if is_plan && !plan_has_todos {
+                continue;
+            }
+            let element = {
                 let activity_open = match block {
                     Block::Activity { id, .. } => self.activity_expanded.get(&id.0).copied(),
                     _ => None,
@@ -2409,8 +2424,13 @@ impl ChatView {
                     window,
                     cx,
                 )
-            })
-            .collect();
+            };
+            if is_plan {
+                plan_elements.push(element);
+            } else {
+                typed.push(element);
+            }
+        }
 
         let show_work_fold = turn_has_work_fold(&turn);
         let work_header = show_work_fold.then(|| {
@@ -2613,7 +2633,7 @@ impl ChatView {
         if streaming_slot.is_some() {
             self.streaming_parse_cache = streaming_slot;
         }
-        if typed.is_empty() && work_header.is_none() {
+        if typed.is_empty() && plan_elements.is_empty() && work_header.is_none() {
             text
         } else {
             let gap = if skip_empty_message && typed.is_empty() {
@@ -2626,6 +2646,7 @@ impl ChatView {
                 .flex_col()
                 .gap(gap)
                 .w_full()
+                .children(plan_elements)
                 .children(work_header)
                 .children(file_overview.flatten())
                 .children(typed)
