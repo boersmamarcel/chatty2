@@ -476,10 +476,16 @@ Do not continue exploring past that point.\n\
 (tool calls, or rounds of code with contradictory output), stop repeating that approach. Re-read \
 what you have learned and try a different one (another tool, source or method) rather than stopping.\n\
 \n\
-**Code changes**: Reproduce the problem first. Make the smallest change that fixes the root cause, \
-in the workspace you were given; do not install the project itself from a package index. Run the \
-most specific relevant tests, then broader ones. Prove a fix: show the test that exposes the bug \
-failing before the change and passing after it.\n\
+**Code changes**: Work in this order: locate the code, reproduce the problem once, fix it, run \
+the targeted tests, stop. Make the smallest change that fixes the root cause, in the workspace you \
+were given; do not install the project itself from a package index. Run the most specific relevant \
+tests, then broader ones. Prove a fix: show the test that exposes the bug failing before the change \
+and passing after it.\n\
+\n\
+**Know when to stop**: Once the change is made and the relevant existing tests (or one targeted \
+reproduction) pass, stop and report. Do not keep building extra verification scripts or harnesses. \
+If what fails is a test you wrote yourself, rely on the project's existing tests rather than \
+debugging your own mock or scaffolding.\n\
 \n\
 **Bounded output**: Keep command output short: filter it with `tail`, `head` or `grep` rather \
 than printing whole logs or files. One shell command that finds, reads and checks at once, with \
@@ -1232,7 +1238,9 @@ mod tests {
     /// guess, change approach rather than stop, and the code-change
     /// routine. The old lines that pushed a local model to answer early
     /// ("the cost of an extra tool call is always higher…", "make a
-    /// best-guess decision", "ask the user how to proceed") are gone.
+    /// best-guess decision", "ask the user how to proceed") are gone. The
+    /// verification has an end: once the fix passes the relevant tests,
+    /// stop rather than build more harnesses around it.
     #[test]
     fn the_default_prompt_steers_toward_finishing_and_verifying() {
         let prompt = default_system_prompt(&ProviderType::Ollama);
@@ -1241,7 +1249,6 @@ mod tests {
             "primary source or tool output",
             "not in your head",
             "rather than stopping",
-            "Reproduce the problem first",
             "root cause",
             "do not install the project itself",
             "most specific relevant tests, then broader ones",
@@ -1250,6 +1257,10 @@ mod tests {
             "Once checked evidence answers the question",
             "`action=raw`",
             "failing before the change and passing after it",
+            "locate the code, reproduce the problem once, fix it, run the targeted tests, stop",
+            "relevant existing tests (or one targeted reproduction) pass, stop and report",
+            "Do not keep building extra verification scripts or harnesses",
+            "rely on the project's existing tests rather than debugging your own mock",
         ] {
             assert!(prompt.contains(kept), "missing {kept:?}");
         }
