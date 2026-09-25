@@ -5,7 +5,6 @@ use chatty_core::models::message_types::{ApprovalBlock, ApprovalState};
 use gpui::*;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::kbd::Kbd;
 use gpui_component::{ActiveTheme, Sizable};
 
@@ -109,48 +108,6 @@ impl RenderOnce for ApprovalCard {
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{label} · {}", self.approval.command))
             }
-        }
-    }
-}
-
-#[derive(IntoElement)]
-pub struct ErrorBlock {
-    id: String,
-    message: String,
-    detail: Option<String>,
-}
-
-impl ErrorBlock {
-    pub fn new(id: impl Into<String>, message: impl Into<String>, detail: Option<String>) -> Self {
-        Self {
-            id: id.into(),
-            message: message.into(),
-            detail,
-        }
-    }
-}
-
-impl RenderOnce for ErrorBlock {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let alert = Alert::error(
-            ElementId::Name(format!("error-{}", self.id).into()),
-            self.message.clone(),
-        );
-        if let Some(detail) = self.detail {
-            CollapsibleEl::new()
-                .open(false)
-                .child(alert)
-                .content(
-                    div()
-                        .text_xs()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(cx.theme().muted_foreground)
-                        .p_2()
-                        .child(detail),
-                )
-                .into_any_element()
-        } else {
-            alert.into_any_element()
         }
     }
 }

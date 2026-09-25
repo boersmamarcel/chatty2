@@ -64,7 +64,7 @@ pub use adapter::{
     adapt_messages_with_traces, attach_plan_block, block_visible_in_turn, format_worked_for,
     format_working_for, plan_turn_index, retain_last_plan_block, turn_has_work_fold,
 };
-pub use approval::{ApprovalCard, ChangeTray, ErrorBlock, PathChange};
+pub use approval::{ApprovalCard, ChangeTray, PathChange};
 pub use artifact_batch_card::ArtifactBatchCard;
 pub use artifact_card::{ArtifactCard, reveal_path_in_os};
 pub use artifact_header::{

@@ -84,11 +84,6 @@ pub enum Block {
         id: BlockId,
         preview: TablePreview,
     },
-    Error {
-        id: BlockId,
-        message: String,
-        detail: Option<String>,
-    },
 }
 
 impl Block {
@@ -104,8 +99,7 @@ impl Block {
             | Self::Plan { id }
             | Self::Artifact { id, .. }
             | Self::ArtifactBatch { id, .. }
-            | Self::TablePreview { id, .. }
-            | Self::Error { id, .. } => *id,
+            | Self::TablePreview { id, .. } => *id,
         }
     }
 }

@@ -321,7 +321,7 @@ fn turn_fingerprint(
             Block::Activity { id, tools } => {
                 tools.len().hash(&mut hasher);
                 activity_expanded.get(&id.0).hash(&mut hasher);
-                // A failed run renders an extra line and forces the card open.
+                // A failed call renders an extra line when the card is open.
                 tools
                     .iter()
                     .map(|tool| std::mem::discriminant(&tool.state))
@@ -340,7 +340,6 @@ fn turn_fingerprint(
                 std::mem::discriminant(&clarification.state).hash(&mut hasher);
                 clarification.answers.len().hash(&mut hasher);
             }
-            Block::Error { message, .. } => message.len().hash(&mut hasher),
             Block::Plan { .. } => {
                 // Renders as nothing until `write_todos` lands, then as one row
                 // per todo — all of it out-of-band state the block never carries.
@@ -2372,14 +2371,28 @@ impl ChatView {
 
         // Folded turns keep receipts + the assistant message; only the
         // work trace (thinking / activity / diffs) is hidden.
+        // Only the newest activity group of a running turn narrates the
+        // current action; earlier groups show their settled tally.
+        let live_activity = turn
+            .streaming
+            .then(|| {
+                turn.blocks.iter().rev().find_map(|block| match block {
+                    Block::Activity { id, .. } => Some(id.0),
+                    _ => None,
+                })
+            })
+            .flatten();
         let typed: Vec<AnyElement> = turn
             .blocks
             .iter()
             .filter(|block| block_visible_in_turn(&turn, block))
             .map(|block| {
-                let activity_open = match block {
-                    Block::Activity { id, .. } => self.activity_expanded.get(&id.0).copied(),
-                    _ => None,
+                let (activity_open, activity_live) = match block {
+                    Block::Activity { id, .. } => (
+                        self.activity_expanded.get(&id.0).copied(),
+                        live_activity == Some(id.0),
+                    ),
+                    _ => (None, false),
                 };
                 render_typed_block(
                     block,
@@ -2388,6 +2401,7 @@ impl ChatView {
                     Some(on_open_table.clone()),
                     plan.as_ref(),
                     activity_open,
+                    activity_live,
                     Some(on_activity_toggle.clone()),
                     open_artifact.as_deref(),
                     window,

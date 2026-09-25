@@ -1,14 +1,15 @@
 use std::rc::Rc;
+use std::time::Duration;
 
-use chatty_core::models::message_types::{ToolCallBlock, ToolCallState};
+use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
-use super::ticker::HeadlineTicker;
 use super::tool_row::ToolRow;
+use super::verb::tool_row_label;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolKind {
@@ -128,12 +129,23 @@ impl RunTally {
                 .iter()
                 .all(|t| matches!(t.state, ToolCallState::Success))
     }
+}
 
-    pub fn has_failure(tools: &[ToolCallBlock]) -> bool {
-        tools
-            .iter()
-            .any(|t| matches!(t.state, ToolCallState::Error(_)))
-    }
+/// How long a new live action takes to fade in over the previous one.
+const LIVE_FADE_MS: u64 = 300;
+
+/// "Reading src/main.rs": the present-tense label, even once the call has
+/// settled, because the header narrates what the agent is doing, not how
+/// each call ended.
+fn live_headline(tool: &ToolCallBlock) -> String {
+    tool_row_label(
+        &tool.display_name,
+        &tool.tool_name,
+        &ToolCallState::Running,
+        &tool.input,
+        None,
+    )
+    .headline()
 }
 
 fn count_diff_lines(output: &str) -> (usize, usize) {
@@ -158,7 +170,7 @@ type ActivityToggle = Rc<dyn Fn(&mut App)>;
 pub struct ActivityGroup {
     tools: Vec<ToolCallBlock>,
     open: bool,
-    ticker: Option<Entity<HeadlineTicker>>,
+    live: bool,
     on_toggle: Option<ActivityToggle>,
 }
 
@@ -167,7 +179,7 @@ impl ActivityGroup {
         Self {
             tools,
             open: true,
-            ticker: None,
+            live: false,
             on_toggle: None,
         }
     }
@@ -177,8 +189,10 @@ impl ActivityGroup {
         self
     }
 
-    pub fn ticker(mut self, ticker: Entity<HeadlineTicker>) -> Self {
-        self.ticker = Some(ticker);
+    /// The group belongs to a turn that is still running: its header names
+    /// the newest action instead of the tally.
+    pub fn live(mut self, live: bool) -> Self {
+        self.live = live;
         self
     }
 
@@ -191,16 +205,12 @@ impl ActivityGroup {
 impl RenderOnce for ActivityGroup {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tally = RunTally::from_tools(&self.tools);
-        let running = self
-            .tools
-            .iter()
-            .any(|t| matches!(t.state, ToolCallState::Running));
-        // Failures stay expanded; in-flight groups follow `open` (default collapsed).
-        let open = if RunTally::has_failure(&self.tools) {
-            true
-        } else {
-            self.open
-        };
+        let open = self.open;
+        let live_headline = self
+            .live
+            .then(|| self.tools.last())
+            .flatten()
+            .map(|tool| (tool.id.clone(), live_headline(tool)));
 
         let on_toggle = self.on_toggle.clone();
         let chevron = if open {
@@ -261,20 +271,31 @@ impl RenderOnce for ActivityGroup {
                     cb(cx);
                 }
             })
-            .when(!running && RunTally::all_success(&self.tools), |this| {
+            .when(!self.live && RunTally::all_success(&self.tools), |this| {
                 this.child(
                     Icon::new(IconName::Check)
                         .size_3()
                         .text_color(cx.theme().success),
                 )
             })
-            .child(sentence)
-            .when(running, |this| {
-                if let Some(ticker) = self.ticker.clone() {
-                    this.child(ticker)
-                } else {
-                    this
-                }
+            .map(|this| match live_headline {
+                // One action at a time: each new call fades in over the last,
+                // whatever became of it. Failures wait in the rows below.
+                Some((tool_id, headline)) => this.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(headline)
+                        .with_animation(
+                            ElementId::Name(format!("activity-live-{tool_id}").into()),
+                            Animation::new(Duration::from_millis(LIVE_FADE_MS)),
+                            |this, delta| this.opacity(delta),
+                        ),
+                ),
+                None => this.child(sentence),
             })
             .when(tally.added > 0, |this| {
                 this.child(Tag::success().small().child(format!("+{}", tally.added)))
@@ -332,8 +353,29 @@ impl RenderOnce for ActivityGroup {
 mod tests {
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
-    use super::{RunTally, ToolKind, classify_tool};
-    use chatty_core::models::message_types::ToolCallBlock;
+    use super::{RunTally, ToolKind, classify_tool, live_headline};
+    use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+
+    #[test]
+    fn live_headline_narrates_a_failed_call_like_a_running_one() {
+        let tool = ToolCallBlock {
+            id: "r".into(),
+            tool_name: "read_file".into(),
+            display_name: "read_file".into(),
+            input: r#"{"path":".opencode/skills/storytelling/SKILL.md"}"#.into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Error("No such file or directory".into()),
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        };
+        assert_eq!(
+            live_headline(&tool),
+            "Reading .opencode/skills/storytelling/SKILL.md"
+        );
+    }
 
     #[test]
     fn browser_handoffs_are_their_own_kind() {

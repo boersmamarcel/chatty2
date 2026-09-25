@@ -190,9 +190,8 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                     // an artifact receipt so provenance stays next to the turn.
                     //
                     // Success-gated like every other receipt above: without it
-                    // this arm also swallowed *failed* writes, which both hid
-                    // the error (the `tool_error` arm below never ran) and
-                    // minted a card for a file that was never written.
+                    // this arm also minted a card for a *failed* write, a file
+                    // that was never written.
                     activity_tools.push(tool.clone());
                     flush_activity(blocks, &mut activity_tools);
                     if let Some(path) = artifact_path(tool)
@@ -204,14 +203,11 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                             old_content: artifact_old_content_from_tool(tool),
                         });
                     }
-                } else if let Some(err) = tool_error(tool) {
-                    flush_activity(blocks, &mut activity_tools);
-                    blocks.push(Block::Error {
-                        id: BlockId::from_parts(namespace, &tool.id),
-                        message: err,
-                        detail: tool.output.clone(),
-                    });
                 } else {
+                    // Failed calls stay in the activity group too. A red card
+                    // per failure read as the run falling apart when the agent
+                    // was just probing paths; the row keeps the error for
+                    // whoever unfolds the group.
                     activity_tools.push(tool.clone());
                 }
             }
@@ -585,7 +581,6 @@ fn is_work_trace_block(block: &Block) -> bool {
             | Block::Approval { .. }
             | Block::Clarification { .. }
             | Block::Plan { .. }
-            | Block::Error { .. }
     )
 }
 
@@ -636,13 +631,6 @@ fn artifact_path(
         .and_then(tool_file_path)
         .or_else(|| tool_file_path(&tool.input))
         .filter(|path| produced_path_is_openable(path))
-}
-
-fn tool_error(tool: &chatty_core::models::message_types::ToolCallBlock) -> Option<String> {
-    match &tool.state {
-        chatty_core::models::message_types::ToolCallState::Error(msg) => Some(msg.clone()),
-        _ => None,
-    }
 }
 
 pub fn adapt_messages(messages: &[DisplayMessage], collapsed_turns: &[bool]) -> Vec<Turn> {
@@ -1062,6 +1050,28 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+        }
+    }
+
+    /// A failed call is a row in its activity group, not a card of its own:
+    /// probing a few paths that do not exist must not read as a broken run.
+    #[test]
+    fn failed_tool_stays_in_the_activity_group() {
+        use chatty_core::models::message_types::ToolCallState;
+        let mut missing = sample_tool("b", "read_file");
+        missing.state = ToolCallState::Error("No such file or directory".into());
+        let msg = assistant_with_tools(vec![
+            sample_tool("a", "git_log"),
+            missing,
+            sample_tool("c", "read_file"),
+        ]);
+        let turn = adapt_message(&msg, 0, false);
+        match turn.blocks.as_slice() {
+            [Block::Activity { tools, .. }, Block::Text { .. }] => {
+                let ids: Vec<_> = tools.iter().map(|t| t.id.as_str()).collect();
+                assert_eq!(ids, ["a", "b", "c"]);
+            }
+            other => panic!("expected one activity group, got {other:?}"),
         }
     }
 
