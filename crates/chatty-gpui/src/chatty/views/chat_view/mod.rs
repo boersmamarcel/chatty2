@@ -173,6 +173,10 @@ pub struct ChatView {
     /// Whether the inline plan card has scrolled above the viewport, resolved
     /// from the list's measured geometry in `prepare_render`.
     plan_above_viewport: bool,
+    /// The inline plan card's window bounds, written by a probe while the card
+    /// paints and taken once per frame. `None` means the card did not paint
+    /// last frame (its turn is outside the rendered range).
+    plan_card_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Whether the transcript list's scroll handler has been installed. Needs
     /// an entity handle, which `ChatView::new` does not have yet.
     scroll_handler_armed: bool,
@@ -383,6 +387,9 @@ enum FoldLine {
     Settled(String),
 }
 
+/// How long the compact plan strip takes to fade in.
+const PLAN_STRIP_FADE_MS: u64 = 160;
+
 /// Docked artifact panel width.
 const ARTIFACT_PANEL_WIDTH: f32 = 380.0;
 
@@ -559,6 +566,7 @@ impl ChatView {
             agent_task_snapshot: None,
             plan_overlay_open: false,
             plan_above_viewport: false,
+            plan_card_bounds: Rc::default(),
             scroll_handler_armed: false,
             artifact_view: new_artifact_view(window, cx),
             artifact_dismissed: false,
@@ -1939,6 +1947,8 @@ impl ChatView {
     /// Drop every measured height and anchor. For a conversation switch, where
     /// nothing about the old transcript's geometry applies to the new one.
     pub(super) fn reset_transcript_list(&mut self) {
+        self.plan_above_viewport = false;
+        self.plan_card_bounds.set(None);
         self.transcript_list.reset(0);
         self.transcript_fingerprints.clear();
         // Cache entries are keyed by message index, and index 3 of the next
@@ -1947,16 +1957,24 @@ impl ChatView {
     }
 
     /// Whether the inline plan card has scrolled above the viewport.
+    ///
+    /// Judged on the card itself, not on its turn: the card sits at the top of
+    /// a turn that goes on to hold the whole answer, so the turn's bottom only
+    /// left the viewport long after the card had, and the compact strip came
+    /// late or not at all. When nothing about the card is known this frame
+    /// (its turn was just re-measured, or is outside the rendered range) the
+    /// previous answer stands: guessing from row indexes flashed the strip on
+    /// for a frame at every todo update while the card was in plain view.
     fn compute_plan_above_viewport(&self) -> bool {
-        let Some(ix) = plan_turn_index(&self.turns) else {
+        if plan_turn_index(&self.turns).is_none() {
             return false;
-        };
-        scroll::plan_is_above_viewport(
-            self.transcript_list.bounds_for_item(ix),
-            ix,
-            self.transcript_list.logical_scroll_top().item_ix,
-            self.transcript_list.viewport_bounds().top(),
-        )
+        }
+        match self.plan_card_bounds.take() {
+            Some(card) => {
+                scroll::plan_is_above_viewport(card, self.transcript_list.viewport_bounds().top())
+            }
+            None => self.plan_above_viewport,
+        }
     }
 
     /// Render the scrollable message list area including the loading skeleton.
@@ -2027,6 +2045,71 @@ impl ChatView {
             .active_approval_for_display()
             .map(|p| p.command.clone());
 
+        // The compact strip floats over the top of the transcript instead of
+        // taking a row above it. As a row it shrank the list by its own height
+        // whenever it appeared, so the whole transcript moved; and moving it
+        // could bring the card back into view, hide the strip, and move it
+        // again. An overlay changes nothing underneath, and fades in.
+        let plan_strip_el = plan_strip.map(|snapshot| {
+            div()
+                .id("plan-strip-slot")
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(PLAN_LIST_TOP_PADDING))
+                .bg(cx.theme().background)
+                .px_4()
+                .flex()
+                .items_center()
+                .child(
+                    PlanStrip::new(snapshot)
+                        .open(overlay_open)
+                        .pending_command(pending_command)
+                        .on_open_change({
+                            let entity = entity.clone();
+                            move |open, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.plan_overlay_open = open;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .on_decide({
+                            let entity = entity.clone();
+                            move |approved, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.handle_floating_approval(approved, cx);
+                                });
+                            }
+                        })
+                        .on_jump({
+                            let entity = entity.clone();
+                            move |cx| {
+                                entity.update(cx, |view, cx| {
+                                    if let Some(msg_index) = jump_message {
+                                        view.collapsed_turns.insert(msg_index, false);
+                                    }
+                                    view.plan_overlay_open = false;
+                                    // Without this, the next frame's
+                                    // sticky re-assert yanks the view
+                                    // straight back to the bottom.
+                                    view.stick_to_bottom = false;
+                                    if let Some(turn_ix) = jump_turn {
+                                        view.transcript_list.scroll_to_reveal_item(turn_ix);
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .with_animation(
+                    "plan-strip-fade",
+                    Animation::new(Duration::from_millis(PLAN_STRIP_FADE_MS)),
+                    |this, delta| this.opacity(delta),
+                )
+        });
+
         trace!(
             target: "chatty_gpui::render::list",
             total = self.messages.len(),
@@ -2044,58 +2127,6 @@ impl ChatView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .when_some(plan_strip, |this, snapshot| {
-                this.child(
-                    div()
-                        .id("plan-strip-slot")
-                        .h(px(PLAN_LIST_TOP_PADDING))
-                        .w_full()
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .child(
-                            PlanStrip::new(snapshot)
-                                .open(overlay_open)
-                                .pending_command(pending_command)
-                                .on_open_change({
-                                    let entity = entity.clone();
-                                    move |open, cx| {
-                                        entity.update(cx, |view, cx| {
-                                            view.plan_overlay_open = open;
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .on_decide({
-                                    let entity = entity.clone();
-                                    move |approved, cx| {
-                                        entity.update(cx, |view, cx| {
-                                            view.handle_floating_approval(approved, cx);
-                                        });
-                                    }
-                                })
-                                .on_jump({
-                                    let entity = entity.clone();
-                                    move |cx| {
-                                        entity.update(cx, |view, cx| {
-                                            if let Some(msg_index) = jump_message {
-                                                view.collapsed_turns.insert(msg_index, false);
-                                            }
-                                            view.plan_overlay_open = false;
-                                            // Without this, the next frame's
-                                            // sticky re-assert yanks the view
-                                            // straight back to the bottom.
-                                            view.stick_to_bottom = false;
-                                            if let Some(turn_ix) = jump_turn {
-                                                view.transcript_list.scroll_to_reveal_item(turn_ix);
-                                            }
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        ),
-                )
-            })
             .when(show_start_screen, |this| {
                 this.child(
                     div()
@@ -2143,6 +2174,9 @@ impl ChatView {
                                     .bg(cx.theme().overlay),
                             )
                         })
+                        // After the scrim, so an open plan overlay dims the
+                        // transcript but not the strip it hangs from.
+                        .children(plan_strip_el)
                         .child(
                             RunPin::new(if has_approval && user_away {
                                 RunPinKind::PendingApproval
@@ -2426,6 +2460,19 @@ impl ChatView {
                 )
             };
             if is_plan {
+                let probe = self.plan_card_bounds.clone();
+                let element = div()
+                    .relative()
+                    .w_full()
+                    .child(element)
+                    .child(
+                        canvas(move |bounds, _, _| probe.set(Some(bounds)), |_, _, _, _| {})
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                    )
+                    .into_any_element();
                 plan_elements.push(element);
             } else {
                 typed.push(element);
