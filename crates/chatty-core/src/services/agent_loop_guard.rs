@@ -205,9 +205,11 @@ pub struct AgentLoopGuard {
     seen_test_commands: HashSet<String>,
     /// URLs fetched, queries searched and code run so far, as `tool:target`.
     seen_targets: HashSet<String>,
-    /// The working tree: a write outside it (a `/tmp` scratch script) is
-    /// not progress. Without one, only the scratch dirs count as outside.
-    workspace_root: Option<PathBuf>,
+    /// The working tree, as given and as canonicalized (a symlinked
+    /// checkout, macOS's `/tmp` → `/private/tmp`): a write outside it (a
+    /// `/tmp` scratch script) is not progress. Empty when no root was
+    /// given; then only the scratch dirs count as outside.
+    workspace_roots: Vec<PathBuf>,
 }
 
 impl AgentLoopGuard {
@@ -231,7 +233,7 @@ impl AgentLoopGuard {
             seen_files: HashSet::new(),
             seen_test_commands: HashSet::new(),
             seen_targets: HashSet::new(),
-            workspace_root: None,
+            workspace_roots: Vec::new(),
         }
     }
 
@@ -244,11 +246,22 @@ impl AgentLoopGuard {
 
     /// The run's working tree, for the progress check: writes outside it do
     /// not count as progress. Relative paths are taken to be inside it.
+    ///
+    /// The model writes paths in the form it was given, which need not be
+    /// the canonical one, so both forms of `root` are kept.
     pub fn with_workspace_root(mut self, root: Option<&Path>) -> Self {
-        self.workspace_root = root.map(|root| {
-            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-            normalize(&root)
-        });
+        self.workspace_roots.clear();
+        if let Some(root) = root {
+            let given =
+                normalize(&std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+            self.workspace_roots.push(given);
+            if let Ok(canonical) = std::fs::canonicalize(root) {
+                let canonical = normalize(&canonical);
+                if !self.workspace_roots.contains(&canonical) {
+                    self.workspace_roots.push(canonical);
+                }
+            }
+        }
         self
     }
 
@@ -363,14 +376,15 @@ impl AgentLoopGuard {
             return true;
         }
         let path = normalize(path);
-        match &self.workspace_root {
-            Some(root) => path.starts_with(root),
-            None => {
-                let temp = normalize(&std::env::temp_dir());
-                !(SCRATCH_DIRS.iter().any(|dir| path.starts_with(dir))
-                    || (temp.parent().is_some() && path.starts_with(&temp)))
-            }
+        if !self.workspace_roots.is_empty() {
+            return self
+                .workspace_roots
+                .iter()
+                .any(|root| path.starts_with(root));
         }
+        let temp = normalize(&std::env::temp_dir());
+        !(SCRATCH_DIRS.iter().any(|dir| path.starts_with(dir))
+            || (temp.parent().is_some() && path.starts_with(&temp)))
     }
 
     // ── Event handlers ────────────────────────────────────────────────────────
@@ -1098,7 +1112,9 @@ mod tests {
             true
         } else {
             // Start the next case from a clean window.
-            *g = progress_guard().with_workspace_root(g.workspace_root.clone().as_deref());
+            let roots = std::mem::take(&mut g.workspace_roots);
+            *g = progress_guard();
+            g.workspace_roots = roots;
             false
         }
     }
@@ -1210,6 +1226,31 @@ mod tests {
             "write_file",
             r#"{"path": "/tmp/job/scratch.py", "content": "x"}"#
         ));
+    }
+
+    #[test]
+    fn writes_through_the_given_or_the_canonical_root_are_both_in_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        let link = real.clone();
+        let mut g = progress_guard().with_workspace_root(Some(&link));
+        let canonical = real.canonicalize().unwrap();
+        for root in [&link, &canonical] {
+            let input =
+                serde_json::json!({ "path": root.join("a.py"), "content": "x" }).to_string();
+            assert!(counts_as_progress(&mut g, "write_file", &input), "{input}");
+        }
+        let outside = serde_json::json!({ "path": tmp.path().join("scratch.py"), "content": "x" })
+            .to_string();
+        assert!(
+            !counts_as_progress(&mut g, "write_file", &outside),
+            "{outside}"
+        );
     }
 
     #[test]
