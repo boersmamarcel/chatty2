@@ -28,11 +28,28 @@ When the shell exits (you typed `exit`, or it crashed), the tab stays, its name 
 
 Closing a tab while a program is running in it, such as `vim` or a build, asks for confirmation first; closing a tab that is only showing its prompt doesn't. On Windows Chatty can't tell the two apart, so closing a running terminal always asks. Closing the last tab closes the dock.
 
+## The Agent tab
+
+The first tab, with the robot icon, is always **Agent**: the shell the agent runs its commands in for the active conversation. It shows every command the agent ran with its full output, not just the part a tool row has room for, and you can type in it too: it is one shell, shared by you and the agent.
+
+- **Switching conversations** switches the Agent tab to that conversation's shell. Your own tabs stay.
+- **Before the agent used its shell** the tab says so and offers **Start shell**, so you can prepare the environment (activate a virtualenv, `cd`, export a variable) before you ask. It starts the same shell the agent then uses. With code execution off in **Settings → Code Execution** the agent has no shell and the tab says that instead.
+- **Its ×** hides the dock; the Agent tab can't be closed, and the shell keeps running.
+- **Which lines were the agent's:** a small blue bar in the left margin marks each command the agent ran. Commands you typed have none.
+- **Status:** next to its name the tab says what the shell is doing: *idle*, *agent running `cargo test`*, *you typing*, or *you running …*.
+- **Sandbox:** when the agent's shell runs in the sandbox, the tab says *sandboxed* (or *sandboxed · no network* with network isolation on). What you type there runs in the same sandbox.
+
+**Sharing the keyboard.** You can type at any time. While the agent's command runs, what you type goes to that program: answer its prompt, or press Ctrl+C to stop it (the agent then gets the interrupted output and exit code 130). While you have a half-typed line at the prompt, the agent's next command waits for you: the tab turns amber and says **Agent waiting for you** with the command it wants to run. Press Enter or clear the line (Ctrl+U) and it goes ahead. If you don't within two seconds, the agent is told the terminal is busy and can try again.
+
+**Show in terminal.** Each shell command row in the conversation has a terminal button: it opens the dock on the Agent tab, scrolled to that command. If the same command ran more than once, it shows the latest run; a command that has scrolled out of the scrollback, or ran in a shell that has since restarted, can't be shown.
+
+The agent can read its own tab with `terminal_read` without you sharing it, so it can see what you ran there ("what did I just run?"). A hidden-input prompt, such as a password prompt, is never read.
+
 ## Where a terminal starts
 
 A new terminal starts in the active conversation's working directory, the same folder the file explorer shows for it (set with the folder icon in the message box or `/cd`). Without one, it starts in the workspace directory from **Settings → Code Execution**, and without that, in your home folder.
 
-Terminals belong to the window, not to a conversation. Switching to another conversation leaves them running and visible; only new terminals pick up the new conversation's folder.
+Your terminals belong to the window, not to a conversation. Switching to another conversation leaves them running and visible; only new terminals pick up the new conversation's folder. The Agent tab is the exception: it always shows the active conversation's shell.
 
 Quitting Chatty ends every shell it started. Terminals are not restored the next time Chatty starts.
 

@@ -627,6 +627,14 @@ impl ChatView {
         cx.notify();
     }
 
+    /// "Show in terminal" on a shell tool row: the dock on the Agent tab,
+    /// scrolled to `command`.
+    pub fn show_in_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_dock
+            .update(cx, |dock, cx| dock.show_agent_command(command, window, cx));
+        cx.notify();
+    }
+
     /// Ctrl+Shift+`: a new terminal tab, dock shown and focused.
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_dock
@@ -3852,6 +3860,235 @@ mod terminal_dock_tests {
             dock.update(cx, |d, cx| d.toggle_maximized(cx));
             assert!(!dock.read(cx).is_maximized());
         });
+    }
+
+    /// AGE-586: a real agent shell session (the kind the agent factory
+    /// makes), started or not, and the runtime its commands need.
+    fn agent_session(
+        start: bool,
+    ) -> (
+        tokio::runtime::Runtime,
+        std::sync::Arc<chatty_core::services::shell_service::ShellSession>,
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let session = std::sync::Arc::new(
+            chatty_core::services::shell_service::ShellSession::with_secrets(
+                Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                30,
+                51200,
+                false,
+                vec![],
+            ),
+        );
+        if start {
+            rt.block_on(session.start()).unwrap();
+        }
+        (rt, session)
+    }
+
+    /// Wait (on the real clock: the PTY is a real process) until `check`.
+    fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+        let start = std::time::Instant::now();
+        while !check() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "never: {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The pinned Agent tab shows the conversation's own shell, is readable
+    /// by the agent as its `Agent` terminal (what the human typed there
+    /// included), and follows a conversation switch: the next conversation
+    /// has no shell, so the tab is empty and the old shell is unlisted.
+    #[gpui::test]
+    fn the_agent_tab_is_the_conversations_shell(cx: &mut gpui::TestAppContext) {
+        use crate::chatty::views::terminal::registry::EmbeddedTerminals;
+        use chatty_core::services::terminal::{
+            Region, TerminalAccess, TerminalKind, TerminalSource,
+        };
+
+        let (rt, session) = agent_session(true);
+        rt.block_on(session.execute("echo agent-ran")).unwrap();
+        let (view, window) = harness(cx);
+        let registry = cx.update(EmbeddedTerminals::global);
+        let dock = cx.update(|cx| view.read(cx).terminal_dock.clone());
+        with_window(cx, window, |window, cx| {
+            dock.update(cx, |d, cx| {
+                d.agent_source = Some((Some("c1".into()), Some(session.clone())));
+                d.show_agent(window, cx);
+            });
+            let d = dock.read(cx);
+            assert!(d.is_open() && d.agent_is_active());
+            assert_eq!(d.tab_count(), 0, "no human tab was started for it");
+            let attached = d.active_view().expect("attached").read(cx).handle().clone();
+            assert!(std::sync::Arc::ptr_eq(
+                &attached,
+                &session.terminal().unwrap()
+            ));
+            assert!(
+                d.active_view()
+                    .unwrap()
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+
+        let id = cx
+            .update(|cx| dock.read(cx).agent_registry_id())
+            .expect("registered");
+        let listed = futures::executor::block_on(registry.list());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].kind, TerminalKind::Agent);
+        assert_eq!(listed[0].access, TerminalAccess::Read);
+
+        // The human types in the same shell; the agent reads it back.
+        session
+            .terminal()
+            .unwrap()
+            .write(b"echo hi-from-$((6*7))\r")
+            .unwrap();
+        eventually("the human's command in terminal_read", || {
+            futures::executor::block_on(registry.read(&id, Region::Screen)).is_ok_and(|t| {
+                t.text.contains("echo hi-from-$((6*7))") && t.text.contains("\nhi-from-42")
+            })
+        });
+        let screen = futures::executor::block_on(registry.read(&id, Region::Screen)).unwrap();
+        assert!(screen.text.contains("echo agent-ran"), "{}", screen.text);
+
+        // Another conversation, without a shell: empty state, unlisted.
+        with_window(cx, window, |_, cx| {
+            dock.update(cx, |d, cx| {
+                d.agent_source = Some((Some("c2".into()), None));
+                d.refresh_agent(cx);
+            });
+            let d = dock.read(cx);
+            assert!(d.agent_is_active());
+            assert!(d.active_view().is_none());
+            assert_eq!(d.agent_registry_id(), None);
+        });
+        assert!(futures::executor::block_on(registry.list()).is_empty());
+        // The shell itself is the agent's and keeps running.
+        assert!(!session.terminal().unwrap().has_exited());
+    }
+
+    /// Before the agent used its shell the tab offers to start it; the shell
+    /// it starts is the one the agent then runs its commands in.
+    #[gpui::test]
+    fn start_shell_attaches_the_agents_session(cx: &mut gpui::TestAppContext) {
+        let (rt, session) = agent_session(false);
+        let (view, window) = harness(cx);
+        let dock = cx.update(|cx| view.read(cx).terminal_dock.clone());
+        with_window(cx, window, |window, cx| {
+            dock.update(cx, |d, cx| {
+                d.agent_source = Some((Some("c1".into()), Some(session.clone())));
+                d.show_agent(window, cx);
+            });
+            assert!(dock.read(cx).active_view().is_none(), "empty state");
+        });
+        // What "Start shell" runs (on the app's runtime).
+        rt.block_on(session.start()).unwrap();
+        with_window(cx, window, |_, cx| {
+            dock.update(cx, |d, cx| d.refresh_agent(cx));
+            let attached = dock
+                .read(cx)
+                .active_view()
+                .unwrap()
+                .read(cx)
+                .handle()
+                .clone();
+            assert!(std::sync::Arc::ptr_eq(
+                &attached,
+                &session.terminal().unwrap()
+            ));
+        });
+        let output = rt.block_on(session.execute("echo same-shell")).unwrap();
+        assert_eq!(output.stdout, "same-shell");
+        assert!(std::sync::Arc::ptr_eq(
+            &session.terminal().unwrap(),
+            &cx.update(|cx| dock
+                .read(cx)
+                .active_view()
+                .unwrap()
+                .read(cx)
+                .handle()
+                .clone())
+        ));
+    }
+
+    /// "Show in terminal" opens the Agent tab scrolled back to the command's
+    /// line, which the agent's link marks.
+    #[gpui::test]
+    fn show_in_terminal_scrolls_to_the_command(cx: &mut gpui::TestAppContext) {
+        use crate::chatty::views::terminal::grid::agent_command_on_row;
+        use chatty_terminal::alacritty_terminal::index::Line;
+
+        let (rt, session) = agent_session(true);
+        rt.block_on(session.execute("echo first-cmd")).unwrap();
+        rt.block_on(session.execute("seq 1 300")).unwrap();
+        let (id, _) = session
+            .agent_commands()
+            .into_iter()
+            .find(|(_, c)| c == "echo first-cmd")
+            .unwrap();
+        let terminal = session.terminal().unwrap();
+        eventually("the output is on screen", || {
+            terminal
+                .snapshot(chatty_terminal::Region::Screen)
+                .text
+                .contains("\n300\n")
+        });
+        let (view, window) = harness(cx);
+        let dock = cx.update(|cx| view.read(cx).terminal_dock.clone());
+        with_window(cx, window, |window, cx| {
+            dock.update(cx, |d, _| {
+                d.agent_source = Some((Some("c1".into()), Some(session.clone())));
+            });
+            // Hidden dock, as from a tool row in the transcript.
+            view.update(cx, |v, cx| v.show_in_terminal("echo first-cmd", window, cx));
+            assert!(dock.read(cx).is_open() && dock.read(cx).agent_is_active());
+        });
+        let top_rows = terminal.with_term(|term| {
+            let offset = term.grid().display_offset() as i32;
+            assert!(offset > 0, "scrolled back");
+            // The top of the view: a line of context (when there is one),
+            // then the command.
+            [-offset, 1 - offset].map(|line| agent_command_on_row(&term.grid()[Line(line)][..]))
+        });
+        assert!(
+            top_rows
+                .iter()
+                .any(|row| row.as_deref() == Some(id.as_str())),
+            "{top_rows:?}"
+        );
+    }
+
+    /// The agent's shell takes the view's size only while the Agent tab
+    /// shows; hidden, it is back at the wide headless size.
+    #[gpui::test]
+    fn the_agent_shell_gets_its_size_back_when_hidden(cx: &mut gpui::TestAppContext) {
+        use chatty_core::services::shell_service::HEADLESS_SIZE;
+        use chatty_terminal::alacritty_terminal::grid::Dimensions;
+
+        let (_rt, session) = agent_session(true);
+        let (view, window) = harness(cx);
+        let dock = cx.update(|cx| view.read(cx).terminal_dock.clone());
+        let terminal = session.terminal().unwrap();
+        let cols = || terminal.with_term(|term| term.columns() as u16);
+        with_window(cx, window, |window, cx| {
+            // Resize as a laid-out view does.
+            dock.update(cx, |d, cx| {
+                d.agent_source = Some((Some("c1".into()), Some(session.clone())));
+                d.show_agent(window, cx);
+            });
+            terminal.resize(80, 20).unwrap();
+            assert_eq!(cols(), 80);
+            dock.update(cx, |d, cx| d.hide(cx));
+        });
+        assert_eq!(cols(), HEADLESS_SIZE.0);
     }
 
     #[gpui::test]

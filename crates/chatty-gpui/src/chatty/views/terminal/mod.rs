@@ -67,6 +67,11 @@ pub fn init(cx: &mut App) {
 /// dragging a panel edge does not reflow the shell on every frame.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// How often an attached view ([`TerminalView::attach`]) checks whether its
+/// terminal changed: about two frames at 60 Hz, and nothing is painted
+/// unless it did.
+const ATTACHED_REPAINT: Duration = Duration::from_millis(33);
+
 /// Font settings for the terminal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalFontSettings {
@@ -121,6 +126,8 @@ pub struct TerminalView {
     grid_size: Option<(u16, u16)>,
     /// Size waiting out [`RESIZE_DEBOUNCE`], and the timer that applies it.
     pending_resize: Option<((u16, u16), Task<()>)>,
+    /// Mark the agent's command lines in a gutter (the Agent tab).
+    agent_marks: bool,
     _events: Task<()>,
     /// Sees keys before the app's keybindings (see [`input`]).
     _intercept: Subscription,
@@ -147,8 +154,84 @@ impl TerminalView {
             cache: RenderCache::default(),
             grid_size: None,
             pending_resize: None,
+            agent_marks: false,
             _events: Self::pump_events(events, cx),
         }
+    }
+
+    /// Show a terminal someone else started and owns the events of: the
+    /// agent's shell (AGE-586). It repaints when the terminal's generation
+    /// moves, checked every [`ATTACHED_REPAINT`], and marks the agent's
+    /// command lines in a gutter.
+    pub fn attach(handle: Arc<TerminalHandle>, cx: &mut Context<Self>) -> Self {
+        Self {
+            handle,
+            focus_handle: cx.focus_handle(),
+            geometry: None,
+            mouse: input::MouseState::default(),
+            marked_text: None,
+            _intercept: input::intercept_keys(cx),
+            font: TerminalFontSettings::default(),
+            title: None,
+            exit: None,
+            cache: RenderCache::default(),
+            grid_size: None,
+            pending_resize: None,
+            agent_marks: true,
+            _events: cx.spawn(async move |this, cx| {
+                let mut painted = None;
+                loop {
+                    cx.background_executor().timer(ATTACHED_REPAINT).await;
+                    let alive = this.update(cx, |view, cx| {
+                        let generation = view.handle.generation();
+                        if painted != Some(generation) {
+                            painted = Some(generation);
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            }),
+        }
+    }
+
+    /// Give the terminal `size` back (the view is going away or hidden) and
+    /// forget the size it had here, so the next layout applies at once.
+    pub fn release_size(&mut self, (cols, rows): (u16, u16)) {
+        self.pending_resize = None;
+        self.grid_size = None;
+        if let Err(e) = self.handle.resize(cols, rows) {
+            warn!("terminal: resize to {cols}x{rows} failed: {e}");
+        }
+    }
+
+    /// Scroll so the line of the agent's command `id` is near the top of
+    /// the view. `false` when the line is no longer in the scrollback.
+    pub fn scroll_to_agent_command(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        use chatty_terminal::alacritty_terminal::grid::{Dimensions, Scroll};
+        use chatty_terminal::alacritty_terminal::index::Line;
+        let found = self.handle.with_term_mut(|term| {
+            let (history, screen) = (
+                term.grid().history_size() as i32,
+                term.screen_lines() as i32,
+            );
+            // Newest first: an id is unique, but a wrapped command spans
+            // rows, and its first row is the one to show.
+            let line = (-history..screen)
+                .filter(|&line| {
+                    grid::agent_command_on_row(&term.grid()[Line(line)][..]).as_deref() == Some(id)
+                })
+                .min()?;
+            term.scroll_display(Scroll::Bottom);
+            // One line of context above it.
+            let offset = (1 - line).clamp(0, history);
+            term.scroll_display(Scroll::Delta(offset));
+            Some(())
+        });
+        cx.notify();
+        found.is_some()
     }
 
     /// The running terminal.

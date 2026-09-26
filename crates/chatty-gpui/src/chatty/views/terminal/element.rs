@@ -28,12 +28,18 @@ use tracing::{debug, trace, warn};
 
 use super::TerminalView;
 use super::grid::{
-    BgRect, Palette, RunGrid, RunStyle, TextRunSpec, batch_row, cell_colors, to_hsla,
+    BgRect, Palette, RunGrid, RunStyle, TextRunSpec, agent_command_on_row, batch_row, cell_colors,
+    to_hsla,
 };
 use super::input::Geometry;
 
 /// Painted width of a beam cursor and height of an underline cursor.
 const CURSOR_BAR: Pixels = px(2.);
+
+/// Room left of the grid for the agent's command marks (the Agent tab).
+const AGENT_GUTTER: Pixels = px(8.);
+/// Width of an agent command mark in that gutter.
+const AGENT_MARK: Pixels = px(3.);
 
 /// Per-view render state kept across frames.
 #[derive(Default)]
@@ -194,6 +200,8 @@ pub(super) struct Frame {
 struct PreparedRow {
     backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     runs: Rc<[ShapedRun]>,
+    /// The agent's command shows on this row (Agent tab only).
+    agent: bool,
 }
 
 struct CursorPaint {
@@ -276,6 +284,7 @@ impl TerminalView {
             )
         };
         let rows_cache = &mut cache.rows;
+        let agent_marks = self.agent_marks;
 
         let locking = Instant::now();
         let mut lock_wait = std::time::Duration::ZERO;
@@ -289,7 +298,9 @@ impl TerminalView {
 
             let rows = (0..screen_lines)
                 .map(|i| {
-                    let layout = batch_row(&grid[Line(i as i32 - offset)][..], colors, &palette);
+                    let cells = &grid[Line(i as i32 - offset)][..];
+                    let agent = agent_marks && agent_command_on_row(cells).is_some();
+                    let layout = batch_row(cells, colors, &palette);
                     let backgrounds = layout
                         .backgrounds
                         .iter()
@@ -305,7 +316,11 @@ impl TerminalView {
                             })
                             .collect()
                     });
-                    PreparedRow { backgrounds, runs }
+                    PreparedRow {
+                        backgrounds,
+                        runs,
+                        agent,
+                    }
                 })
                 .collect::<Vec<_>>();
 
@@ -490,6 +505,7 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let started = Instant::now();
+        let bounds = grid_bounds(bounds, self.view.read(cx).agent_marks);
         let frame = self
             .view
             .update(cx, |view, cx| view.prepare_frame(bounds, window, cx));
@@ -512,10 +528,30 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let started = Instant::now();
+        let outer = bounds;
+        let agent_marks = self.view.read(cx).agent_marks;
+        let bounds = grid_bounds(bounds, agent_marks);
         self.register_input(bounds, hitbox, window, cx);
         let origin = bounds.origin;
         let selection_color = cx.theme().selection;
-        window.paint_quad(fill(bounds, frame.background));
+        window.paint_quad(fill(outer, frame.background));
+        if agent_marks {
+            // A bar in the gutter beside each row the agent's command shows
+            // on; typed lines get none.
+            let color = cx.theme().info;
+            for (i, row) in frame.rows.iter().enumerate() {
+                if row.agent {
+                    let top = origin.y + frame.line_height * i as f32;
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(outer.origin.x + px(2.), top + px(1.)),
+                            size(AGENT_MARK, frame.line_height - px(2.)),
+                        ),
+                        color,
+                    ));
+                }
+            }
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for row in &frame.rows {
                 for (rect, color) in &row.backgrounds {
@@ -544,6 +580,19 @@ impl Element for TerminalElement {
             "terminal paint"
         );
     }
+}
+
+/// Where the grid goes in the element's `bounds`: all of it, or right of the
+/// agent-mark gutter.
+fn grid_bounds(bounds: Bounds<Pixels>, agent_marks: bool) -> Bounds<Pixels> {
+    if !agent_marks {
+        return bounds;
+    }
+    let gutter = AGENT_GUTTER.min(bounds.size.width);
+    Bounds::new(
+        point(bounds.origin.x + gutter, bounds.origin.y),
+        size(bounds.size.width - gutter, bounds.size.height),
+    )
 }
 
 impl TerminalElement {

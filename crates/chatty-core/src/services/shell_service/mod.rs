@@ -97,6 +97,14 @@ impl ShellProcess {
     }
 }
 
+/// What [`ShellSession`] shares of the running shell outside its process
+/// lock.
+struct Live {
+    terminal: Arc<TerminalHandle>,
+    tap: Arc<Tap>,
+    is_sandboxed: bool,
+}
+
 /// How long the login-profile init may take before the session gives up on
 /// it and runs without the profile (see [`LOGIN_PROFILE_INIT`]). Also bounds
 /// the wait for the first prompt of a shell started without it.
@@ -200,7 +208,11 @@ printf '\033]6973;ready\007'
 /// `<dir>/cmd-<id>` and types ` . "$__chatty_r" <id> <column>` (a leading
 /// space keeps it out of the history); this file then redraws that line as
 /// the command itself (so a terminal view shows what ran, as if typed),
-/// prints the start mark, and sources the command in the current shell. So
+/// prints the start mark, and sources the command in the current shell. The
+/// redrawn line carries an OSC 8 link to [`AGENT_LINK_PREFIX`] and the
+/// command's id: invisible (the view draws no links), but kept per cell in
+/// the grid, so a view can tell the agent's command lines from typed ones
+/// and find a command's line again (see [`agent_command_id`]). So
 /// `cd`, variables (`declare` too: this is not a function), functions,
 /// heredocs, `set -e` and `exit` behave as typed, and the exit code is the
 /// last command's. It prints the end mark itself (a `PROMPT_COMMAND` the
@@ -210,7 +222,7 @@ printf '\033]6973;ready\007'
 /// paste, bash 3.2 and newer.
 const RUNNER: &str = r#"__chatty_ec=$?
 __chatty_id=$1
-printf '\033[1A\033[%sG\033[K%s\n' "$(($2 + 1))" "$(<"${__chatty_r%/*}/cmd-$1")"
+printf '\033[1A\033[%sG\033[K\033]8;;chatty-agent:%s\007%s\033]8;;\007\n' "$(($2 + 1))" "$1" "$(<"${__chatty_r%/*}/cmd-$1")"
 printf '\033]6973;C;%s\007' "$1"
 set --
 __chatty_status "$__chatty_ec"
@@ -226,6 +238,40 @@ return $__chatty_ec
 /// output to the terminal (`ls`, `git`, test runners) don't wrap it early.
 const HEADLESS_COLS: u16 = 200;
 const HEADLESS_ROWS: u16 = 50;
+
+/// The terminal's size with no view attached, `(cols, rows)`. A view that
+/// resized the agent's terminal gives it back this size when it detaches,
+/// so the model's commands see the wide terminal again.
+pub const HEADLESS_SIZE: (u16, u16) = (HEADLESS_COLS, HEADLESS_ROWS);
+
+/// OSC 8 link target on the line [`RUNNER`] redraws as an agent command,
+/// followed by the command's id.
+pub const AGENT_LINK_PREFIX: &str = "chatty-agent:";
+
+/// The id of the agent command a grid cell's OSC 8 link target names, or
+/// `None` for a cell of anything else (a typed line, output).
+pub fn agent_command_id(link_uri: &str) -> Option<&str> {
+    link_uri.strip_prefix(AGENT_LINK_PREFIX)
+}
+
+/// How many recent agent commands [`ShellSession::agent_commands`] keeps.
+const AGENT_HISTORY: usize = 200;
+
+/// What the shell is doing, for a view's status line (see
+/// [`ShellSession::activity`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellActivity {
+    /// No shell is running (not started yet, or gone).
+    NotStarted,
+    /// At an empty prompt, or between commands.
+    Idle,
+    /// Running the agent's command.
+    AgentRunning { command: String },
+    /// Someone has a partial line at the prompt.
+    HumanTyping,
+    /// A command typed at the prompt is running.
+    HumanRunning { command: String },
+}
 
 /// How long an agent command waits for the terminal to be back at an empty
 /// prompt (someone typing, a command started from a view) before giving up.
@@ -329,6 +375,8 @@ enum Prompt {
 
 struct AgentCommand {
     id: String,
+    /// The command as sent, for a view's status line.
+    command: String,
     /// Output is being kept (its start mark was seen, its end mark not yet).
     capturing: bool,
     /// Output and exit code, once its end mark was seen.
@@ -481,6 +529,25 @@ impl TapState {
         }
     }
 
+    /// What the shell is doing, as a view shows it.
+    fn activity(&self) -> ShellActivity {
+        if self.exited.is_some() {
+            return ShellActivity::NotStarted;
+        }
+        if let Some(cmd) = self.command.as_ref().filter(|c| c.done.is_none()) {
+            return ShellActivity::AgentRunning {
+                command: cmd.command.clone(),
+            };
+        }
+        match &self.prompt {
+            Prompt::Reading if !self.scanner.text().is_blank() => ShellActivity::HumanTyping,
+            Prompt::Running { command_line } => ShellActivity::HumanRunning {
+                command: command_line.clone(),
+            },
+            _ => ShellActivity::Idle,
+        }
+    }
+
     /// Nothing runs and nobody types, yet no prompt was seen: its marks are
     /// gone, or the shell is stuck between commands.
     fn lost_prompt(&self) -> bool {
@@ -498,9 +565,14 @@ impl TapState {
 /// Network isolation is controlled by the `network_isolation` setting.
 pub struct ShellSession {
     process: Mutex<Option<ShellProcess>>,
-    /// The running shell's terminal, readable while a command holds
-    /// `process` (a view attaching, Ctrl+C from one).
-    terminal: std::sync::Mutex<Option<Arc<TerminalHandle>>>,
+    /// The running shell's terminal and tap, readable while a command holds
+    /// `process` (a view attaching, Ctrl+C from one, its status line).
+    live: std::sync::Mutex<Option<Live>>,
+    /// The agent command waiting for the terminal to be free (someone is
+    /// typing or running something), while it waits.
+    waiting: std::sync::Mutex<Option<String>>,
+    /// Recent agent commands, oldest first: `(id, command)`.
+    history: std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
     workspace_dir: Option<String>,
     network_isolation: bool,
     timeout_seconds: u32,
@@ -543,7 +615,9 @@ impl ShellSession {
         let secret_key_names = secrets.iter().map(|(k, _)| k.clone()).collect();
         Self {
             process: Mutex::new(None),
-            terminal: std::sync::Mutex::new(None),
+            live: std::sync::Mutex::new(None),
+            waiting: std::sync::Mutex::new(None),
+            history: std::sync::Mutex::new(std::collections::VecDeque::new()),
             workspace_dir,
             network_isolation,
             timeout_seconds,
@@ -574,14 +648,62 @@ impl ShellSession {
     /// attach to (it may resize it and type into it) or a reader to take
     /// snapshots of. A respawned shell has a new one.
     pub fn terminal(&self) -> Option<Arc<TerminalHandle>> {
-        self.terminal
+        self.live().as_ref().map(|live| Arc::clone(&live.terminal))
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, Option<Live>> {
+        self.live.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Publish the running shell (or that none runs) to [`Self::terminal`]
+    /// and [`Self::activity`].
+    fn set_live(&self, proc: Option<&ShellProcess>) {
+        *self.live() = proc.map(|proc| Live {
+            terminal: Arc::clone(&proc.terminal),
+            tap: Arc::clone(&proc.tap),
+            is_sandboxed: proc.is_sandboxed,
+        });
+    }
+
+    /// Start the shell now if it is not running, as the agent's first
+    /// command would: same workspace, sandbox, secrets and init. For a view
+    /// that lets the human prepare the shell before asking the agent.
+    pub async fn start(&self) -> Result<()> {
+        let mut process = self.process.lock().await;
+        self.ensure_started(&mut process).await
+    }
+
+    /// What the shell is doing now, without waiting for a running command.
+    pub fn activity(&self) -> ShellActivity {
+        self.live()
+            .as_ref()
+            .map_or(ShellActivity::NotStarted, |live| live.tap.lock().activity())
+    }
+
+    /// The agent command waiting for the terminal to be free, while it
+    /// waits: someone is typing at the prompt or running a command there.
+    pub fn waiting_command(&self) -> Option<String> {
+        self.waiting
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    fn set_terminal(&self, terminal: Option<Arc<TerminalHandle>>) {
-        *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = terminal;
+    /// Whether the running shell is inside the sandbox; `None` when no
+    /// shell runs.
+    pub fn running_sandboxed(&self) -> Option<bool> {
+        self.live().as_ref().map(|live| live.is_sandboxed)
+    }
+
+    /// Recent agent commands, oldest first, as `(id, command)`. The id is
+    /// the one in the command line's link (see [`agent_command_id`]).
+    pub fn agent_commands(&self) -> Vec<(String, String)> {
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Check if sandboxing is available on this platform
@@ -677,7 +799,7 @@ impl ShellSession {
                 }
             }
             *process = None;
-            self.set_terminal(None);
+            self.set_live(None);
         }
 
         info!(workspace = ?self.workspace_dir, "Spawning persistent shell session");
@@ -702,7 +824,7 @@ impl ShellSession {
             match Self::wait_ready(&proc).await {
                 Ok(()) => {
                     info!(pid = ?proc.terminal.pid(), sandboxed = proc.is_sandboxed, "Shell session started");
-                    self.set_terminal(Some(Arc::clone(&proc.terminal)));
+                    self.set_live(Some(&proc));
                     *process = Some(proc);
                     return Ok(());
                 }
@@ -1111,6 +1233,13 @@ impl ShellSession {
         // SAFETY: ensure_started() guarantees process is Some on Ok return
         let proc = process.as_mut().unwrap();
 
+        // A view shows what waits for the human while it waits (not the
+        // moment between our last command's end and the next prompt).
+        let held = {
+            let state = proc.tap.lock();
+            state.busy().is_some() && !state.lost_prompt()
+        };
+        let _waiting = held.then(|| Waiting::set(&self.waiting, command));
         let at_prompt = proc
             .tap
             .wait_for(Instant::now() + BUSY_WAIT, |state| {
@@ -1160,11 +1289,12 @@ impl ShellSession {
                 if let Some(stuck) = process.take() {
                     stuck.kill();
                 }
-                self.set_terminal(None);
+                self.set_live(None);
                 self.ensure_started(&mut process).await?;
                 restarted = true;
             }
         }
+        drop(_waiting);
         // SAFETY: still Some, or just restarted by ensure_started()
         let proc = process.as_mut().unwrap();
 
@@ -1175,11 +1305,20 @@ impl ShellSession {
             let mut state = proc.tap.lock();
             state.command = Some(AgentCommand {
                 id: id.clone(),
+                command: command.to_string(),
                 capturing: false,
                 done: None,
             });
             state.prompt_width
         };
+
+        {
+            let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            if history.len() == AGENT_HISTORY {
+                history.pop_front();
+            }
+            history.push_back((id.clone(), command.to_string()));
+        }
 
         // Type one short line that sources the command file through
         // [`RUNNER`]; the command itself never goes through readline.
@@ -1226,7 +1365,7 @@ impl ShellSession {
                     // non-interactive shell did not.
                     strip_exit_notice(&mut output);
                     process.take();
-                    self.set_terminal(None);
+                    self.set_live(None);
                 }
 
                 // The piped shell's end marker began with a newline, so the
@@ -1274,7 +1413,7 @@ impl ShellSession {
                 if let Some(proc) = process.take() {
                     proc.kill();
                 }
-                self.set_terminal(None);
+                self.set_live(None);
 
                 let truncated = Self::bound_output(&mut output, self.max_output_bytes);
                 let mut stdout = output.trim_end().to_string();
@@ -1415,7 +1554,7 @@ impl ShellSession {
         if let Some(proc) = process.take() {
             debug!("Shutting down shell session");
             proc.kill();
-            self.set_terminal(None);
+            self.set_live(None);
         }
     }
 
@@ -1438,6 +1577,22 @@ impl Drop for ShellSession {
             // still hold one.
             proc.kill();
         }
+    }
+}
+
+/// Holds [`ShellSession::waiting_command`] for as long as it lives.
+struct Waiting<'a>(&'a std::sync::Mutex<Option<String>>);
+
+impl<'a> Waiting<'a> {
+    fn set(slot: &'a std::sync::Mutex<Option<String>>, command: &str) -> Self {
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(command.to_string());
+        Self(slot)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 

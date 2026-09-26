@@ -32,6 +32,15 @@ impl ToolRow {
     }
 }
 
+/// The command of a `shell_execute` call, for "Show in terminal".
+fn shell_command(tool_name: &str, input: &str) -> Option<String> {
+    if tool_name != "shell_execute" {
+        return None;
+    }
+    let args: serde_json::Value = serde_json::from_str(input).ok()?;
+    args.get("command")?.as_str().map(str::to_string)
+}
+
 /// First line of an error, for the inline summary.
 ///
 /// The full text goes in the detail line below; this keeps the row itself one
@@ -88,6 +97,7 @@ impl RenderOnce for ToolRow {
             _ => None,
         };
         let copy_value = tool.output.clone().unwrap_or_else(|| tool.input.clone());
+        let shell_command = shell_command(&tool.tool_name, &tool.input);
         let icon = source_icon(&tool.source);
         let verb_color = if matches!(tool.state, ToolCallState::Error(_)) {
             cx.theme().danger
@@ -144,6 +154,24 @@ impl RenderOnce for ToolRow {
                 this.child(Tag::danger().small().child(format!("attempt {attempt}")))
             })
             .child(div().flex_1())
+            // The agent's shell command, in the Agent tab (AGE-586).
+            .when_some(shell_command, |this, command| {
+                this.child(
+                    Button::new(ElementId::Name(format!("tool-terminal-{id}").into()))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::SquareTerminal))
+                        .tooltip("Show in terminal")
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::actions::ShowInTerminal {
+                                    command: command.clone(),
+                                }),
+                                cx,
+                            );
+                        }),
+                )
+            })
             .child(
                 Clipboard::new(ElementId::Name(format!("tool-copy-{id}").into())).value(copy_value),
             )
@@ -202,7 +230,22 @@ impl RenderOnce for ToolRow {
 
 #[cfg(test)]
 mod tests {
-    use super::{error_headline, strip_error_prefixes};
+    use super::{error_headline, shell_command, strip_error_prefixes};
+
+    /// Only shell commands get "Show in terminal", with the command as sent.
+    #[test]
+    fn show_in_terminal_is_for_shell_commands() {
+        assert_eq!(
+            shell_command(
+                "shell_execute",
+                r#"{"command":"cargo test","timeout_seconds":60}"#
+            )
+            .as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(shell_command("read_file", r#"{"command":"x"}"#), None);
+        assert_eq!(shell_command("shell_execute", "not json"), None);
+    }
 
     #[test]
     fn the_tool_name_is_not_repeated() {

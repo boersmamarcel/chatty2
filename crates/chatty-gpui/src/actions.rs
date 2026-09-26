@@ -20,6 +20,15 @@ actions!(
     ]
 );
 
+/// "Show in terminal" on a shell tool row (AGE-586): open the dock on the
+/// Agent tab, scrolled to the command.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = terminal, no_json)]
+pub struct ShowInTerminal {
+    /// The command as the agent sent it.
+    pub command: String,
+}
+
 pub(crate) fn register_actions(cx: &mut App) {
     // Register open settings action with platform-specific keybindings
     debug!("Action registered");
