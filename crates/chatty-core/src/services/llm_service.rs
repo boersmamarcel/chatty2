@@ -123,6 +123,7 @@ pub fn normalize_usage(
         cache_read_tokens: clamp(cache_read),
         cache_write_tokens: clamp(cache_write),
         output_tokens: clamp(usage.output_tokens),
+        reasoning_tokens: clamp(usage.reasoning_tokens),
     }
 }
 
@@ -782,6 +783,24 @@ mod tests {
         assert_eq!(call.cache_read_tokens, 0);
         assert_eq!(call.input_tokens, 5_000);
         assert_eq!(call.cache_hit_rate(), Some(0.0));
+    }
+
+    /// Reasoning tokens reach the per-call record, where the headless usage
+    /// file sums them (they are part of `output_tokens`, not on top of it).
+    #[test]
+    fn reasoning_tokens_reach_the_normalised_record() {
+        let reported: rig_core::providers::openrouter::Usage = serde_json::from_str(
+            r#"{"prompt_tokens":50,"completion_tokens":40,"total_tokens":90,
+                "completion_tokens_details":{"reasoning_tokens":25}}"#,
+        )
+        .expect("an OpenRouter usage block deserializes");
+        let call = normalize_usage(
+            UsageSemantics::InputIncludesCache,
+            1,
+            &rig_core::completion::Usage::from(&reported),
+        );
+        assert_eq!(call.reasoning_tokens, 25);
+        assert_eq!(call.output_tokens, 40);
     }
 
     #[test]

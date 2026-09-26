@@ -264,6 +264,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     cache_read_tokens: 1000,
                     cache_write_tokens: 0,
                     output_tokens: 56,
+                    reasoning_tokens: 0,
                 })),
                 ScriptedItem::Chunk(StreamChunk::TurnUsage(ApiCallUsage {
                     turn: 0,
@@ -271,6 +272,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     cache_read_tokens: 1000,
                     cache_write_tokens: 0,
                     output_tokens: 56,
+                    reasoning_tokens: 0,
                 })),
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],

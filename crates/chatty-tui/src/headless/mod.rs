@@ -36,6 +36,8 @@ use crate::events::AppEvent;
 
 mod runner;
 pub use runner::HeadlessRunner;
+pub mod usage_file;
+pub use usage_file::RunExit;
 
 const MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS: usize = 5;
 const MAX_FINALIZATION_ATTEMPTS: usize = 4;
@@ -208,6 +210,8 @@ pub async fn run_headless(
     // The run's clock starts with the run: `--max-duration` bounds the
     // work, not the process's startup.
     let deadline = engine.start_clock();
+    // `--usage-file`: an interrupted run still says what it spent.
+    usage_file::watch_for_interrupt(engine.usage.clone());
     let mut time_budget = TimeBudget::Running;
     // When headless itself stops a pass that overran the deadline.
     let mut backstop = deadline.map(|d| d.end() + deadline_grace(d.budget()));
@@ -860,6 +864,14 @@ pub async fn run_headless(
         }
     }
 
+    engine.finish_usage(if unrecovered_error.is_some() {
+        RunExit::Error
+    } else if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {
+        RunExit::Deadline
+    } else {
+        RunExit::Completed
+    });
+
     if let Some(error) = unrecovered_error {
         // Whatever was streamed before the failure is still worth having;
         // the exit code is what tells a script (or a leader) it is not an
@@ -951,10 +963,14 @@ pub async fn run_pipe(
 ) -> Result<()> {
     use std::io::Read;
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+        engine.finish_usage(RunExit::Error);
+        return Err(error.into());
+    }
     let input = input.trim().to_string();
 
     if input.is_empty() {
+        engine.finish_usage(RunExit::Error);
         eprintln!("No input provided on stdin");
         std::process::exit(1);
     }

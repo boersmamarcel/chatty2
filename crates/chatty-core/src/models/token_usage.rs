@@ -27,6 +27,11 @@ pub struct ApiCallUsage {
     pub cache_write_tokens: u32,
     /// Output tokens generated.
     pub output_tokens: u32,
+    /// The share of `output_tokens` the provider says went to reasoning
+    /// ("thinking"). `0` when it reports none, which rig cannot tell apart
+    /// from a provider that does not report the field at all.
+    #[serde(default)]
+    pub reasoning_tokens: u32,
 }
 
 impl ApiCallUsage {
@@ -319,6 +324,7 @@ mod tests {
             cache_read_tokens: read,
             cache_write_tokens: write,
             output_tokens: output,
+            reasoning_tokens: 0,
         }
     }
 
