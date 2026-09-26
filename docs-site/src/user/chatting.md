@@ -52,7 +52,7 @@ When the agent produces a document, a card appears in the transcript and the fil
 
   ![Table artifact](../assets/animations/artifact_table.gif)
 
-- **Markdown documents** the agent wrote, rendered or as source.
+- **Markdown documents** the agent wrote, rendered or as source — including any Mermaid diagrams in the file, drawn inline the same way as in chat.
 
   ![Markdown artifact](../assets/animations/artifact_markdown.gif)
 

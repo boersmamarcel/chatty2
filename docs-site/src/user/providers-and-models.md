@@ -19,7 +19,7 @@ No key needed — a local instance is detected automatically. The URL field defa
 Ollama models are added for you: Chatty discovers what is installed shortly after launch and keeps the roster in step, removing models you have deleted from Ollama and detecting per model whether it accepts images.
 
 > [!NOTE]
-> **A pulled model does not show up?** Discovery runs once, shortly after Chatty starts. If you `ollama pull` a model while Chatty is open, restart Chatty — **Test** confirms Ollama is reachable but does not add models. If **Test** fails, make sure Ollama is running (`ollama list` in a terminal) and that the URL matches where it listens. Models you added by hand under **Enter an identifier manually** are left alone by discovery.
+> **A pulled model does not show up?** Discovery runs at launch, and again every time the Settings window opens or is brought forward — so an Ollama started after Chatty, or a model you `ollama pull`ed while Chatty was open, appears next time you open Settings. No restart needed. If **Test** fails, make sure Ollama is running (`ollama list` in a terminal) and that the URL matches where it listens. Models you added by hand under **Enter an identifier manually** are left alone by discovery.
 
 ### Azure OpenAI
 
