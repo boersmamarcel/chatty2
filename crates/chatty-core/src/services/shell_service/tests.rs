@@ -393,12 +393,6 @@ async fn test_echo_n_then_cat_completes_without_timeout() {
 }
 
 #[test]
-fn test_decode_output_line_lossy_decodes_non_utf8() {
-    let decoded = ShellSession::decode_output_line(b"\xff\xfeabc\n");
-    assert!(decoded.contains("abc"));
-}
-
-#[test]
 fn test_can_sandbox() {
     let can = ShellSession::can_sandbox();
     // On Linux: depends on bwrap availability
@@ -792,4 +786,413 @@ async fn test_login_profile_keeps_inherited_path_and_drops_xtrace() {
 
     let output = session.execute("echo plain").await.unwrap();
     assert_eq!(output.stdout, "plain", "no xtrace in output");
+}
+
+// ── Characterization (AGE-585) ───────────────────────────────────────────────
+// Written against the piped shell before it moved onto a PTY; the PTY shell
+// must produce the same results.
+
+/// Output text exactly: lines, blank lines, leading and trailing blanks
+/// within lines, tabs, non-ASCII, stderr merged in order.
+#[tokio::test]
+async fn characterize_output_text_is_exact() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let cases: [(&str, &str); 6] = [
+        ("printf 'a\\nb\\n'; echo err >&2; echo c", "a\nb\nerr\nc"),
+        ("printf 'a\\n\\n\\nb\\n'", "a\n\n\nb"),
+        ("printf '  x  \\ny\\n'", "  x  \ny"),
+        ("printf 'a\\tb\\n'", "a\tb"),
+        ("echo 'héllo 📈'", "héllo 📈"),
+        ("true", ""),
+    ];
+    for (command, expected) in cases {
+        let output = session.execute(command).await.unwrap();
+        assert_eq!(output.stdout, expected, "{command}");
+        assert_eq!(output.exit_code, 0, "{command}");
+        assert!(!output.truncated && !output.timed_out, "{command}");
+    }
+}
+
+/// Exit codes round-trip, the session survives a failing command, and an
+/// `exit` ends the shell with its code and no output.
+#[tokio::test]
+async fn characterize_exit_codes() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    for (command, code) in [
+        ("false", 1),
+        ("sh -c 'exit 7'", 7),
+        ("(exit 3)", 3),
+        ("true", 0),
+    ] {
+        assert_eq!(
+            session.execute(command).await.unwrap().exit_code,
+            code,
+            "{command}"
+        );
+    }
+    let output = session.execute("echo bye; exit 5").await.unwrap();
+    assert_eq!((output.stdout.as_str(), output.exit_code), ("bye", 5));
+    assert!(!session.is_running().await);
+    assert_eq!(session.execute("echo back").await.unwrap().stdout, "back");
+}
+
+/// The truncation message, byte for byte.
+#[tokio::test]
+async fn characterize_truncation_is_exact() {
+    let session = ShellSession::with_secrets(None, 30, 100, false, vec![]);
+    let output = session.execute("seq 1 1000").await.unwrap();
+    // The piped shell's end marker started with a newline, so the text the
+    // cap measured was the output plus one `\n`.
+    let mut expected: String = (1..=1000).map(|n| format!("{n}\n")).collect::<String>() + "\n";
+    assert!(ShellSession::bound_output(&mut expected, 100));
+    assert_eq!(output.stdout, expected.trim_end());
+    assert!(output.truncated);
+}
+
+/// The timeout result, byte for byte, and the session restarts clean.
+#[tokio::test]
+async fn characterize_timeout_is_exact() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.execute("export BEFORE=1; cd /tmp").await.unwrap();
+    let output = session
+        .execute_with_timeout("echo partial; sleep 10", Some(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        output.stdout,
+        "partial\n[shell_execute: command timed out after 1 seconds and was killed; \
+         output above is partial. The shell session was restarted: the working \
+         directory and any exported variables are back to their defaults.]"
+    );
+    assert_eq!(output.exit_code, -1);
+    assert!(output.timed_out && !output.truncated);
+    let after = session.execute("echo \"[$BEFORE]\"").await.unwrap();
+    assert_eq!(after.stdout, "[]");
+}
+
+/// A command that waits on stdin runs into the timeout.
+#[tokio::test]
+async fn characterize_stdin_reader_times_out() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session.execute_with_timeout("cat", Some(1)).await.unwrap();
+    assert!(output.timed_out, "{output:?}");
+    assert_eq!(session.execute("echo ok").await.unwrap().stdout, "ok");
+}
+
+/// cd, set_env and exported variables persist; cwd is tracked exactly.
+#[tokio::test]
+async fn characterize_state_persists() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.cd("/tmp").await.unwrap();
+    session.set_env("CHATTY_A", "it's $x").await.unwrap();
+    let output = session.execute("pwd; echo \"$CHATTY_A\"").await.unwrap();
+    assert_eq!(output.stdout, "/tmp\nit's $x");
+    let status = session.status().await.unwrap();
+    assert_eq!(status.cwd, "/tmp");
+    assert!(
+        status
+            .env_vars
+            .contains(&("CHATTY_A".into(), "it's $x".into()))
+    );
+}
+
+// ── The shell on a PTY (AGE-585) ─────────────────────────────────────────────
+
+/// A scratch git repository with two commits.
+fn git_repo() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap().to_string();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    for n in 1..=2 {
+        std::fs::write(dir.path().join("f"), n.to_string()).unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-q", "-m", &format!("commit number {n}")]);
+    }
+    (dir, path)
+}
+
+/// `git log` on a terminal would open a pager and wait for a key.
+#[tokio::test]
+async fn git_log_returns_without_a_pager() {
+    let (_dir, repo) = git_repo();
+    let session = ShellSession::with_secrets(Some(repo), 10, 51200, false, vec![]);
+    let started = std::time::Instant::now();
+    let output = session.execute("git log").await.unwrap();
+    assert!(!output.timed_out, "{output:?}");
+    assert_eq!(output.exit_code, 0, "{output:?}");
+    assert!(output.stdout.contains("commit number 2"), "{output:?}");
+    assert!(output.stdout.contains("commit number 1"), "{output:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// Colours are for the terminal view, not the model.
+#[tokio::test]
+async fn colourised_output_comes_back_as_plain_text() {
+    let (_dir, repo) = git_repo();
+    let session = ShellSession::with_secrets(Some(repo), 30, 51200, false, vec![]);
+    std::fs::create_dir(format!("{}/subdir", session.workspace_dir().unwrap())).unwrap();
+    let output = session.execute("ls --color=always -1").await.unwrap();
+    assert_eq!(output.stdout, "f\nsubdir", "{:?}", output.stdout);
+    let output = session
+        .execute("git -c color.ui=always log --oneline -1")
+        .await
+        .unwrap();
+    assert!(!output.stdout.contains('\x1b'), "{:?}", output.stdout);
+    assert!(
+        output.stdout.ends_with("commit number 2"),
+        "{:?}",
+        output.stdout
+    );
+}
+
+/// A progress line redrawn with `\r` comes back as it ended.
+#[tokio::test]
+async fn carriage_return_progress_collapses_to_its_last_state() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session.execute("printf 'a\\r b\\r c\\n'").await.unwrap();
+    assert_eq!(output.stdout.trim(), "c");
+    let output = session
+        .execute("for i in 1 2 3; do printf '\\r\\033[K%s%%' $((i*33)); done; echo; echo done")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "99%\ndone");
+}
+
+/// The output is read from the stream, not the grid: a line wider than the
+/// terminal comes back as one line.
+#[tokio::test]
+async fn long_lines_do_not_wrap_at_the_terminal_width() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session.execute("printf '%0500d\\n' 0").await.unwrap();
+    assert_eq!(output.stdout, "0".repeat(500));
+}
+
+/// A multi-line command runs as one unit: one result, the last exit code,
+/// tabs in it are text (not completion), heredocs work.
+#[tokio::test]
+async fn multi_line_commands_run_as_one() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session
+        .execute("for i in 1 2; do\n\techo \"n=$i\"\ndone\ncat <<'EOF'\n\tx!y\nEOF\nfalse")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "n=1\nn=2\n\tx!y");
+    assert_eq!(output.exit_code, 1);
+}
+
+/// What an interactive shell would do differently is switched off: `!`
+/// history expansion, aliases from the profile, job control.
+#[tokio::test]
+async fn interactive_shell_quirks_are_off() {
+    let (_workspace, workspace, home) = workspace_with_profile("alias echo='echo aliased'\n");
+    let session =
+        ShellSession::with_secrets(Some(workspace), 30, 51200, false, vec![]).with_home(&home);
+    let output = session
+        .execute("echo \"hi!\" 'a!b'; echo $-")
+        .await
+        .unwrap();
+    let lines: Vec<&str> = output.stdout.lines().collect();
+    assert_eq!(lines[0], "hi! a!b", "{output:?}");
+    assert!(
+        !lines[1].contains('m') && !lines[1].contains('H'),
+        "{output:?}"
+    );
+}
+
+/// The agent's terminal: pagers print, the width is wide, TERM is set.
+#[tokio::test]
+async fn pty_environment_for_the_agent() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session
+        .execute("echo $PAGER $GIT_PAGER $MANPAGER $LESS $TERM; tput cols; test -t 1 && echo tty")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "cat cat cat -FRX xterm-256color\n200\ntty");
+}
+
+/// Non-UTF-8 output is decoded lossily, not dropped.
+#[tokio::test]
+async fn non_utf8_output_is_decoded_lossily() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session.execute("printf '\\377\\376abc\\n'").await.unwrap();
+    assert!(output.stdout.ends_with("abc"), "{:?}", output.stdout);
+}
+
+/// The marks are invisible: a terminal view shows a prompt, the command and
+/// its output, and nothing of the protocol.
+#[tokio::test]
+async fn terminal_view_shows_no_marks() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.execute("echo visible-output").await.unwrap();
+    let terminal = session.terminal().expect("a running terminal");
+    // The tap sees the bytes just before the grid does: wait for the next
+    // prompt to be drawn.
+    let mut screen = String::new();
+    for _ in 0..100 {
+        screen = terminal.snapshot(chatty_terminal::Region::Screen).text;
+        if screen.lines().count() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(screen.contains("echo visible-output"), "{screen}");
+    assert!(screen.contains("\nvisible-output\n"), "{screen}");
+    for leak in ["133;", "CHATTY", "__chatty", "\x1b"] {
+        assert!(!screen.contains(leak), "{leak:?} in {screen}");
+    }
+    // Prompt + command, output, prompt: the command's id was pasted and
+    // taken back off the line.
+    let lines: Vec<&str> = screen.lines().collect();
+    assert_eq!(lines.len(), 3, "{screen}");
+    // `$`, or `#` as root.
+    let prompt_end = |l: &str| l.ends_with('$') || l.ends_with('#');
+    let command_line = lines[0].strip_suffix(" echo visible-output");
+    assert!(command_line.is_some_and(prompt_end), "{screen}");
+    assert_eq!(lines[1], "visible-output");
+    assert!(prompt_end(lines[2]), "{screen}");
+}
+
+/// Wait until the terminal's screen contains `needle`.
+async fn wait_for_screen(terminal: &chatty_terminal::TerminalHandle, needle: &str) {
+    for _ in 0..100 {
+        if terminal
+            .snapshot(chatty_terminal::Region::Screen)
+            .text
+            .contains(needle)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!(
+        "{needle:?} never showed: {}",
+        terminal.snapshot(chatty_terminal::Region::Screen).text
+    );
+}
+
+/// Shared keyboard: while someone types at the prompt the agent's command
+/// is not sent (it would be glued onto their line).
+#[tokio::test]
+async fn busy_while_someone_is_typing() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.execute("true").await.unwrap();
+    let terminal = session.terminal().unwrap();
+    terminal.write(b"echo half-typ").unwrap();
+    wait_for_screen(&terminal, "half-typ").await;
+
+    let err = session.execute("echo agent").await.unwrap_err().to_string();
+    assert!(
+        err.contains("the terminal is busy: someone is typing"),
+        "{err}"
+    );
+
+    // Once they clear their line, the agent gets the prompt back.
+    terminal.write(b"\x15").unwrap(); // Ctrl+U
+    let output = session.execute("echo agent").await.unwrap();
+    assert_eq!(output.stdout, "agent");
+}
+
+/// Shared keyboard: a command started from the terminal view keeps it; the
+/// agent is told what is running instead of typing into it.
+#[tokio::test]
+async fn busy_while_a_command_runs() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.execute("true").await.unwrap();
+    let terminal = session.terminal().unwrap();
+    terminal.write(b"sleep 30\r").unwrap();
+    for _ in 0..100 {
+        if matches!(
+            session
+                .process
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .tap
+                .lock()
+                .prompt,
+            Prompt::Running { .. }
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let err = session.execute("echo agent").await.unwrap_err().to_string();
+    assert!(
+        err.contains("the terminal is busy: `sleep 30` is running"),
+        "{err}"
+    );
+
+    terminal.write(b"\x03").unwrap(); // Ctrl+C
+    let output = session.execute("echo agent").await.unwrap();
+    assert_eq!(output.stdout, "agent");
+}
+
+/// Ctrl+C reaches the running command: the shell keeps its controlling
+/// terminal, inside the sandbox too (no `--new-session`).
+#[tokio::test]
+async fn ctrl_c_interrupts_the_running_command() {
+    let session = Arc::new(ShellSession::with_secrets(None, 60, 51200, false, vec![]));
+    session.execute("true").await.unwrap();
+    let sandboxed = session.is_sandboxed().await;
+    let terminal = session.terminal().unwrap();
+
+    let running = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move { session.execute("echo started; sleep 100; echo after").await }
+    });
+    wait_for_screen(&terminal, "\nstarted").await;
+    let started = std::time::Instant::now();
+    terminal.write(b"\x03").unwrap();
+
+    let output = running.await.unwrap().unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{output:?}"
+    );
+    assert!(!output.timed_out, "sandboxed={sandboxed} {output:?}");
+    assert_eq!(output.exit_code, 130, "sandboxed={sandboxed} {output:?}");
+    assert!(!output.stdout.contains("after"), "{output:?}");
+    // Same shell, still there.
+    assert_eq!(session.execute("echo same").await.unwrap().stdout, "same");
+}
+
+/// The bubblewrap path, run for real where bubblewrap works (it needs user
+/// namespaces; not every machine allows them).
+#[tokio::test]
+async fn sandboxed_shell_runs_on_the_pty() {
+    if !ShellSession::can_sandbox() {
+        return;
+    }
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = match session
+        .execute("test -t 0 && echo tty; test -e /home || echo no-home")
+        .await
+    {
+        Ok(output) => output,
+        // bubblewrap is installed but can't create its namespaces here.
+        Err(e) if e.to_string().contains("bwrap:") => return,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(session.is_sandboxed().await);
+    assert_eq!(output.stdout, "tty\nno-home", "{output:?}");
 }

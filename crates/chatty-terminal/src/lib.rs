@@ -10,7 +10,9 @@
 //! it whether anything changed since the last frame.
 //!
 //! [`TerminalHandle::spawn_with_tap`] adds a byte-stream tap that sees every
-//! byte read from the PTY before the parser does (see [`tap`]).
+//! byte read from the PTY before the parser does (see [`tap`]); a
+//! [`MarkScanner`] fed from it finds shell-integration marks and the clean
+//! text between them (see [`marks`]).
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -29,10 +31,12 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Osc52};
 use alacritty_terminal::tty;
 
+pub mod marks;
 mod snapshot;
 pub mod tap;
 
 pub use alacritty_terminal;
+pub use marks::{CHATTY_OSC, CleanText, Mark, MarkScanner};
 pub use snapshot::{Region, TerminalText};
 pub use tap::ByteTap;
 

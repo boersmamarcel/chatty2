@@ -15,6 +15,9 @@ agent shell, Harbor runs) as well as under a view.
   sees every byte read from the PTY before the parser does.
 - `TerminalConfig::scrollback` sets the lines of history kept (default
   10,000).
+- `MarkScanner` (fed from the tap): OSC 133 `A`/`B`/`C`/`D` marks, chatty's
+  private OSC 6973, and the `CleanText` between them (no escapes, `\r\n` as
+  `\n`, redrawn lines as they ended, no wrapping at the terminal width).
 - `write`, `resize`, `kill`; dropping the handle kills the child's process
   group and joins the PTY thread.
 - `has_foreground_job()`: whether a program other than the shell holds the

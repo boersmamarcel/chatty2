@@ -299,10 +299,13 @@ examples.
    those fixes. See CLAUDE.md.
 
 10. **The agent shell loads the login profile, but still starts
-    `--norc --noprofile`.** `shell_service` sources `/etc/profile` and the
-    first of `~/.bash_profile`/`~/.bash_login`/`~/.profile` into the shell's
-    first command (output discarded) so a project's conda env or `PATH`
-    additions reach the model's commands. If you're debugging a shell tool
+    `--norc --noprofile`.** `shell_service` runs bash on a PTY
+    (`chatty-terminal`) and sources `/etc/profile` and the first of
+    `~/.bash_profile`/`~/.bash_login`/`~/.profile` in its init, before the
+    first prompt (output discarded, `PS1` unset while it runs), so a
+    project's conda env or `PATH` additions reach the model's commands.
+    Command completion is read from OSC 133 / OSC 6973 marks in the byte
+    stream, not printed marker lines. If you're debugging a shell tool
     that behaves differently interactively vs. under the agent, check what
     the login profile does, not `.bashrc` (never sourced). See CLAUDE.md.
 
