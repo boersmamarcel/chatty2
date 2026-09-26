@@ -73,7 +73,7 @@ pub struct InputState {
     pub textarea: TextArea<'static>,
     slash_menu_selected: usize,
     slash_menu_scroll_offset: usize,
-    /// Filesystem skills loaded from the workspace `.claude/skills/` and global skills dirs.
+    /// Filesystem skills loaded from the project and global skill directories.
     available_skills: Vec<(String, String)>,
     /// Cached list of files for the `@` mention picker.
     pub at_menu_files: Vec<String>,

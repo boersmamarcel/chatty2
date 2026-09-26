@@ -930,10 +930,10 @@ impl AgentClient {
         ) = if let Some(ref mem_svc) = memory_service {
             let has_embeddings = embedding_service.is_some();
             tracing::info!(semantic_search = has_embeddings, "Memory tools enabled");
-            let workspace_skills_dir = exec_settings
+            let workspace_dir = exec_settings
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_ref())
-                .map(|d| std::path::Path::new(d).join(".claude").join("skills"));
+                .map(std::path::PathBuf::from);
             (
                 Some(RememberTool::new(
                     mem_svc.clone(),
@@ -947,7 +947,7 @@ impl AgentClient {
                     mem_svc.clone(),
                     embedding_service.clone(),
                     skill_service.clone(),
-                    workspace_skills_dir,
+                    workspace_dir,
                 )),
             )
         } else {
@@ -959,8 +959,8 @@ impl AgentClient {
         let read_skill_tool = ReadSkillTool::new(
             exec_settings
                 .as_ref()
-                .and_then(|s| s.workspace_dir.as_ref())
-                .map(|d| std::path::Path::new(d).join(".claude").join("skills")),
+                .and_then(|s| s.workspace_dir.as_deref())
+                .map(std::path::Path::new),
         )
         .with_team_skill(team_skill);
 

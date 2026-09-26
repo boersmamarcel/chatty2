@@ -66,7 +66,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
 use super::chat_input::{
-    ChatInput, ChatInputState, ModelOption, PrStatusBarView, slash_menu_items_with_skills,
+    ChatInput, ChatInputEvent, ChatInputState, ModelOption, PrStatusBarView,
+    slash_menu_items_with_skills,
 };
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{ApprovalState, ClarificationState, SystemTrace, TraceItem};
@@ -460,6 +461,11 @@ impl ChatView {
                     // the newline that gpui-component writes before PressEnter).
                     state_for_change.update(cx, |state, cx| {
                         let new_text = state.input.read(cx).text().to_string();
+                        // A fresh `/` rescans the skill directories so a skill
+                        // added on disk mid-session appears in the picker.
+                        if new_text.trim() == "/" {
+                            cx.emit(ChatInputEvent::SlashMenuOpened);
+                        }
                         state.reset_slash_menu_selection_if_query_changed(&new_text);
                         state.reset_at_menu_selection_if_query_changed(&new_text);
 

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/chatty-core",
+    "crates/chatty-terminal",
     "crates/chatty-gpui",
     "crates/chatty-tui",
     "crates/chatty-wasm-runtime",

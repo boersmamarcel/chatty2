@@ -1,7 +1,9 @@
+use crate::services::memory_service::MemoryHitSource;
+use crate::services::skill_service::SkillService;
 use crate::services::team::TeamSkill;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Error type for the read_skill tool
@@ -45,30 +47,34 @@ pub struct ReadSkillOutput {
 /// ## Skill locations searched (in order)
 /// 0. The team's own skill, when this run was started with `--team` and the
 ///    team directory carries a `SKILL.md` (AGE-407)
-/// 1. `<workspace>/.claude/skills/<name>/SKILL.md`  — project-local
-/// 2. `<data_dir>/chatty/skills/<name>/SKILL.md`    — global user skills
+/// 1. `.agents/skills/<name>/SKILL.md`, then `.claude/skills/<name>/SKILL.md`,
+///    from the workspace up to its git root — project skills
+/// 2. `~/.agents/skills/<name>/SKILL.md`, then `~/.claude/skills/<name>/SKILL.md`
+///    — global skills
+///
+/// These are the directories [`SkillService`] lists for the slash-command
+/// picker, so any skill the picker offers can be read here.
 ///
 /// For skills stored via the `save_skill` tool (not filesystem files), use
 /// `search_memory` instead.
 #[derive(Clone)]
 pub struct ReadSkillTool {
-    global_skills_dir: PathBuf,
-    workspace_skills_dir: Option<PathBuf>,
+    skill_dirs: Vec<(PathBuf, MemoryHitSource)>,
     team_skill: Option<TeamSkill>,
 }
 
 impl ReadSkillTool {
     /// Create a new `ReadSkillTool`.
     ///
-    /// `workspace_skills_dir` should be the `.claude/skills` directory inside the
-    /// current workspace root, or `None` when no workspace is configured.
-    pub fn new(workspace_skills_dir: Option<PathBuf>) -> Self {
-        let global_skills_dir = dirs::data_dir()
-            .map(|d| d.join("chatty").join("skills"))
-            .unwrap_or_else(|| PathBuf::from(".chatty_skills"));
+    /// `workspace_dir` is the workspace root, or `None` when no workspace is
+    /// configured (global skills only).
+    pub fn new(workspace_dir: Option<&Path>) -> Self {
+        Self::with_skill_dirs(SkillService::new(None).skill_dirs(workspace_dir))
+    }
+
+    fn with_skill_dirs(skill_dirs: Vec<(PathBuf, MemoryHitSource)>) -> Self {
         Self {
-            global_skills_dir,
-            workspace_skills_dir,
+            skill_dirs,
             team_skill: None,
         }
     }
@@ -93,8 +99,8 @@ impl Tool for ReadSkillTool {
         "Load the full instructions for a named skill. \
                           Skills are listed with a one-line description in the automatic context \
                           block — use this tool to get the complete step-by-step procedure. \
-                          Searches the workspace .claude/skills/ directory first, then the \
-                          global skills directory. For skills created with save_skill (not \
+                          Searches the project's .agents/skills/ and .claude/skills/ first, \
+                          then ~/.agents/skills/ and ~/.claude/skills/. For skills created with save_skill (not \
                           filesystem files), use search_memory instead."
             .to_string()
     }
@@ -133,24 +139,23 @@ impl Tool for ReadSkillTool {
             });
         }
 
-        // Check workspace directory first
-        if let Some(ref ws_dir) = self.workspace_skills_dir
-            && let Some(content) = try_read_skill_file(&ws_dir.join(&args.name), &file_names).await
-        {
-            return Ok(ReadSkillOutput {
-                content,
-                source: "workspace".to_string(),
-            });
+        // A skill name is one directory name; anything else would read
+        // outside the skills directories.
+        if args.name.is_empty() || args.name.starts_with('.') || args.name.contains(['/', '\\']) {
+            return Err(ReadSkillError::NotFound(args.name));
         }
 
-        // Fall back to global directory
-        if let Some(content) =
-            try_read_skill_file(&self.global_skills_dir.join(&args.name), &file_names).await
-        {
-            return Ok(ReadSkillOutput {
-                content,
-                source: "global".to_string(),
-            });
+        for (dir, source) in &self.skill_dirs {
+            if let Some(content) = try_read_skill_file(&dir.join(&args.name), &file_names).await {
+                let source = match source {
+                    MemoryHitSource::GlobalSkillFile => "global",
+                    _ => "workspace",
+                };
+                return Ok(ReadSkillOutput {
+                    content,
+                    source: source.to_string(),
+                });
+            }
         }
 
         Err(ReadSkillError::NotFound(args.name))
@@ -179,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_not_found_for_missing_skill() {
-        let tool = ReadSkillTool::new(None);
+        let tool = ReadSkillTool::with_skill_dirs(Vec::new());
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -194,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn reads_skill_from_workspace_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("my-skill");
+        let skill_dir = tmp.path().join(".claude/skills/my-skill");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         let content =
             "---\nname: my-skill\ndescription: A test skill.\n---\n# Steps\n1. Do something.";
@@ -202,7 +207,7 @@ mod tests {
             .await
             .unwrap();
 
-        let tool = ReadSkillTool::new(Some(tmp.path().to_path_buf()));
+        let tool = ReadSkillTool::new(Some(tmp.path()));
         let output = tool
             .call(
                 &mut ToolContext::new(),
@@ -224,17 +229,16 @@ mod tests {
     #[tokio::test]
     async fn serves_the_team_skill_ahead_of_the_skill_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("coder-reviewer");
+        let skill_dir = tmp.path().join(".agents/skills/coder-reviewer");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         tokio::fs::write(skill_dir.join("SKILL.md"), "# workspace copy")
             .await
             .unwrap();
 
-        let tool =
-            ReadSkillTool::new(Some(tmp.path().to_path_buf())).with_team_skill(Some(TeamSkill {
-                name: "coder-reviewer".to_string(),
-                content: "# the team's copy".to_string(),
-            }));
+        let tool = ReadSkillTool::new(Some(tmp.path())).with_team_skill(Some(TeamSkill {
+            name: "coder-reviewer".to_string(),
+            content: "# the team's copy".to_string(),
+        }));
         let output = tool
             .call(
                 &mut ToolContext::new(),
@@ -256,5 +260,28 @@ mod tests {
             )
             .await;
         assert!(matches!(other, Err(ReadSkillError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn refuses_names_that_leave_the_skills_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(tmp.path().join("SKILL.md"), "# outside")
+            .await
+            .unwrap();
+        let tool = ReadSkillTool::with_skill_dirs(vec![(
+            tmp.path().join("skills"),
+            MemoryHitSource::GlobalSkillFile,
+        )]);
+        for name in ["..", "../", "a/b"] {
+            let result = tool
+                .call(
+                    &mut ToolContext::new(),
+                    ReadSkillArgs {
+                        name: name.to_string(),
+                    },
+                )
+                .await;
+            assert!(matches!(result, Err(ReadSkillError::NotFound(_))), "{name}");
+        }
     }
 }

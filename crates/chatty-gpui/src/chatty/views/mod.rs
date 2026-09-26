@@ -22,6 +22,7 @@ pub mod search_conversations_dialog;
 mod sidebar_file_tree;
 pub mod sidebar_view;
 pub mod syntax_highlighter;
+pub mod terminal;
 pub mod thinking_indicator;
 pub mod titlebar;
 pub mod trace_components;

@@ -24,7 +24,9 @@ Full lookup table: [slash commands reference](../reference/slash-commands.md).
 | Immediate (no args) | `/compact` | Picker `execute_immediately: true` → `ChatInputEvent::SlashCommandSelected` → `handle_slash_command` | `Command` variant, no `Option<String>` |
 | Arg-based | `/agent <prompt>` | Picker inserts `/agent ` (does not execute) → user sends → `try_handle_arg_slash_command` | `Command::Agent(Option<String>)` |
 
-Skills from `.claude/skills/` appear in both pickers with a skill badge. Do not
+Skills from the project and global skill directories (`.agents/skills/`,
+`.claude/skills/`; see `SkillService`) appear in both pickers with a skill
+badge, rescanned each time the picker opens. Do not
 register a skill as a built-in command.
 
 ## GPUI (desktop)

@@ -23,18 +23,18 @@ Nothing leaves your machine unless a provider, extension or website you use rece
 |------|-------|-------|---------|
 | Settings, provider keys, extensions | `~/Library/Application Support/chatty/` | `~/.config/chatty/` | `%APPDATA%\chatty\` |
 | Conversations (`conversations.db`) | same folder | `~/.config/chatty/` | same folder |
-| Training exports | `…/chatty/exports/` | `~/.config/chatty/exports/` | `…\chatty\exports\` |
+| Training exports | `~/Library/Application Support/chatty/exports/` | `~/.config/chatty/exports/` | `%APPDATA%\chatty\exports\` |
 | Catalog extension sign-in tokens | same folder | `~/.config/chatty/` | same folder |
 | Memory (`memory.mv2`) | same folder | `~/.local/share/chatty/` | same folder |
-| Global skills | `…/chatty/skills/` | `~/.local/share/chatty/skills/` | `…\chatty\skills\` |
-| Installed modules | `…/chatty/modules/` | `~/.local/share/chatty/modules/` | `…\chatty\modules\` |
-| Downloaded Chrome builds | `…/chatty/browsers/<version>/` | `~/.local/share/chatty/browsers/<version>/` | `…\chatty\browsers\<version>\` |
-| PDF rendering library cache | `…/chatty/lib/` | `~/.local/share/chatty/lib/` | `…\chatty\lib\` |
-| Rendered math and diagram caches | `…/chatty/math_cache/`, `…/chatty/mermaid_cache/` | `~/.config/chatty/math_cache/`, `~/.config/chatty/mermaid_cache/` | `…\chatty\math_cache\`, `…\chatty\mermaid_cache\` |
+| Global skills (see [Memory & skills](./memory-and-skills.md#skills)) | `~/.agents/skills/`, `~/.claude/skills/` | same | `%USERPROFILE%\.agents\skills\`, `%USERPROFILE%\.claude\skills\` |
+| Installed modules | `~/Library/Application Support/chatty/modules/` | `~/.local/share/chatty/modules/` | `%APPDATA%\chatty\modules\` |
+| Downloaded Chrome builds | `~/Library/Application Support/chatty/browsers/<version>/` | `~/.local/share/chatty/browsers/<version>/` | `%APPDATA%\chatty\browsers\<version>\` |
+| PDF rendering library cache | `~/Library/Application Support/chatty/lib/` | `~/.local/share/chatty/lib/` | `%APPDATA%\chatty\lib\` |
+| Rendered math and diagram caches | `~/Library/Application Support/chatty/math_cache/`, `~/Library/Application Support/chatty/mermaid_cache/` | `~/.config/chatty/math_cache/`, `~/.config/chatty/mermaid_cache/` | `%APPDATA%\chatty\math_cache\`, `%APPDATA%\chatty\mermaid_cache\` |
 | Browser screenshots and console logs | `<workspace>/.chatty/browser/` | same | same |
-| Workspace skills | `<workspace>/.claude/skills/` | same | same |
+| Project skills | `<workspace>/.agents/skills/`, `<workspace>/.claude/skills/` (and in parent folders up to the git root) | same | same |
 | Sub-agent worktrees (one per delegated worker, left in place; delete when done) | `<workspace>/.chatty/worktrees/<name>/` | same | same |
-| Team directories (`<id>/team.json` + `SKILL.md`) | `<workspace>/.chatty/teams/`, then `…/chatty/teams/` | same, then `~/.local/share/chatty/teams/` | same, then `…\chatty\teams\` |
+| Team directories (`<id>/team.json` + `SKILL.md`) | `<workspace>/.chatty/teams/`, then `~/Library/Application Support/chatty/teams/` | same, then `~/.local/share/chatty/teams/` | same, then `%APPDATA%\chatty\teams\` |
 | Context-window thresholds (`token_tracking.json`) | same folder as settings | `~/.config/chatty/` | same folder |
 | Terminal app binary | `/usr/local/bin/chatty-tui` | `~/.local/bin/chatty-tui` | the app's install folder |
 
