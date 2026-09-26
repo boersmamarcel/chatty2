@@ -235,12 +235,19 @@ pub struct QuickOpenDialog;
 impl QuickOpenDialog {
     pub fn open(window: &mut Window, cx: &mut App) {
         let view = cx.new(|cx| QuickOpenView::new(window, cx));
+        let input = view.read(cx).input.clone();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             dialog
                 .title("Go to File")
                 .w(px(560.))
                 .h(px(440.))
                 .child(view.clone())
+        });
+        // Type-to-filter right after Cmd/Ctrl+P (AGE-570). Deferred so the
+        // dialog's own focus handling on open runs first and does not take
+        // focus back from the input.
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
         });
     }
 }
