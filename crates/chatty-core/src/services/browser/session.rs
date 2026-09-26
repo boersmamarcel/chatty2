@@ -244,6 +244,23 @@ pub struct BrowserSession {
     _user_data: Option<tempfile::TempDir>,
 }
 
+/// Chrome's sandbox cannot run as root, and Chrome then exits before the
+/// DevTools socket is up with only its stderr to explain why. Say so plainly
+/// instead (AGE-564). The sandbox is deliberately *not* turned off for root:
+/// with internet access on the browser renders open-web content, and that
+/// is the case the sandbox exists for.
+pub(crate) fn refuse_root() -> Result<(), BrowserError> {
+    #[cfg(unix)]
+    if nix::unistd::geteuid().is_root() {
+        return Err(BrowserError::Launch(
+            "Chrome cannot run as root: its sandbox is unavailable to the root user. \
+             Run Chatty as a regular user to use the browser."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 impl BrowserSession {
     /// Launch a browser and attach to a fresh page.
     pub async fn launch(

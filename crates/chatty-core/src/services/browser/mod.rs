@@ -65,6 +65,10 @@ pub struct BrowserManager {
     session: Mutex<Option<Arc<BrowserSession>>>,
     /// Latest snapshot, so refs survive between tool calls.
     snapshot: Mutex<Option<Snapshot>>,
+    /// Chrome download progress (0.0..=1.0) while the first launch fetches
+    /// the pinned build; `None` otherwise. The artifact panel shows it
+    /// instead of a bare "Starting browser…" (AGE-565).
+    download_progress: tokio::sync::watch::Sender<Option<f32>>,
 }
 
 impl BrowserManager {
@@ -76,6 +80,7 @@ impl BrowserManager {
             workspace,
             session: Mutex::new(None),
             snapshot: Mutex::new(None),
+            download_progress: tokio::sync::watch::Sender::new(None),
         }
     }
 
@@ -94,6 +99,7 @@ impl BrowserManager {
             workspace,
             session: Mutex::new(None),
             snapshot: Mutex::new(None),
+            download_progress: tokio::sync::watch::Sender::new(None),
         }
     }
 
@@ -147,11 +153,24 @@ impl BrowserManager {
             *self.snapshot.lock().await = None;
         }
 
-        let chrome = provisioning::resolve_chrome(None).await?;
+        // Before the download: no point fetching Chrome only to refuse it.
+        session::refuse_root()?;
+        let progress = |fraction: f32| {
+            self.download_progress.send_replace(Some(fraction));
+        };
+        let chrome = provisioning::resolve_chrome(Some(&progress)).await;
+        self.download_progress.send_replace(None);
+        let chrome = chrome?;
         let session =
             BrowserSession::launch(chrome, self.profile.clone(), self.policy.clone()).await?;
         *guard = Some(session.clone());
         Ok(session)
+    }
+
+    /// Chrome download progress while a first launch fetches the pinned
+    /// build (`Some(0.0..=1.0)`), `None` when nothing is downloading.
+    pub fn watch_download_progress(&self) -> tokio::sync::watch::Receiver<Option<f32>> {
+        self.download_progress.subscribe()
     }
 
     /// Store the snapshot a `browser_snapshot` call produced.
