@@ -1,0 +1,21 @@
+[package]
+name = "chatty-terminal"
+version.workspace = true
+edition.workspace = true
+description = "Headless terminal model: a PTY plus an alacritty_terminal Term (no UI)"
+publish = false
+rust-version = "1.94"
+
+[lib]
+name = "chatty_terminal"
+path = "src/lib.rs"
+
+[dependencies]
+# Apache-2.0. Only its public API is used; Zed's GPL-3.0 `terminal` crate is
+# not a source for anything here.
+alacritty_terminal = "0.26"
+polling = "3.8"
+tracing = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+nix = { workspace = true }

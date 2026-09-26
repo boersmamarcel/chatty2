@@ -98,6 +98,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`chatty-core`](../crates/chatty-core/README.md) | UI-agnostic agent core: models, services, tools, settings, sandbox |
 | [`chatty-gpui`](../crates/chatty-gpui/README.md) | GPUI desktop app (`chatty` binary) |
 | [`chatty-tui`](../crates/chatty-tui/README.md) | Ratatui terminal app (interactive, headless, pipe) |
+| [`chatty-terminal`](../crates/chatty-terminal/README.md) | Embedded terminal model: PTY + alacritty `Term`, no UI |
 | [`chatty-wasm-runtime`](../crates/chatty-wasm-runtime/README.md) | Wasmtime embedding and host WIT interfaces |
 | [`chatty-module-registry`](../crates/chatty-module-registry/README.md) | WASM module discovery, manifest, lifecycle |
 | [`chatty-protocol-gateway`](../crates/chatty-protocol-gateway/README.md) | HTTP gateway: OpenAI / MCP / A2A |
