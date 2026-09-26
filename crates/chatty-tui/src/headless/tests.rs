@@ -2157,4 +2157,40 @@ mod runner {
         assert_eq!(inputs[1], ANNOUNCED_STEP_NUDGE);
         assert_eq!(*started.lock().unwrap(), 2);
     }
+
+    /// A turn past the verbosity limit that still ends by announcing a
+    /// step belongs to the overflow path: its own prompts, then
+    /// finalization once they run out, never a nudge on top.
+    #[tokio::test]
+    async fn an_overflowing_turn_gets_the_overflow_prompts_and_no_nudge() {
+        let overflowing = format!(
+            "{} Let me apply the fix.",
+            "The parser drops the argument. ".repeat(200)
+        );
+        let mut turns: Vec<Scenario> = (0..=MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS)
+            .map(|_| answer_turn(&overflowing))
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+        let inputs = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS,
+            "the turn and its overflow prompts, no nudge after them"
+        );
+        assert!(
+            inputs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|input| input != ANNOUNCED_STEP_NUDGE),
+            "{:?}",
+            inputs.lock().unwrap()
+        );
+    }
 }

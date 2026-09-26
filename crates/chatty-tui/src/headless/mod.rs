@@ -711,8 +711,12 @@ pub async fn run_headless(
                     continue;
                 }
                 // The model ended its turn saying what it would do next
-                // instead of doing it; nobody is here to say "go on".
+                // instead of doing it; nobody is here to say "go on". Not
+                // after a text overflow: that turn already had its own
+                // recovery prompts, and past their limit it goes to
+                // finalization, not to a third round of "act now".
                 if announced_step_nudges < MAX_ANNOUNCED_STEP_NUDGES
+                    && !was_text_overflow
                     && !engine.is_streaming
                     && engine.has_tool_turns_left()
                     && !(answer_file_required && answer_file_exists(&engine))
