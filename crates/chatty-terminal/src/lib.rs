@@ -324,13 +324,20 @@ impl TerminalHandle {
         None
     }
 
-    /// Whether the terminal is at a hidden-input prompt: the PTY's `ECHO`
-    /// flag is off while the line discipline is canonical (`ICANON`), which
-    /// is what `sudo`, `ssh`, `getpass(3)` and `read -s` set while a password
-    /// or passphrase is typed. `ECHO` alone is not enough: line editors
-    /// (bash's readline, zsh's zle) and full-screen programs turn it off too,
-    /// but they also leave canonical mode, and they draw what is typed
+    /// Whether the terminal is at a plain text password prompt: the PTY's
+    /// `ECHO` flag is off while the line discipline is canonical (`ICANON`),
+    /// which is what `sudo`, `ssh`, `su`, `passwd`, `getpass(3)`, `read -s`
+    /// and gpg's `--pinentry-mode loopback` prompt set while a password or
+    /// passphrase is typed. `ECHO` alone is not enough: line editors (bash's
+    /// readline, zsh's zle) and full-screen programs turn it off too, but
+    /// they also leave canonical mode, and they draw what is typed
     /// themselves.
+    ///
+    /// Not caught: full-screen (curses) passphrase boxes such as
+    /// pinentry-curses, which run in raw mode like vim or less and cannot
+    /// be told apart from them by termios, and GUI pinentries outside the
+    /// terminal. In both the passphrase itself is never on screen; only the
+    /// surrounding screen is, as at any other moment.
     ///
     /// `None` where that cannot be told (Windows: ConPTY exposes no termios),
     /// after exit, or on error.

@@ -61,9 +61,9 @@ Tick **Remember this, don't ask again** to skip the question from then on: the e
 
 Click the eye on a shared tab to stop sharing it at once.
 
-A tab you haven't shared is still listed to the agent (its name and folder), so it can tell you it isn't shared and ask you to share it, but its contents are never read. While a terminal waits for a password or passphrase (`sudo`, `ssh`, `gpg`), the agent gets "terminal is at a hidden-input prompt" instead of the screen, even from a shared tab. Windows has no way to tell that a program is asking for a password, so on Windows don't leave a shared tab at a password prompt.
+A tab you haven't shared is still listed to the agent (its name and folder), so it can tell you it isn't shared and ask you to share it, but its contents are never read. While a terminal waits at a plain text password prompt (`sudo`, `ssh`, `su`, `passwd`, a script's `read -s`, or `gpg` with `--pinentry-mode loopback`), the agent gets "terminal is at a hidden-input prompt" instead of the screen, even from a shared tab. Full-screen passphrase boxes, such as the one `gpg` usually draws in the terminal (pinentry-curses), and pinentry windows outside the terminal are not caught: the passphrase itself is never on screen there, but the rest of the terminal can be read as at any other moment. Windows has no way to tell that a program is asking for a password, so on Windows don't leave a shared tab at a password prompt.
 
-Every read shows up in the conversation as a tool row such as *Read terminal · bash — chatty2 · 42 lines*; expand it to see exactly the text the agent was given. The tab it read lights up for a moment.
+Every read shows up in the conversation as a tool row such as *Read terminal · bash — chatty2 · 42 lines*, naming the tab and how many lines the agent was given; the row's copy button gives the exact output. The tab it read lights up for a moment.
 
 The tmux panes outside Chatty are a separate switch, **Enable Terminal Access** in **Settings → Code Execution** (see [Agents and tools](./agents-and-tools.md)).
 
