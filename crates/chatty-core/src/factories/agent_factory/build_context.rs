@@ -99,6 +99,12 @@ pub struct AgentBuildContext {
     /// drop `ask_user`. `from_services` sets it `true`; the factory offers
     /// the tool only when this and `exec_settings` (if any) both allow it.
     pub ask_user_enabled: bool,
+    /// The directory whose `AGENTS.md` / `CLAUDE.md` apply (AGE-589),
+    /// carried separately for the same reason as `ask_user_enabled`: a
+    /// gating host hands over no execution settings, and so no workspace,
+    /// when every tool group is off, yet the project's instructions still
+    /// apply. `None` falls back to `exec_settings.workspace_dir`.
+    pub instructions_dir: Option<std::path::PathBuf>,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -222,6 +228,9 @@ impl AgentBuildContext {
             // chatty-tui overrides this with its own flag; everyone else
             // leaves the decision to `exec_settings`.
             ask_user_enabled: true,
+            // chatty-tui sets it from its ungated settings; everyone else
+            // leaves it to `exec_settings`.
+            instructions_dir: None,
         }
     }
 }

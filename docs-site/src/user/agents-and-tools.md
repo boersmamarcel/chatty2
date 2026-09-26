@@ -42,6 +42,10 @@ Optional switches on the same page: **Enable Git Integration** (git tools and th
 
 **Per-chat working directory.** The folder icon in the composer (**Select Working Directory**) overrides the workspace for that conversation; `×` resets it to the global one. The override is saved with the conversation. `/cd <dir>` does the same from the keyboard, and `/add-dir <dir>` widens the workspace by one more directory.
 
+## Project instructions (AGENTS.md / CLAUDE.md)
+
+If your project has an `AGENTS.md` or `CLAUDE.md` — the instruction files other coding agents read — Chatty's agent reads them too and follows them. It looks in the working folder and in every folder above it up to the root of the git repository, taking `AGENTS.md` when a folder has both. A personal file for every project goes in `~/.agents/AGENTS.md` (or `~/.claude/CLAUDE.md`). The most specific file comes last and wins when two disagree; what you ask in the chat still overrides them. Files are read when a conversation starts or its working folder changes, and very long files are cut off after the first 32 KB.
+
 ## What the agent can do
 
 Tool names and their exact scopes are in the [tools catalog](../dev/reference/tools-catalog.md); this is the map.

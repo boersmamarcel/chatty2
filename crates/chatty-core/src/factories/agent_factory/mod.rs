@@ -273,6 +273,7 @@ impl AgentClient {
             unattended,
             answer_file,
             ask_user_enabled,
+            instructions_dir,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -1316,6 +1317,22 @@ impl AgentClient {
             ),
             unattended,
         );
+        // The workspace's AGENTS.md / CLAUDE.md (and the user's global one),
+        // read fresh on every build so an edit applies to the next
+        // conversation (AGE-589).
+        let workspace_dir = instructions_dir.as_deref().or_else(|| {
+            exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_deref())
+                .map(std::path::Path::new)
+        });
+        let preamble = match crate::services::project_instructions::instructions_section(
+            workspace_dir,
+            dirs::home_dir().as_deref(),
+        ) {
+            Some(section) => format!("{preamble}\n\n{section}"),
+            None => preamble,
+        };
 
         // Build native tools once (all providers use the same set)
         let native_tools = native_tools!(

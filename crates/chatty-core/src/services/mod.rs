@@ -53,6 +53,7 @@ pub mod pdf_thumbnail;
 pub mod pdfium_utils;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
+pub mod project_instructions;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
