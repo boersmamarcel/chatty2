@@ -646,6 +646,11 @@ impl ChatEngine {
             // Read off the ungated settings: the gate drops them all when
             // every tool group is off, `--disable ask-user` included.
             ask_user_enabled: self.execution_settings.ask_user_enabled,
+            instructions_dir: self
+                .execution_settings
+                .workspace_dir
+                .as_ref()
+                .map(std::path::PathBuf::from),
             ..AgentBuildContext::from_services(AgentServices {
                 exec_settings: gated_exec_settings(&self.execution_settings),
                 user_secrets: self.user_secrets.clone(),
