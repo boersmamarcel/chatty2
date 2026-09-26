@@ -260,27 +260,32 @@ fn zsh_records_through_zdotdir_and_restores_it() {
         println!("skipped: no zsh");
         return;
     };
-    let home = home("zsh", "");
-    std::fs::write(
-        home.join(".zshenv"),
-        "[[ -n $CHATTY_TEST_ZSH_MODULES ]] && module_path=($CHATTY_TEST_ZSH_MODULES)\n",
-    )
-    .unwrap();
-    std::fs::write(
-        home.join(".zshrc"),
-        "PS1='$ '\nalias hi='echo hello-zsh'\nunsetopt PROMPT_SP\n",
-    )
-    .unwrap();
-    let (term, _events) = TerminalHandle::spawn(TerminalConfig {
-        shell: Some(zsh),
-        ..bash(&home)
-    })
-    .unwrap();
-    let f = run(&term, b"false", 1);
-    let hi = run(&term, b"hi; echo zd=${ZDOTDIR-unset}", 2);
-    assert_eq!(f.exit_code, Some(1));
-    assert_eq!(hi.command_text, "hi; echo zd=${ZDOTDIR-unset}");
-    assert_eq!(last_command(&term).1, "hello-zsh\nzd=unset");
+    // The second variant's `nounset` is still on when the hooks install.
+    for (name, extra) in [("zsh", ""), ("zsh-nounset", "setopt nounset\n")] {
+        let home = home(name, "");
+        std::fs::write(
+            home.join(".zshenv"),
+            "[[ -n $CHATTY_TEST_ZSH_MODULES ]] && module_path=($CHATTY_TEST_ZSH_MODULES)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".zshrc"),
+            format!("{extra}PS1='$ '\nalias hi='echo hello-zsh'\nunsetopt PROMPT_SP\n"),
+        )
+        .unwrap();
+        let (term, _events) = TerminalHandle::spawn(TerminalConfig {
+            shell: Some(zsh.clone()),
+            ..bash(&home)
+        })
+        .unwrap();
+        let f = run(&term, b"false", 1);
+        let hi = run(&term, b"hi; echo zd=${ZDOTDIR-unset}", 2);
+        assert_eq!(f.exit_code, Some(1), "{name}");
+        assert_eq!(hi.command_text, "hi; echo zd=${ZDOTDIR-unset}", "{name}");
+        assert_eq!(last_command(&term).1, "hello-zsh\nzd=unset", "{name}");
+        let screen = term.snapshot(Region::Screen).text;
+        assert!(!screen.contains("parameter not set"), "{name}: {screen}");
+    }
 }
 
 #[test]

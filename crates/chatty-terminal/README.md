@@ -30,7 +30,10 @@ agent shell, Harbor runs) as well as under a view.
   bash and zsh started with default arguments load chatty's OSC 133
   snippets (`--rcfile` / a `ZDOTDIR` wrapper, `src/integration.rs`) after
   the user's own startup files, which are never edited. fish and PowerShell
-  are unsupported and run without integration.
+  are unsupported and run without integration. With injection, bash is
+  not a login shell to itself (`shopt login_shell` is off; our rcfile
+  sources the login startup files instead), so a `.bash_profile` that
+  branches on `login_shell` sees "not login".
 - `write`, `resize`, `kill`; dropping the handle kills the child's process
   group and joins the PTY thread.
 - `has_foreground_job()`: whether a program other than the shell holds the

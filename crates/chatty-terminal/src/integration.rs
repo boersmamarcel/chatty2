@@ -103,8 +103,9 @@ if [[ -z ${__chatty_osc133-} && $PS1 != *'133;A'* ]]; then
     __chatty_preexec() {
         printf '\e]133;C\a'
     }
-    precmd_functions=(__chatty_precmd $precmd_functions __chatty_wrap_prompt)
-    preexec_functions=($preexec_functions __chatty_preexec)
+    # `-` defaults: the user's .zshrc may have left `nounset` on.
+    precmd_functions=(__chatty_precmd ${precmd_functions-} __chatty_wrap_prompt)
+    preexec_functions=(${preexec_functions-} __chatty_preexec)
 fi
 "#;
 
@@ -233,5 +234,15 @@ mod tests {
         let mut env = HashMap::new();
         assert_eq!(inject("zsh", false, &mut env).unwrap(), vec!["-i"]);
         assert!(Path::new(&env["ZDOTDIR"]).join(".zshrc").is_file());
+    }
+
+    #[test]
+    fn zsh_hooks_expand_with_defaults_under_nounset() {
+        // The hook arrays may be unset; under `nounset` a bare `$name`
+        // aborts the rc file before the hooks install.
+        for name in ["precmd_functions", "preexec_functions"] {
+            assert!(ZSH_RC.contains(&format!("${{{name}-}}")), "{name}");
+            assert!(!ZSH_RC.contains(&format!("${name}")), "{name}");
+        }
     }
 }
