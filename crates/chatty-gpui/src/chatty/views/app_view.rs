@@ -17,6 +17,9 @@ impl Render for ChattyApp {
         crate::boot_timing::checkpoint("open_to_first_frame");
 
         let dialog_layer = Root::render_dialog_layer(window, cx);
+        // Without this layer `window.push_notification` draws nothing in the
+        // main window (AGE-567's "Couldn't copy the image" was invisible).
+        let notification_layer = Root::render_notification_layer(window, cx);
         let sidebar = self.sidebar_view.clone();
         let chat_view = self.chat_view.clone();
 
@@ -172,5 +175,6 @@ impl Render for ChattyApp {
                 )
             })
             .children(dialog_layer)
+            .children(notification_layer)
     }
 }

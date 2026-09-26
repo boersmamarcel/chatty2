@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::{ActiveTheme, WindowExt};
 use gpui_component::{Icon, Sizable};
 use tracing::warn;
 
@@ -111,7 +111,9 @@ impl MermaidComponent {
             .xsmall()
             .icon(Icon::new(CustomIcon::Image))
             .tooltip("Copy as PNG")
-            .on_click(move |_event, _window, _cx| {
+            .on_click(move |_event, window, cx| {
+                // A failed copy says so in the window, not only in the log:
+                // the button otherwise looks like it did nothing (AGE-567).
                 match MermaidRendererService::render_svg_to_png(&svg_path) {
                     Ok(png_bytes) => {
                         #[cfg(target_os = "linux")]
@@ -121,16 +123,22 @@ impl MermaidComponent {
                             // Use wl-copy (Wayland) or xclip (X11) directly instead.
                             if !copy_png_to_linux_clipboard(&png_bytes) {
                                 warn!("No clipboard tool found (install wl-clipboard or xclip)");
+                                window.push_notification(
+                                    "Couldn't copy the image: install wl-clipboard (Wayland) \
+                                     or xclip (X11) to copy images on Linux.",
+                                    cx,
+                                );
                             }
                         }
                         #[cfg(not(target_os = "linux"))]
                         {
                             let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, png_bytes);
-                            _cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                            cx.write_to_clipboard(ClipboardItem::new_image(&image));
                         }
                     }
                     Err(e) => {
                         warn!(error = ?e, "Failed to render mermaid PNG for clipboard");
+                        window.push_notification("Couldn't render the diagram as an image.", cx);
                     }
                 }
             })
