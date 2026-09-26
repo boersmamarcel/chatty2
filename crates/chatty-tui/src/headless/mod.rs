@@ -262,6 +262,11 @@ pub async fn run_headless(
     let mut text_overflow_stop_requested = false;
     let mut text_hard_stop_requested = false;
     let mut text_bytes_this_turn = 0usize;
+    // The text of the current model call, since its last tool call: what a
+    // turn ending here ended with. Cleared on a cancel or an error, so only
+    // a turn the model itself ended is read by `announces_untaken_step`.
+    let mut last_call_text = String::new();
+    let mut announced_step_nudges = 0usize;
 
     loop {
         let event = match backstop {
@@ -298,6 +303,7 @@ pub async fn run_headless(
                 // through the runner's event observer, and the final answer
                 // still goes to stdout.
                 response.push_str(&text);
+                last_call_text.push_str(&text);
                 text_bytes_this_turn += text.len();
                 if answer_file_required
                     && !text_hard_stop_requested
@@ -326,6 +332,7 @@ pub async fn run_headless(
             }
             AppEvent::ToolCallStarted { ref name, .. } => {
                 text_bytes_this_turn = 0;
+                last_call_text.clear();
                 let name_str = name.clone();
                 engine.handle_event(event);
                 if let Some(tc) = engine.transcript.tool_call_named(&name_str) {
@@ -335,6 +342,7 @@ pub async fn run_headless(
                 }
             }
             AppEvent::ToolCallResult { ref id, .. } => {
+                last_call_text.clear();
                 let id_str = id.clone();
                 engine.handle_event(event);
                 let mut called_final_answer = false;
@@ -486,6 +494,7 @@ pub async fn run_headless(
                 }
             }
             AppEvent::ToolCallError { ref id, .. } => {
+                last_call_text.clear();
                 let id_str = id.clone();
                 engine.handle_event(event);
                 let mut refused = false;
@@ -546,6 +555,7 @@ pub async fn run_headless(
             }
             AppEvent::StreamCompleted => {
                 engine.handle_event(AppEvent::StreamCompleted);
+                let final_call_text = std::mem::take(&mut last_call_text);
                 // Update loop guard: resets per-turn counters and checks for late-game deadline.
                 let turns_used = engine.transcript.assistant_turns();
                 loop_guard.on_turn_complete(turns_used, answer_file_exists(&engine));
@@ -700,6 +710,22 @@ pub async fn run_headless(
                     send_answer_file_finalization_prompt(&mut engine, &message, true);
                     continue;
                 }
+                // The model ended its turn saying what it would do next
+                // instead of doing it; nobody is here to say "go on".
+                if announced_step_nudges < MAX_ANNOUNCED_STEP_NUDGES
+                    && !engine.is_streaming
+                    && engine.has_tool_turns_left()
+                    && !(answer_file_required && answer_file_exists(&engine))
+                    && announces_untaken_step(&final_call_text)
+                {
+                    announced_step_nudges += 1;
+                    eprintln!(
+                        "Turn ended announcing a step it did not take; nudging the model to continue ({}/{}).",
+                        announced_step_nudges, MAX_ANNOUNCED_STEP_NUDGES
+                    );
+                    engine.send_message(ANNOUNCED_STEP_NUDGE.to_string());
+                    continue;
+                }
                 if should_request_answer_file_finalization(
                     answer_file_required,
                     finalization_attempts,
@@ -737,6 +763,7 @@ pub async fn run_headless(
                 engine.handle_event(event);
             }
             AppEvent::StreamError(error) => {
+                last_call_text.clear();
                 engine.handle_event(AppEvent::StreamError(error.clone()));
                 eprintln!("Error: {}", error);
 
@@ -792,6 +819,7 @@ pub async fn run_headless(
                 break;
             }
             AppEvent::StreamCancelled => {
+                last_call_text.clear();
                 engine.handle_event(AppEvent::StreamCancelled);
                 // Stopped for the time budget: `StreamCompleted` sends the
                 // last pass.
@@ -962,10 +990,12 @@ pub async fn run_pipe(
     run_headless(engine, event_rx, input).await
 }
 
+mod announced_step;
 mod answer_file;
 mod recovery;
 mod tool_format;
 
+use announced_step::{ANNOUNCED_STEP_NUDGE, MAX_ANNOUNCED_STEP_NUDGES, announces_untaken_step};
 use answer_file::*;
 use recovery::*;
 use tool_format::*;

@@ -381,6 +381,14 @@ impl HeadlessRunner {
         TurnBudget::run_share(turns, total, spent).with_deadline(deadline)
     }
 
+    /// Whether a follow-up pass would still get a tool turn: an uncapped
+    /// run always does, a capped one until it has spent `max_agent_turns`
+    /// plus [`FINAL_PASS_TOOL_TURNS`].
+    pub(super) fn has_tool_turns_left(&self) -> bool {
+        let total = self.execution_settings.max_agent_turns as usize;
+        total == 0 || self.tool_turns_spent < total + FINAL_PASS_TOOL_TURNS
+    }
+
     fn spawn_turn(&mut self, input: TurnInput) {
         self.in_tool_turn = false;
         #[cfg(test)]

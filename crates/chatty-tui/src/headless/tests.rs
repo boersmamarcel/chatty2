@@ -1988,4 +1988,87 @@ mod runner {
             inputs.lock().unwrap()
         );
     }
+
+    // -------------------------------------------------------------------
+    // A turn that announces its next step and ends without taking it.
+    // -------------------------------------------------------------------
+
+    /// A turn that reads a file and then ends on `closing` with no tool call.
+    fn read_then_say_turn(closing: &str) -> Scenario {
+        Scenario {
+            name: "read_then_say",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Let me read the module.".into())),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_read".into(),
+                    name: "read_file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_read".into(),
+                    arguments: r#"{"path":"src/lib.rs"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_read".into(),
+                    result: "fn f() {}".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text(closing.to_string())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn an_announced_but_untaken_step_gets_a_continue_nudge() {
+        let (runner, event_rx, started, _workspace) = scripted_runner(vec![
+            read_then_say_turn("I found the root cause. Let me confirm and apply the fix."),
+            answer_turn("Fixed the bug and the tests pass."),
+            answer_turn("never reached"),
+        ])
+        .await;
+        let inputs = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2, "the turn, then one nudge");
+        assert_eq!(inputs.lock().unwrap()[1], ANNOUNCED_STEP_NUDGE);
+    }
+
+    #[tokio::test]
+    async fn announced_step_nudges_are_bounded() {
+        let mut turns: Vec<Scenario> = (0..MAX_ANNOUNCED_STEP_NUDGES + 2)
+            .map(|_| answer_turn("Let me check when do_query() is called:"))
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + MAX_ANNOUNCED_STEP_NUDGES,
+            "the first turn plus the bounded nudges"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closing_line_or_an_announcement_before_a_tool_call_is_not_nudged() {
+        for closing in [
+            "Fixed the bug; the tests pass. Let me know if you want more.",
+            "Fixed the bug; the tests pass.",
+        ] {
+            let (runner, event_rx, started, _workspace) =
+                scripted_runner(vec![read_then_say_turn(closing), answer_turn("never")]).await;
+
+            run_headless(runner, event_rx, CODING_TASK.to_string())
+                .await
+                .expect("the run exits 0");
+
+            assert_eq!(*started.lock().unwrap(), 1, "{closing}");
+        }
+    }
 }
