@@ -50,6 +50,9 @@ pub struct TerminalSettings {
     /// What the eye icon on a terminal tab does (AGE-583): ask each time, or
     /// share at a remembered level without asking.
     pub share_default: TerminalShareDefault,
+    /// Attach a snapshot of the terminal the dock shows to each message
+    /// when it changed (AGE-587). On by default.
+    pub auto_attach_context: bool,
 }
 
 /// "When sharing a terminal" (AGE-583): the level the share dialog's
@@ -75,6 +78,7 @@ impl Default for TerminalSettings {
             scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK,
             dock_height: DEFAULT_TERMINAL_DOCK_HEIGHT,
             share_default: TerminalShareDefault::Ask,
+            auto_attach_context: true,
         }
     }
 }
@@ -118,6 +122,7 @@ mod tests {
             DEFAULT_TERMINAL_SCROLLBACK
         );
         assert_eq!(loaded.terminal.share_default, TerminalShareDefault::Ask);
+        assert!(loaded.terminal.auto_attach_context, "on by default");
     }
 
     /// The remembered share level round-trips in snake_case.

@@ -100,6 +100,18 @@ pub enum TerminalDockEvent {
     Hidden,
 }
 
+/// Where a message's terminal snapshot comes from; see
+/// [`TerminalDock::context_source`].
+pub struct ContextSource {
+    pub handle: Arc<TerminalHandle>,
+    /// The tab's name as the strip shows it.
+    pub tab: String,
+    pub cwd: Option<PathBuf>,
+    /// The agent's recent commands by id (the Agent tab; empty otherwise):
+    /// its shell records the runner line, not the command.
+    pub agent_commands: Vec<(String, String)>,
+}
+
 /// Payload of a tab being dragged to a new place in the strip.
 #[derive(Clone)]
 pub struct DraggedTerminalTab {
@@ -448,6 +460,51 @@ impl TerminalDock {
             return self.agent.view.as_ref();
         }
         self.tabs.get(self.active).map(|tab| &tab.view)
+    }
+
+    /// The terminal a message's snapshot is read from (AGE-587): the tab on
+    /// screen, while the dock is open and the agent may read it — the Agent
+    /// tab always, a human tab only once shared — with its name and
+    /// directory. Never a terminal at a hidden-input prompt.
+    pub fn context_source(&self, cx: &App) -> Option<ContextSource> {
+        if !self.open {
+            return None;
+        }
+        let (view, tab, cwd, agent_commands) = if self.agent_active {
+            let view = self.agent.view.as_ref()?;
+            let cwd = view.read(cx).handle().current_dir().or_else(|| {
+                self.agent
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.workspace_dir().map(PathBuf::from))
+            });
+            (view, "Agent".to_string(), cwd, self.agent_commands())
+        } else {
+            let tab = self.tabs.get(self.active)?;
+            if !self.registry.access(&tab.registry_id).can_read() {
+                return None;
+            }
+            let cwd = tab.live_cwd.clone().unwrap_or_else(|| tab.cwd.clone());
+            (&tab.view, tab.title(), Some(cwd), Vec::new())
+        };
+        let handle = view.read(cx).handle().clone();
+        if handle.input_hidden() == Some(true) {
+            return None;
+        }
+        Some(ContextSource {
+            handle,
+            tab,
+            cwd,
+            agent_commands,
+        })
+    }
+
+    fn agent_commands(&self) -> Vec<(String, String)> {
+        self.agent
+            .session
+            .as_ref()
+            .map(|session| session.agent_commands())
+            .unwrap_or_default()
     }
 
     /// Tab ids in strip order.

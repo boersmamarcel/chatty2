@@ -28,6 +28,7 @@ use crate::assets::CustomIcon;
 use crate::settings::models::providers_store::ProviderType;
 
 use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
+use super::super::terminal::context::render_context_chip;
 use super::ThumbnailCache;
 use super::at_mention::{at_menu_items_for, render_at_menu};
 use super::slash::{render_slash_menu, slash_menu_items_with_skills};
@@ -160,6 +161,8 @@ impl RenderOnce for ChatInput {
         let supports_pdf = self.state.read(cx).supports_pdf;
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
+        let terminal_context = self.state.read(cx).terminal_context().cloned();
+        let state_for_terminal_context = self.state.clone();
         let is_streaming = self.state.read(cx).is_streaming();
 
         // Read thumbnail cache (for PDF previews)
@@ -730,6 +733,21 @@ impl RenderOnce for ChatInput {
                                             },
                                         )),
                                 )
+                            })
+                            .when_some(terminal_context, |d, context| {
+                                let state = state_for_terminal_context.clone();
+                                d.child(div().flex().flex_row().px_2().mt_2().child(
+                                    render_context_chip(
+                                        "composer-terminal-context",
+                                        &context,
+                                        Some(std::rc::Rc::new(move |cx: &mut App| {
+                                            state.update(cx, |state, cx| {
+                                                state.remove_terminal_context(cx)
+                                            });
+                                        })),
+                                        cx,
+                                    ),
+                                ))
                             }),
                     ),
                     ),

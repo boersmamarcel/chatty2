@@ -764,6 +764,15 @@ where
         "render_message: deciding markdown path"
     );
 
+    // A user message's terminal snapshot (AGE-587) shows as a chip under
+    // the text, not as the block itself.
+    let (user_text, terminal_context) = match msg.role {
+        MessageRole::User => {
+            chatty_core::services::terminal::context::split_terminal_context(&msg.content)
+        }
+        MessageRole::Assistant => (msg.content.as_str(), None),
+    };
+
     let final_container = if should_interleave {
         // Render interleaved content (text mixed with tool calls)
         render_interleaved_content(
@@ -781,7 +790,7 @@ where
     } else if msg.is_markdown {
         // Markdown content — use cache for finalized, streaming parse for streaming
         let content_elements = render_text_segment_cached(
-            &msg.content,
+            user_text,
             index,
             msg.is_markdown,
             msg.is_streaming,
@@ -792,7 +801,18 @@ where
         container.children(content_elements)
     } else {
         // Non-markdown plain text
-        container.child(msg.content.clone())
+        container.child(user_text.to_string())
+    };
+    let final_container = match terminal_context {
+        Some(context) => final_container.child(div().flex().flex_row().mt_2().child(
+            super::terminal::context::render_context_chip(
+                format!("msg-{index}-terminal-context"),
+                &context,
+                None,
+                cx,
+            ),
+        )),
+        None => final_container,
     };
 
     // Wrap with action buttons for finalized assistant messages

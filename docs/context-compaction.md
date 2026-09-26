@@ -58,6 +58,7 @@ whole for as long as possible.
 
 | # | Stage | Effect |
 |---|-------|--------|
+| 0 | Terminal context | Stub every `<terminal_context>` snapshot a desktop user turn carried (AGE-587) but the newest one: `[older terminal snapshot of "…" removed to save context]` |
 | 1 | Cap | Stub every tool result over 8 KB outside the tail (`[tool result truncated — N chars]` plus a 200-char preview) |
 | 2 | Compact | Replace every tool result outside the tail with a one-liner (`[compacted] …`, 120 chars) |
 | 3 | Snip | Keep the first 2 and last 8 messages, replace the middle with one marker; both ends of the cut move off a tool round-trip first (see below) |

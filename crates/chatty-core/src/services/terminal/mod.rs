@@ -9,6 +9,7 @@
 //! without breaking a match elsewhere. Writing to a terminal (`run`) is
 //! deliberately not part of the trait yet.
 
+pub mod context;
 mod tmux;
 
 use std::sync::Arc;

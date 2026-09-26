@@ -592,13 +592,19 @@ impl ChattyApp {
                 ChatInputEvent::Send {
                     message,
                     attachments,
+                    terminal_context,
                 } => {
                     debug!(message = %message, attachment_count = attachments.len(), "ChatInputEvent::Send received");
                     // Intercept arg-based slash commands before sending to LLM.
                     if app.try_handle_arg_slash_command(message.trim(), cx) {
                         return;
                     }
-                    app.send_message(message.clone(), attachments.clone(), cx);
+                    app.send_message(
+                        message.clone(),
+                        attachments.clone(),
+                        terminal_context.clone(),
+                        cx,
+                    );
                 }
                 ChatInputEvent::ModelChanged(model_id) => {
                     debug!(model_id = %model_id, "ChatInputEvent::ModelChanged received");

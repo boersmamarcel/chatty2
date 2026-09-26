@@ -254,6 +254,19 @@ pub fn agent_command_id(link_uri: &str) -> Option<&str> {
     link_uri.strip_prefix(AGENT_LINK_PREFIX)
 }
 
+/// The id of the agent command a typed runner line starts, the line the
+/// session types for it (` . "$__chatty_r" <id> <column>`), as the
+/// terminal's command marks record it: the record's text is that line, not
+/// the command, which [`ShellSession::agent_commands`] has by this id
+/// (AGE-587). `None` for a command the human typed.
+pub fn runner_command_id(command_text: &str) -> Option<&str> {
+    command_text
+        .trim()
+        .strip_prefix(". \"$__chatty_r\" ")?
+        .split_whitespace()
+        .next()
+}
+
 /// How many recent agent commands [`ShellSession::agent_commands`] keeps.
 const AGENT_HISTORY: usize = 200;
 
