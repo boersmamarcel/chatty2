@@ -250,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_saves_all_succeed_and_last_call_wins() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
+        let path = dir.path().join("general_settings.json");
         let repo = GenericJsonRepository::<u32>::with_path(path.clone());
 
         let saves: Vec<_> = (0..50u32).map(|v| repo.save(v)).collect();
@@ -261,7 +261,7 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
-            .filter(|n| n != "settings.json")
+            .filter(|n| n != "general_settings.json")
             .collect();
         assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
     }
@@ -269,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_list_saves_all_succeed_and_last_call_wins() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("items.json");
+        let path = dir.path().join("models.json");
         let repo = GenericJsonListRepository::<u32>::with_path(path);
 
         let saves: Vec<_> = (0..50u32).map(|v| repo.save_all(vec![v, v])).collect();

@@ -178,7 +178,9 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 - **Single-object files** (`load` / `save`): missing file → `T::default()`.
 - **List files** (`load_all` / `save_all`): missing file → `[]`.
 - **Settings JSON writes** are atomic: pretty-printed JSON to a sibling
-  `*.json.<pid>.tmp`, then rename (`GenericJsonRepository`).
+  `*.json.<pid>.<seq>.tmp`, then rename (`GenericJsonRepository`). Saves of
+  one file are serialized and the newest call wins; an older save that lands
+  late is dropped rather than written over a newer one.
 - Serde field names are snake_case unless a table notes otherwise.
 - `#[serde(skip)]` fields are runtime-only and never written to disk.
 
