@@ -32,6 +32,22 @@ pub fn execution_settings_page() -> SettingPage {
                     )
                     .description("Master toggle for bash shell command execution"),
                     SettingItem::new(
+                        "Enable Terminal Access",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<ExecutionSettingsModel>().terminal_access,
+                            |_val: bool, cx: &mut App| {
+                                execution_settings_controller::toggle_terminal_access(cx);
+                            },
+                        )
+                        .default_value(false),
+                    )
+                    .description(
+                        "Let the agent read your own terminal (your tmux panes) with the \
+                         read-only terminal_read tool, e.g. to ask \"what failed in my \
+                         terminal?\". It sees whatever the pane shows, secrets included. \
+                         Available only while a tmux server is running.",
+                    ),
+                    SettingItem::new(
                         "Enable Git Integration",
                         SettingField::switch(
                             |cx: &App| cx.global::<ExecutionSettingsModel>().git_enabled,

@@ -193,6 +193,7 @@ pub(super) fn narrow_availability(
         daytona: keep(tools.daytona, &["daytona_run"]),
         publish_module: keep(tools.publish_module, &["publish_wasm_module"]),
         ask_user: keep(tools.ask_user, &["ask_user"]),
+        terminal: keep(tools.terminal, &["terminal_read"]),
     }
 }
 
@@ -276,6 +277,7 @@ mod tests {
             daytona: true,
             publish_module: true,
             ask_user: true,
+            terminal: true,
         }
     }
 

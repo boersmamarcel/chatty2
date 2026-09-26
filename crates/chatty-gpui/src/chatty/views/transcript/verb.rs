@@ -62,6 +62,7 @@ fn verb_for(tool_name: &str, display_name: &str, state: &ToolCallState) -> Strin
         "fetch" => ("Fetching", "Fetched"),
         "git_diff" => ("Diffing", "Diffed"),
         "git_status" => ("Checking", "Checked"),
+        "terminal_read" => ("Reading terminal", "Read terminal"),
         // Synthetic rows for the human-takeover handoffs (AGE-156).
         "browser_take_control" => (
             "Taking control of the browser",
@@ -426,6 +427,19 @@ mod tests {
         );
         assert_eq!(label.headline(), "Read docs/poem.md");
         assert!(label.added.is_none());
+    }
+
+    /// The generic fallback turned `terminal_read` into "terminaled read".
+    #[test]
+    fn terminal_read_reads_as_reading_the_terminal() {
+        let label = tool_row_label(
+            "terminal_read",
+            "terminal_read",
+            &ToolCallState::Success,
+            r#"{"lines":80}"#,
+            None,
+        );
+        assert_eq!(label.headline(), "Read terminal");
     }
 
     #[test]

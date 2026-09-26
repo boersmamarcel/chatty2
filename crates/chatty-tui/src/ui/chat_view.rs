@@ -188,6 +188,7 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
                 badge("git", engine.execution_settings.git_enabled),
                 badge("code", engine.execution_settings.execute_code_enabled),
                 badge("docker", engine.execution_settings.docker_code_execution_enabled),
+                badge("terminal", engine.execution_settings.terminal_access),
             ]),
         ),
         welcome_line(

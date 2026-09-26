@@ -352,6 +352,32 @@ pub fn toggle_git(cx: &mut App) {
     .detach();
 }
 
+/// Toggle read-only access to the user's terminal (`terminal_read`,
+/// AGE-577) and persist to disk.
+pub fn toggle_terminal_access(cx: &mut App) {
+    // 1. Apply update immediately (optimistic update)
+    let new_enabled = !cx.global::<ExecutionSettingsModel>().terminal_access;
+    cx.global_mut::<ExecutionSettingsModel>().terminal_access = new_enabled;
+
+    // 2. Get updated state for async save
+    let settings = cx.global::<ExecutionSettingsModel>().clone();
+
+    // 3. Refresh UI immediately (optimistic update)
+    cx.refresh_windows();
+
+    // 4. Notify so the active conversation's agent is rebuilt with the new tool set
+    notify_tool_set_changed(cx);
+
+    // 5. Save async with error handling
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
+}
+
 /// Update the shell timeout in seconds and persist to disk.
 /// Clamps the value to 1–600 seconds.
 pub fn set_timeout_seconds(seconds: u32, cx: &mut App) {

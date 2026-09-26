@@ -69,6 +69,8 @@ pub mod stream_processor;
 /// The team directory: roster, leader role, verification, skill and turn
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
+/// A read-only view of the human's terminals (`terminal_read`, AGE-577).
+pub mod terminal;
 pub mod title_generator;
 /// The model's view of its tool-turn budget and the tool-free wrap-up call
 /// that replaces `MaxTurnsError`.

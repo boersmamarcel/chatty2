@@ -38,7 +38,7 @@ Everything below is off until you switch it on in **Settings → Code Execution*
 2. Turn on **Enable Code Execution**.
 3. Choose an **Approval Mode** — what they mean is on [Security & sandboxing](./security.md).
 
-Optional switches on the same page: **Enable Git Integration** (git tools and the pull request bar), **Enable Browser Tools** with **Allow Browser Access to Private Network**, **Enable Code Execution Tool** with **Enable Docker Fallback** and a **Docker Host** field, plus **Max Agent Turns**, a command **Timeout**, a **Max Output** size and **Network Isolation**. Web access has its own page, **Settings → Internet**, and is on by default.
+Optional switches on the same page: **Enable Terminal Access** (read-only view of your tmux panes, below), **Enable Git Integration** (git tools and the pull request bar), **Enable Browser Tools** with **Allow Browser Access to Private Network**, **Enable Code Execution Tool** with **Enable Docker Fallback** and a **Docker Host** field, plus **Max Agent Turns**, a command **Timeout**, a **Max Output** size and **Network Isolation**. Web access has its own page, **Settings → Internet**, and is on by default.
 
 **Per-chat working directory.** The folder icon in the composer (**Select Working Directory**) overrides the workspace for that conversation; `×` resets it to the global one. The override is saved with the conversation. `/cd <dir>` does the same from the keyboard, and `/add-dir <dir>` widens the workspace by one more directory.
 
@@ -65,6 +65,12 @@ Shell commands run in a persistent session inside the sandbox, with streaming ou
 *Run the test suite, fix whatever fails, and run it again.*
 
 Shell commands and code runs follow your approval mode; sandboxed commands run without prompting under **Auto-approve Sandboxed**.
+
+**Enable Terminal Access** (off by default) lets the agent read your own terminal: the tmux panes you have open, as plain text, through the read-only `terminal_read` tool. It cannot type into them or run anything there. Without a pane named it reads the one you were in last, so after a failing build in another pane you can simply ask:
+
+*What failed in my terminal?*
+
+The agent sees whatever the pane shows, secrets included, so leave it off unless you want this. The tool is only offered while tmux is running; in the terminal interface the group is called `terminal` (`--enable terminal`, or `/tools`).
 
 ### Data and documents
 

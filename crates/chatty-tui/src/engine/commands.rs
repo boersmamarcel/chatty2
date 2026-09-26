@@ -796,6 +796,11 @@ impl ChatEngine {
                 label: "Ask User".to_string(),
                 enabled: es.ask_user_enabled,
             },
+            ToolPickerItem {
+                key: "terminal".to_string(),
+                label: "Terminal Access (read tmux)".to_string(),
+                enabled: es.terminal_access,
+            },
         ];
 
         self.tool_picker = Some(ToolPicker { items, selected: 0 });

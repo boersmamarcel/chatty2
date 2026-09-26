@@ -201,6 +201,7 @@ pub mod search_memory_tool;
 pub mod search_tool;
 pub mod search_web_tool;
 pub mod shell_tool;
+pub mod terminal_read_tool;
 #[cfg(test)]
 pub mod test_helpers;
 #[cfg(feature = "math-render")]
@@ -256,6 +257,7 @@ pub use search_memory_tool::{
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
+pub use terminal_read_tool::TerminalReadTool;
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
 pub use worker_progress::{progress_text_for_event, worker_executable};
@@ -319,6 +321,14 @@ mod gemini_compat_tests {
     async fn daytona_tool_gemini_compat() {
         use crate::tools::daytona_tool::DaytonaTool;
         let tool = DaytonaTool::new("dummy".to_string(), None);
+        check_gemini_compat(rig_agent::tool::tool_definition(&tool));
+    }
+
+    #[tokio::test]
+    async fn terminal_read_tool_gemini_compat() {
+        use crate::services::terminal::TmuxSource;
+        use crate::tools::terminal_read_tool::TerminalReadTool;
+        let tool = TerminalReadTool::new(std::sync::Arc::new(TmuxSource::new()), 1024);
         check_gemini_compat(rig_agent::tool::tool_definition(&tool));
     }
 

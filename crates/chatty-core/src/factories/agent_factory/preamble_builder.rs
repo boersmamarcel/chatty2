@@ -202,6 +202,13 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
         tool_sections
             .push("- **publish_wasm_module** (publish WASM module to hive registry)".to_string());
     }
+    if tools.terminal {
+        tool_sections.push(
+            "- **terminal_read** (read-only view of the user's own terminal; use it when they \
+             refer to their terminal, e.g. \"what failed in my terminal?\")"
+                .to_string(),
+        );
+    }
     if tools.ask_user {
         tool_sections.push(
             "- **ask_user** (ask the user to settle a genuine ambiguity before you commit to an \
@@ -1021,6 +1028,30 @@ mod tests {
             None,
         );
         assert!(result.contains("daytona_run"));
+    }
+
+    #[test]
+    fn terminal_section_only_when_the_tool_is_there() {
+        let build = |tools: &ToolAvailability| {
+            build_preamble(
+                "",
+                &ProviderType::OpenRouter,
+                tools,
+                &None,
+                &McpTools::none(),
+                &[],
+                &[],
+                &AgentRole::default(),
+                None,
+            )
+        };
+        let on = build(&ToolAvailability {
+            terminal: true,
+            ..Default::default()
+        });
+        assert!(on.contains("terminal_read"));
+        assert!(on.contains("read-only"));
+        assert!(!build(&ToolAvailability::default()).contains("terminal_read"));
     }
 
     #[test]

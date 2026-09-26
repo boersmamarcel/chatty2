@@ -40,8 +40,8 @@ use crate::tools::{
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, UpdateTodoTool, VerifyCompletionTool, WriteFileTool,
-    WriteTodosTool,
+    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, UpdateTodoTool, VerifyCompletionTool,
+    WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -1020,6 +1020,25 @@ impl AgentClient {
             None
         };
 
+        // Read-only view of the user's terminal (AGE-577): only when the
+        // setting is on and a source has a terminal to read right now, so a
+        // machine without tmux never shows the model a tool that cannot work.
+        let terminal_read_tool: Option<TerminalReadTool> =
+            match exec_settings.as_ref().filter(|s| s.terminal_access) {
+                Some(settings) => {
+                    let source: std::sync::Arc<dyn crate::services::terminal::TerminalSource> =
+                        std::sync::Arc::new(crate::services::terminal::TmuxSource::new());
+                    if source.list().await.is_empty() {
+                        tracing::info!("Terminal read tool skipped: no tmux terminals to read");
+                        None
+                    } else {
+                        tracing::info!("Terminal read tool enabled");
+                        Some(TerminalReadTool::new(source, settings.max_output_bytes))
+                    }
+                }
+                None => None,
+            };
+
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
             doc_retriever: doc_retriever_tool.is_some(),
@@ -1151,6 +1170,7 @@ impl AgentClient {
             daytona: daytona_tool.is_some(),
             publish_module: false, // set below after publish_module_tool is created
             ask_user: false,       // set below alongside publish_module
+            terminal: terminal_read_tool.is_some(),
         };
 
         // The profile decides what the prompt describes as well as what is
@@ -1375,6 +1395,7 @@ impl AgentClient {
             invoke_agent_tool: invoke_agent_tool,
             publish_module_tool: publish_module_tool,
             ask_user_tool: ask_user_tool,
+            terminal_read_tool: terminal_read_tool,
             load_tools_tool: tool_loader.clone().map(LoadToolsTool::new),
         );
 

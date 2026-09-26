@@ -462,6 +462,7 @@ mod tests {
                 hosted_conversations_enabled: true,
                 tool_loading: Default::default(),
                 ask_user_enabled: true,
+                terminal_access: false,
             },
             extensions: {
                 let mut model = ExtensionsModel::default();

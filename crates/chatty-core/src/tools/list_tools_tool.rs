@@ -437,6 +437,16 @@ impl ListToolsTool {
             });
         }
 
+        if tools.terminal {
+            native_tools.push(ToolInfo {
+                name: "terminal_read".to_string(),
+                description:
+                    "Read the user's own terminal (their tmux panes) as plain text. Read-only."
+                        .to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         // read_skill is always available — it's the on-demand companion to the slim
         // skill descriptions shown in the automatic context block.
         native_tools.push(ToolInfo {
@@ -578,6 +588,7 @@ mod tests {
             daytona: false,
             publish_module: false,
             ask_user: false,
+            terminal: false,
         }
     }
 
@@ -611,6 +622,7 @@ mod tests {
             daytona: true,
             publish_module: true,
             ask_user: true,
+            terminal: true,
         }
     }
 
@@ -759,6 +771,7 @@ mod tests {
             "search_web",
             "browser_use",
             "daytona_run",
+            "terminal_read",
         ];
         for name in &expected {
             assert!(names.contains(&name.to_string()), "missing {name}");
