@@ -16,6 +16,15 @@ Download the latest release from [GitHub Releases](https://github.com/boersmamar
 | Linux (x86_64) | `.AppImage` |
 | Windows (x86_64) | `.exe` installer |
 
+On Linux, make the AppImage executable and run it:
+
+```bash
+chmod +x chatty-linux-x86_64.AppImage
+./chatty-linux-x86_64.AppImage
+```
+
+AppImages need FUSE 2. If it fails with `error loading libfuse.so.2`, install it: `sudo apt install libfuse2t64` on Ubuntu 24.04+, `sudo apt install libfuse2` on Ubuntu 22.04 and Debian, `sudo dnf install fuse-libs` on Fedora. Without FUSE, `./chatty-linux-x86_64.AppImage --appimage-extract-and-run` works too.
+
 Chatty checks for new releases in the background and offers them in the status footer. Details: [Advanced](./advanced.md).
 
 ## 2. Connect a provider and add a model
