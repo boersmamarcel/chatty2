@@ -176,6 +176,9 @@ struct State {
     /// Set once the run's last word is written; later writes are dropped,
     /// so a checkpoint cannot overwrite how the run ended.
     finished: bool,
+    /// Whether a failed write has been reported on stderr; once is enough
+    /// for a path that stays unwritable (a directory that does not exist).
+    warned: bool,
 }
 
 /// The run's totals and, with `--usage-file`, where they go. Cloned into
@@ -200,6 +203,7 @@ impl UsageRecorder {
                 started: Instant::now(),
                 totals: RunTotals::default(),
                 finished: false,
+                warned: false,
             })),
         }
     }
@@ -253,6 +257,15 @@ impl UsageRecorder {
         let report = state.totals.report(exit, duration_ms, &state.model);
         if let Err(error) = write_atomic(&path, &report) {
             tracing::warn!(path = %path.display(), %error, "Could not write the usage file");
+            // Headless and pipe runs log nowhere, so the one place a
+            // caller can see this is stderr; the run itself goes on.
+            if !state.warned {
+                state.warned = true;
+                eprintln!(
+                    "warning: could not write --usage-file {}: {error}",
+                    path.display()
+                );
+            }
         }
     }
 }
@@ -411,6 +424,21 @@ mod tests {
         recorder.finish(RunExit::Completed);
         assert_eq!(read()["exit"], "deadline");
         assert_eq!(read()["tool_calls"], 1);
+    }
+
+    /// A path whose directory does not exist costs the run nothing but the
+    /// file: every write fails quietly and the totals keep counting.
+    #[test]
+    fn an_unwritable_path_does_not_stop_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("usage.json");
+        let recorder = UsageRecorder::new(Some(path.clone()), "m".into());
+        recorder.update(|t| t.tool_calls += 1);
+        recorder.checkpoint();
+        recorder.finish(RunExit::Completed);
+        assert!(!path.exists());
+        assert!(recorder.lock().warned, "the failure was reported once");
+        assert_eq!(recorder.lock().totals.tool_calls, 1);
     }
 
     /// The watcher leaves an ignored signal ignored (`nohup`, a background
