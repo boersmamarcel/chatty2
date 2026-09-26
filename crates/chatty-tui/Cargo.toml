@@ -19,6 +19,9 @@ chatty-protocol-gateway = { path = "../chatty-protocol-gateway", features = ["wo
 # `ProtocolGateway` so it can delegate to `local-agent`, the same way the
 # desktop's module-settings controller does.
 axum = "0.8"
+# `chatty-tui acp` (ADR-0013, AGE-414): the Agent Client Protocol server an
+# editor such as Zed (or Harbor's ACP runner) drives over stdio.
+agent-client-protocol = "2.2"
 
 # LLM framework (needed for rig types used in chatty-core's API)
 rig-core.workspace = true
