@@ -76,8 +76,13 @@ fn printf_shows_up_on_screen_after_a_wakeup() {
 
 #[test]
 fn resize_reaches_the_child() {
-    let (term, events) =
-        TerminalHandle::spawn(sh("printf ready; read _x; tput cols; sleep 5")).unwrap();
+    // ncurses `tput cols` prefers an exported COLUMNS/LINES over the PTY's
+    // TIOCGWINSZ, and the child inherits this process's environment (the
+    // PTY options can only add variables), so clear them in the script.
+    let (term, events) = TerminalHandle::spawn(sh(
+        "unset COLUMNS LINES; printf ready; read _x; tput cols; sleep 5",
+    ))
+    .unwrap();
     wait_until(&term, &events, "ready", |t, _| screen_contains(t, "ready"));
 
     term.resize(40, 10).unwrap();
@@ -126,12 +131,18 @@ fn kill_reports_child_exit_and_leaves_no_process() {
 
 #[test]
 fn drop_kills_the_child() {
-    let (term, events) = TerminalHandle::spawn(sh("printf up; sleep 30")).unwrap();
+    // The shell ignores SIGHUP, so alacritty's own hang-up on PTY drop cannot
+    // end it: only the crate's SIGKILL does. Without it, drop would block in
+    // the PTY's `wait()` for the full minute.
+    let (term, events) = TerminalHandle::spawn(sh("trap '' HUP; printf up; sleep 60")).unwrap();
     let pid = term.pid().unwrap() as i32;
     wait_until(&term, &events, "up", |t, _| screen_contains(t, "up"));
 
+    let start = Instant::now();
     drop(term);
+    let took = start.elapsed();
 
+    assert!(took < Duration::from_secs(10), "drop took {took:?}");
     // Drop joins the PTY thread, which reaps the shell: gone immediately.
     assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err());
 }

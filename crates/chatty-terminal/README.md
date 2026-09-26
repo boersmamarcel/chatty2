@@ -26,4 +26,7 @@ inside the crate, so programs that query the terminal work headless.
 ## Tests
 
 `cargo test -p chatty-terminal` spawns real shells under a PTY (Unix only).
-The Windows ConPTY path is compiled by CI's Windows check but not run.
+The Windows ConPTY path compiles with
+`cargo check --target x86_64-pc-windows-msvc -p chatty-terminal` (verified
+locally). CI's Windows check covers it once chatty-gpui or chatty-tui depend
+on this crate; the Windows runtime is untested.
