@@ -772,6 +772,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
+| `WRITE_SLOTS` | `settings/repositories/generic_json_repository.rs` | `LazyLock<Mutex<HashMap<PathBuf, WriteSlot>>>` | Per settings file, the last save written behind an async lock, so overlapping saves of one file never interleave and an older save never lands over a newer one (AGE-562) |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
 | `LIVE_SANDBOXES` | `sandbox/manager.rs` | `LazyLock<Mutex<HashMap<u64, SandboxMap>>>` | Holds every live `SandboxManager`'s container map so `shutdown_all()` can destroy them at process exit — a manager's `Drop` can only spawn a detached task, which dies with the runtime |
 | `FONTS` | `services/math_renderer_service.rs` | `LazyLock<(Vec<Font>, FontBook)>` | Typst's embedded fonts parsed once per process; every math compile used to re-parse all of them in `MathWorld::new` (AGE-394) |
