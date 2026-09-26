@@ -44,7 +44,9 @@ mod snapshot;
 pub mod tap;
 
 pub use alacritty_terminal;
-pub use commands::{CommandRecord, LAST_COMMAND_OUTPUT_BYTES, LastCommand, MAX_RECORDS};
+pub use commands::{
+    AgentCommand, CommandRecord, LAST_COMMAND_OUTPUT_BYTES, LastCommand, MAX_RECORDS, PromptState,
+};
 pub use marks::{CHATTY_OSC, CleanText, Mark, MarkScanner};
 pub use snapshot::{Region, TerminalText};
 pub use tap::ByteTap;
@@ -465,6 +467,55 @@ impl TerminalHandle {
     /// last [`MAX_RECORDS`]). Empty for a shell without integration.
     pub fn commands(&self) -> Vec<CommandRecord> {
         self.with_commands(|term, commands| commands.records(term))
+    }
+
+    /// Where the shell is, from its OSC 133 marks: at an (empty?) prompt,
+    /// running a command, or without integration (AGE-584).
+    pub fn prompt_state(&self) -> PromptState {
+        self.with_commands(|_, commands| commands.prompt_state())
+    }
+
+    /// Take the next command the shell starts as the agent's (AGE-584):
+    /// recorded [`CommandRecord::by_agent`], its output kept as clean text
+    /// from the byte stream. Only at an empty prompt; otherwise returns what
+    /// is in the way and changes nothing. Write the command right after,
+    /// follow it with [`agent_command`](Self::agent_command) and finish with
+    /// [`end_agent_command`](Self::end_agent_command).
+    pub fn begin_agent_command(&self) -> Result<(), PromptState> {
+        self.with_commands(|_, commands| commands.begin_agent_command())
+    }
+
+    /// The agent's command, as far as it got.
+    pub fn agent_command(&self) -> AgentCommand {
+        self.with_commands(|_, commands| commands.agent_command())
+    }
+
+    /// Stop following the agent's command; returns its output so far (all
+    /// of it once finished), or `None` if it never started.
+    pub fn end_agent_command(&self) -> Option<String> {
+        self.with_commands(|_, commands| commands.end_agent_command())
+    }
+
+    /// Grid lines (negative: scrollback) holding command lines the agent
+    /// typed, for an attribution marker. Empty on the alternate screen.
+    pub fn agent_command_lines(&self) -> Vec<alacritty_terminal::index::Line> {
+        self.with_commands(|term, commands| {
+            if term
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+            {
+                return Vec::new();
+            }
+            commands.agent_lines(term)
+        })
+    }
+
+    /// Whether the program at the prompt asked for bracketed paste.
+    pub fn bracketed_paste(&self) -> bool {
+        self.with_term(|term| {
+            term.mode()
+                .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        })
     }
 
     /// Run `f` on the terminal and the command tracker once both have

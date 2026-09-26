@@ -67,6 +67,7 @@ fn verb_for(tool_name: &str, display_name: &str, state: &ToolCallState) -> Strin
         "git_diff" => ("Diffing", "Diffed"),
         "git_status" => ("Checking", "Checked"),
         "terminal_read" => ("Reading terminal", "Read terminal"),
+        "terminal_run" => ("Running in your terminal", "Ran in your terminal"),
         // Synthetic rows for the human-takeover handoffs (AGE-156).
         "browser_take_control" => (
             "Taking control of the browser",
@@ -480,6 +481,19 @@ mod tests {
             Some(&output),
         );
         assert_eq!(label.headline(), "Read terminal · bash — chatty2 · 3 lines");
+    }
+
+    /// AGE-584: a command run in the human's terminal says where it ran.
+    #[test]
+    fn terminal_run_reads_as_running_in_your_terminal() {
+        let label = tool_row_label(
+            "terminal_run",
+            "terminal_run",
+            &ToolCallState::Success,
+            r#"{"terminal":"term-2","command":"npm run dev"}"#,
+            None,
+        );
+        assert_eq!(label.headline(), "Ran in your terminal npm run dev");
     }
 
     #[test]

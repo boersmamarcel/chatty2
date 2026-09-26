@@ -6,13 +6,16 @@
 //! desktop's embedded terminals are a second one (AGE-583, in chatty-gpui),
 //! and [`TerminalSources`] lists and reads several as one. The enums are
 //! `#[non_exhaustive]` so later regions (the last command) and backends land
-//! without breaking a match elsewhere. Writing to a terminal (`run`) is
-//! deliberately not part of the trait yet.
+//! without breaking a match elsewhere. Running a command in a terminal
+//! (`terminal_run`, AGE-584) is [`TerminalSource::begin_run`] then
+//! [`TerminalSource::run`]; only the desktop's embedded tabs shared as
+//! [`TerminalAccess::ReadRun`] take one, every other source refuses.
 
 pub mod context;
 mod tmux;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -102,6 +105,25 @@ pub struct TerminalText {
     pub rows: u16,
 }
 
+/// What [`TerminalSource::run`] returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRun {
+    /// The command line as the shell showed it when it started.
+    pub command: String,
+    /// Its output as plain text, read from the byte stream (so not wrapped
+    /// at the terminal's width); partial when it has not finished.
+    pub output: String,
+    /// Whether it ended within the timeout. When not, it is still running
+    /// in the terminal; nothing was stopped.
+    pub finished: bool,
+    /// Its exit code, once finished (`None` if the shell sent none).
+    pub exit_code: Option<i32>,
+}
+
+/// Why a source that only reads refuses [`TerminalSource::begin_run`].
+pub const READ_ONLY_SOURCE_MESSAGE: &str = "commands can only be run in a terminal tab of chatty's own terminal dock; tmux panes are \
+     read only";
+
 /// A backend that can list and read terminals.
 #[async_trait]
 pub trait TerminalSource: Send + Sync {
@@ -112,6 +134,30 @@ pub trait TerminalSource: Send + Sync {
 
     /// Read `region` of terminal `id`.
     async fn read(&self, id: &str, region: Region) -> anyhow::Result<TerminalText>;
+
+    /// Reserve terminal `id` for one [`run`](Self::run) (AGE-584): refuse
+    /// now what `run` would refuse (not shared as read + run, no shell
+    /// integration, not at an empty prompt after a short wait, a run already
+    /// pending there), so the human is never asked to approve a command
+    /// that cannot run. `Ok` holds the terminal until [`end_run`](Self::end_run).
+    async fn begin_run(&self, id: &str) -> anyhow::Result<()> {
+        let _ = id;
+        anyhow::bail!(READ_ONLY_SOURCE_MESSAGE)
+    }
+
+    /// Type `command` (one line) at terminal `id`'s prompt and wait up to
+    /// `timeout` for it to finish. Needs a [`begin_run`](Self::begin_run)
+    /// first; checks the prompt again right before typing and never types
+    /// into a running program.
+    async fn run(&self, id: &str, command: &str, timeout: Duration) -> anyhow::Result<TerminalRun> {
+        let _ = (id, command, timeout);
+        anyhow::bail!(READ_ONLY_SOURCE_MESSAGE)
+    }
+
+    /// Release what [`begin_run`](Self::begin_run) reserved.
+    fn end_run(&self, id: &str) {
+        let _ = id;
+    }
 }
 
 /// What `read` fails with when the terminal is at a password prompt (echo
@@ -149,6 +195,40 @@ impl TerminalSource for TerminalSources {
             }
         }
         anyhow::bail!("no terminal `{id}`; `list: true` lists the terminals")
+    }
+
+    async fn begin_run(&self, id: &str) -> anyhow::Result<()> {
+        match self.source_of(id).await {
+            Some(source) => source.begin_run(id).await,
+            None => {
+                anyhow::bail!("no terminal `{id}`; `terminal_read` with `list: true` lists them")
+            }
+        }
+    }
+
+    async fn run(&self, id: &str, command: &str, timeout: Duration) -> anyhow::Result<TerminalRun> {
+        match self.source_of(id).await {
+            Some(source) => source.run(id, command, timeout).await,
+            None => anyhow::bail!("no terminal `{id}`"),
+        }
+    }
+
+    fn end_run(&self, id: &str) {
+        for source in &self.0 {
+            source.end_run(id);
+        }
+    }
+}
+
+impl TerminalSources {
+    /// The source that lists `id`.
+    async fn source_of(&self, id: &str) -> Option<&Arc<dyn TerminalSource>> {
+        for source in &self.0 {
+            if source.list().await.iter().any(|t| t.id == id) {
+                return Some(source);
+            }
+        }
+        None
     }
 }
 

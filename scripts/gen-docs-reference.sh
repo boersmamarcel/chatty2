@@ -84,6 +84,7 @@ tools = [
     ("create_chart", "viz", "chart_tool.rs", "Registered via tool_collector"),
     ("ask_user", "agent", "ask_user_tool.rs", "Clarifying questions; answered in the UI"),
     ("terminal_read", "terminal", "terminal_read_tool.rs", "terminal_access; read-only view of the user's tmux panes"),
+    ("terminal_run", "terminal", "terminal_run_tool.rs", "Desktop only; a dock tab shared as Read + run; every command approved by the human, auto-approve never applies"),
     ("browser_navigate", "web", "browser_tools.rs", "feature: browser; localhost/file:// by default"),
     ("browser_snapshot", "web", "browser_tools.rs", "feature: browser"),
     ("browser_screenshot", "web", "browser_tools.rs", "feature: browser; PNG via add_attachment path"),

@@ -209,6 +209,14 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
                 .to_string(),
         );
     }
+    if tools.terminal_run {
+        tool_sections.push(
+            "- **terminal_run** (run one command in a terminal tab the user shared as Read + run: \
+             their own shell, not the sandbox, and every command waits for their approval; use \
+             it only when they ask for that tab, otherwise use your own shell)"
+                .to_string(),
+        );
+    }
     if tools.ask_user {
         tool_sections.push(
             "- **ask_user** (ask the user to settle a genuine ambiguity before you commit to an \
@@ -1052,6 +1060,14 @@ mod tests {
         assert!(on.contains("terminal_read"));
         assert!(on.contains("read-only"));
         assert!(!build(&ToolAvailability::default()).contains("terminal_read"));
+        assert!(!on.contains("terminal_run"));
+        let run = build(&ToolAvailability {
+            terminal: true,
+            terminal_run: true,
+            ..Default::default()
+        });
+        assert!(run.contains("terminal_run"));
+        assert!(run.contains("not the sandbox"));
     }
 
     #[test]

@@ -82,6 +82,24 @@ A tab you haven't shared is still listed to the agent (its name and folder), so 
 
 Every read shows up in the conversation as a tool row such as *Read terminal · bash — chatty2 · 42 lines*, naming the tab and how many lines the agent was given; the row's copy button gives the exact output. The tab it read lights up for a moment.
 
+### Letting the agent run a command in your terminal
+
+The agent normally runs commands in its own shell. When you want one to run in a tab of yours instead (your ssh session, your activated virtualenv, the dev server you are watching), share that tab as **Read + run** and ask for it, for example *Restart the dev server in my terminal*.
+
+A tab shared this way is your own shell: it is not sandboxed and it holds your credentials. So every command the agent wants to run there first shows an approval card with the exact command, the tab's name and folder, and the line **Runs in your shell, not the sandbox.** Nothing is typed until you click **Approve**; **Deny** tells the agent no. This card always appears, one per command, whatever the approval mode under **Settings → Code Execution**: auto-approve never applies to your terminals.
+
+Once approved, the command is typed at your prompt and appears in the tab as if you had typed it, marked with the same small blue bar in the left margin as the agent's commands in the Agent tab (the margin appears in your tab with the agent's first command there). The agent gets the command's output and exit code when it finishes. A command that is still running after two minutes (a server, say) keeps running; the agent is told so and can read the tab later.
+
+The agent is refused, and nothing is typed, when:
+
+- the tab is shared **Read only**: it is told to ask you to share the tab as Read + run;
+- you are typing at the prompt, or a program is running in the tab (`vim`, a Python prompt, a password prompt, a running build): it waits two seconds, then is told what is in the way;
+- the tab's shell has no shell integration (anything other than bash or zsh, such as fish): without it the agent can't tell when a command finishes, so it doesn't type into the tab at all;
+- the command has more than one line: only single-line commands are typed at your prompt;
+- another command of the agent's is already waiting or running in that tab.
+
+tmux panes outside Chatty are only ever read, never run in.
+
 ## The terminal goes with your message
 
 While the dock is open on a terminal the agent may read (the Agent tab, or a tab you shared), each message you send carries a short snapshot of it, so *why did that fail?* works without pointing the agent at the terminal. A chip above the message box says what goes along, for example *Terminal: bash — chatty2 · 32 lines*:

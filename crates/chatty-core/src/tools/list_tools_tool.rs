@@ -447,6 +447,14 @@ impl ListToolsTool {
             });
         }
 
+        if tools.terminal_run {
+            native_tools.push(ToolInfo {
+                name: "terminal_run".to_string(),
+                description: "Run one command in a terminal tab the user shared as Read + run: their own shell, not the sandbox. Every command needs their approval, even under auto-approve.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         // read_skill is always available — it's the on-demand companion to the slim
         // skill descriptions shown in the automatic context block.
         native_tools.push(ToolInfo {
@@ -589,6 +597,7 @@ mod tests {
             publish_module: false,
             ask_user: false,
             terminal: false,
+            terminal_run: false,
         }
     }
 
@@ -623,6 +632,7 @@ mod tests {
             publish_module: true,
             ask_user: true,
             terminal: true,
+            terminal_run: true,
         }
     }
 
@@ -772,6 +782,7 @@ mod tests {
             "browser_use",
             "daytona_run",
             "terminal_read",
+            "terminal_run",
         ];
         for name in &expected {
             assert!(names.contains(&name.to_string()), "missing {name}");

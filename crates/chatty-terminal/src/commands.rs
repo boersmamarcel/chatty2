@@ -64,6 +64,11 @@ pub struct CommandRecord {
     pub finished_at: Option<SystemTime>,
     /// Some of the output's lines have left the terminal's scrollback.
     pub truncated: bool,
+    /// Line (see the module docs) the command was typed on: the cursor's
+    /// line at the `B` mark.
+    pub command_line: u64,
+    /// The agent typed this command (AGE-584), not the human.
+    pub by_agent: bool,
     output_start_column: usize,
     end_column: usize,
 }
@@ -84,6 +89,39 @@ enum Phase {
     Typing,
 }
 
+/// Where an integrated shell is right now, from its marks (AGE-584).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptState {
+    /// No OSC 133 mark was ever seen: whether a command runs or ends can't
+    /// be told.
+    NoIntegration,
+    /// At the prompt, reading a command line; `typed` is what is on it
+    /// (blank at an empty prompt).
+    AtPrompt { typed: String },
+    /// A command runs; `command` is its text (empty when none was seen).
+    Running { command: String },
+    /// Printing a prompt, or between a command's end and the next prompt.
+    Between,
+}
+
+/// The command the agent typed at the prompt (AGE-584), see
+/// [`CommandTracker::begin_agent_command`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentCommand {
+    /// Nothing was begun, or it was ended.
+    Idle,
+    /// Begun; the shell has not started a command since.
+    Waiting,
+    /// Started (`C` seen); `command` is the command line that ran.
+    Running { command: String },
+    /// Ended (`D` seen); `output` is its clean text from the byte stream.
+    Finished {
+        command: String,
+        exit_code: Option<i32>,
+        output: String,
+    },
+}
+
 pub(crate) struct CommandTracker {
     scanner: MarkScanner,
     shadow: Term<VoidListener>,
@@ -94,6 +132,11 @@ pub(crate) struct CommandTracker {
     records: VecDeque<CommandRecord>,
     /// Some OSC 133 mark was seen: the shell is integrated.
     integrated: bool,
+    /// The cursor's line at the last `B` mark.
+    input_line: u64,
+    /// The agent's command, whose output is kept from the byte stream
+    /// while it runs.
+    agent: AgentCommand,
 }
 
 impl CommandTracker {
@@ -110,6 +153,8 @@ impl CommandTracker {
             phase: Phase::Idle,
             records: VecDeque::new(),
             integrated: false,
+            input_line: 0,
+            agent: AgentCommand::Idle,
         }
     }
 
@@ -161,27 +206,47 @@ impl CommandTracker {
     }
 
     fn on_mark(&mut self, mark: Mark) {
-        let text = self.scanner.text_mut();
+        // While the agent's command runs its output is being kept: marks a
+        // program inside it prints (a nested integrated shell) must not
+        // reset the text.
+        let capturing = matches!(self.agent, AgentCommand::Running { .. });
         match mark {
             Mark::PromptStart => {
                 self.integrated = true;
                 self.phase = Phase::Prompt;
-                // Keep the prompt, to know where the command line starts.
-                text.set_enabled(false);
-                text.set_enabled(true);
+                if !capturing {
+                    // Keep the prompt, to know where the command line starts.
+                    let text = self.scanner.text_mut();
+                    text.set_enabled(false);
+                    text.set_enabled(true);
+                }
             }
             Mark::CommandStart => {
                 self.integrated = true;
                 self.phase = Phase::Typing;
-                // Keep what is typed from here, starting after the prompt:
-                // line editing redraws relative to the prompt's width.
-                let shown = text.take();
-                let width = shown.rsplit('\n').next().unwrap_or("").chars().count();
-                text.set_enabled(true);
-                text.move_to_column(width);
+                self.input_line = self.cursor().0;
+                if !capturing {
+                    // Keep what is typed from here, starting after the
+                    // prompt: line editing redraws relative to its width.
+                    let text = self.scanner.text_mut();
+                    let shown = text.take();
+                    let width = shown.rsplit('\n').next().unwrap_or("").chars().count();
+                    text.set_enabled(true);
+                    text.move_to_column(width);
+                }
             }
             Mark::OutputStart => {
                 self.integrated = true;
+                // A second `C` before `D` (bash shows `PS0` once per command
+                // of a multi-line command line) belongs to the same command.
+                if self.running().is_some() {
+                    if !capturing {
+                        self.scanner.text_mut().set_enabled(false);
+                    }
+                    self.phase = Phase::Idle;
+                    return;
+                }
+                let text = self.scanner.text_mut();
                 let typed = if self.phase == Phase::Typing {
                     text.take()
                 } else {
@@ -189,35 +254,49 @@ impl CommandTracker {
                 };
                 text.set_enabled(false);
                 self.phase = Phase::Idle;
-                // A second `C` before `D` (bash shows `PS0` once per command
-                // of a multi-line command line) belongs to the same command.
-                if self.running().is_some() {
-                    return;
-                }
                 let (line, column) = self.cursor();
                 if self.records.len() == MAX_RECORDS {
                     self.records.pop_front();
                 }
+                let by_agent = self.agent == AgentCommand::Waiting;
+                let command_text = typed.trim().to_string();
+                if by_agent {
+                    self.agent = AgentCommand::Running {
+                        command: command_text.clone(),
+                    };
+                    self.scanner.text_mut().set_enabled(true);
+                }
                 self.records.push_back(CommandRecord {
-                    command_text: typed.trim().to_string(),
+                    command_text,
                     output_start_line: line,
                     end_line: None,
                     exit_code: None,
                     started_at: SystemTime::now(),
                     finished_at: None,
                     truncated: false,
+                    command_line: self.input_line,
+                    by_agent,
                     output_start_column: column,
                     end_column: 0,
                 });
             }
             Mark::CommandEnd { exit_code } => {
                 self.integrated = true;
-                text.set_enabled(false);
                 self.phase = Phase::Idle;
                 // `D` also comes at prompts where nothing ran (an empty
                 // line, the first prompt); only a running command ends.
                 if self.running().is_none() {
+                    self.scanner.text_mut().set_enabled(false);
                     return;
+                }
+                let output = self.scanner.text_mut().take();
+                self.scanner.text_mut().set_enabled(false);
+                if let AgentCommand::Running { command } = &self.agent {
+                    self.agent = AgentCommand::Finished {
+                        command: command.clone(),
+                        exit_code,
+                        output: output.trim_end().to_string(),
+                    };
                 }
                 let (line, column) = self.cursor();
                 if let Some(record) = self.running() {
@@ -229,6 +308,71 @@ impl CommandTracker {
             }
             Mark::Private(_) => {}
         }
+    }
+
+    /// Where the shell is now.
+    pub(crate) fn prompt_state(&self) -> PromptState {
+        if !self.integrated {
+            return PromptState::NoIntegration;
+        }
+        match self.phase {
+            Phase::Typing => PromptState::AtPrompt {
+                typed: self.scanner.text().text().trim().to_string(),
+            },
+            Phase::Prompt => PromptState::Between,
+            Phase::Idle => match self.records.back().filter(|r| r.is_running()) {
+                Some(record) => PromptState::Running {
+                    command: record.command_text.clone(),
+                },
+                None => PromptState::Between,
+            },
+        }
+    }
+
+    /// Take the next command the shell starts as the agent's: it is
+    /// recorded `by_agent` and its output kept as clean text from the byte
+    /// stream until it ends. Only at an empty prompt; anything else is
+    /// returned as what is in the way. Write the command right after.
+    pub(crate) fn begin_agent_command(&mut self) -> Result<(), PromptState> {
+        match self.prompt_state() {
+            PromptState::AtPrompt { typed } if typed.is_empty() => {
+                self.agent = AgentCommand::Waiting;
+                Ok(())
+            }
+            other => Err(other),
+        }
+    }
+
+    /// The agent's command, as far as it got.
+    pub(crate) fn agent_command(&self) -> AgentCommand {
+        self.agent.clone()
+    }
+
+    /// Stop following the agent's command (it finished, or the caller gave
+    /// up waiting): returns the output kept so far, if it had started.
+    pub(crate) fn end_agent_command(&mut self) -> Option<String> {
+        let agent = std::mem::replace(&mut self.agent, AgentCommand::Idle);
+        match agent {
+            AgentCommand::Running { .. } => {
+                let text = self.scanner.text_mut();
+                let output = text.take();
+                text.set_enabled(false);
+                Some(output.trim_end().to_string())
+            }
+            AgentCommand::Finished { output, .. } => Some(output),
+            AgentCommand::Idle | AgentCommand::Waiting => None,
+        }
+    }
+
+    /// Grid lines (negative: scrollback) of the command lines the agent
+    /// typed that `term` still keeps, for an attribution marker.
+    pub(crate) fn agent_lines<T>(&self, term: &Term<T>) -> Vec<Line> {
+        let oldest = self.oldest_line(term);
+        self.records
+            .iter()
+            .filter(|r| r.by_agent && r.command_line as i64 >= oldest)
+            .map(|r| Line((r.command_line as i64 - self.scrolled as i64) as i32))
+            .collect()
     }
 
     /// Resize the real terminal and the shadow together. Call with the
@@ -445,6 +589,96 @@ mod tests {
             .map(|r| (r.command_text.as_str(), r.exit_code))
             .collect();
         assert_eq!(got, vec![("ls", Some(0)), ("false", Some(1))]);
+    }
+
+    #[test]
+    fn prompt_state_follows_the_marks() {
+        let mut t = tracker();
+        assert_eq!(t.prompt_state(), PromptState::NoIntegration);
+        t.feed(b"\x1b]133;A\x07$ ");
+        assert_eq!(t.prompt_state(), PromptState::Between);
+        t.feed(b"\x1b]133;B\x07");
+        let empty = PromptState::AtPrompt {
+            typed: String::new(),
+        };
+        assert_eq!(t.prompt_state(), empty);
+        t.feed(b"vi");
+        assert_eq!(
+            t.prompt_state(),
+            PromptState::AtPrompt { typed: "vi".into() }
+        );
+        // Erased again (readline: backspace, erase to end of line).
+        t.feed(b"\x08\x08\x1b[K");
+        assert_eq!(t.prompt_state(), empty);
+        t.feed(b"vim\r\n\x1b]133;C\x07");
+        assert_eq!(
+            t.prompt_state(),
+            PromptState::Running {
+                command: "vim".into()
+            }
+        );
+        t.feed(b"\x1b]133;D;0\x07");
+        assert_eq!(t.prompt_state(), PromptState::Between);
+    }
+
+    #[test]
+    fn the_agent_command_is_marked_and_its_output_kept() {
+        let mut t = tracker();
+        // Not at a prompt: refused, nothing armed.
+        assert_eq!(t.begin_agent_command(), Err(PromptState::NoIntegration));
+        t.feed(PROMPT);
+        t.feed(b"x");
+        assert_eq!(
+            t.begin_agent_command(),
+            Err(PromptState::AtPrompt { typed: "x".into() })
+        );
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+        t.feed(b"\x08\x1b[K");
+
+        t.begin_agent_command().unwrap();
+        assert_eq!(t.agent_command(), AgentCommand::Waiting);
+        t.feed(b"make\r\n\x1b]133;C\x07");
+        assert_eq!(
+            t.agent_command(),
+            AgentCommand::Running {
+                command: "make".into()
+            }
+        );
+        t.feed(b"cc -o a\r\n\x1b[31merror\x1b[0m\r\n\x1b]133;D;2\x07");
+        t.feed(PROMPT);
+        assert_eq!(
+            t.agent_command(),
+            AgentCommand::Finished {
+                command: "make".into(),
+                exit_code: Some(2),
+                output: "cc -o a\nerror".into(),
+            }
+        );
+        assert_eq!(t.end_agent_command().as_deref(), Some("cc -o a\nerror"));
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+
+        // The human's next command is theirs.
+        t.feed(b"ls\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        let by_agent: Vec<_> = t
+            .records
+            .iter()
+            .map(|r| (r.command_text.as_str(), r.by_agent, r.command_line))
+            .collect();
+        assert_eq!(by_agent, vec![("make", true, 0), ("ls", false, 3)]);
+    }
+
+    #[test]
+    fn giving_up_on_a_running_agent_command_returns_its_output_so_far() {
+        let mut t = tracker();
+        t.feed(PROMPT);
+        t.begin_agent_command().unwrap();
+        t.feed(b"serve\r\n\x1b]133;C\x07listening on 8765\r\n");
+        assert_eq!(t.end_agent_command().as_deref(), Some("listening on 8765"));
+        // It keeps running, and ends as the human's record would.
+        t.feed(b"^C\r\n\x1b]133;D;130\x07");
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+        assert_eq!(t.records[0].exit_code, Some(130));
+        assert!(t.records[0].by_agent);
     }
 
     #[test]

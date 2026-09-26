@@ -129,12 +129,21 @@ pub struct TerminalView {
     pending_resize: Option<((u16, u16), Task<()>)>,
     /// Mark the agent's command lines in a gutter (the Agent tab).
     agent_marks: bool,
+    /// The agent ran a command in this (human) tab through `terminal_run`
+    /// (AGE-584): its lines are marked in the same gutter, shown from then
+    /// on.
+    agent_ran: bool,
     _events: Task<()>,
     /// Sees keys before the app's keybindings (see [`input`]).
     _intercept: Subscription,
 }
 
 impl TerminalView {
+    /// Whether the agent-mark gutter takes room left of the grid.
+    fn gutter(&self) -> bool {
+        self.agent_marks || self.agent_ran
+    }
+
     /// Wrap a spawned terminal. `events` is the receiver
     /// [`TerminalHandle::spawn`] returned.
     pub fn new(
@@ -156,6 +165,7 @@ impl TerminalView {
             grid_size: None,
             pending_resize: None,
             agent_marks: false,
+            agent_ran: false,
             _events: Self::pump_events(events, cx),
         }
     }
@@ -179,6 +189,7 @@ impl TerminalView {
             grid_size: None,
             pending_resize: None,
             agent_marks: true,
+            agent_ran: false,
             _events: cx.spawn(async move |this, cx| {
                 let mut painted = None;
                 loop {

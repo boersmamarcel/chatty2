@@ -72,7 +72,7 @@ Shell commands and code runs follow your approval mode; sandboxed commands run w
 
 The agent sees whatever the pane shows, secrets included, so leave it off unless you want this. The tool is only offered while tmux is running; in the terminal interface the group is called `terminal` (`--enable terminal`, or `/tools`).
 
-In the desktop app you can also share the terminals in its own [terminal dock](./terminal-dock.md#sharing-a-terminal-with-the-agent), one tab at a time, with the eye icon on the tab; that needs no setting, and a tab you never share is never read.
+In the desktop app you can also share the terminals in its own [terminal dock](./terminal-dock.md#sharing-a-terminal-with-the-agent), one tab at a time, with the eye icon on the tab; that needs no setting, and a tab you never share is never read. A tab shared as **Read + run** also lets the agent run a command there (`terminal_run`), and every such command asks for your approval first, even under **Auto-approve All**: it runs in your own shell, not the sandbox. See [Letting the agent run a command in your terminal](./terminal-dock.md#letting-the-agent-run-a-command-in-your-terminal).
 
 ### Data and documents
 
