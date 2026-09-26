@@ -515,6 +515,11 @@ mod tests {
                 theme_name: Some("Solarized".to_string()),
                 dark_mode: Some(true),
                 sidebar_mode: crate::settings::models::general_model::SidebarMode::Files,
+                terminal: crate::settings::models::general_model::TerminalSettings {
+                    shell: Some("/bin/zsh".to_string()),
+                    dock_height: 420.0,
+                    ..Default::default()
+                },
             },
         )
         .await;

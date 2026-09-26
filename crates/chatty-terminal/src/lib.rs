@@ -67,7 +67,12 @@ pub struct TerminalConfig {
     /// Cell size in pixels as `(width, height)`, reported to the child via
     /// the window size (`TIOCGWINSZ` pixel fields).
     pub cell_px: (u16, u16),
+    /// Lines of scrollback kept above the screen.
+    pub scrollback: usize,
 }
+
+/// Default for [`TerminalConfig::scrollback`], alacritty's own default.
+pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
 impl Default for TerminalConfig {
     fn default() -> Self {
@@ -78,6 +83,7 @@ impl Default for TerminalConfig {
             env: HashMap::new(),
             size: (80, 24),
             cell_px: (8, 16),
+            scrollback: DEFAULT_SCROLLBACK,
         }
     }
 }
@@ -148,6 +154,10 @@ pub struct TerminalHandle {
     term: Arc<FairMutex<TerminalModel>>,
     shared: Arc<Shared>,
     pid: Option<u32>,
+    /// A duplicate of the PTY master, kept to ask which process group has
+    /// the terminal's foreground ([`Self::has_foreground_job`]).
+    #[cfg(unix)]
+    master: Option<std::fs::File>,
     /// The PTY thread. It hands back the event loop, and with it the PTY,
     /// when it stops; dropping that runs the PTY's own cleanup (hang up,
     /// reap the child).
@@ -179,6 +189,7 @@ impl TerminalHandle {
     ) -> io::Result<(Self, Receiver<TerminalEvent>)> {
         let (cols, rows) = config.size;
         let (cell_width, cell_height) = config.cell_px;
+        let scrollback = config.scrollback;
         let window_size = WindowSize {
             num_cols: cols.max(1),
             num_lines: rows.max(1),
@@ -188,6 +199,12 @@ impl TerminalHandle {
 
         let pty = tty::new(&pty_options(config), window_size, 0)?;
         let pid = child_pid(&pty);
+        #[cfg(unix)]
+        let master = pty
+            .file()
+            .try_clone()
+            .inspect_err(|e| tracing::warn!("terminal: cannot duplicate the PTY master: {e}"))
+            .ok();
 
         let shared = Arc::new(Shared {
             loop_tx: OnceLock::new(),
@@ -206,6 +223,7 @@ impl TerminalHandle {
         // read request inside `Term`, so it is never answered.
         let term_config = TermConfig {
             osc52: Osc52::OnlyCopy,
+            scrolling_history: scrollback,
             ..TermConfig::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(
@@ -228,6 +246,8 @@ impl TerminalHandle {
                 term,
                 shared,
                 pid,
+                #[cfg(unix)]
+                master,
                 thread: Some(thread),
             },
             events_rx,
@@ -283,6 +303,58 @@ impl TerminalHandle {
     /// Whether the child has exited (a `ChildExit` was seen).
     pub fn has_exited(&self) -> bool {
         self.shared.exited.load(Ordering::Acquire)
+    }
+
+    /// Whether a program other than the shell holds the terminal's
+    /// foreground (e.g. `vim`, `cargo build`): the PTY's foreground process
+    /// group is not the shell's own. `None` where that cannot be told
+    /// (Windows, or the query failed); `Some(false)` once the shell exited.
+    pub fn has_foreground_job(&self) -> Option<bool> {
+        if self.has_exited() {
+            return Some(false);
+        }
+        #[cfg(unix)]
+        {
+            let (master, pid) = (self.master.as_ref()?, self.pid?);
+            // The shell ran `setsid()`, so its pid is its process-group id.
+            let foreground = nix::unistd::tcgetpgrp(master).ok()?;
+            Some(foreground.as_raw() != pid as i32)
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// Name of the program holding the terminal's foreground (`vim`,
+    /// `cargo`, or the shell itself at its prompt), for a tab title. Linux
+    /// only (read from `/proc`); `None` elsewhere, after exit, or on error.
+    pub fn foreground_process_name(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.has_exited() {
+                return None;
+            }
+            let pgid = nix::unistd::tcgetpgrp(self.master.as_ref()?).ok()?;
+            // A process group's id is its leader's pid.
+            let comm = std::fs::read_to_string(format!("/proc/{pgid}/comm")).ok()?;
+            let name = comm.trim();
+            (!name.is_empty()).then(|| name.to_string())
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    /// The shell's current working directory, for a tab title. Linux only
+    /// (read from `/proc`); `None` elsewhere, after exit, or on error.
+    pub fn current_dir(&self) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.has_exited() {
+                return None;
+            }
+            std::fs::read_link(format!("/proc/{}/cwd", self.pid?)).ok()
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     /// The child's process id, if the platform reports one.

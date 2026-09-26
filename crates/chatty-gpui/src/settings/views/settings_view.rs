@@ -6,6 +6,7 @@ use crate::settings::views::extensions_page::extensions_page;
 use crate::settings::views::memory_settings_page::memory_settings_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
 use crate::settings::views::search_settings_page::search_settings_page;
+use crate::settings::views::terminal_settings_page::terminal_settings_page;
 use crate::settings::views::training_settings_page::training_settings_page;
 use crate::settings::views::user_secrets_page::user_secrets_page;
 
@@ -236,6 +237,7 @@ impl Render for SettingsView {
                 extensions_page(),
                 search_settings_page(),
                 execution_settings_page(),
+                terminal_settings_page(),
                 memory_settings_page(),
                 training_settings_page(),
                 user_secrets_page(),

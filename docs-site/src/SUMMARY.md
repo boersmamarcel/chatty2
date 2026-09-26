@@ -9,6 +9,7 @@
 - [Getting started](./user/getting-started.md)
 - [Providers & models](./user/providers-and-models.md)
 - [Chatting](./user/chatting.md)
+- [Terminal dock](./user/terminal-dock.md)
 - [Agents & tools](./user/agents-and-tools.md)
 - [Extensions & MCP](./user/extensions.md)
 - [Memory & skills](./user/memory-and-skills.md)

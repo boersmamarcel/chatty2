@@ -72,6 +72,7 @@ use super::chat_input::{
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{ApprovalState, ClarificationState, SystemTrace, TraceItem};
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
+use super::terminal::dock::{DockResizeDrag, TerminalDock, TerminalDockEvent, dragged_dock_height};
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
@@ -224,6 +225,10 @@ pub struct ChatView {
     /// GitHub pull request bar above the composer. Owns its own poller;
     /// `sync_pr_status` only tells it which workspace to watch.
     pr_status: Entity<PrStatusBarView>,
+    /// The bottom terminal dock under the chat column (AGE-582). Held here
+    /// rather than per conversation: terminals belong to the window.
+    terminal_dock: Entity<TerminalDock>,
+    _terminal_dock_events: Subscription,
 }
 
 /// What the last transcript refresh cost, for the `CHATTY_DEBUG_UI` overlay.
@@ -432,6 +437,7 @@ impl ChatView {
             .collect();
 
         let chat_input_state = cx.new(|_cx| ChatInputState::new(input.clone()));
+        let terminal_dock = cx.new(TerminalDock::new);
 
         // Subscribe to input events to handle Enter key
         let state_for_enter = chat_input_state.clone();
@@ -548,6 +554,15 @@ impl ChatView {
             }
         });
 
+        // The dock hiding itself (its hide button, its last tab closed) gives
+        // the keyboard back to the composer.
+        let terminal_dock_events = window.subscribe(&terminal_dock, cx, {
+            let input = input.clone();
+            move |_, event: &TerminalDockEvent, window, cx| match event {
+                TerminalDockEvent::Hidden => input.update(cx, |input, cx| input.focus(window, cx)),
+            }
+        });
+
         Self {
             chat_input_state,
             messages: Vec::new(),
@@ -592,7 +607,37 @@ impl ChatView {
             session_bar_expanded: false,
             elapsed_tick_started: false,
             pr_status: cx.new(|_cx| PrStatusBarView::new()),
+            _terminal_dock_events: terminal_dock_events,
+            terminal_dock,
         }
+    }
+
+    /// Ctrl/Cmd+J, Ctrl+`: open the dock and focus its terminal (starting
+    /// one if it has none), or close it and give the keyboard back to the
+    /// composer. As in VS Code and Zed, the toggle closes the dock whether
+    /// or not the terminal has focus.
+    pub fn toggle_terminal_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_dock.read(cx).is_open() {
+            self.terminal_dock.update(cx, |dock, cx| dock.hide(cx));
+            self.focus_composer(window, cx);
+        } else {
+            self.terminal_dock
+                .update(cx, |dock, cx| dock.show(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Ctrl+Shift+`: a new terminal tab, dock shown and focused.
+    pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_dock
+            .update(cx, |dock, cx| dock.new_terminal(window, cx));
+        cx.notify();
+    }
+
+    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_input_state.update(cx, |state, cx| {
+            state.input.update(cx, |input, cx| input.focus(window, cx));
+        });
     }
 
     /// Get the chat input state entity (for wiring callbacks)
@@ -2863,6 +2908,19 @@ impl Render for ChatView {
             .map(|p| p.conversation_id.clone());
         let current_conv_id = self.conversation_id.clone();
 
+        // The terminal dock sits under the composer (AGE-582). Maximised, it
+        // takes the transcript's place and the composer stays above it.
+        let (dock_open, dock_maximized) = {
+            let dock = self.terminal_dock.read(cx);
+            (dock.is_open(), dock.is_open() && dock.is_maximized())
+        };
+        let dock_height = cx
+            .try_global::<GeneralSettingsModel>()
+            .map(|s| s.terminal.dock_height)
+            .unwrap_or(chatty_core::settings::models::general_model::DEFAULT_TERMINAL_DOCK_HEIGHT);
+        let message_list =
+            (!dock_maximized).then(|| self.render_message_list(cx).into_any_element());
+
         let column = div()
             .flex_1()
             .h_full()
@@ -2920,7 +2978,7 @@ impl Render for ChatView {
                     }
                 })
             })
-            .child(self.render_message_list(cx))
+            .children(message_list)
             .when_some(self.render_debug_overlay(cx), |this, overlay| {
                 this.child(overlay)
             })
@@ -2990,7 +3048,31 @@ impl Render for ChatView {
                     .child({
                         ChatInput::new(self.chat_input_state.clone()).into_any_element()
                     }),
-            );
+            )
+            .when(dock_open, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .when(dock_maximized, |dock| dock.flex_1().min_h_0())
+                        .when(!dock_maximized, |dock| dock.h(px(dock_height)))
+                        .child(self.terminal_dock.clone()),
+                )
+            })
+            // A drag on the dock's top edge: the column knows its own
+            // height, so the new dock height is worked out here.
+            .on_drag_move::<DockResizeDrag>(cx.listener(
+                |this, event: &DragMoveEvent<DockResizeDrag>, _, cx| {
+                    let column = event.bounds;
+                    let height = dragged_dock_height(
+                        f32::from(column.size.height),
+                        f32::from(event.event.position.y - column.origin.y),
+                    );
+                    this.terminal_dock
+                        .update(cx, |dock, cx| dock.set_height(height, cx));
+                    cx.notify();
+                },
+            ));
 
         let root = div()
             .flex_1()
@@ -3477,5 +3559,243 @@ mod sticky_scroll_tests {
             !append.contains("scroll_transcript_to_bottom") && !append.contains("scroll_to("),
             "append_assistant_text must not scroll; prepare_render does, once per frame"
         );
+    }
+}
+
+/// The terminal dock under the chat column (AGE-582): toggle, focus in and
+/// out, tabs surviving a conversation switch. Real shells (`/bin/sh`), so
+/// Unix only.
+#[cfg(all(test, unix))]
+mod terminal_dock_tests {
+    // Named imports, not a glob (see `show_artifact_integration_tests`).
+    use super::{ChatView, ExecutionSettingsModel, GeneralSettingsModel};
+    use gpui::{AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Window};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn harness(cx: &mut gpui::TestAppContext) -> (Entity<ChatView>, AnyWindowHandle) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut general = GeneralSettingsModel::default();
+            general.terminal.shell = Some("/bin/sh".into());
+            cx.set_global(general);
+            cx.set_global(ExecutionSettingsModel {
+                workspace_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                ..ExecutionSettingsModel::default()
+            });
+            cx.set_global(crate::settings::models::ExtensionsModel::default());
+            cx.set_global(chatty_core::models::ErrorStore::new(100));
+            cx.set_global(crate::auto_updater::AutoUpdater::new("0.0.0"));
+            cx.set_global(chatty_core::models::ConversationsStore::new());
+        });
+        let slot: Rc<RefCell<Option<Entity<ChatView>>>> = Rc::default();
+        let slot_for_window = slot.clone();
+        let window = cx.add_window(move |window, cx| {
+            let view = cx.new(|cx| ChatView::new(window, cx));
+            *slot_for_window.borrow_mut() = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = slot.borrow_mut().take().expect("ChatView captured");
+        (view, window.into())
+    }
+
+    fn with_window<R>(
+        cx: &mut gpui::TestAppContext,
+        window: AnyWindowHandle,
+        f: impl FnOnce(&mut Window, &mut App) -> R,
+    ) -> R {
+        cx.update_window(window, |_, window, cx| f(window, cx))
+            .expect("window is open")
+    }
+
+    fn composer_focused(view: &Entity<ChatView>, window: &Window, cx: &App) -> bool {
+        view.read(cx)
+            .chat_input_state
+            .read(cx)
+            .input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    }
+
+    fn terminal_focused(view: &Entity<ChatView>, window: &Window, cx: &App) -> bool {
+        view.read(cx)
+            .terminal_dock
+            .read(cx)
+            .active_view()
+            .is_some_and(|t| t.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    #[gpui::test]
+    fn toggle_opens_a_terminal_in_the_workspace_and_focuses_it(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        with_window(cx, window, |window, cx| {
+            assert!(!view.read(cx).terminal_dock.read(cx).is_open());
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+
+            let dock = view.read(cx).terminal_dock.read(cx);
+            assert!(dock.is_open());
+            assert_eq!(dock.tab_count(), 1);
+            // No conversation workspace here: the app-wide one.
+            assert_eq!(dock.tab_cwds(), vec![std::env::temp_dir()]);
+            assert!(terminal_focused(&view, window, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_again_closes_keeps_the_shell_and_refocuses_the_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, window) = harness(cx);
+        let pid = with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            let dock = view.read(cx).terminal_dock.read(cx);
+            dock.active_view().unwrap().read(cx).handle().pid().unwrap()
+        });
+        with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            let dock = view.read(cx).terminal_dock.read(cx);
+            assert!(!dock.is_open());
+            assert_eq!(dock.tab_count(), 1, "closing the dock keeps its terminals");
+            assert!(composer_focused(&view, window, cx));
+            assert!(!terminal_focused(&view, window, cx));
+
+            // Reopening shows the same terminal, not a new one.
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            let dock = view.read(cx).terminal_dock.read(cx);
+            assert_eq!(dock.tab_count(), 1);
+            assert_eq!(
+                dock.active_view().unwrap().read(cx).handle().pid(),
+                Some(pid)
+            );
+            assert!(terminal_focused(&view, window, cx));
+        });
+    }
+
+    /// The 1 s title poll runs only while the dock is open: a never-opened
+    /// or closed dock must not wake the app.
+    #[gpui::test]
+    fn titles_are_polled_only_while_the_dock_is_open(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        with_window(cx, window, |window, cx| {
+            let dock = view.read(cx).terminal_dock.clone();
+            assert!(!dock.read(cx).is_polling_titles(), "never opened");
+
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            assert!(dock.read(cx).is_polling_titles(), "open");
+
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            assert!(!dock.read(cx).is_polling_titles(), "hidden");
+
+            // Reopened, then its last tab closed: the dock hides itself.
+            view.update(cx, |v, cx| v.new_terminal(window, cx));
+            assert!(dock.read(cx).is_polling_titles(), "new terminal");
+            let ids = dock.read(cx).tab_ids();
+            for id in ids {
+                dock.update(cx, |d, cx| d.close(id, window, cx));
+            }
+            assert!(!dock.read(cx).is_open());
+            assert!(!dock.read(cx).is_polling_titles(), "last tab closed");
+        });
+    }
+
+    #[gpui::test]
+    fn escape_does_not_take_focus_from_the_terminal(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+        });
+        let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+        vcx.simulate_keystrokes("escape");
+        with_window(cx, window, |window, cx| {
+            assert!(terminal_focused(&view, window, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn terminals_survive_a_conversation_switch(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        let before = with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                v.toggle_terminal_dock(window, cx);
+                v.new_terminal(window, cx);
+            });
+            view.read(cx).terminal_dock.read(cx).tab_ids()
+        });
+        assert_eq!(before.len(), 2);
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_conversation_id("another".into(), cx);
+                v.clear_messages(cx);
+                v.load_history(&[], cx);
+            });
+            let dock = view.read(cx).terminal_dock.read(cx);
+            assert!(dock.is_open());
+            assert_eq!(dock.tab_ids(), before);
+            assert!(
+                dock.active_view()
+                    .is_some_and(|t| !t.read(cx).handle().has_exited())
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn new_close_and_reorder_tabs(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                v.new_terminal(window, cx);
+                v.new_terminal(window, cx);
+                v.new_terminal(window, cx);
+            });
+            let dock = view.read(cx).terminal_dock.clone();
+            assert_eq!(dock.read(cx).tab_ids(), vec![0, 1, 2]);
+            assert_eq!(dock.read(cx).active_index(), 2);
+
+            // Drag tab 2 onto tab 0: it moves first and stays active.
+            dock.update(cx, |d, cx| d.move_tab(2, 0, cx));
+            assert_eq!(dock.read(cx).tab_ids(), vec![2, 0, 1]);
+            assert_eq!(dock.read(cx).active_index(), 0);
+
+            // Closing tabs; the last one hides the dock and refocuses the
+            // composer.
+            dock.update(cx, |d, cx| d.close(2, window, cx));
+            assert_eq!(dock.read(cx).tab_ids(), vec![0, 1]);
+            assert!(terminal_focused(&view, window, cx));
+            dock.update(cx, |d, cx| d.close(0, window, cx));
+            dock.update(cx, |d, cx| d.close(1, window, cx));
+            assert_eq!(dock.read(cx).tab_count(), 0);
+            assert!(!dock.read(cx).is_open());
+        });
+        cx.run_until_parked();
+        with_window(cx, window, |window, cx| {
+            assert!(composer_focused(&view, window, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn maximize_hides_the_transcript_but_keeps_the_composer(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            let dock = view.read(cx).terminal_dock.clone();
+            dock.update(cx, |d, cx| d.toggle_maximized(cx));
+            assert!(dock.read(cx).is_maximized());
+            dock.update(cx, |d, cx| d.toggle_maximized(cx));
+            assert!(!dock.read(cx).is_maximized());
+        });
+    }
+
+    #[gpui::test]
+    fn dragging_the_top_edge_sets_the_remembered_height(cx: &mut gpui::TestAppContext) {
+        let (view, _window) = harness(cx);
+        cx.update(|cx| {
+            let dock = view.read(cx).terminal_dock.clone();
+            dock.update(cx, |d, cx| d.set_height(420., cx));
+            assert_eq!(
+                cx.global::<GeneralSettingsModel>().terminal.dock_height,
+                420.
+            );
+        });
     }
 }

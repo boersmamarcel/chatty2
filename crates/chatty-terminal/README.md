@@ -13,8 +13,16 @@ agent shell, Harbor runs) as well as under a view.
   no subscriber.
 - `spawn_with_tap(config, tap)` adds a byte-stream tap: a callback that
   sees every byte read from the PTY before the parser does.
+- `TerminalConfig::scrollback` sets the lines of history kept (default
+  10,000).
 - `write`, `resize`, `kill`; dropping the handle kills the child's process
   group and joins the PTY thread.
+- `has_foreground_job()`: whether a program other than the shell holds the
+  terminal's foreground (the PTY's foreground process group on Unix;
+  `None` on Windows, where it cannot be told).
+- `foreground_process_name()` and `current_dir()`: the foreground
+  program's name and the shell's working directory, for tab titles (Linux,
+  via `/proc`; `None` elsewhere).
 - `with_term` reads the grid under its lock (for the renderer);
   `generation()` changes whenever content or size does.
 - `snapshot(Region) -> TerminalText`: the screen, or the last N rows of

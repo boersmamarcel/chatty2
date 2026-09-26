@@ -1,5 +1,5 @@
 use crate::settings::models::GeneralSettingsModel;
-use crate::settings::models::general_model::SidebarMode;
+use crate::settings::models::general_model::{SidebarMode, TerminalSettings};
 use crate::settings::utils::find_theme_variant;
 use gpui::{App, AsyncApp, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeRegistry};
@@ -38,6 +38,27 @@ pub fn update_sidebar_mode(cx: &mut App, mode: SidebarMode) {
         }
     })
     .detach();
+}
+
+/// Write the current general settings to disk (for changes already applied
+/// to the global, e.g. the terminal dock's height after a drag).
+pub fn save_general_settings(cx: &mut App) {
+    let settings = cx.global::<GeneralSettingsModel>().clone();
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::general_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save general settings, changes will be lost on restart");
+        }
+    })
+    .detach();
+}
+
+/// Change the terminal dock's settings (AGE-582) and persist them. Fonts
+/// apply to open terminals at once; shell and scrollback to new ones.
+pub fn update_terminal_settings(cx: &mut App, change: impl FnOnce(&mut TerminalSettings)) {
+    change(&mut cx.global_mut::<GeneralSettingsModel>().terminal);
+    cx.refresh_windows();
+    save_general_settings(cx);
 }
 
 /// Update selected theme (persistence automatic via observer)

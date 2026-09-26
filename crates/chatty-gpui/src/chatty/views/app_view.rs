@@ -12,9 +12,6 @@ use gpui_component::{
     button::{Button, ButtonVariants, DropdownButton},
 };
 
-/// Height of the `CHATTY_DEBUG_TERMINAL` terminal (AGE-579; T4 replaces it).
-const DEBUG_TERMINAL_HEIGHT: f32 = 360.;
-
 impl Render for ChattyApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::boot_timing::checkpoint("open_to_first_frame");
@@ -44,6 +41,20 @@ impl Render for ChattyApp {
             .on_action(|_: &crate::QuickOpenFiles, window, cx| {
                 crate::chatty::views::QuickOpenDialog::open(window, cx);
             })
+            // The terminal dock (AGE-582) moves focus, so it needs `Window`
+            // too, for the same reason as QuickOpenFiles above.
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ToggleTerminalDock, window, cx| {
+                    this.chat_view
+                        .update(cx, |view, cx| view.toggle_terminal_dock(window, cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::NewTerminal, window, cx| {
+                    this.chat_view
+                        .update(cx, |view, cx| view.new_terminal(window, cx));
+                }),
+            )
             .child(
                 // Custom titlebar with toggle button
                 AppTitleBar::new(self.sidebar_view.clone(), self.chat_view.clone()),
@@ -74,16 +85,6 @@ impl Render for ChattyApp {
                             .child(resizable_panel().child(self.chat_view.clone())),
                     )
                 }
-            })
-            .when_some(self.debug_terminal.clone(), |this, terminal| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .h(px(DEBUG_TERMINAL_HEIGHT))
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .child(terminal),
-                )
             })
             .child(
                 // Footer bar
