@@ -137,6 +137,10 @@ pub struct FetchTool {
     wayback_available_url: String,
     wayback_web_url: String,
     wayback_lookup_timeout: std::time::Duration,
+    /// Tests only: let loopback/private IPs through the SSRF guard so a
+    /// local mock server can stand in for a site. Hostnames the guard
+    /// blocks (`localhost`, `*.internal`) and link-local stay blocked.
+    allow_private_ips: bool,
 }
 
 impl FetchTool {
@@ -149,6 +153,24 @@ impl FetchTool {
             wayback_available_url: WAYBACK_AVAILABLE_URL.to_string(),
             wayback_web_url: WAYBACK_WEB_URL.to_string(),
             wayback_lookup_timeout: WAYBACK_LOOKUP_TIMEOUT,
+            allow_private_ips: false,
+        }
+    }
+
+    /// Tests only (see [`FetchTool::allow_private_ips`]).
+    #[cfg(test)]
+    pub(crate) fn allowing_private_ips_for_tests(mut self) -> Self {
+        self.allow_private_ips = true;
+        self
+    }
+
+    /// The SSRF guard every URL this tool requests passes, redirects included.
+    fn check_host(&self, url: &str) -> Result<(), ToolError> {
+        if self.allow_private_ips {
+            crate::services::ssrf_guard::check_public_host_with_bypass(url, true)
+                .map_err(|reason| ToolError::OperationFailed(format!("Access denied: {reason}")))
+        } else {
+            validate_url_host(url)
         }
     }
 
@@ -248,7 +270,7 @@ impl Tool for FetchTool {
         }
 
         // SSRF protection: block requests to private/internal networks
-        validate_url_host(&url)?;
+        self.check_host(&url)?;
 
         // A page is read from the cache only to page through it or search
         // it (`start_index` or `find`); a plain fetch downloads it again, so
@@ -331,6 +353,15 @@ enum Download {
     Done(FetchToolOutput),
 }
 
+/// Who a download is for. A `search_web` extract is best effort and must
+/// have no side effects: no Wayback detour, no binary file saved to the
+/// workspace.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Tool,
+    Extract,
+}
+
 /// The session's recently fetched pages, keyed by the URL as asked for
 /// (fragment included, since it decides where the text starts) and the
 /// User-Agent override, least recently used first. Bounded by [`MAX_CACHED_PAGES`] and [`MAX_CACHED_BYTES`].
@@ -394,6 +425,27 @@ impl FetchTool {
         start_index: usize,
         max_length: usize,
     ) -> Result<Download, ToolError> {
+        self.download_for(
+            url,
+            user_agent,
+            fragment,
+            start_index,
+            max_length,
+            Purpose::Tool,
+        )
+        .await
+    }
+
+    /// [`FetchTool::download`] for `purpose`.
+    async fn download_for(
+        &self,
+        url: &str,
+        user_agent: Option<&str>,
+        fragment: Option<&str>,
+        start_index: usize,
+        max_length: usize,
+        purpose: Purpose,
+    ) -> Result<Download, ToolError> {
         info!(url = %url, max_length = max_length, "Fetching URL");
 
         let mut notes: Vec<String> = Vec::new();
@@ -433,7 +485,7 @@ impl FetchTool {
         };
 
         let status = response.status().as_u16();
-        if matches!(status, 403 | 404 | 410) && !is_archive_url(url) {
+        if purpose == Purpose::Tool && matches!(status, 403 | 404 | 410) && !is_archive_url(url) {
             match self.archived_copy(url).await {
                 Some((snapshot_url, captured)) => {
                     notes.push(format!(
@@ -452,6 +504,7 @@ impl FetchTool {
                                 start_index,
                                 max_length,
                                 notes,
+                                purpose,
                             )
                             .await;
                     }
@@ -476,6 +529,7 @@ impl FetchTool {
             start_index,
             max_length,
             notes,
+            purpose,
         )
         .await
     }
@@ -526,7 +580,7 @@ impl FetchTool {
             };
 
             // SSRF protection: validate redirect target
-            validate_url_host(&next_url)?;
+            self.check_host(&next_url)?;
 
             info!(from = %current_url, to = %next_url, "Following redirect");
             current_url = next_url;
@@ -602,6 +656,7 @@ impl FetchTool {
         start_index: usize,
         max_length: usize,
         notes: Vec<String>,
+        purpose: Purpose,
     ) -> Result<Download, ToolError> {
         let note = (!notes.is_empty()).then(|| notes.join(" "));
         let status = response.status().as_u16();
@@ -640,6 +695,17 @@ impl FetchTool {
 
         // Determine if this is binary content that should be saved to disk
         if is_binary_content_type(&content_type) {
+            if purpose == Purpose::Extract {
+                return Ok(Download::Done(FetchToolOutput {
+                    status,
+                    content: String::new(),
+                    content_type,
+                    truncated: false,
+                    total_length: None,
+                    saved_to: None,
+                    note,
+                }));
+            }
             return self
                 .handle_binary_response(response, url, status, &content_type)
                 .await
@@ -666,6 +732,53 @@ impl FetchTool {
             text,
             note,
         }))
+    }
+}
+
+impl FetchTool {
+    /// The extracted text of `url`, for `search_web` to cut a result's
+    /// extract from. Goes through the same guard and download path as a
+    /// `fetch` call (SSRF check on the URL and every redirect, 429 waits,
+    /// the 403 browser retry) and shares the session page cache, so a later
+    /// `fetch` of the page with `find` or `start_index` does not download
+    /// it again. `None` for anything that is not a readable text page:
+    /// a refused URL, an error status, a binary file (never saved), a
+    /// transport failure. No Wayback fallback: an extract is best effort.
+    pub(crate) async fn page_text_for_extract(&self, url: &str) -> Option<String> {
+        let url = url.trim();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return None;
+        }
+        // The guard resolves the host name: keep that off the runtime.
+        let check = url.to_string();
+        let this = self.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || this.check_host(&check))
+            .await
+            .ok()?
+        {
+            info!(url = %url, error = %e, "No search extract: URL refused");
+            return None;
+        }
+        let cache_key = format!("{url}\n");
+        if let Some(page) = self.pages.get(&cache_key) {
+            return Some(page.text.clone());
+        }
+        let fragment = url
+            .split_once('#')
+            .map(|(_, fragment)| fragment)
+            .filter(|fragment| !fragment.is_empty());
+        match self
+            .download_for(url, None, fragment, 0, MAX_WINDOW, Purpose::Extract)
+            .await
+            .ok()?
+        {
+            Download::Page(page) => {
+                let text = page.text.clone();
+                self.pages.insert(cache_key, Arc::new(page));
+                Some(text)
+            }
+            Download::Done(_) => None,
+        }
     }
 }
 
@@ -1059,53 +1172,17 @@ fn find_passages(text: &str, query: &str, start_index: usize, max_length: usize)
 /// `query` (BM25), for a `find` with no exact match: a model's phrasing of
 /// what it is looking for is rarely the document's own.
 fn closest_passages(text: &str, query: &str, from: usize, max_length: usize) -> String {
-    use crate::tools::passages::{PASSAGE_STRIDE, PASSAGE_WORDS, score_passages, tokenize};
-
     let no_match = format!(
         "[find \"{query}\": no match from start_index={from} of {}. \
          Try other words, or page through with start_index.]",
         text.len()
     );
-    let query_terms = tokenize(query);
-    let words: Vec<(usize, usize)> = regex::Regex::new(r"\S+")
-        .map(|re| {
-            re.find_iter(&text[from..])
-                .map(|m| (from + m.start(), from + m.end()))
-                .collect()
-        })
-        .unwrap_or_default();
-    if query_terms.is_empty() || words.is_empty() {
-        return no_match;
-    }
-
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut first = 0;
-    loop {
-        let last = (first + PASSAGE_WORDS).min(words.len()) - 1;
-        spans.push((words[first].0, words[last].1));
-        if last + 1 == words.len() {
-            break;
-        }
-        first += PASSAGE_STRIDE;
-    }
-    let tokens: Vec<Vec<String>> = spans
-        .iter()
-        .map(|&(start, end)| tokenize(&text[start..end]))
-        .collect();
-    let scores = score_passages(&query_terms, &tokens);
-    let mut ranked: Vec<usize> = (0..spans.len()).filter(|&i| scores[i] > 0.0).collect();
-    ranked.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
-
-    let mut chosen: Vec<(usize, usize)> = Vec::new();
-    for i in ranked {
-        let (start, end) = spans[i];
-        if chosen.iter().all(|&(s, e)| end <= s || start >= e) {
-            chosen.push((start, end));
-        }
-        if chosen.len() == FIND_FALLBACK_PASSAGES {
-            break;
-        }
-    }
+    let chosen = ranked_passage_spans(
+        text,
+        &crate::tools::passages::tokenize(query),
+        from,
+        FIND_FALLBACK_PASSAGES,
+    );
     if chosen.is_empty() {
         return no_match;
     }
@@ -1124,6 +1201,153 @@ fn closest_passages(text: &str, query: &str, from: usize, max_length: usize) -> 
         out.push_str(&text[start..end]);
     }
     out
+}
+
+/// Byte spans of up to `limit` non-overlapping passages of `text` from
+/// `from` on (windows of [`PASSAGE_WORDS`](crate::tools::passages::PASSAGE_WORDS)
+/// words), best BM25 match for `query_terms` first. Passages that share no
+/// word with the query are left out, so the list may be empty.
+fn ranked_passage_spans(
+    text: &str,
+    query_terms: &[String],
+    from: usize,
+    limit: usize,
+) -> Vec<(usize, usize)> {
+    use crate::tools::passages::{PASSAGE_STRIDE, PASSAGE_WORDS, score_passages, tokenize};
+
+    let words: Vec<(usize, usize)> = regex::Regex::new(r"\S+")
+        .map(|re| {
+            re.find_iter(&text[from..])
+                .map(|m| (from + m.start(), from + m.end()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if query_terms.is_empty() || words.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut first = 0;
+    loop {
+        let last = (first + PASSAGE_WORDS).min(words.len()) - 1;
+        spans.push((words[first].0, words[last].1));
+        if last + 1 == words.len() {
+            break;
+        }
+        first += PASSAGE_STRIDE;
+    }
+    let tokens: Vec<Vec<String>> = spans
+        .iter()
+        .map(|&(start, end)| tokenize(&text[start..end]))
+        .collect();
+    let scores = score_passages(query_terms, &tokens);
+    let mut ranked: Vec<usize> = (0..spans.len()).filter(|&i| scores[i] > 0.0).collect();
+    ranked.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+
+    let mut chosen: Vec<(usize, usize)> = Vec::new();
+    for i in ranked {
+        let (start, end) = spans[i];
+        if chosen.iter().all(|&(s, e)| end <= s || start >= e) {
+            chosen.push((start, end));
+        }
+        if chosen.len() == limit {
+            break;
+        }
+    }
+    chosen
+}
+
+/// Separator between the passages of an extract.
+const EXTRACT_GAP: &str = " … ";
+
+/// A short extract of `text` for a search result: the passages that best
+/// match `query_terms` (BM25, as `find` ranks them when nothing matches
+/// exactly), in page order and joined with ` … `, or the page's opening
+/// when no passage shares a word with the query. Each passage starts at the
+/// sentence holding its first query word (a short lead-in, like `find`'s)
+/// rather than wherever its word window happened to begin. Whitespace is
+/// collapsed and the whole is at most `max_bytes` bytes of UTF-8 (so at
+/// most that many characters). Empty only for a blank page.
+pub(crate) fn page_extract(text: &str, query_terms: &[String], max_bytes: usize) -> String {
+    fn collapse(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    fn cut(s: &str, max_bytes: usize) -> String {
+        if s.len() <= max_bytes {
+            return s.to_string();
+        }
+        let end = floor_char_boundary(s, max_bytes.saturating_sub('…'.len_utf8()));
+        let end = s[..end].rfind(' ').filter(|&i| i > end / 2).unwrap_or(end);
+        format!("{}…", &s[..end])
+    }
+    let terms: std::collections::HashSet<&str> = query_terms.iter().map(String::as_str).collect();
+    // Byte offset of the first query word in `text[start..end]`.
+    let first_hit = |start: usize, end: usize| -> Option<usize> {
+        let mut word_start = None;
+        for (i, c) in text[start..end]
+            .char_indices()
+            .chain(std::iter::once((end - start, ' ')))
+        {
+            match (c.is_alphanumeric(), word_start) {
+                (true, None) => word_start = Some(i),
+                (false, Some(w)) => {
+                    if terms.contains(text[start + w..start + i].to_lowercase().as_str()) {
+                        return Some(start + w);
+                    }
+                    word_start = None;
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    // Where the sentence holding `hit` starts, looking back at most
+    // FIND_CONTEXT_BEFORE / 2 bytes; else that far back, at a word start.
+    let lead_in = |hit: usize| -> usize {
+        let from = floor_char_boundary(text, hit.saturating_sub(FIND_CONTEXT_BEFORE / 2));
+        let before = &text[from..hit];
+        match before.rfind(['.', '!', '?', '\n']) {
+            Some(i) => from + i + 1,
+            None if from == 0 => 0,
+            None => before.find(char::is_whitespace).map_or(hit, |i| from + i),
+        }
+    };
+
+    let mut picked: Vec<(usize, usize, String)> = Vec::new();
+    let mut used = 0;
+    // At the 80-byte floor below a few passages fill any sensible cap.
+    let limit = (max_bytes / 150).clamp(1, 12);
+    for (start, end) in ranked_passage_spans(text, query_terms, 0, limit) {
+        let from = first_hit(start, end).map_or(start, lead_in);
+        let to = floor_char_boundary(text, from + (end - start));
+        if picked.iter().any(|&(s, e, _)| from < e && to > s) {
+            continue;
+        }
+        let gap = if picked.is_empty() {
+            0
+        } else {
+            EXTRACT_GAP.len()
+        };
+        let room = max_bytes.saturating_sub(used + gap);
+        // Not worth a fragment shorter than a sentence.
+        if room < 80 {
+            break;
+        }
+        let passage = cut(&collapse(&text[from..to]), room);
+        used += gap + passage.len();
+        picked.push((from, to, passage));
+    }
+    if picked.is_empty() {
+        // The head only needs a few times `max_bytes` of raw text.
+        let head = &text[..floor_char_boundary(text, max_bytes.saturating_mul(4))];
+        return cut(&collapse(head), max_bytes);
+    }
+    picked.sort_by_key(|&(start, _, _)| start);
+    picked
+        .into_iter()
+        .map(|(_, _, passage)| passage)
+        .collect::<Vec<_>>()
+        .join(EXTRACT_GAP)
 }
 
 /// Elements whose text is site furniture rather than page content. Skipped
@@ -2285,6 +2509,45 @@ mod tests {
             ),
             "got {content:?}"
         );
+    }
+
+    fn terms(q: &str) -> Vec<String> {
+        crate::tools::passages::tokenize(q)
+    }
+
+    #[test]
+    fn test_page_extract_keeps_matching_passages_in_page_order() {
+        let filler = "Nothing to see in this line of filler text at all. ".repeat(30);
+        let text = format!(
+            "{filler}\nThe comet was first seen in 1742 by an amateur.\n{filler}\n\
+             Its orbital period is 76 years, the comet returning regularly.\n{filler}"
+        );
+        let extract = page_extract(&text, &terms("comet orbital period"), 1_200);
+        let seen = extract.find("first seen in 1742").expect(&extract);
+        let period = extract.find("orbital period is 76").expect(&extract);
+        assert!(seen < period, "page order: {extract}");
+        assert!(extract.contains(EXTRACT_GAP));
+        assert!(extract.len() <= 1_200);
+        assert!(!extract.contains('\n'), "whitespace collapsed");
+    }
+
+    #[test]
+    fn test_page_extract_without_a_match_is_the_page_head() {
+        let text = "Welcome to the site.   It has   pages.\n".repeat(200);
+        let extract = page_extract(&text, &terms("zebra"), 100);
+        assert!(extract.starts_with("Welcome to the site. It has pages."));
+        assert!(extract.len() <= 100 && extract.ends_with('…'), "{extract}");
+        assert_eq!(page_extract("   ", &terms("zebra"), 100), "");
+    }
+
+    #[test]
+    fn test_page_extract_cap_holds_for_multibyte_text() {
+        let text = "Ästhetik und Übermut, größer als Straße ".repeat(500);
+        for cap in [81, 100, 1_200] {
+            let extract = page_extract(&text, &terms("größer straße"), cap);
+            assert!(extract.len() <= cap, "{cap}: {}", extract.len());
+            assert!(extract.contains("größer"));
+        }
     }
 
     fn page(text: &str) -> Arc<CachedPage> {

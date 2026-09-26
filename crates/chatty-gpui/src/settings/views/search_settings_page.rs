@@ -160,6 +160,21 @@ pub fn search_settings_page() -> SettingPage {
                         .default_value(5.0),
                     )
                     .description("Maximum number of search results to return per query (1-20)."),
+                    SettingItem::new(
+                        "Page Extracts",
+                        SettingField::switch(
+                            |cx: &App| cx.global::<SearchSettingsModel>().page_extracts,
+                            |_val: bool, cx: &mut App| {
+                                search_settings_controller::toggle_page_extracts(cx);
+                            },
+                        )
+                        .default_value(true),
+                    )
+                    .description(
+                        "Read the top three result pages and show the passages that match the \
+                         query with each result, so the AI often needs no separate page fetch. \
+                         Adds up to a few seconds per search.",
+                    ),
                 ]),
             // ── Keyless Search ───────────────────────────────────────────
             SettingGroup::new()

@@ -84,6 +84,17 @@ pub fn set_max_results(count: usize, cx: &mut App) {
     save_async(cx);
 }
 
+/// Toggle page extracts in search results and persist to disk
+pub fn toggle_page_extracts(cx: &mut App) {
+    let new_enabled = !cx.global::<SearchSettingsModel>().page_extracts;
+    info!(new = new_enabled, "Toggling search page extracts");
+    cx.global_mut::<SearchSettingsModel>().page_extracts = new_enabled;
+
+    cx.refresh_windows();
+    notify_tool_set_changed(cx);
+    save_async(cx);
+}
+
 /// Toggle browser-use enabled/disabled and persist to disk
 pub fn toggle_browser_use(cx: &mut App) {
     let new_enabled = !cx.global::<SearchSettingsModel>().browser_use_enabled;

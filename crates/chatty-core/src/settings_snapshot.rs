@@ -527,6 +527,7 @@ mod tests {
                 tavily_api_key: Some("tvly-key".to_string()),
                 brave_api_key: Some("brave-key".to_string()),
                 max_results: 10,
+                page_extracts: false,
                 browser_use_enabled: false,
                 browser_use_api_key: Some("bu-key".to_string()),
                 daytona_enabled: false,

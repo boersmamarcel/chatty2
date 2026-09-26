@@ -54,6 +54,38 @@ const PASSAGE_CHARS: usize = 600;
 /// Maximum snippet length per result (characters)
 const MAX_SNIPPET_LENGTH: usize = 1000;
 
+/// How many results get a page extract and how long extracts may be.
+#[derive(Clone, Copy, Debug)]
+struct ExtractLimits {
+    /// Results, from the top, that get one.
+    results: usize,
+    /// Longest extract per result, in bytes of UTF-8 (so at most that many
+    /// characters).
+    per_result: usize,
+    /// All extracts of one search together, in bytes.
+    total: usize,
+}
+
+/// Three results, 1,200 bytes each, 4,000 in all (~1k tokens): with the
+/// titles and snippets one search stays far below the context shaper's cap
+/// on recording a tool result whole (two fifths of the history budget, ~7k
+/// tokens on a 32k window). The total binds when `results` is raised.
+const EXTRACT_LIMITS: ExtractLimits = ExtractLimits {
+    results: 3,
+    per_result: 1_200,
+    total: 4_000,
+};
+
+/// Time budget for the whole search call after which no page is waited on
+/// for an extract; each page also has [`PAGE_FETCH_BUDGET_SECS`]. A page that
+/// misses either simply gets no extract.
+const EXTRACT_DEADLINE_SECS: u64 = 10;
+
+/// Told to the model alongside results that carry an extract.
+const EXTRACT_NOTE: &str = "`extract` holds the passages of that result's page that best match \
+     the query (the page's opening when none do), cut short. If it is not enough, fetch the \
+     result's url for the full page (fetch with `find` jumps to a passage).";
+
 // ── Tool Args / Output ──────────────────────────────────────────────────────
 
 /// Arguments for the search_web tool
@@ -78,6 +110,10 @@ pub struct SearchResult {
     /// Backend that produced the result (`tavily`, `brave`, `bing`,
     /// `duckduckgo`), so the model and the retrieval eval can tell them apart.
     pub source: String,
+    /// Query-relevant text from the page itself (top results only, when page
+    /// extracts are on and the page could be read in time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract: Option<String>,
 }
 
 /// Output from the search_web tool
@@ -89,6 +125,9 @@ pub struct SearchWebToolOutput {
     pub results: Vec<SearchResult>,
     /// Number of results returned
     pub result_count: usize,
+    /// How to read the results' extracts; present only when some have one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Every result the backends returned before merging and truncation,
     /// in merged order. Not shown to the model; the retrieval eval uses it
     /// to rescore a run as if one source (e.g. Wikipedia) did not exist.
@@ -177,6 +216,20 @@ pub struct SearchWebTool {
     /// (vLLM, llama.cpp server, …) that orders the keyless candidate pool
     /// instead of BM25. `None` = BM25 order.
     reranker: Option<Reranker>,
+    /// The session's `fetch` tool, when page extracts are on: it reads the
+    /// top results' pages (same SSRF guard, rate-limit handling and page
+    /// cache as a `fetch` call). `None` = titles and snippets only.
+    extracts: Option<crate::tools::FetchTool>,
+    extract_limits: ExtractLimits,
+}
+
+/// Page text the keyless passage stage already read, so the extract stage
+/// does not download it again, and each result's snippet as the engine gave
+/// it (before a passage was put in front), to show beside an extract.
+#[derive(Default)]
+struct Prefetched {
+    texts: std::collections::HashMap<String, String>,
+    engine_snippets: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -215,6 +268,8 @@ impl SearchWebTool {
             default_max_results,
             cache: None,
             reranker: None,
+            extracts: None,
+            extract_limits: EXTRACT_LIMITS,
         }
     }
 
@@ -230,6 +285,8 @@ impl SearchWebTool {
             default_max_results,
             cache: None,
             reranker: None,
+            extracts: None,
+            extract_limits: EXTRACT_LIMITS,
         }
     }
 
@@ -324,6 +381,14 @@ impl SearchWebTool {
         ))
     }
 
+    /// Attach a query-relevant extract of the page to the top results,
+    /// reading pages through `fetch` (the session's fetch tool, so the same
+    /// policy and page cache apply).
+    pub fn with_page_extracts(mut self, fetch: crate::tools::FetchTool) -> Self {
+        self.extracts = Some(fetch);
+        self
+    }
+
     /// Route every backend request through `cache` (eval harness only).
     pub fn with_response_cache(mut self, cache: Arc<ResponseCache>) -> Self {
         self.cache = Some(cache);
@@ -400,6 +465,7 @@ impl SearchWebTool {
                 url: r.url,
                 snippet: truncate_snippet(&r.content),
                 source: "tavily".to_string(),
+                extract: None,
             })
             .collect())
     }
@@ -442,6 +508,7 @@ impl SearchWebTool {
                         url: r.url,
                         snippet: truncate_snippet(&r.description),
                         source: "brave".to_string(),
+                        extract: None,
                     })
                     .collect()
             })
@@ -455,13 +522,14 @@ impl SearchWebTool {
     /// failing is survivable; both failing (or one failing and the other
     /// finding nothing) is an error, never a silent empty list.
     ///
-    /// Returns `(merged, candidates)`: the list shown to the model, truncated
-    /// to `max_results`, and every backend result in merged order.
+    /// Returns `(merged, candidates, prefetched)`: the list shown to the
+    /// model, truncated to `max_results`, every backend result in merged
+    /// order, and the page text the passage stage read.
     async fn search_keyless(
         &self,
         query: &str,
         max_results: usize,
-    ) -> Result<(Vec<SearchResult>, Vec<SearchResult>), ToolError> {
+    ) -> Result<(Vec<SearchResult>, Vec<SearchResult>, Prefetched), ToolError> {
         let pool = if self.reranker.is_some() {
             max_results.max(RERANK_POOL)
         } else {
@@ -492,9 +560,18 @@ impl SearchWebTool {
                 )));
             }
         };
-        let candidates = self.rerank_by_passages(query, interleave(&lists)).await;
+        let pool = interleave(&lists);
+        let engine_snippets = pool
+            .iter()
+            .map(|r| (r.url.clone(), r.snippet.clone()))
+            .collect();
+        let (candidates, texts) = self.rerank_by_passages(query, pool).await;
         let merged = candidates.iter().take(max_results).cloned().collect();
-        Ok((merged, candidates))
+        let prefetched = Prefetched {
+            texts,
+            engine_snippets,
+        };
+        Ok((merged, candidates, prefetched))
     }
 
     /// Wikipedia full-text search (`list=search`), which needs no key and
@@ -546,6 +623,7 @@ impl SearchWebTool {
                 snippet: truncate_snippet(strip_html_tags(&hit.snippet).trim()),
                 title: hit.title,
                 source: "wikipedia".to_string(),
+                extract: None,
             })
             .collect())
     }
@@ -559,12 +637,12 @@ impl SearchWebTool {
     /// With a cross-encoder configured, the pool is then reordered by its
     /// score on (title + best passage or snippet); otherwise, or if it fails,
     /// the engines' order stands. Best effort: a page that fails or times out
-    /// keeps its snippet.
+    /// keeps its snippet. Also returns the page text it read, by URL.
     async fn rerank_by_passages(
         &self,
         query: &str,
         mut pool: Vec<SearchResult>,
-    ) -> Vec<SearchResult> {
+    ) -> (Vec<SearchResult>, std::collections::HashMap<String, String>) {
         let pages = if self.reranker.is_some() {
             RERANK_POOL
         } else {
@@ -574,13 +652,18 @@ impl SearchWebTool {
         let texts = futures::future::join_all(pool[..n].iter().map(|r| async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(PAGE_FETCH_BUDGET_SECS),
-                self.page_text(r),
+                self.page_text(&r.url),
             )
             .await
             .ok()
             .flatten()
         }))
         .await;
+        let read: std::collections::HashMap<String, String> = pool
+            .iter()
+            .zip(&texts)
+            .filter_map(|(r, text)| Some((r.url.clone(), text.clone()?)))
+            .collect();
 
         let query_terms: Vec<String> = crate::tools::passages::tokenize(query)
             .into_iter()
@@ -682,19 +765,90 @@ impl SearchWebTool {
                 let mut order: Vec<usize> = (0..pool.len()).collect();
                 order.sort_by(|&a, &b| best[b].0.total_cmp(&best[a].0));
                 let mut slots: Vec<Option<SearchResult>> = pool.into_iter().map(Some).collect();
-                return order.into_iter().filter_map(|i| slots[i].take()).collect();
+                let ordered = order.into_iter().filter_map(|i| slots[i].take()).collect();
+                return (ordered, read);
             }
         }
         // No reranker (or it failed): keep the engines' order.
-        pool
+        (pool, read)
+    }
+
+    /// Give the first results an extract of their page (see
+    /// [`crate::tools::fetch_tool::page_extract`]), within the tool's
+    /// [`ExtractLimits`] ([`EXTRACT_LIMITS`] in the product).
+    /// Pages are read concurrently, each within [`PAGE_FETCH_BUDGET_SECS`]
+    /// and all by `deadline`; one that fails, is refused by the fetch
+    /// policy, or is late just gets no extract. A result with an extract
+    /// gets its engine snippet back in place of the passage the keyless
+    /// stage put in front of it, which the extract supersedes. Returns
+    /// whether any result got one.
+    async fn attach_extracts(
+        &self,
+        query: &str,
+        results: &mut [SearchResult],
+        mut prefetched: Prefetched,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        if self.extracts.is_none() {
+            return false;
+        }
+        let limits = self.extract_limits;
+        let n = results.len().min(limits.results);
+        let known: Vec<Option<String>> = results[..n]
+            .iter()
+            .map(|r| prefetched.texts.remove(&r.url))
+            .collect();
+        let texts = futures::future::join_all(results[..n].iter().zip(known).map(
+            |(r, known)| async move {
+                if known.is_some() {
+                    return known;
+                }
+                let page_deadline = (tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(PAGE_FETCH_BUDGET_SECS))
+                .min(deadline);
+                tokio::time::timeout_at(page_deadline, self.page_text(&r.url))
+                    .await
+                    .ok()
+                    .flatten()
+            },
+        ))
+        .await;
+
+        let query_terms: Vec<String> = crate::tools::passages::tokenize(query)
+            .into_iter()
+            .filter(|t| !QUERY_STOPWORDS.contains(&t.as_str()))
+            .collect();
+        let mut left = limits.total;
+        let mut any = false;
+        for (result, text) in results.iter_mut().zip(texts) {
+            let Some(text) = text else { continue };
+            let extract = crate::tools::fetch_tool::page_extract(
+                &text,
+                &query_terms,
+                limits.per_result.min(left),
+            );
+            if extract.is_empty() {
+                continue;
+            }
+            left -= extract.len();
+            if let Some(snippet) = prefetched.engine_snippets.remove(&result.url) {
+                result.snippet = snippet;
+            }
+            result.extract = Some(extract);
+            any = true;
+            if left < 200 {
+                break;
+            }
+        }
+        any
     }
 
     /// Plain text of a result's page: Wikipedia articles through the API
-    /// (clean text, compliant User-Agent), anything else as HTML fetched
-    /// behind the SSRF guard and converted like `fetch` does.
-    async fn page_text(&self, result: &SearchResult) -> Option<String> {
-        if let Some(title) = result
-            .url
+    /// (clean text, compliant User-Agent), anything else through the
+    /// session's `fetch` tool when page extracts are on, else as HTML
+    /// fetched behind the SSRF guard and converted like `fetch` does.
+    async fn page_text(&self, url: &str) -> Option<String> {
+        if let Some(title) = url
             .strip_prefix("https://en.wikipedia.org/wiki/")
             .map(|t| t.replace('_', " "))
         {
@@ -721,7 +875,11 @@ impl SearchWebTool {
                 .map(str::to_string);
         }
 
-        let url = result.url.clone();
+        if let Some(fetch) = &self.extracts {
+            let text = fetch.page_text_for_extract(url).await?;
+            return Some(crate::tools::passages::strip_link_targets(&text));
+        }
+        let url = url.to_string();
         let check = url.clone();
         tokio::task::spawn_blocking(move || crate::services::ssrf_guard::check_public_host(&check))
             .await
@@ -852,13 +1010,21 @@ impl Tool for SearchWebTool {
     type Output = SearchWebToolOutput;
 
     fn description(&self) -> String {
-        "Search the web and return relevant results. \
+        let mut description = "Search the web and return relevant results. \
                          Use this to find up-to-date information, research topics, find documentation, \
                          or answer questions that require current web data. \
                          If general results are thin, search the site itself through its own search \
                          page or API (e.g. MediaWiki `api.php?action=query&list=search`, PubMed \
                          Central `?term=`, the Wayback CDX API); never guess IDs or URLs."
-                .to_string()
+            .to_string();
+        if self.extracts.is_some() {
+            description.push_str(
+                " The top results carry an `extract`: the passages of the page itself that \
+                 match the query. Check them before fetching; fetch a page only when its \
+                 extract does not answer the question.",
+            );
+        }
+        description
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -889,6 +1055,8 @@ impl Tool for SearchWebTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(EXTRACT_DEADLINE_SECS);
         let query = args.query.trim().to_string();
         if query.is_empty() {
             return Err(ToolError::OperationFailed(
@@ -901,16 +1069,16 @@ impl Tool for SearchWebTool {
             .unwrap_or(self.default_max_results)
             .clamp(1, 20);
 
-        let (results, candidates) = match (&self.provider, &self.api_key) {
+        let (mut results, candidates, prefetched) = match (&self.provider, &self.api_key) {
             (Some(SearchProvider::Tavily), Some(key)) => {
                 info!(query = %query, max_results, provider = "tavily", "Performing web search");
                 let results = self.search_tavily(&query, max_results, key).await?;
-                (results.clone(), results)
+                (results.clone(), results, Prefetched::default())
             }
             (Some(SearchProvider::Brave), Some(key)) => {
                 info!(query = %query, max_results, provider = "brave", "Performing web search");
                 let results = self.search_brave(&query, max_results, key).await?;
-                (results.clone(), results)
+                (results.clone(), results, Prefetched::default())
             }
             _ => {
                 info!(query = %query, max_results, provider = "keyless", "Performing web search");
@@ -921,11 +1089,15 @@ impl Tool for SearchWebTool {
         if result_count == 0 {
             warn!(query = %query, "Web search returned no results");
         }
+        let with_extracts = self
+            .attach_extracts(&query, &mut results, prefetched, deadline)
+            .await;
 
         Ok(SearchWebToolOutput {
             query,
             results,
             result_count,
+            note: with_extracts.then(|| EXTRACT_NOTE.to_string()),
             candidates,
         })
     }
@@ -1091,6 +1263,7 @@ fn parse_ddg_lite_results(html: &str, max_results: usize) -> Vec<SearchResult> {
                 url,
                 snippet,
                 source: "duckduckgo".to_string(),
+                extract: None,
             });
         }
 
@@ -1191,6 +1364,7 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
                 url,
                 snippet,
                 source: "bing".to_string(),
+                extract: None,
             });
         }
     }
@@ -1530,6 +1704,7 @@ mod tests {
             url: u.into(),
             snippet: String::new(),
             source: s.into(),
+            extract: None,
         };
         let merged = interleave(&[
             vec![r("w1", "wikipedia"), r("w2", "wikipedia")],
@@ -1664,12 +1839,14 @@ mod tests {
                 url: "https://www.britishairways.com/".to_string(),
                 snippet: "Find cheap flights and book online.".to_string(),
                 source: "bing".to_string(),
+                extract: None,
             },
             SearchResult {
                 title: "Quiz Widget".to_string(),
                 url: "https://quizwidget.example/".to_string(),
                 snippet: "Add a quiz to your page.".to_string(),
                 source: "bing".to_string(),
+                extract: None,
             },
         ];
         assert!(!results_match_query("Virtue restaurant Chicago", &decoys));
@@ -1682,6 +1859,7 @@ mod tests {
             url: "https://www.britishmuseum.org/collection".to_string(),
             snippet: "Explore the collection.".to_string(),
             source: "bing".to_string(),
+            extract: None,
         }];
         assert!(results_match_query("British Museum opening hours", &real));
         // A term may match through the decoded URL or the snippet alone.
@@ -1695,6 +1873,7 @@ mod tests {
             url: "https://quizwidget.example/".to_string(),
             snippet: "Add a quiz to your page.".to_string(),
             source: "bing".to_string(),
+            extract: None,
         }];
         assert!(results_match_query("who won", &results));
     }
@@ -1710,6 +1889,7 @@ mod tests {
             url: "https://tickets.example/bts".to_string(),
             snippet: "See what fans are saying about the tour.".to_string(),
             source: "bing".to_string(),
+            extract: None,
         }];
         assert!(!results_match_query(
             "what is the capital of France",
@@ -1726,6 +1906,7 @@ mod tests {
             url: "https://en.wikipedia.org/wiki/Paris".to_string(),
             snippet: "Paris is the capital and most populous city of France.".to_string(),
             source: "bing".to_string(),
+            extract: None,
         }];
         assert!(results_match_query("what is the capital of France", &real));
     }
@@ -1739,6 +1920,7 @@ mod tests {
             url: "https://quizwidget.example/".to_string(),
             snippet: "Add a quiz to your page.".to_string(),
             source: "bing".to_string(),
+            extract: None,
         }];
         assert!(results_match_query("what should this have been", &results));
     }
@@ -1778,5 +1960,391 @@ mod tests {
         let results = parse_bing_results(html, 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, "https://a.com");
+    }
+
+    // ── Page extracts ───────────────────────────────────────────────────
+
+    /// Paths the extract mock server was asked for.
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// A page of `filler` paragraphs with one paragraph about the query's
+    /// subject in the middle, far from the page's opening.
+    fn page_with_fact(fact: &str) -> String {
+        let filler =
+            "<p>Opening words about unrelated gardening topics and weather.</p>".repeat(40);
+        format!("<!DOCTYPE html><html><body>{filler}<p>{fact}</p>{filler}</body></html>")
+    }
+
+    /// A loopback server for result pages, one task per connection so a
+    /// slow page does not hold up the others. `/slow` answers after 30 s,
+    /// `/pdf` is a binary file, `/missing` a 404, `/long` repeats the query
+    /// terms all over, and anything else is [`page_with_fact`].
+    async fn page_server() -> (String, Seen) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Default::default();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                    log.lock().unwrap().push(path.clone());
+                    let (status, content_type, body) = match path.as_str() {
+                        "/slow" => {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            ("200 OK", "text/html", page_with_fact("too late"))
+                        }
+                        "/pdf" => ("200 OK", "application/pdf", "%PDF-1.4 binary".to_string()),
+                        "/missing" => ("404 Not Found", "text/plain", "gone".to_string()),
+                        "/long" => (
+                            "200 OK",
+                            "text/html",
+                            format!(
+                                "<html><body>{}</body></html>",
+                                "<p>The zanzibar lighthouse keeper logbook records the zanzibar \
+                                 lighthouse lamp being lit every evening at dusk.</p>"
+                                    .repeat(200)
+                            ),
+                        ),
+                        _ => (
+                            "200 OK",
+                            "text/html",
+                            page_with_fact(
+                                "The Zanzibar lighthouse was first lit in 1897 by keeper Amina Juma.",
+                            ),
+                        ),
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    fn result(url: String) -> SearchResult {
+        SearchResult {
+            title: "A page".to_string(),
+            snippet: "engine snippet".to_string(),
+            url,
+            source: "tavily".to_string(),
+            extract: None,
+        }
+    }
+
+    fn fetcher() -> crate::tools::FetchTool {
+        crate::tools::FetchTool::new(None).allowing_private_ips_for_tests()
+    }
+
+    fn later(secs: u64) -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(secs)
+    }
+
+    /// A Tavily-backed tool whose search answer is recorded in a response
+    /// cache (so no search API is contacted) and lists `urls`.
+    async fn tool_with_recorded_results(
+        dir: &std::path::Path,
+        query: &str,
+        urls: &[String],
+    ) -> SearchWebTool {
+        use crate::tools::response_cache::CacheMode;
+        let cache = Arc::new(ResponseCache::new(dir, CacheMode::Record, false));
+        let body = serde_json::json!({
+            "results": urls
+                .iter()
+                .map(|u| serde_json::json!({"title": "A page", "url": u, "content": "engine snippet"}))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
+        cache
+            .get_or_fetch("tavily", &format!("basic|5|{query}"), || async {
+                CachedResponse {
+                    status: 200,
+                    body,
+                    transport_error: None,
+                    latency_ms: 0,
+                }
+            })
+            .await
+            .unwrap();
+        let replay = Arc::new(ResponseCache::new(dir, CacheMode::Replay, false));
+        SearchWebTool::new(SearchProvider::Tavily, "key".to_string(), 5).with_response_cache(replay)
+    }
+
+    async fn search(tool: &SearchWebTool, query: &str) -> SearchWebToolOutput {
+        tool.call(
+            &mut ToolContext::new(),
+            SearchWebToolArgs {
+                query: query.to_string(),
+                max_results: Some(5),
+            },
+        )
+        .await
+        .expect("search succeeds")
+    }
+
+    #[tokio::test]
+    async fn extracts_carry_the_matching_passage_of_the_top_pages() {
+        let (base, seen) = page_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let query = "when was the Zanzibar lighthouse first lit";
+        let urls: Vec<String> = (1..=5).map(|i| format!("{base}/page{i}")).collect();
+        let tool = tool_with_recorded_results(dir.path(), query, &urls)
+            .await
+            .with_page_extracts(fetcher());
+
+        let output = search(&tool, query).await;
+        assert_eq!(output.result_count, 5);
+        for r in &output.results[..3] {
+            let extract = r.extract.as_deref().expect("top results get an extract");
+            assert!(
+                extract.starts_with(
+                    "The Zanzibar lighthouse was first lit in 1897 by keeper Amina Juma."
+                ),
+                "the passage starts at the matching sentence: {extract}"
+            );
+            assert_eq!(r.snippet, "engine snippet");
+        }
+        assert!(output.results[3..].iter().all(|r| r.extract.is_none()));
+        assert_eq!(seen.lock().unwrap().len(), 3, "only the top three are read");
+        let note = output.note.as_deref().expect("a note explains extracts");
+        assert!(note.contains("fetch"));
+        let json = serde_json::to_value(&output).unwrap();
+        assert!(json["results"][0]["extract"].is_string());
+        assert!(json["results"][4].get("extract").is_none());
+        assert!(tool.description().contains("`extract`"));
+
+        // The pages are in the session's fetch cache now: a `find` on one
+        // does not download it again.
+        let fetch = tool.extracts.clone().unwrap();
+        let before = seen.lock().unwrap().len();
+        let page = fetch.page_text_for_extract(&urls[0]).await.unwrap();
+        assert!(page.contains("Amina Juma"));
+        assert_eq!(seen.lock().unwrap().len(), before);
+    }
+
+    #[tokio::test]
+    async fn extract_falls_back_to_the_page_head_without_a_match() {
+        let (base, _) = page_server().await;
+        let mut results = vec![result(format!("{base}/page"))];
+        let tool = SearchWebTool::new_fallback(5).with_page_extracts(fetcher());
+        let any = tool
+            .attach_extracts(
+                "quokka habitat",
+                &mut results,
+                Prefetched::default(),
+                later(10),
+            )
+            .await;
+        assert!(any);
+        let extract = results[0].extract.as_deref().unwrap();
+        assert!(
+            extract.starts_with("Opening words about unrelated gardening"),
+            "{extract}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extracts_respect_the_per_result_and_total_caps() {
+        let (base, _) = page_server().await;
+        let query = "zanzibar lighthouse keeper logbook";
+
+        // Product limits: each extract within 1,200 bytes.
+        let mut results: Vec<SearchResult> =
+            (0..3).map(|_| result(format!("{base}/long"))).collect();
+        let tool = SearchWebTool::new_fallback(5).with_page_extracts(fetcher());
+        tool.attach_extracts(query, &mut results, Prefetched::default(), later(10))
+            .await;
+        for r in &results {
+            let extract = r.extract.as_deref().unwrap();
+            assert!(
+                extract.len() <= EXTRACT_LIMITS.per_result,
+                "{}",
+                extract.len()
+            );
+            assert!(
+                extract.len() > EXTRACT_LIMITS.per_result / 2,
+                "{}",
+                extract.len()
+            );
+            assert!(extract.contains("zanzibar lighthouse"));
+        }
+
+        // More results than the total allows: the total binds.
+        let mut tool = SearchWebTool::new_fallback(5).with_page_extracts(fetcher());
+        tool.extract_limits = ExtractLimits {
+            results: 5,
+            per_result: 1_200,
+            total: 3_000,
+        };
+        let mut results: Vec<SearchResult> =
+            (0..5).map(|_| result(format!("{base}/long"))).collect();
+        tool.attach_extracts(query, &mut results, Prefetched::default(), later(10))
+            .await;
+        let total: usize = results
+            .iter()
+            .filter_map(|r| r.extract.as_deref())
+            .map(str::len)
+            .sum();
+        assert!(total <= 3_000, "{total}");
+        assert!(results[0].extract.is_some() && results[1].extract.is_some());
+        assert!(results[4].extract.is_none(), "nothing left for the fifth");
+    }
+
+    #[tokio::test]
+    async fn slow_or_failing_pages_get_no_extract_and_do_not_fail_the_search() {
+        let (base, _) = page_server().await;
+        let mut results = vec![
+            result(format!("{base}/slow")),
+            result(format!("{base}/page")),
+            result(format!("{base}/missing")),
+        ];
+        let tool = SearchWebTool::new_fallback(5).with_page_extracts(fetcher());
+        let started = std::time::Instant::now();
+        let any = tool
+            .attach_extracts(
+                "Zanzibar lighthouse",
+                &mut results,
+                Prefetched::default(),
+                // The overall deadline cuts the slow page off before its
+                // own per-page budget would.
+                tokio::time::Instant::now() + std::time::Duration::from_millis(1_500),
+            )
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(any);
+        assert!(results[0].extract.is_none());
+        assert!(results[1].extract.as_deref().unwrap().contains("1897"));
+        assert!(
+            results[2].extract.is_none(),
+            "an error page is not an extract"
+        );
+
+        // A binary result is neither an extract nor saved anywhere.
+        let mut results = vec![result(format!("{base}/pdf"))];
+        assert!(
+            !tool
+                .attach_extracts("x", &mut results, Prefetched::default(), later(10))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_page_times_out_within_the_search_call() {
+        let (base, _) = page_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let query = "Zanzibar lighthouse";
+        let urls = vec![format!("{base}/slow"), format!("{base}/page")];
+        let tool = tool_with_recorded_results(dir.path(), query, &urls)
+            .await
+            .with_page_extracts(fetcher());
+        let started = std::time::Instant::now();
+        let output = search(&tool, query).await;
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(PAGE_FETCH_BUDGET_SECS + 2),
+            "{took:?}"
+        );
+        assert_eq!(output.result_count, 2);
+        assert!(output.results[0].extract.is_none());
+        assert!(output.results[1].extract.is_some());
+    }
+
+    #[tokio::test]
+    async fn policy_refused_url_gets_no_extract_and_no_request() {
+        let (base, seen) = page_server().await;
+        let port = base.rsplit(':').next().unwrap();
+        let mut results = vec![
+            // `localhost` is refused by fetch's address filtering, even
+            // with private IPs let through for the mock server.
+            result(format!("http://localhost:{port}/page")),
+            result("file:///etc/passwd".to_string()),
+            result(format!("{base}/page")),
+        ];
+        let tool = SearchWebTool::new_fallback(5).with_page_extracts(fetcher());
+        tool.attach_extracts(
+            "Zanzibar lighthouse",
+            &mut results,
+            Prefetched::default(),
+            later(10),
+        )
+        .await;
+        assert!(results[0].extract.is_none());
+        assert!(results[1].extract.is_none());
+        assert!(results[2].extract.is_some());
+        assert_eq!(*seen.lock().unwrap(), vec!["/page".to_string()]);
+
+        // And without the test-only loopback allowance, the product guard
+        // refuses the mock server itself.
+        let mut results = vec![result(format!("{base}/page"))];
+        let strict =
+            SearchWebTool::new_fallback(5).with_page_extracts(crate::tools::FetchTool::new(None));
+        strict
+            .attach_extracts(
+                "Zanzibar lighthouse",
+                &mut results,
+                Prefetched::default(),
+                later(10),
+            )
+            .await;
+        assert!(results[0].extract.is_none());
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pages_the_passage_stage_read_are_not_downloaded_again() {
+        let (base, seen) = page_server().await;
+        let url = format!("{base}/page");
+        let mut results = vec![SearchResult {
+            snippet: "best passage … engine snippet".to_string(),
+            ..result(url.clone())
+        }];
+        let prefetched = Prefetched {
+            texts: [(
+                url.clone(),
+                "Intro. The Zanzibar lighthouse was lit in 1897.".to_string(),
+            )]
+            .into(),
+            engine_snippets: [(url.clone(), "engine snippet".to_string())].into(),
+        };
+        let tool = SearchWebTool::new_fallback(5).with_page_extracts(fetcher());
+        tool.attach_extracts("Zanzibar lighthouse", &mut results, prefetched, later(10))
+            .await;
+        assert!(results[0].extract.as_deref().unwrap().contains("1897"));
+        assert_eq!(
+            results[0].snippet, "engine snippet",
+            "extract replaces the lead passage"
+        );
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn extracts_off_keeps_the_old_output() {
+        let (base, seen) = page_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let query = "Zanzibar lighthouse";
+        let urls = vec![format!("{base}/page")];
+        let tool = tool_with_recorded_results(dir.path(), query, &urls).await;
+        let output = search(&tool, query).await;
+        assert!(output.note.is_none());
+        assert!(output.results[0].extract.is_none());
+        assert_eq!(output.results[0].snippet, "engine snippet");
+        let json = serde_json::to_value(&output).unwrap();
+        assert!(json.get("note").is_none());
+        assert!(json["results"][0].get("extract").is_none());
+        assert!(seen.lock().unwrap().is_empty(), "no page is read");
+        assert!(!tool.description().contains("`extract`"));
     }
 }

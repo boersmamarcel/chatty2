@@ -680,6 +680,11 @@ impl AgentClient {
         {
             use crate::settings::models::search_settings::SearchProvider;
             let max_results = search_settings.as_ref().map(|s| s.max_results).unwrap_or(5);
+            // Extracts read pages the way `fetch` does, so they follow it:
+            // no fetch tool (internet access off), no extracts.
+            let extract_fetcher = fetch_tool
+                .clone()
+                .filter(|_| search_settings.as_ref().is_none_or(|s| s.page_extracts));
             let api_tool = search_settings.as_ref().and_then(|search_cfg| {
                 let api_key = match search_cfg.active_provider {
                     SearchProvider::Tavily => search_cfg.tavily_api_key.clone(),
@@ -690,7 +695,7 @@ impl AgentClient {
                     SearchWebTool::new(search_cfg.active_provider.clone(), key, max_results)
                 })
             });
-            Some(api_tool.unwrap_or_else(|| {
+            let tool = api_tool.unwrap_or_else(|| {
                 tracing::info!(
                     "Search web tool enabled with DuckDuckGo fallback (no API key configured)"
                 );
@@ -704,7 +709,14 @@ impl AgentClient {
                     }
                     None => tool,
                 }
-            }))
+            });
+            Some(match extract_fetcher {
+                Some(fetch) => {
+                    tracing::info!("Search results carry page extracts");
+                    tool.with_page_extracts(fetch)
+                }
+                None => tool,
+            })
         } else {
             tracing::info!("Search web tool disabled (internet access is off)");
             None

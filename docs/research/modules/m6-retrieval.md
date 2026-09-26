@@ -35,7 +35,7 @@ State after this module (keyless = no search API key):
 | Candidate retrieval | Which items could be relevant? | Keyed: Tavily / Brave API. Keyless: Wikipedia search API **in parallel with** a Bing → DuckDuckGo scrape | memvid BM25 (always), memvid vector search (opt-in) |
 | Fusion | How do several ranked lists become one? | Keyless: Wikipedia and web lists interleaved (RRF tried, reverted) | Raw max-score merge of the BM25 and vector lists |
 | Reranking | Which few candidates are best? | Keyless: BM25 over passages of the fetched pages; with a reranker configured, a cross-encoder orders a 10-candidate pool | None |
-| Context packing | What goes into the prompt, in what order? | Up to `max_results` results; keyless snippets lead with the page's best passage (≤ 1,000 chars total) | Up to `top_k` (default 5) hits; facts first, then skills |
+| Context packing | What goes into the prompt, in what order? | Up to `max_results` results; keyless snippets lead with the page's best passage (≤ 1,000 chars total); with page extracts on (default), the top 3 results also carry an extract of their best-matching passages (≤ 1,200 chars each, ≤ 4,000 per search) | Up to `top_k` (default 5) hits; facts first, then skills |
 
 The rest of this page explains why each stage exists (the papers), what Chatty does at
 each stage today (the code), and what we measured.

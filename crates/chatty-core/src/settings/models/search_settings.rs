@@ -35,6 +35,12 @@ pub struct SearchSettingsModel {
     /// Maximum number of search results to return
     #[serde(default = "default_max_results")]
     pub max_results: usize,
+    /// Attach a short query-relevant extract of the page itself to the top
+    /// search results, so a fact on the page often needs no `fetch` round
+    /// trip. The pages are read like `fetch` reads them (same address
+    /// filtering, session page cache); off = titles and snippets only.
+    #[serde(default = "default_true")]
+    pub page_extracts: bool,
     /// Whether browser-use cloud automation is enabled.
     /// Defaults to `true` so that setting an API key is sufficient to activate the tool.
     /// Set to `false` to explicitly disable without removing the key.
@@ -87,6 +93,7 @@ impl Default for SearchSettingsModel {
             tavily_api_key: None,
             brave_api_key: None,
             max_results: default_max_results(),
+            page_extracts: true,
             browser_use_enabled: true,
             browser_use_api_key: None,
             daytona_enabled: true,
@@ -108,6 +115,7 @@ mod tests {
         assert_eq!(loaded.rerank_url, None);
         assert_eq!(loaded.rerank_model, None);
         assert_eq!(loaded.reranker(), None);
+        assert!(loaded.page_extracts, "page extracts default to on");
     }
 
     #[test]

@@ -270,6 +270,7 @@ Daytona keys (not only web search).
 | **`tavily_api_key`** | `Option<String>` | `null` | Secret |
 | **`brave_api_key`** | `Option<String>` | `null` | Secret |
 | `max_results` | `usize` | `5` | Search hit cap |
+| `page_extracts` | `bool` | `true` | Attach a query-relevant extract of the page (≤1,200 chars each, ≤4,000 per search) to the top 3 results; pages are read like `fetch` reads them (same address filtering, session page cache). Needs internet access on |
 | `browser_use_enabled` | `bool` | `true` | Key alone is enough to activate; set `false` to disable without deleting the key |
 | **`browser_use_api_key`** | `Option<String>` | `null` | Secret |
 | `daytona_enabled` | `bool` | `true` | Same pattern as browser-use |
@@ -282,6 +283,7 @@ Daytona keys (not only web search).
   "enabled": false,
   "active_provider": "Tavily",
   "max_results": 5,
+  "page_extracts": true,
   "browser_use_enabled": true,
   "daytona_enabled": true
 }
