@@ -31,6 +31,7 @@ crates/
 ├── chatty-gpui/              # Desktop binary `chatty` (GPUI)
 ├── chatty-tui/               # Terminal binary `chatty-tui` (Ratatui)
 │                             #   also: --headless and --pipe modes
+├── chatty-terminal/          # Embedded terminal model: PTY + alacritty Term (no UI)
 ├── chatty-wasm-runtime/      # Wasmtime runtime for WASM agent modules
 ├── chatty-module-registry/   # Module discovery, manifest, lifecycle
 ├── chatty-protocol-gateway/  # HTTP gateway: OpenAI / MCP / A2A protocols

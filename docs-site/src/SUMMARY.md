@@ -71,6 +71,7 @@
   - [chatty-core](./dev/crates/chatty-core.md)
   - [chatty-gpui](./dev/crates/chatty-gpui.md)
   - [chatty-tui](./dev/crates/chatty-tui.md)
+  - [chatty-terminal](./dev/crates/chatty-terminal.md)
   - [chatty-wasm-runtime](./dev/crates/chatty-wasm-runtime.md)
   - [chatty-module-registry](./dev/crates/chatty-module-registry.md)
   - [chatty-protocol-gateway](./dev/crates/chatty-protocol-gateway.md)
