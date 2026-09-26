@@ -13,8 +13,8 @@ use crate::tools::{
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, UpdateTodoTool, VerifyCompletionTool,
-    WriteFileTool, WriteTodosTool,
+    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool, UpdateTodoTool,
+    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -147,6 +147,7 @@ pub(super) struct NativeTools {
     pub publish_module_tool: Option<PublishModuleTool>,
     pub ask_user_tool: Option<AskUserTool>,
     pub terminal_read_tool: Option<TerminalReadTool>,
+    pub terminal_run_tool: Option<TerminalRunTool>,
     /// `load_tools`, under dynamic tool loading. Registered whatever the
     /// profile says: it is how the agent reaches the rest of its tools.
     pub load_tools_tool: Option<LoadToolsTool>,
@@ -322,6 +323,9 @@ impl NativeTools {
         if let Some(t) = self.terminal_read_tool {
             b = add(b, profile, t);
         }
+        if let Some(t) = self.terminal_run_tool {
+            b = add(b, profile, t);
+        }
         if let Some(t) = self.load_tools_tool {
             b = b.tool(t);
         }
@@ -375,6 +379,7 @@ macro_rules! native_tools {
         publish_module_tool: $publish_module_tool:expr,
         ask_user_tool: $ask_user_tool:expr,
         terminal_read_tool: $terminal_read_tool:expr,
+        terminal_run_tool: $terminal_run_tool:expr,
         load_tools_tool: $load_tools_tool:expr $(,)?
     ) => {
         NativeTools {
@@ -430,6 +435,7 @@ macro_rules! native_tools {
             publish_module_tool: $publish_module_tool,
             ask_user_tool: $ask_user_tool,
             terminal_read_tool: $terminal_read_tool,
+            terminal_run_tool: $terminal_run_tool,
             load_tools_tool: $load_tools_tool,
         }
     };

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chatty_core::models::message_types::{ApprovalBlock, ApprovalState};
+use chatty_core::tools::terminal_run_tool::parse_approval_label;
 use gpui::*;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants};
@@ -53,10 +54,16 @@ impl RenderOnce for ApprovalCard {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(Alert::warning(
-                        ElementId::Name(format!("approval-alert-{id}").into()),
-                        format!("Run `{command}`?"),
-                    ))
+                    .child({
+                        let alert_id = ElementId::Name(format!("approval-alert-{id}").into());
+                        // A command for the human's own terminal (AGE-584):
+                        // where it runs and that it is not sandboxed.
+                        match parse_approval_label(&command) {
+                            Some((run, context)) => Alert::warning(alert_id, context.to_string())
+                                .title(format!("Run `{run}` in your terminal?")),
+                            None => Alert::warning(alert_id, format!("Run `{command}`?")),
+                        }
+                    })
                     .child(
                         div()
                             .flex()
@@ -106,7 +113,10 @@ impl RenderOnce for ApprovalCard {
                     .h(px(28.))
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("{label} · {}", self.approval.command))
+                    .child(match parse_approval_label(&self.approval.command) {
+                        Some((run, _)) => format!("{label} · {run} · in your terminal"),
+                        None => format!("{label} · {}", self.approval.command),
+                    })
             }
         }
     }

@@ -32,6 +32,10 @@ pub fn classify_tool(name: &str) -> ToolKind {
         // A read of the user's terminal, not a file explored or a command run.
         return ToolKind::External;
     }
+    if n == "terminal_run" {
+        // A command run in the user's terminal (AGE-584).
+        return ToolKind::Command;
+    }
     if n.contains("todo") || n == "verify_completion" {
         // Agent plan tools are Plan blocks, not edits.
         return ToolKind::Explore;
@@ -414,6 +418,7 @@ mod tests {
         assert_eq!(phase_label(classify_tool("apply_diff")), "Editing");
         assert_eq!(phase_label(classify_tool("shell_execute")), "Running");
         assert_eq!(classify_tool("terminal_read"), ToolKind::External);
+        assert_eq!(classify_tool("terminal_run"), ToolKind::Command);
     }
 
     #[test]

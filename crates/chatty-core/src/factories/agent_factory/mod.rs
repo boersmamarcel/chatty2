@@ -40,8 +40,8 @@ use crate::tools::{
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, UpdateTodoTool, VerifyCompletionTool,
-    WriteFileTool, WriteTodosTool,
+    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool, UpdateTodoTool,
+    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -1028,6 +1028,26 @@ impl AgentClient {
         // them: tabs are opened and shared long after the agent is built,
         // so the tool is always offered there and checks each tab's access
         // at call time; with nothing shared it only says so.
+        // Running a command in a tab the human shared as read + run
+        // (AGE-584): the desktop's embedded tabs only, and only with an
+        // approval store to ask through, since every command is approved
+        // by the human whatever the approval mode.
+        let terminal_run_tool: Option<TerminalRunTool> =
+            match (&embedded_terminals, &pending_approvals) {
+                (Some(tabs), Some(approvals)) => Some(TerminalRunTool::new(
+                    tabs.clone(),
+                    approvals.clone(),
+                    exec_settings.as_ref().map_or_else(
+                        || {
+                            crate::settings::models::ExecutionSettingsModel::default()
+                                .max_output_bytes
+                        },
+                        |s| s.max_output_bytes,
+                    ),
+                )),
+                _ => None,
+            };
+
         let terminal_read_tool: Option<TerminalReadTool> = {
             use crate::services::terminal::{TerminalSource, TerminalSources, TmuxSource};
             let mut sources: Vec<std::sync::Arc<dyn TerminalSource>> = Vec::new();
@@ -1195,6 +1215,7 @@ impl AgentClient {
             publish_module: false, // set below after publish_module_tool is created
             ask_user: false,       // set below alongside publish_module
             terminal: terminal_read_tool.is_some(),
+            terminal_run: terminal_run_tool.is_some(),
         };
 
         // The profile decides what the prompt describes as well as what is
@@ -1420,6 +1441,7 @@ impl AgentClient {
             publish_module_tool: publish_module_tool,
             ask_user_tool: ask_user_tool,
             terminal_read_tool: terminal_read_tool,
+            terminal_run_tool: terminal_run_tool,
             load_tools_tool: tool_loader.clone().map(LoadToolsTool::new),
         );
 
@@ -1630,6 +1652,10 @@ mod tests {
         let _ = crate::init_repositories();
         let ctx = AgentBuildContext {
             pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
+            pending_approvals: Some(
+                crate::models::execution_approval_store::ExecutionApprovalStore::new()
+                    .get_pending_approvals(),
+            ),
             ask_user_enabled,
             embedded_terminals,
             ..AgentBuildContext::from_services(AgentServices::default())
@@ -1694,11 +1720,13 @@ mod tests {
         }
 
         let terminal_read = "terminal_read".to_string();
-        assert!(
-            tool_names_with(true, Some(std::sync::Arc::new(NoTabs)))
-                .await
-                .contains(&terminal_read)
-        );
-        assert!(!tool_names_with(true, None).await.contains(&terminal_read));
+        let terminal_run = "terminal_run".to_string();
+        let with_tabs = tool_names_with(true, Some(std::sync::Arc::new(NoTabs))).await;
+        assert!(with_tabs.contains(&terminal_read));
+        // AGE-584: so does `terminal_run`, for tabs shared as read + run.
+        assert!(with_tabs.contains(&terminal_run));
+        let without = tool_names_with(true, None).await;
+        assert!(!without.contains(&terminal_read));
+        assert!(!without.contains(&terminal_run));
     }
 }

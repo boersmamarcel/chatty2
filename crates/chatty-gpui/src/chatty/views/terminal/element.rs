@@ -36,7 +36,8 @@ use super::input::Geometry;
 /// Painted width of a beam cursor and height of an underline cursor.
 const CURSOR_BAR: Pixels = px(2.);
 
-/// Room left of the grid for the agent's command marks (the Agent tab).
+/// Room left of the grid for the agent's command marks: the Agent tab's
+/// always, a human tab's once the agent ran a command there (AGE-584).
 const AGENT_GUTTER: Pixels = px(8.);
 /// Width of an agent command mark in that gutter.
 const AGENT_MARK: Pixels = px(3.);
@@ -200,7 +201,8 @@ pub(super) struct Frame {
 struct PreparedRow {
     backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     runs: Rc<[ShapedRun]>,
-    /// The agent's command shows on this row (Agent tab only).
+    /// The agent's command shows on this row: its OSC 8 link in the Agent
+    /// tab, a `terminal_run` record in a human tab.
     agent: bool,
 }
 
@@ -248,8 +250,14 @@ impl TerminalView {
             cell_width: metrics.cell_width,
             line_height: metrics.line_height,
         });
+        let had_gutter = self.gutter();
         let frame = self.build_frame(bounds, palette, &metrics, window);
         self.cache.metrics = Some(metrics);
+        if self.gutter() != had_gutter {
+            // The agent's first command here: lay out again beside the
+            // gutter.
+            cx.notify();
+        }
         frame
     }
 
@@ -286,6 +294,15 @@ impl TerminalView {
         let rows_cache = &mut cache.rows;
         let agent_marks = self.agent_marks;
 
+        // A human tab's agent commands come from the command records
+        // (`terminal_run`); taken before the grid's lock, which this also
+        // takes. The Agent tab's are the links on its rows.
+        let agent_lines = if agent_marks {
+            Vec::new()
+        } else {
+            self.handle.agent_command_lines()
+        };
+        self.agent_ran |= !agent_lines.is_empty();
         let locking = Instant::now();
         let mut lock_wait = std::time::Duration::ZERO;
         let (rows, selection, cursor) = self.handle.with_term(|term| {
@@ -299,7 +316,11 @@ impl TerminalView {
             let rows = (0..screen_lines)
                 .map(|i| {
                     let cells = &grid[Line(i as i32 - offset)][..];
-                    let agent = agent_marks && agent_command_on_row(cells).is_some();
+                    let agent = if agent_marks {
+                        agent_command_on_row(cells).is_some()
+                    } else {
+                        agent_lines.iter().any(|line| line.0 + offset == i as i32)
+                    };
                     let layout = batch_row(cells, colors, &palette);
                     let backgrounds = layout
                         .backgrounds
@@ -505,7 +526,7 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let started = Instant::now();
-        let bounds = grid_bounds(bounds, self.view.read(cx).agent_marks);
+        let bounds = grid_bounds(bounds, self.view.read(cx).gutter());
         let frame = self
             .view
             .update(cx, |view, cx| view.prepare_frame(bounds, window, cx));
@@ -529,7 +550,7 @@ impl Element for TerminalElement {
     ) {
         let started = Instant::now();
         let outer = bounds;
-        let agent_marks = self.view.read(cx).agent_marks;
+        let agent_marks = self.view.read(cx).gutter();
         let bounds = grid_bounds(bounds, agent_marks);
         self.register_input(bounds, hitbox, window, cx);
         let origin = bounds.origin;

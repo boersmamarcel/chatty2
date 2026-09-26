@@ -194,6 +194,7 @@ pub(super) fn narrow_availability(
         publish_module: keep(tools.publish_module, &["publish_wasm_module"]),
         ask_user: keep(tools.ask_user, &["ask_user"]),
         terminal: keep(tools.terminal, &["terminal_read"]),
+        terminal_run: keep(tools.terminal_run, &["terminal_run"]),
     }
 }
 
@@ -278,6 +279,7 @@ mod tests {
             publish_module: true,
             ask_user: true,
             terminal: true,
+            terminal_run: true,
         }
     }
 
