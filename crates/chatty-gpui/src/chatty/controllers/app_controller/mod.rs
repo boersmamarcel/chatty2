@@ -434,6 +434,9 @@ pub struct ChattyApp {
     /// run one turn at a time once it ends (AGE-482).
     mailboxes:
         std::collections::HashMap<String, chatty_core::session::Mailbox<message_ops::QueuedSend>>,
+    /// `CHATTY_DEBUG_TERMINAL=1` only (AGE-579): a terminal under the chat
+    /// until the docked terminal panel (T4) replaces it.
+    pub debug_terminal: Option<Entity<crate::chatty::views::terminal::TerminalView>>,
 }
 
 impl ChattyApp {
@@ -467,6 +470,7 @@ impl ChattyApp {
             _mcp_notifier: mcp_notifier,
             active_invoke_agent_ids: std::collections::HashSet::new(),
             mailboxes: std::collections::HashMap::new(),
+            debug_terminal: crate::chatty::views::terminal::debug_terminal_from_env(cx),
         };
 
         // Store entity in global state for later access
