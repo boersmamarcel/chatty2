@@ -83,6 +83,7 @@ tools = [
     ("publish_wasm_module", "modules", "publish_module_tool.rs", ""),
     ("create_chart", "viz", "chart_tool.rs", "Registered via tool_collector"),
     ("ask_user", "agent", "ask_user_tool.rs", "Clarifying questions; answered in the UI"),
+    ("terminal_read", "terminal", "terminal_read_tool.rs", "terminal_access; read-only view of the user's tmux panes"),
     ("browser_navigate", "web", "browser_tools.rs", "feature: browser; localhost/file:// by default"),
     ("browser_snapshot", "web", "browser_tools.rs", "feature: browser"),
     ("browser_screenshot", "web", "browser_tools.rs", "feature: browser; PNG via add_attachment path"),
@@ -255,6 +256,7 @@ opt-in (`false`) for security.
 | `hosted_conversations_enabled` | `bool` | `false` | Developer-only: offers the per-conversation move between local and hosted (AGE-308) |
 | `tool_loading` | `ToolLoading` | `"all"` | How tools are offered to the model. JSON: `all` (every allowed tool on every request) or `dynamic` (a small core, plus groups the model loads with `load_tools`). Omitted from the file while `all`. CLI override: `chatty-tui --tool-loading` |
 | `ask_user_enabled` | `bool` | `true` | Offer the `ask_user` tool (ADR-0011 C7). Omitted from the file while `true`. CLI override: `chatty-tui --disable ask-user` (unattended runs, so a stray call fails fast instead of blocking) |
+| `terminal_access` | `bool` | `false` | Offer the read-only `terminal_read` tool over the user's tmux panes (AGE-577); registered only while a tmux server has panes. Omitted from the file while `false`. CLI: `chatty-tui --enable terminal` |
 
 `ApprovalMode` has no `rename_all` — JSON uses the Rust variant names above.
 

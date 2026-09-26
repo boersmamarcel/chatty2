@@ -28,6 +28,10 @@ pub fn classify_tool(name: &str) -> ToolKind {
     if n == "browser_take_control" || n == "browser_release_control" {
         return ToolKind::Handoff;
     }
+    if n == "terminal_read" {
+        // A read of the user's terminal, not a file explored or a command run.
+        return ToolKind::External;
+    }
     if n.contains("todo") || n == "verify_completion" {
         // Agent plan tools are Plan blocks, not edits.
         return ToolKind::Explore;
@@ -409,6 +413,7 @@ mod tests {
         assert_eq!(phase_label(classify_tool("search_code")), "Searching");
         assert_eq!(phase_label(classify_tool("apply_diff")), "Editing");
         assert_eq!(phase_label(classify_tool("shell_execute")), "Running");
+        assert_eq!(classify_tool("terminal_read"), ToolKind::External);
     }
 
     #[test]

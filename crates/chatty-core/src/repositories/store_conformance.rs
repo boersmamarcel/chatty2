@@ -550,6 +550,7 @@ mod tests {
                 hosted_conversations_enabled: true,
                 tool_loading: crate::settings::models::ToolLoading::Dynamic,
                 ask_user_enabled: false,
+                terminal_access: true,
             },
         )
         .await;

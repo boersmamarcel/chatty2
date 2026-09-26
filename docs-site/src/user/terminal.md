@@ -23,7 +23,7 @@ Where it lands: macOS puts a link in `/usr/local/bin` (you may be asked for an a
 | **Headless** | `chatty-tui --headless -m "question"` | One message in, the answer on stdout — for scripts and [sub-agents](./sub-agents.md) |
 | **Pipe** | `cat notes.md \| chatty-tui --pipe` | stdin is the message; the answer goes to stdout |
 
-Useful flags: `--model <id or name>` picks a model (exact id, then name, then substring); `--enable` / `--disable` switch tool groups for this run (`shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`; an unknown name is an error), and `--only` runs with exactly the groups named; `--auto-approve` skips every approval prompt ([Security & sandboxing](./security.md)). Full list: [CLI flags](../dev/reference/cli-flags.md).
+Useful flags: `--model <id or name>` picks a model (exact id, then name, then substring); `--enable` / `--disable` switch tool groups for this run (`shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal`; an unknown name is an error), and `--only` runs with exactly the groups named; `--auto-approve` skips every approval prompt ([Security & sandboxing](./security.md)). Full list: [CLI flags](../dev/reference/cli-flags.md).
 
 ## Zero-config quick start
 

@@ -160,7 +160,8 @@ pub fn gated_exec_settings(settings: &ExecutionSettingsModel) -> Option<Executio
         || settings.filesystem_write_enabled
         || settings.fetch_enabled
         || settings.git_enabled
-        || settings.execute_code_enabled;
+        || settings.execute_code_enabled
+        || settings.terminal_access;
     any_tool_enabled.then(|| settings.clone())
 }
 
@@ -279,6 +280,10 @@ mod tests {
         assert!(
             opens_the_gate(|s| s.execute_code_enabled = true),
             "execute_code_enabled"
+        );
+        assert!(
+            opens_the_gate(|s| s.terminal_access = true),
+            "terminal_access"
         );
     }
 

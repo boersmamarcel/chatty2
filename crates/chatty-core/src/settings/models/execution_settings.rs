@@ -155,6 +155,18 @@ pub struct ExecutionSettingsModel {
     /// snapshots stay byte-for-byte what they were until a run turns it off.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub ask_user_enabled: bool,
+    /// Offer `terminal_read`, a read-only view of the user's own terminals
+    /// (their tmux panes), to the model (AGE-577). Off by default: a
+    /// terminal can show anything, secrets included. The tool is registered
+    /// only when this is on and a terminal source has something to read.
+    /// Skipped when off, like `tool_loading`, so persisted settings files and
+    /// snapshots stay byte-for-byte what they were.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub terminal_access: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_true(value: &bool) -> bool {
@@ -199,6 +211,7 @@ impl Default for ExecutionSettingsModel {
             hosted_conversations_enabled: false, // Developer-only until online mode is account-scoped
             tool_loading: ToolLoading::All,
             ask_user_enabled: true,
+            terminal_access: false, // Opt-in: the terminal may show secrets
         }
     }
 }
@@ -225,5 +238,24 @@ mod ask_user_serde_tests {
         assert_eq!(json["ask_user_enabled"], false);
         let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
         assert!(!back.ask_user_enabled);
+    }
+
+    /// `terminal_access` is off by default and, like `ask_user_enabled`,
+    /// absent from the serialized settings until it is turned on.
+    #[test]
+    fn terminal_access_is_off_by_default_and_absent_when_off() {
+        let json = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
+        assert!(json.get("terminal_access").is_none());
+        let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
+        assert!(!back.terminal_access);
+
+        let on = ExecutionSettingsModel {
+            terminal_access: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&on).unwrap();
+        assert_eq!(json["terminal_access"], true);
+        let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
+        assert!(back.terminal_access);
     }
 }

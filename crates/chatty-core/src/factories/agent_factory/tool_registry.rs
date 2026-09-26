@@ -34,6 +34,7 @@ pub struct ToolAvailability {
     pub daytona: bool,
     pub publish_module: bool,
     pub ask_user: bool,
+    pub terminal: bool,
 }
 
 pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<String> {
@@ -192,6 +193,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.publish_module {
         names.insert(String::from("publish_wasm_module"));
+    }
+    if tools.terminal {
+        names.insert(String::from("terminal_read"));
     }
 
     names
@@ -395,6 +399,7 @@ mod tests {
             ("browser_use", "browser_use"),
             ("daytona", "daytona_run"),
             ("publish_module", "publish_wasm_module"),
+            ("terminal", "terminal_read"),
         ];
 
         for (flag, expected_tool) in cases {
@@ -408,6 +413,7 @@ mod tests {
                 "browser_use" => tools.browser_use = true,
                 "daytona" => tools.daytona = true,
                 "publish_module" => tools.publish_module = true,
+                "terminal" => tools.terminal = true,
                 _ => unreachable!(),
             }
             let names = active_native_tool_names(&tools);
@@ -471,6 +477,7 @@ mod tests {
             daytona: true,
             publish_module: true,
             ask_user: true,
+            terminal: true,
         };
         let names = active_native_tool_names(&all);
         // Every individual flag's tools should be present
@@ -505,6 +512,7 @@ mod tests {
             "daytona_run",
             "execute_code",
             "compile_typst",
+            "terminal_read",
         ] {
             assert!(
                 !names.contains(tool),

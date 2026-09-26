@@ -32,6 +32,7 @@ pub fn verb_for(tool_name: &str, state: &ToolCallState) -> Option<String> {
         "fetch" => ("Fetching", "Fetched"),
         "git_diff" => ("Diffing", "Diffed"),
         "git_status" => ("Checking", "Checked"),
+        "terminal_read" => ("Reading terminal", "Read terminal"),
         "browser_take_control" => (
             "Taking control of the browser",
             "Took control of the browser",
@@ -266,6 +267,15 @@ fn count_diff_lines(output: &str) -> (usize, usize) {
 mod tests {
     use super::*;
     use chatty_core::models::message_types::ToolSource;
+
+    /// Without an arm the row fell back to the raw `terminal_read(lines=80)`.
+    #[test]
+    fn terminal_read_reads_as_reading_the_terminal() {
+        assert_eq!(
+            verb_for("terminal_read", &ToolCallState::Success).as_deref(),
+            Some("Read terminal")
+        );
+    }
 
     fn tool(name: &str) -> ToolCallInfo {
         ToolCallInfo {

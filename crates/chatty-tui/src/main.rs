@@ -70,6 +70,7 @@ TOOL GROUPS:
     code-exec    Expose the execute_code tool (Monty-backed Python fast path)
     docker-exec  Allow Docker fallback for execute_code (requires Docker)
     ask-user     Allow the model to ask the user a clarifying question
+    terminal     Let the model read your tmux panes (read-only, terminal_read)
 
   Names are case-insensitive, `_` works for `-` (ask_user, fs_read), and an
   unknown name is an error.
@@ -1029,7 +1030,7 @@ fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfi
 
 /// The tool group names recognized by --enable/--disable/--only.
 const VALID_TOOL_GROUPS: &str =
-    "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user";
+    "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user, terminal";
 
 /// Flip one named tool group on `settings`. Shared by --enable, --disable
 /// and --only so the group vocabulary (and its docker-exec/code-exec
@@ -1057,6 +1058,7 @@ fn set_tool_group(
             settings.docker_code_execution_enabled = on;
         }
         "ask-user" => settings.ask_user_enabled = on,
+        "terminal" => settings.terminal_access = on,
         _ => bail!("Unknown tool group '{name}' (valid: {VALID_TOOL_GROUPS})"),
     }
     Ok(())
@@ -1077,6 +1079,7 @@ fn tool_group_enabled(
         "code-exec" => settings.execute_code_enabled,
         "docker-exec" => settings.docker_code_execution_enabled,
         "ask-user" => settings.ask_user_enabled,
+        "terminal" => settings.terminal_access,
         _ => return None,
     })
 }
@@ -1091,6 +1094,7 @@ fn canonical_tool_group(name: &str) -> String {
     match group.as_str() {
         "shell-execute" => "shell".to_string(),
         "execute-code" => "code-exec".to_string(),
+        "terminal-read" => "terminal".to_string(),
         _ => group,
     }
 }
@@ -1121,6 +1125,7 @@ const ALL_TOOL_GROUPS: &[&str] = &[
     "code-exec",
     "docker-exec",
     "ask-user",
+    "terminal",
 ];
 
 /// Strict allow-list: turn every known group off, then turn on exactly the
@@ -1256,6 +1261,22 @@ mod tool_override_tests {
         assert!(settings.execute_code_enabled);
         assert!(settings.filesystem_write_enabled);
         assert!(!settings.ask_user_enabled);
+    }
+
+    /// `terminal` (or the tool's own name) turns `terminal_access` on, and
+    /// `--only` turns it off like every other group.
+    #[test]
+    fn terminal_group_toggles_terminal_access() {
+        let mut settings = ExecutionSettingsModel::default();
+        assert!(!settings.terminal_access);
+        apply_tool_overrides(&mut settings, &["terminal".to_string()], &[]).unwrap();
+        assert!(settings.terminal_access);
+        apply_tool_overrides(&mut settings, &[], &["terminal_read".to_string()]).unwrap();
+        assert!(!settings.terminal_access);
+
+        settings.terminal_access = true;
+        apply_tool_only(&mut settings, &["shell".to_string()]).unwrap();
+        assert!(!settings.terminal_access);
     }
 
     #[test]
