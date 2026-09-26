@@ -19,6 +19,46 @@ pub struct GeneralSettingsModel {
     /// field existed still load, defaulting to `Chats`.
     #[serde(default)]
     pub sidebar_mode: SidebarMode,
+    /// The desktop's terminal dock (AGE-582). `#[serde(default)]` for the
+    /// same reason as `sidebar_mode`.
+    #[serde(default)]
+    pub terminal: TerminalSettings,
+}
+
+/// Default scrollback of a dock terminal, in lines.
+pub const DEFAULT_TERMINAL_SCROLLBACK: usize = 10_000;
+/// Default height of the terminal dock, in pixels.
+pub const DEFAULT_TERMINAL_DOCK_HEIGHT: f32 = 300.0;
+
+/// Settings of the desktop terminal dock (AGE-582). Fonts apply to open
+/// terminals at once; the shell and scrollback to terminals opened after
+/// the change.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    /// Monospace family; `None` uses the theme's code font.
+    pub font_family: Option<String>,
+    /// Font size in pixels; `None` uses the theme's code font size.
+    pub font_size: Option<f32>,
+    /// Program to run instead of the platform's default shell.
+    pub shell: Option<String>,
+    /// Lines of scrollback per terminal.
+    pub scrollback_lines: usize,
+    /// Height the dock opens at, in pixels. Dragging the dock's top edge
+    /// updates it.
+    pub dock_height: f32,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            font_family: None,
+            font_size: None,
+            shell: None,
+            scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK,
+            dock_height: DEFAULT_TERMINAL_DOCK_HEIGHT,
+        }
+    }
 }
 
 impl Default for GeneralSettingsModel {
@@ -28,6 +68,36 @@ impl Default for GeneralSettingsModel {
             theme_name: None,
             dark_mode: None,
             sidebar_mode: SidebarMode::default(),
+            terminal: TerminalSettings::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings file saved before the terminal dock existed still loads,
+    /// with the dock's defaults.
+    #[test]
+    fn settings_without_terminal_section_load_with_defaults() {
+        let json = r#"{"font_size":15.0,"theme_name":null,"dark_mode":true}"#;
+        let loaded: GeneralSettingsModel = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.font_size, 15.0);
+        assert_eq!(loaded.terminal, TerminalSettings::default());
+        assert_eq!(loaded.terminal.scrollback_lines, 10_000);
+    }
+
+    /// A partial terminal section keeps the other fields' defaults.
+    #[test]
+    fn partial_terminal_section_fills_in_defaults() {
+        let json = r#"{"font_size":14.0,"terminal":{"shell":"/bin/zsh"}}"#;
+        let loaded: GeneralSettingsModel = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.terminal.shell.as_deref(), Some("/bin/zsh"));
+        assert_eq!(loaded.terminal.dock_height, DEFAULT_TERMINAL_DOCK_HEIGHT);
+        assert_eq!(
+            loaded.terminal.scrollback_lines,
+            DEFAULT_TERMINAL_SCROLLBACK
+        );
     }
 }

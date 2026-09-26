@@ -715,6 +715,8 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | `ChatViewEvent` | `FeedbackChanged` | `history_index`, `feedback` | `ChatView` | `ChattyApp` |
 | | `RegenerateMessage` | `history_index` | `ChatView` | `ChattyApp` |
 | `ArtifactViewEvent` | `Closed` | — | `ArtifactView` | `ChatView` |
+| `TerminalDockEvent` | `Hidden` | — | `TerminalDock` | `ChatView` (refocuses the composer) |
+| `TerminalViewEvent` | `TitleChanged` / `Exited` | — | `TerminalView` | `TerminalDock` (tab strip) |
 | | `PresentationChanged` | — | `ArtifactView` | `ChatView` |
 | | `BrowserControlChanged` | `taken`, `url` | `ArtifactView` | `ChatView` (activity trail) |
 | `TraceEvent` | `ToolCallStateChanged` | `tool_id`, `old_state`, `new_state` | `SystemTraceView` | `ChatView` |
@@ -725,7 +727,7 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | `AgentConfigEvent` | `RebuildRequired` | — | `AgentConfigNotifier` | Settings controllers, `ChattyApp` |
 | `ErrorNotifierEvent` | `NewError` | — | `ErrorNotifier` | `ChattyApp` (toast/banner) |
 
-**Source files:** `stream_manager.rs`, `sidebar_view.rs`, `chat_input/mod.rs`, `chat_view/mod.rs`, `transcript/artifact_view.rs`, `message_types.rs` (TraceEvent), `models_notifier.rs`, `agent_config_notifier.rs`, `error_notifier.rs`. This table is hand-maintained; CI checks that every `EventEmitter` enum and every `StreamManagerEvent` variant has a row (`make docs-check-reference`).
+**Source files:** `stream_manager.rs`, `sidebar_view.rs`, `chat_input/mod.rs`, `chat_view/mod.rs`, `transcript/artifact_view.rs`, `terminal/dock.rs`, `terminal/mod.rs`, `message_types.rs` (TraceEvent), `models_notifier.rs`, `agent_config_notifier.rs`, `error_notifier.rs`. This table is hand-maintained; CI checks that every `EventEmitter` enum and every `StreamManagerEvent` variant has a row (`make docs-check-reference`).
 
 **Adding a new event:** define an enum on the emitter entity, `impl EventEmitter<YourEvent>`, subscribe in the parent (usually `ChattyApp` or `ChatView`). Never use `Arc<dyn Fn>` callbacks between entities. Step-by-step: [Add a desktop GPUI view](../guides/add-gpui-view.md).
 EOF

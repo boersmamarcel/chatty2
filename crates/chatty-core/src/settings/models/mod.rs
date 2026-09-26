@@ -96,6 +96,11 @@ mod schema_docs {
         assert!(general["theme_name"].is_null());
         assert!(general["dark_mode"].is_null());
         assert_eq!(general["sidebar_mode"], "Chats");
+        assert!(general["terminal"]["font_family"].is_null());
+        assert!(general["terminal"]["font_size"].is_null());
+        assert!(general["terminal"]["shell"].is_null());
+        assert_eq!(general["terminal"]["scrollback_lines"], 10_000);
+        assert_eq!(general["terminal"]["dock_height"], 300.0);
 
         let exec = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
         assert_eq!(exec["enabled"], false);

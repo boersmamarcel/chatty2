@@ -5,5 +5,6 @@ pub mod models_page;
 pub mod providers_view;
 pub mod search_settings_page;
 pub mod settings_view;
+pub mod terminal_settings_page;
 pub mod training_settings_page;
 pub mod user_secrets_page;

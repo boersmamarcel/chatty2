@@ -231,3 +231,110 @@ fn osc52_copy_is_forwarded_and_paste_is_never_answered() {
     );
     assert!(screen_contains(&term, "no-reply"));
 }
+
+#[test]
+fn scrollback_setting_caps_the_history() {
+    let config = TerminalConfig {
+        scrollback: 100,
+        ..sh("seq 1 1000; sleep 5")
+    };
+    let (term, events) = TerminalHandle::spawn(config).unwrap();
+    wait_until(&term, &events, "1000", |t, _| {
+        t.snapshot(Region::Screen).text.lines().any(|l| l == "1000")
+    });
+
+    let all = term.snapshot(Region::Scrollback { lines: 5000 });
+    let screen_rows = TerminalConfig::default().size.1 as usize;
+    assert!(
+        all.text.lines().count() <= 100 + screen_rows,
+        "kept {} lines with a 100-line scrollback",
+        all.text.lines().count()
+    );
+    assert_eq!(all.text.lines().last(), Some("1000"));
+}
+
+/// The dock's close confirmation (AGE-582) asks only while a program other
+/// than the shell holds the terminal.
+#[test]
+fn foreground_job_is_seen_while_a_program_runs_in_the_shell() {
+    let config = TerminalConfig {
+        shell: Some("bash".into()),
+        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
+        ..TerminalConfig::default()
+    };
+    let (term, events) = TerminalHandle::spawn(config).unwrap();
+    // An interactive bash at its prompt owns the foreground itself.
+    wait_until(&term, &events, "the prompt", |t, _| {
+        t.snapshot(Region::Screen).text.contains('$')
+    });
+    assert_eq!(term.has_foreground_job(), Some(false));
+
+    term.write(b"sleep 30\r").unwrap();
+    let start = Instant::now();
+    while term.has_foreground_job() != Some(true) {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "sleep never took the foreground"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Ctrl+C ends it and the shell takes the foreground back.
+    term.write(b"\x03").unwrap();
+    let start = Instant::now();
+    while term.has_foreground_job() != Some(false) {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the shell never got the foreground back"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    term.kill();
+    wait_until(&term, &events, "ChildExit", |_, seen| {
+        seen.iter()
+            .any(|e| matches!(e, TerminalEvent::ChildExit(_)))
+    });
+    assert_eq!(term.has_foreground_job(), Some(false));
+}
+
+/// The dock's tab titles (AGE-582) name the foreground program and the
+/// shell's live directory.
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_process_name_and_current_dir_follow_the_shell() {
+    let start = std::env::temp_dir();
+    let config = TerminalConfig {
+        shell: Some("bash".into()),
+        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
+        cwd: Some(start.clone()),
+        ..TerminalConfig::default()
+    };
+    let (term, events) = TerminalHandle::spawn(config).unwrap();
+    wait_until(&term, &events, "the prompt", |t, _| {
+        t.snapshot(Region::Screen).text.contains('$')
+    });
+    assert_eq!(term.foreground_process_name().as_deref(), Some("bash"));
+    assert_eq!(
+        term.current_dir().map(|d| d.canonicalize().unwrap()),
+        Some(start.canonicalize().unwrap())
+    );
+
+    term.write(b"cd / && sleep 30\r").unwrap();
+    let begun = Instant::now();
+    while term.foreground_process_name().as_deref() != Some("sleep") {
+        assert!(
+            begun.elapsed() < DEADLINE,
+            "sleep never showed as foreground"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(term.current_dir(), Some(std::path::PathBuf::from("/")));
+
+    term.kill();
+    wait_until(&term, &events, "ChildExit", |_, seen| {
+        seen.iter()
+            .any(|e| matches!(e, TerminalEvent::ChildExit(_)))
+    });
+    assert_eq!(term.foreground_process_name(), None);
+}

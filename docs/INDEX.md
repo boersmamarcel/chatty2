@@ -16,6 +16,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`getting-started.md`](../docs-site/src/user/getting-started.md) | First run: download, provider, model, first message |
 | [`providers-and-models.md`](../docs-site/src/user/providers-and-models.md) | Connect OpenRouter, Ollama or Azure; manage the model roster |
 | [`chatting.md`](../docs-site/src/user/chatting.md) | Rendering, artifacts, PR status bar, cost, themes |
+| [`terminal-dock.md`](../docs-site/src/user/terminal-dock.md) | The desktop's terminal panel under the chat: Ctrl/Cmd+J, tabs, where it starts, settings |
 | [`agents-and-tools.md`](../docs-site/src/user/agents-and-tools.md) | The agent loop and what the agent can do |
 | [`extensions.md`](../docs-site/src/user/extensions.md) | Hive marketplace, built-in integrations, custom MCP servers |
 | [`memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and saved skills |

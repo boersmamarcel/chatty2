@@ -6,6 +6,20 @@
 
 use super::*;
 
+// The terminal dock's actions (AGE-582). Their handlers sit on the main
+// window's root element (`app_view.rs`), since they move keyboard focus and
+// need the `Window`.
+actions!(
+    terminal,
+    [
+        /// Open the dock and focus its terminal, or close it (Ctrl/Cmd+J,
+        /// Ctrl+`).
+        ToggleTerminalDock,
+        /// Open a new terminal tab in the dock (Ctrl+Shift+`).
+        NewTerminal
+    ]
+);
+
 pub(crate) fn register_actions(cx: &mut App) {
     // Register open settings action with platform-specific keybindings
     debug!("Action registered");
@@ -26,6 +40,19 @@ pub(crate) fn register_actions(cx: &mut App) {
         // Fuzzy quick-open over the workspace (AGE-480).
         KeyBinding::new("cmd-p", QuickOpenFiles, None),
     ]);
+    // Terminal dock (AGE-582), as in VS Code and Zed: Ctrl/Cmd+J and Ctrl+`
+    // toggle, Ctrl+Shift+` opens a new terminal. The chords are in the
+    // terminal's reserved-key list, so they work from inside a terminal too.
+    {
+        use chatty::views::terminal::dock::{NEW_TERMINAL_KEYS, TOGGLE_DOCK_KEYS};
+        let toggle = TOGGLE_DOCK_KEYS
+            .iter()
+            .map(|key| KeyBinding::new(key, ToggleTerminalDock, None));
+        let new = NEW_TERMINAL_KEYS
+            .iter()
+            .map(|key| KeyBinding::new(key, NewTerminal, None));
+        cx.bind_keys(toggle.chain(new).collect::<Vec<_>>());
+    }
     #[cfg(target_os = "linux")]
     cx.bind_keys([
         KeyBinding::new("alt-y", ApprovePendingCommand, None),

@@ -15,9 +15,9 @@
 //! Input (T3) lives in [`input`] (the view's key, text, paste, mouse and
 //! wheel handlers) over the pure encoders in [`keys`], which also holds the
 //! one list of keys the app keeps while a terminal has focus
-//! ([`keys::RESERVED_KEYS`]). The docked panel (T4) comes later; until then
-//! [`debug_terminal_from_env`] is the only way to open one.
+//! ([`keys::RESERVED_KEYS`]). Terminals open in the bottom dock under the chat ([`dock`], T4).
 
+pub mod dock;
 mod element;
 pub mod grid;
 mod input;
@@ -26,15 +26,16 @@ pub mod keys;
 use std::time::Duration;
 
 use chatty_terminal::alacritty_terminal::term::ClipboardType;
-use chatty_terminal::{TerminalConfig, TerminalEvent, TerminalHandle};
+use chatty_terminal::{TerminalEvent, TerminalHandle};
 use futures::StreamExt;
 use gpui::{
-    App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Task, Window, actions,
     div,
 };
 use tracing::warn;
 
+use crate::settings::models::GeneralSettingsModel;
 use element::{RenderCache, TerminalElement};
 
 actions!(
@@ -85,6 +86,15 @@ impl Default for TerminalFontSettings {
     }
 }
 
+/// What a [`TerminalView`] tells its owner (the dock's tab strip).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalViewEvent {
+    /// The program set (or reset) the window title (OSC 0/2).
+    TitleChanged,
+    /// The shell exited.
+    Exited,
+}
+
 /// A terminal on screen: a running [`TerminalHandle`] and the element that
 /// paints it.
 pub struct TerminalView {
@@ -96,6 +106,11 @@ pub struct TerminalView {
     /// IME pre-edit text, while a composition is open.
     marked_text: Option<String>,
     font: TerminalFontSettings,
+    /// Last OSC title; `None` until one is set, or after a reset.
+    title: Option<String>,
+    /// Set once the shell exited: its exit code, or `None` when it was
+    /// killed by a signal or the platform does not report one.
+    exit: Option<Option<i32>>,
     cache: RenderCache,
     /// Grid size last sent to the PTY.
     grid_size: Option<(u16, u16)>,
@@ -122,11 +137,61 @@ impl TerminalView {
             marked_text: None,
             _intercept: input::intercept_keys(cx),
             font: TerminalFontSettings::default(),
+            title: None,
+            exit: None,
             cache: RenderCache::default(),
             grid_size: None,
             pending_resize: None,
             _events: Self::pump_events(events, cx),
         }
+    }
+
+    /// The running terminal.
+    pub fn handle(&self) -> &TerminalHandle {
+        &self.handle
+    }
+
+    /// The program's OSC title, if it set one.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// `Some(code)` once the shell exited (`code` is `None` for a signal).
+    pub fn exit_status(&self) -> Option<Option<i32>> {
+        self.exit
+    }
+
+    /// Record a title or exit for the tab strip. Returns an OSC 52 clipboard
+    /// write from the program, for the caller to apply; reads
+    /// (`ClipboardLoad`) are never answered: `chatty-terminal` configures
+    /// `Term` to drop them.
+    fn apply_event(
+        &mut self,
+        event: TerminalEvent,
+        cx: &mut Context<Self>,
+    ) -> Option<(ClipboardType, String)> {
+        match event {
+            TerminalEvent::ClipboardStore(kind, text) => return Some((kind, text)),
+            TerminalEvent::Title(title) => {
+                self.title = Some(title);
+                cx.emit(TerminalViewEvent::TitleChanged);
+            }
+            TerminalEvent::ResetTitle => {
+                self.title = None;
+                cx.emit(TerminalViewEvent::TitleChanged);
+            }
+            TerminalEvent::ChildExit(status) if self.exit.is_none() => {
+                self.exit = Some(status.code());
+                cx.emit(TerminalViewEvent::Exited);
+            }
+            // Windows sends no `ChildExit`; the loop ending is the exit.
+            TerminalEvent::Exit if self.exit.is_none() => {
+                self.exit = Some(None);
+                cx.emit(TerminalViewEvent::Exited);
+            }
+            _ => {}
+        }
+        None
     }
 
     /// Forward the handle's blocking channel into the view: each batch of
@@ -155,14 +220,17 @@ impl TerminalView {
 
         cx.spawn(async move |this, cx| {
             while let Some(event) = rx.next().await {
-                let mut repaint = changes_screen(&event);
-                let mut clipboard = clipboard_store(event);
+                let mut batch = vec![event];
                 // Everything already queued rides on the same frame.
                 while let Ok(event) = rx.try_recv() {
-                    repaint |= changes_screen(&event);
-                    clipboard = clipboard_store(event).or(clipboard);
+                    batch.push(event);
                 }
-                let updated = this.update(cx, |_, cx| {
+                let repaint = batch.iter().any(changes_screen);
+                let updated = this.update(cx, |view, cx| {
+                    let mut clipboard = None;
+                    for event in batch {
+                        clipboard = view.apply_event(event, cx).or(clipboard);
+                    }
                     if let Some((kind, text)) = clipboard {
                         write_clipboard(kind, text, cx);
                     }
@@ -211,15 +279,6 @@ impl TerminalView {
     }
 }
 
-/// An OSC 52 clipboard write from the program. Reads (`ClipboardLoad`) are
-/// never answered: `chatty-terminal` configures `Term` to drop them.
-fn clipboard_store(event: TerminalEvent) -> Option<(ClipboardType, String)> {
-    match event {
-        TerminalEvent::ClipboardStore(kind, text) => Some((kind, text)),
-        _ => None,
-    }
-}
-
 fn write_clipboard(kind: ClipboardType, text: String, cx: &mut App) {
     let item = ClipboardItem::new_string(text);
     match kind {
@@ -242,8 +301,20 @@ impl Focusable for TerminalView {
     }
 }
 
+impl EventEmitter<TerminalViewEvent> for TerminalView {}
+
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Font settings apply to open terminals: a settings change refreshes
+        // the window, and the element re-measures when they differ.
+        if let Some(settings) = cx.try_global::<GeneralSettingsModel>() {
+            self.font.family = settings
+                .terminal
+                .font_family
+                .clone()
+                .filter(|f| !f.trim().is_empty());
+            self.font.size = settings.terminal.font_size.filter(|s| *s > 0.);
+        }
         div()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -251,27 +322,5 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .child(TerminalElement::new(cx.entity(), self.focus_handle.clone()))
-    }
-}
-
-/// Debug hook until the docked panel (T4) exists: with
-/// `CHATTY_DEBUG_TERMINAL=1` the main window opens a terminal under the
-/// chat. `CHATTY_DEBUG_TERMINAL_CMD` runs that command in `bash -c` instead
-/// of the login shell (end it with `; exec bash` to keep the shell).
-pub(crate) fn debug_terminal_from_env(cx: &mut App) -> Option<Entity<TerminalView>> {
-    if std::env::var("CHATTY_DEBUG_TERMINAL").ok().as_deref() != Some("1") {
-        return None;
-    }
-    let mut config = TerminalConfig::default();
-    if let Ok(command) = std::env::var("CHATTY_DEBUG_TERMINAL_CMD") {
-        config.shell = Some("bash".into());
-        config.args = vec!["-c".into(), command];
-    }
-    match TerminalHandle::spawn(config) {
-        Ok((handle, events)) => Some(cx.new(|cx| TerminalView::new(handle, events, cx))),
-        Err(e) => {
-            warn!("terminal: CHATTY_DEBUG_TERMINAL set but the shell did not start: {e}");
-            None
-        }
     }
 }
