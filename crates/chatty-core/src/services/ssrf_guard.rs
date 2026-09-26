@@ -23,8 +23,9 @@ pub fn check_public_host(url: &str) -> Result<(), String> {
 /// address `169.254.169.254` — is never bypassed, even with the flag on:
 /// that carve-out is deliberate (AGE-459) and applied before the flag is
 /// consulted at all, in [`is_blocked_ip`]. Only the browser's per-workspace
-/// toggle should ever pass `true` here; `fetch_tool` always calls
-/// [`check_public_host`].
+/// toggle should ever pass `true` here at runtime; `fetch_tool` calls
+/// [`check_public_host`], and passes `true` only from its `#[cfg(test)]`
+/// switch that lets a loopback mock server stand in for a site.
 pub fn check_public_host_with_bypass(
     url: &str,
     allow_private_network_access: bool,
