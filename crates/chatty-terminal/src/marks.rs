@@ -56,12 +56,26 @@ impl MarkScanner {
     /// text printed since the previous one; it decides whether text is kept
     /// from here on ([`CleanText::set_enabled`]) and takes what it wants.
     /// Sequences split across calls are carried over.
-    pub fn feed(&mut self, bytes: &[u8], mut on_mark: impl FnMut(Mark, &mut CleanText)) {
+    pub fn feed(&mut self, mut bytes: &[u8], mut on_mark: impl FnMut(Mark, &mut CleanText)) {
+        while !bytes.is_empty() {
+            let (used, mark) = self.next_mark(bytes);
+            bytes = &bytes[used..];
+            if let Some(mark) = mark {
+                on_mark(mark, &mut self.text);
+            }
+        }
+    }
+
+    /// Scan `bytes` up to the end of the next mark. Returns how many bytes
+    /// were scanned (all of them when no mark ends in `bytes`) and the mark,
+    /// so a caller can act at the exact point in the stream where it ended.
+    pub fn next_mark(&mut self, bytes: &[u8]) -> (usize, Option<Mark>) {
         let mut performer = Performer {
             text: &mut self.text,
-            on_mark: &mut on_mark,
+            mark: None,
         };
-        self.parser.advance(&mut performer, bytes);
+        let used = self.parser.advance_until_terminated(&mut performer, bytes);
+        (used, performer.mark)
     }
 
     /// The text printed since the last mark, if kept.
@@ -74,12 +88,13 @@ impl MarkScanner {
     }
 }
 
-struct Performer<'a, F> {
+struct Performer<'a> {
     text: &'a mut CleanText,
-    on_mark: &'a mut F,
+    /// The mark that ended the scan.
+    mark: Option<Mark>,
 }
 
-impl<F: FnMut(Mark, &mut CleanText)> Perform for Performer<'_, F> {
+impl Perform for Performer<'_> {
     fn print(&mut self, c: char) {
         self.text.print(c);
     }
@@ -105,9 +120,11 @@ impl<F: FnMut(Mark, &mut CleanText)> Perform for Performer<'_, F> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if let Some(mark) = parse_mark(params) {
-            (self.on_mark)(mark, self.text);
-        }
+        self.mark = parse_mark(params);
+    }
+
+    fn terminated(&self) -> bool {
+        self.mark.is_some()
     }
 }
 

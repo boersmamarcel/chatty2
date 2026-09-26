@@ -13,6 +13,11 @@
 //! byte read from the PTY before the parser does (see [`tap`]); a
 //! [`MarkScanner`] fed from it finds shell-integration marks and the clean
 //! text between them (see [`marks`]).
+//!
+//! Every terminal also keeps [`CommandRecord`]s from the OSC 133 marks a
+//! shell with integration prints: [`TerminalHandle::commands`] and
+//! [`Region::LastCommand`]. bash and zsh started with default arguments get
+//! that integration injected (see [`TerminalConfig::shell_integration`]).
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -31,11 +36,15 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Osc52};
 use alacritty_terminal::tty;
 
+mod commands;
+#[cfg(unix)]
+mod integration;
 pub mod marks;
 mod snapshot;
 pub mod tap;
 
 pub use alacritty_terminal;
+pub use commands::{CommandRecord, LAST_COMMAND_OUTPUT_BYTES, LastCommand, MAX_RECORDS};
 pub use marks::{CHATTY_OSC, CleanText, Mark, MarkScanner};
 pub use snapshot::{Region, TerminalText};
 pub use tap::ByteTap;
@@ -73,6 +82,11 @@ pub struct TerminalConfig {
     pub cell_px: (u16, u16),
     /// Lines of scrollback kept above the screen.
     pub scrollback: usize,
+    /// Load chatty's OSC 133 shell integration into bash and zsh (Unix),
+    /// so [`TerminalHandle::commands`] sees each command. Applies only when
+    /// `args` is empty (the default arguments); the user's own startup
+    /// files still load first and are never modified. Default `true`.
+    pub shell_integration: bool,
 }
 
 /// Default for [`TerminalConfig::scrollback`], alacritty's own default.
@@ -88,6 +102,7 @@ impl Default for TerminalConfig {
             size: (80, 24),
             cell_px: (8, 16),
             scrollback: DEFAULT_SCROLLBACK,
+            shell_integration: true,
         }
     }
 }
@@ -157,6 +172,7 @@ impl EventListener for EventProxy {
 pub struct TerminalHandle {
     term: Arc<FairMutex<TerminalModel>>,
     shared: Arc<Shared>,
+    commands: Arc<Mutex<commands::CommandTracker>>,
     pid: Option<u32>,
     /// A duplicate of the PTY master, kept to ask which process group has
     /// the terminal's foreground ([`Self::has_foreground_job`]).
@@ -189,7 +205,7 @@ impl TerminalHandle {
 
     fn spawn_inner(
         config: TerminalConfig,
-        tap: Option<ByteTap>,
+        mut tap: Option<ByteTap>,
     ) -> io::Result<(Self, Receiver<TerminalEvent>)> {
         let (cols, rows) = config.size;
         let (cell_width, cell_height) = config.cell_px;
@@ -235,10 +251,22 @@ impl TerminalHandle {
             &GridSize::from(window_size),
             proxy(),
         )));
+        let commands = Arc::new(Mutex::new(commands::CommandTracker::new(&GridSize::from(
+            window_size,
+        ))));
+        let tap: ByteTap = Box::new({
+            let commands = Arc::clone(&commands);
+            move |bytes| {
+                lock(&commands).feed(bytes);
+                if let Some(tap) = tap.as_mut() {
+                    tap(bytes);
+                }
+            }
+        });
         let event_loop = EventLoop::new(
             Arc::clone(&term),
             proxy(),
-            tap::Tapped::new(pty, tap),
+            tap::Tapped::new(pty, Some(tap)),
             true,
             false,
         )?;
@@ -249,6 +277,7 @@ impl TerminalHandle {
             Self {
                 term,
                 shared,
+                commands,
                 pid,
                 #[cfg(unix)]
                 master,
@@ -275,7 +304,13 @@ impl TerminalHandle {
             size.num_lines = rows.max(1);
             *size
         };
-        self.term.lock().resize(GridSize::from(size));
+        {
+            // The lease keeps the PTY thread out of its read loop, so the
+            // tracker and the terminal have seen the same bytes.
+            let _lease = self.term.lease();
+            let mut term = self.term.lock_unfair();
+            lock(&self.commands).resize(&mut term, GridSize::from(size));
+        }
         self.shared.generation.fetch_add(1, Ordering::Release);
         self.shared.send(Msg::Resize(size))
     }
@@ -417,7 +452,31 @@ impl TerminalHandle {
 
     /// Plain text of `region`.
     pub fn snapshot(&self, region: Region) -> TerminalText {
+        if region == Region::LastCommand {
+            return self.with_commands(|term, commands| {
+                let (last, output) = commands.last_command(term);
+                snapshot::frame(term, output, Some(last))
+            });
+        }
         snapshot::snapshot(&self.term.lock(), region)
+    }
+
+    /// The commands run at an integrated shell's prompt, oldest first (the
+    /// last [`MAX_RECORDS`]). Empty for a shell without integration.
+    pub fn commands(&self) -> Vec<CommandRecord> {
+        self.with_commands(|term, commands| commands.records(term))
+    }
+
+    /// Run `f` on the terminal and the command tracker once both have
+    /// processed the same bytes: under the lease the PTY thread is outside
+    /// its read loop, and every byte the tap saw has been parsed.
+    fn with_commands<R>(
+        &self,
+        f: impl FnOnce(&TerminalModel, &mut commands::CommandTracker) -> R,
+    ) -> R {
+        let _lease = self.term.lease();
+        let term = self.term.lock_unfair();
+        f(&term, &mut lock(&self.commands))
     }
 
     /// Counter bumped whenever the terminal content or size changes. A view
@@ -444,7 +503,12 @@ fn is_hidden_input(echo: bool, canonical: bool) -> bool {
     !echo && canonical
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// `Dimensions` for a bare grid size.
+#[derive(Clone, Copy)]
 struct GridSize {
     cols: usize,
     rows: usize,
@@ -474,6 +538,12 @@ impl Dimensions for GridSize {
 }
 
 fn pty_options(config: TerminalConfig) -> tty::Options {
+    let login = config.shell.is_none();
+    let default_args = config.args.is_empty();
+    let mut env = config.env;
+    #[cfg(not(unix))]
+    let _ = (login, default_args, config.shell_integration);
+
     let (program, args) = match config.shell {
         Some(program) => (program, config.args),
         None => {
@@ -486,7 +556,12 @@ fn pty_options(config: TerminalConfig) -> tty::Options {
         }
     };
 
-    let mut env = config.env;
+    #[cfg(unix)]
+    let args = match config.shell_integration && default_args {
+        true => integration::inject(&program, login, &mut env).unwrap_or(args),
+        false => args,
+    };
+
     env.entry("TERM".into())
         .or_insert_with(|| "xterm-256color".into());
     env.entry("COLORTERM".into())
