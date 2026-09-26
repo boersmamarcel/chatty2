@@ -3672,6 +3672,33 @@ mod terminal_dock_tests {
         });
     }
 
+    /// The 1 s title poll runs only while the dock is open: a never-opened
+    /// or closed dock must not wake the app.
+    #[gpui::test]
+    fn titles_are_polled_only_while_the_dock_is_open(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        with_window(cx, window, |window, cx| {
+            let dock = view.read(cx).terminal_dock.clone();
+            assert!(!dock.read(cx).is_polling_titles(), "never opened");
+
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            assert!(dock.read(cx).is_polling_titles(), "open");
+
+            view.update(cx, |v, cx| v.toggle_terminal_dock(window, cx));
+            assert!(!dock.read(cx).is_polling_titles(), "hidden");
+
+            // Reopened, then its last tab closed: the dock hides itself.
+            view.update(cx, |v, cx| v.new_terminal(window, cx));
+            assert!(dock.read(cx).is_polling_titles(), "new terminal");
+            let ids = dock.read(cx).tab_ids();
+            for id in ids {
+                dock.update(cx, |d, cx| d.close(id, window, cx));
+            }
+            assert!(!dock.read(cx).is_open());
+            assert!(!dock.read(cx).is_polling_titles(), "last tab closed");
+        });
+    }
+
     #[gpui::test]
     fn escape_does_not_take_focus_from_the_terminal(cx: &mut gpui::TestAppContext) {
         let (view, window) = harness(cx);

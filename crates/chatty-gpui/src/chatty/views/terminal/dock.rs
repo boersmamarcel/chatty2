@@ -99,7 +99,8 @@ pub struct TerminalDock {
     save_height: Option<Task<()>>,
     focus_handle: FocusHandle,
     _quit: Subscription,
-    _live_refresh: Task<()>,
+    /// Polls tab titles every [`LIVE_REFRESH`]; only while the dock is open.
+    live_refresh: Option<Task<()>>,
 }
 
 impl EventEmitter<TerminalDockEvent> for TerminalDock {}
@@ -131,22 +132,38 @@ impl TerminalDock {
                 dock.tabs.clear();
                 async {}
             }),
-            // Titles follow `cd` and the program started at the prompt,
-            // which print nothing the dock would otherwise hear about.
-            _live_refresh: cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(LIVE_REFRESH).await;
-                    let alive = this.update(cx, |dock, cx| {
-                        if dock.open && dock.refresh_live(cx) {
-                            cx.notify();
-                        }
-                    });
-                    if alive.is_err() {
-                        break;
-                    }
-                }
-            }),
+            live_refresh: None,
         }
+    }
+
+    /// Start polling tab titles, if not already: they follow `cd` and the
+    /// program started at the prompt, which print nothing the dock would
+    /// otherwise hear about. Only while the dock is open, so a closed or
+    /// never-opened dock never wakes the app.
+    fn start_live_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_live(cx);
+        if self.live_refresh.is_some() {
+            return;
+        }
+        self.live_refresh = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(LIVE_REFRESH).await;
+                let alive = this.update(cx, |dock, cx| {
+                    if dock.refresh_live(cx) {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Whether the title poll is running (tests).
+    #[cfg(test)]
+    pub fn is_polling_titles(&self) -> bool {
+        self.live_refresh.is_some()
     }
 
     /// Re-read each tab's foreground program and directory; whether any
@@ -208,13 +225,15 @@ impl TerminalDock {
         if self.tabs.is_empty() {
             self.spawn_tab(cx);
         }
+        self.start_live_refresh(cx);
         self.focus_active(window, cx);
         cx.notify();
     }
 
-    /// Hide the dock. Its terminals keep running.
+    /// Hide the dock. Its terminals keep running; the title poll stops.
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.live_refresh = None;
         cx.notify();
     }
 
@@ -222,6 +241,7 @@ impl TerminalDock {
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.spawn_tab(cx);
+        self.start_live_refresh(cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -331,6 +351,7 @@ impl TerminalDock {
         if self.tabs.is_empty() {
             self.open = false;
             self.maximized = false;
+            self.live_refresh = None;
             cx.emit(TerminalDockEvent::Hidden);
         } else if was_active {
             self.focus_active(window, cx);

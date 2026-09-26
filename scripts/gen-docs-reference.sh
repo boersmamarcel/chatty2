@@ -715,10 +715,10 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | `ChatViewEvent` | `FeedbackChanged` | `history_index`, `feedback` | `ChatView` | `ChattyApp` |
 | | `RegenerateMessage` | `history_index` | `ChatView` | `ChattyApp` |
 | `ArtifactViewEvent` | `Closed` | — | `ArtifactView` | `ChatView` |
-| `TerminalDockEvent` | `Hidden` | — | `TerminalDock` | `ChatView` (refocuses the composer) |
-| `TerminalViewEvent` | `TitleChanged` / `Exited` | — | `TerminalView` | `TerminalDock` (tab strip) |
 | | `PresentationChanged` | — | `ArtifactView` | `ChatView` |
 | | `BrowserControlChanged` | `taken`, `url` | `ArtifactView` | `ChatView` (activity trail) |
+| `TerminalDockEvent` | `Hidden` | — | `TerminalDock` | `ChatView` (refocuses the composer) |
+| `TerminalViewEvent` | `TitleChanged` / `Exited` | — | `TerminalView` | `TerminalDock` (tab strip) |
 | `TraceEvent` | `ToolCallStateChanged` | `tool_id`, `old_state`, `new_state` | `SystemTraceView` | `ChatView` |
 | | `ToolCallInputReceived` | `tool_id` | `SystemTraceView` | `ChatView` |
 | | `ToolCallOutputReceived` | `tool_id`, `has_output` | `SystemTraceView` | `ChatView` |
