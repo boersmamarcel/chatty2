@@ -158,6 +158,14 @@ fn command_refusal(command: &str) -> Option<&'static str> {
              shell's escapes instead (`$'\\t'`)",
         );
     }
+    // An odd run of trailing backslashes escapes the Enter: the shell would
+    // wait at its continuation prompt and the run for its whole timeout.
+    if command.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1 {
+        return Some(
+            "the command ends in a backslash, which would leave the user's shell waiting for \
+             another line; remove it",
+        );
+    }
     None
 }
 
@@ -437,8 +445,29 @@ mod tests {
         args: serde_json::Value,
     ) -> Result<serde_json::Value, ToolError> {
         let args: TerminalRunArgs = serde_json::from_value(args).unwrap();
-        let out = tool.call(&mut ToolContext::new(), args).await?;
+        // Bounded, so a call that waits on an approval nobody answers (a
+        // refusal that stopped refusing) fails instead of waiting out the
+        // store's own 5-minute timeout.
+        let out = tokio::time::timeout(CALL_WAIT, tool.call(&mut ToolContext::new(), args))
+            .await
+            .expect("the call returned: it did not wait on an unanswered approval")?;
         Ok(serde_json::to_value(out).unwrap())
+    }
+
+    /// How long a test waits for an approval request, or for a call.
+    const CALL_WAIT: Duration = Duration::from_secs(5);
+
+    /// The next approval request, failing the test when none comes (the
+    /// tool skipped the approval).
+    async fn next_request(
+        requests: &mut mpsc::UnboundedReceiver<
+            crate::models::execution_approval_store::ApprovalNotification,
+        >,
+    ) -> crate::models::execution_approval_store::ApprovalNotification {
+        tokio::time::timeout(CALL_WAIT, requests.recv())
+            .await
+            .expect("an approval request: the tool must always ask")
+            .expect("the approval channel is open")
     }
 
     /// Call the tool while answering its approval request with `approve`;
@@ -450,7 +479,7 @@ mod tests {
     ) -> (Result<serde_json::Value, ToolError>, String) {
         let (tool, store, mut requests) = tool(source);
         let answer = tokio::spawn(async move {
-            let request = requests.recv().await.expect("an approval request");
+            let request = next_request(&mut requests).await;
             let decision = if approve {
                 ApprovalDecision::Approved
             } else {
@@ -601,7 +630,13 @@ mod tests {
     async fn only_single_line_commands_are_typed() {
         let source = Arc::new(FakeTabs::new(&[("term-3", TerminalAccess::ReadRun)]));
         let (tool, _store, _requests) = tool(source.clone());
-        for command in ["echo a\necho b", "printf 'a\tb'", "   "] {
+        for command in [
+            "echo a\necho b",
+            "printf 'a\tb'",
+            "   ",
+            "ls \\",
+            "echo a \\\\\\",
+        ] {
             let err = call(
                 &tool,
                 serde_json::json!({"terminal": "term-3", "command": command}),
@@ -612,6 +647,9 @@ mod tests {
             assert!(err.contains("nothing was run"), "{command:?}: {err}");
         }
         assert!(source.calls().is_empty());
+        // An escaped backslash at the end is a complete line.
+        assert_eq!(command_refusal("echo a\\\\"), None);
+        assert!(command_refusal("ls \\").unwrap().contains("backslash"));
     }
 
     /// Denied: a refusal, nothing typed, the terminal released.
@@ -653,13 +691,14 @@ mod tests {
             )
             .await
         });
-        let request = requests.recv().await.unwrap();
+        let request = next_request(&mut requests).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(
-            source.calls(),
-            ["begin term-3"],
-            "not run before the answer"
+        let calls = source.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("run ")),
+            "not run before the answer: {calls:?}"
         );
+        assert_eq!(calls, ["begin term-3"]);
         assert!(store.resolve(&request.id, ApprovalDecision::Approved));
         let out = pending.await.unwrap().unwrap();
         assert_eq!(out["exit_code"], 3);
