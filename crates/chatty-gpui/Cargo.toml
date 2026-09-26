@@ -11,6 +11,7 @@ path = "src/main.rs"
 chatty-core = { path = "../chatty-core", features = ["gpui-globals", "all-tools"] }
 chatty-module-registry = { path = "../chatty-module-registry" }
 chatty-protocol-gateway = { path = "../chatty-protocol-gateway" }
+chatty-terminal = { path = "../chatty-terminal" }
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 
 # GPUI framework
