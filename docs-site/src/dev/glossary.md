@@ -26,7 +26,7 @@
 
 **Approval mode.** `ApprovalMode` in the execution settings: `AlwaysAsk` (default), `AutoApproveSandboxed`, `AutoApproveAll`. It decides whether shell commands and file writes stop for a y/n prompt (`ExecutionApprovalStore`, `WriteApprovalStore`); `chatty-tui --auto-approve` forces `AutoApproveAll`. Owning page: [Security & approvals](../user/security.md); fields in [Settings schema](./reference/settings-schema.md).
 
-**Workspace.** The absolute directory in `ExecutionSettingsModel.workspace_dir` that roots the filesystem, shell, git and browser tools; paths outside it are refused. The TUI defaults it to the current directory. Project-local skills live in `<workspace>/.claude/skills/`, browser dumps in `<workspace>/.chatty/browser/`. Owning page: [Agents & tools](../user/agents-and-tools.md).
+**Workspace.** The absolute directory in `ExecutionSettingsModel.workspace_dir` that roots the filesystem, shell, git and browser tools; paths outside it are refused. The TUI defaults it to the current directory. Project skills live in `<workspace>/.agents/skills/` or `<workspace>/.claude/skills/`, browser dumps in `<workspace>/.chatty/browser/`. Owning page: [Agents & tools](../user/agents-and-tools.md).
 
 **Lane A / Lane B (browser).** Two navigation policies for the built-in headless Chrome. Lane A is what ships: an ephemeral profile that reaches `localhost` and workspace-local `file://` URLs, widened to the public web when the internet-access setting is on, behind the same SSRF denylist as `fetch` unless the workspace's `allow_private_network_access` toggle opts into reaching its own LAN too (AGE-459) — the link-local/cloud-metadata range stays refused regardless. Lane B — a per-task origin allowlist with a persistent, credentialed profile — is designed into `NavigationPolicy` but not implemented. Owning page: [Contributing patterns](./contributing-patterns.md) (Built-in Browser); user view in [Agents & tools](../user/agents-and-tools.md).
 
@@ -42,7 +42,7 @@
 
 **Evidence envelope.** The runner's — not the model's — account of a worker's output, appended to every delegation reply as a fenced `evidence` block and carried on the terminal status's `metadata.evidence`: branch, base, commit count, diff stat and, when the team declares one, the verification command's exit code and tail. Empty branch, no envelope.
 
-**Skill.** A `SKILL.md` in `<workspace>/.claude/skills/<name>/` (project-local) or `<data dir>/chatty/skills/<name>/` (global), loaded by `SkillService`, read with `read_skill`, written with `save_skill`, and offered in the slash-command picker. Owning page: [Memory & skills](../user/memory-and-skills.md); internals in [Agent memory](./architecture/agent-memory.md).
+**Skill.** A `SKILL.md` in `.agents/skills/<name>/` or `.claude/skills/<name>/` — in the workspace and its parents up to the git root (project), or under `~` (global) — loaded by `SkillService`, read with `read_skill`, written with `save_skill`, and offered in the slash-command picker. Owning page: [Memory & skills](../user/memory-and-skills.md); internals in [Agent memory](./architecture/agent-memory.md).
 
 **MCP.** Model Context Protocol: external tool servers configured under Settings → Extensions, started by `McpService`, and attached to the agent as tools. Their environment variables are shown to the model only through `masked_env()`. Owning page: [Extensions & MCP](../user/extensions.md); the shipped list is the [curated MCP catalog](./architecture/curated-mcp-catalog.md).
 

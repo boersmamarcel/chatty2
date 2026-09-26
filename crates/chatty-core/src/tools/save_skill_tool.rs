@@ -36,8 +36,8 @@ pub struct SaveSkillArgs {
 ///    owns these entries; they travel with the user's memory database.
 ///
 /// 2. **`SKILL.md` files** — manually maintained Markdown files placed by the user
-///    in `<workspace>/.claude/skills/<name>/SKILL.md` (project-local) or
-///    `<data_dir>/chatty/skills/<name>/SKILL.md` (global).  These are outside the
+///    in `.agents/skills/<name>/SKILL.md` or `.claude/skills/<name>/SKILL.md`
+///    in the project, or the same under `~` (global).  These are outside the
 ///    memory store and cannot be created or deleted by the agent.
 ///
 /// Both paths produce `MemoryHit` objects and are merged before injection.  If the
@@ -75,8 +75,8 @@ impl Tool for SaveSkillTool {
                          skills, prefer recording shell steps that use `uv` for package management \
                          or `execute_code` when isolated sandbox execution is the better fit. \
                          Note: users can also provide skills as SKILL.md files in \
-                         <workspace>/.claude/skills/<name>/ (project-local) or \
-                         <data_dir>/chatty/skills/<name>/ (global). Both sources are merged \
+                         .agents/skills/<name>/ in the project or ~/.agents/skills/<name>/ \
+                         globally (.claude/skills/ is read too). Both sources are merged \
                          into the same context block; calling save_skill is the agent-managed \
                          alternative for skills that should travel with the memory database."
             .to_string()

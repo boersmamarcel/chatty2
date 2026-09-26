@@ -24,10 +24,25 @@ A skill is a named, reusable procedure — *deploy-to-staging*, *write-unit-test
 
 You can also invoke a skill yourself: type `/` in the composer and pick it — skills appear in the picker with a skill badge.
 
-Skills live in two places:
+A skill is a folder holding a `SKILL.md` file, in the [Agent Skills](https://agentskills.io) format that Claude Code, Codex, opencode and Cursor also read. The folder name is the skill name; the `description:` line in the file's frontmatter is what the picker shows:
 
-- **Workspace skills** in `.claude/skills/` next to your code, so they travel with the project.
-- **Global skills** in Chatty's data directory ([where](./advanced.md)), available in every workspace.
+```markdown
+---
+name: deploy-to-staging
+description: Build, tag and push the current branch to staging.
+---
+
+1. Run the tests …
+```
+
+Chatty looks for skills in two places:
+
+- **Project skills**, next to your code so they travel with the repository: `.agents/skills/<name>/SKILL.md` or `.claude/skills/<name>/SKILL.md`. Chatty searches the conversation's working folder and every folder above it up to the root of the git repository.
+- **Global skills**, available in every project: `~/.agents/skills/<name>/SKILL.md` or `~/.claude/skills/<name>/SKILL.md` in your home folder. The path is the same on macOS, Linux and Windows (`%USERPROFILE%\.agents\skills\` on Windows).
+
+Use `.agents/skills/` for new skills. Chatty reads `.claude/skills/` as well, so skills you already have for Claude Code show up without copying them. When two skills share a name, the project skill wins over the global one, and `.agents` wins over `.claude`.
+
+The `/` picker rescans these folders each time you open it, so a skill you add while Chatty is running shows up the next time you type `/`.
 
 ## Next
 

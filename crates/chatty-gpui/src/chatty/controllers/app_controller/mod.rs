@@ -165,6 +165,12 @@ fn get_embedding_service(cx: &gpui::AsyncApp) -> Option<chatty_core::services::E
     .flatten()
 }
 
+/// The workspace directory from the execution settings, if one is set.
+fn workspace_dir_setting(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<ExecutionSettingsModel>()
+        .and_then(|s| s.workspace_dir.as_ref().map(PathBuf::from))
+}
+
 /// Read the SkillService from globals.
 ///
 /// The global is set at startup (keyword-only) and replaced with an embedding-aware
@@ -625,6 +631,9 @@ impl ChattyApp {
                     debug!(dir = ?dir, "ChatInputEvent::WorkingDirChanged received");
                     app.change_conversation_working_dir(dir.clone(), cx);
                 }
+                ChatInputEvent::SlashMenuOpened => {
+                    app.refresh_skills_for_current_dir(cx);
+                }
             },
         )
         .detach();
@@ -719,12 +728,35 @@ impl ChattyApp {
     /// Initialize chat input with available models (and skills for the workspace).
     fn initialize_models(&self, cx: &mut Context<Self>) {
         self.refresh_chat_input_models(cx);
+        self.refresh_skills_for_current_dir(cx);
 
-        let workspace_dir = cx
-            .try_global::<ExecutionSettingsModel>()
-            .and_then(|s| s.workspace_dir.clone())
-            .map(PathBuf::from);
-        self.refresh_chat_input_skills(workspace_dir.as_deref(), cx);
+        // Execution settings load from disk after the window is built, so the
+        // scan above runs before the workspace is known and finds global
+        // skills only. Rescan once the workspace arrives, and whenever it
+        // changes.
+        let mut last_workspace = workspace_dir_setting(cx);
+        cx.observe_global::<ExecutionSettingsModel>(move |app, cx| {
+            let workspace = workspace_dir_setting(cx);
+            if workspace != last_workspace {
+                last_workspace = workspace;
+                app.refresh_skills_for_current_dir(cx);
+            }
+        })
+        .detach();
+    }
+
+    /// Rescan skills for the chat input's working directory, falling back to
+    /// the workspace setting when the conversation has none of its own.
+    fn refresh_skills_for_current_dir(&self, cx: &mut Context<Self>) {
+        let dir = self
+            .chat_view
+            .read(cx)
+            .chat_input_state()
+            .read(cx)
+            .working_dir()
+            .cloned()
+            .or_else(|| workspace_dir_setting(cx));
+        self.refresh_chat_input_skills(dir.as_deref(), cx);
     }
 
     /// Push the current `ModelsModel` into the chat-input model picker.
@@ -789,13 +821,13 @@ impl ChattyApp {
             .cloned()
             .unwrap_or_else(|| chatty_core::services::SkillService::new(None));
 
-        let workspace_skills_dir = workspace_dir.map(|d| d.join(".claude").join("skills"));
+        let workspace_dir = workspace_dir.map(Path::to_path_buf);
         let chat_view = self.chat_view.clone();
         let generation = SKILLS_REFRESH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
         cx.spawn(async move |_this, cx| {
             crate::boot_timing::checkpoint("skills_scan_start");
-            let raw_skills = skill_service.list_all_skills(workspace_skills_dir).await;
+            let raw_skills = skill_service.list_all_skills(workspace_dir).await;
             crate::boot_timing::checkpoint("skills_scan_done");
 
             if SKILLS_REFRESH_GENERATION.load(Ordering::SeqCst) != generation {
