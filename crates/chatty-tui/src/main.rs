@@ -53,7 +53,8 @@ chatty-tui provides four operating modes:
                           echo \"explain this\" | chatty-tui --pipe
 
   ACP (acp):              Serve the Agent Client Protocol on stdin/stdout, so
-                          an editor such as Zed can run chatty as its agent.
+                          an editor such as Zed or VS Code (through an ACP
+                          extension) can run chatty as its agent.
                           Global flags go before the subcommand:
                           chatty-tui --model claude-3.5-sonnet acp
 
@@ -366,11 +367,11 @@ struct Cli {
 enum Command {
     /// Serve the Agent Client Protocol (ACP) on stdin/stdout.
     ///
-    /// For editors that run an external agent over ACP, such as Zed: each
-    /// ACP session is a conversation rooted at the editor's project
-    /// directory, tool approvals are asked through the editor, and the
-    /// model's ask_user tool is off. Logs go to stderr. Flags such as
-    /// --model and --auto-approve go before `acp`.
+    /// For editors that run an external agent over ACP, such as Zed, or VS
+    /// Code through an ACP extension: each ACP session is a conversation
+    /// rooted at the editor's project directory, tool approvals are asked
+    /// through the editor, and the model's ask_user tool is off. Logs go
+    /// to stderr. Flags such as --model and --auto-approve go before `acp`.
     Acp,
 }
 

@@ -22,7 +22,7 @@ Where it lands: macOS puts a link in `/usr/local/bin` (you may be asked for an a
 | **Interactive** | `chatty-tui` | Full-screen chat with a model picker, tool picker and approval prompts |
 | **Headless** | `chatty-tui --headless -m "question"` | One message in, the answer on stdout — for scripts and [sub-agents](./sub-agents.md) |
 | **Pipe** | `cat notes.md \| chatty-tui --pipe` | stdin is the message; the answer goes to stdout |
-| **ACP** | `chatty-tui acp` | Serves the [Agent Client Protocol](https://agentclientprotocol.com) on stdin/stdout, so an editor such as Zed can run chatty as its agent ([below](#use-chatty-as-an-agent-in-zed)) |
+| **ACP** | `chatty-tui acp` | Serves the [Agent Client Protocol](https://agentclientprotocol.com) on stdin/stdout, so an editor such as Zed or VS Code can run chatty as its agent ([below](#use-chatty-as-an-agent-in-zed-or-vs-code)) |
 
 Useful flags: `--model <id or name>` picks a model (exact id, then name, then substring); `--enable` / `--disable` switch tool groups for this run (`shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal`; an unknown name is an error), and `--only` runs with exactly the groups named; `--auto-approve` skips every approval prompt ([Security & sandboxing](./security.md)). Full list: [CLI flags](../dev/reference/cli-flags.md).
 
@@ -81,9 +81,21 @@ Sending a message while a reply is still streaming doesn't get refused — press
 
 Pasting more than 6 lines or 800 characters replaces the pasted text in the input box with a short reference, `[Pasted text #1 +45 lines]`, so a stack trace or log dump doesn't fill the screen — shorter pastes (a URL, a path, a one-line error) are inserted as-is. The model still receives the full text when you send the message. Run `/paste 1` to print a reference's full text back to the transcript. The reference acts as a single character: the cursor steps over it, and backspace at its edge removes the whole thing.
 
-## Use chatty as an agent in Zed
+## Use chatty as an agent in Zed or VS Code
 
-`chatty-tui acp` lets any ACP editor drive chatty. In Zed, open Agent Settings → External Agents → Add Custom Agent, or add this to your settings file:
+`chatty-tui acp` runs chatty as an [Agent Client Protocol](https://agentclientprotocol.com) (ACP) agent, so an editor can use it as its coding agent. Each editor thread is its own chatty conversation, rooted at the folder you have open. It uses your chatty providers, models, tools and MCP servers. Tool calls, the files they touch and the agent's todo plan show up in the editor, and when a tool needs approval the editor asks you with Allow / Deny.
+
+**The command.** The editor starts `chatty-tui` itself, so give it the full path:
+
+- macOS app: `/Applications/chatty.app/Contents/MacOS/chatty-tui`
+- Linux: the `chatty-tui` binary inside the AppImage, or one you built
+- From source: `cargo build --release -p chatty-tui`, then `target/release/chatty-tui`
+
+Put other flags before `acp`, e.g. `"args": ["--model", "claude-sonnet", "acp"]` or `"args": ["--ollama", "acp"]`.
+
+### Zed
+
+Zed supports ACP agents natively. Open Agent Settings → External Agents → Add Custom Agent, or add this to your settings file:
 
 ```json
 {
@@ -98,9 +110,35 @@ Pasting more than 6 lines or 800 characters replaces the pasted text in the inpu
 }
 ```
 
-Then pick **Chatty** in the Agent Panel. Each thread is a chatty conversation rooted at the Zed project's folder. It uses your chatty providers, models, tools and MCP servers. Tool calls, file locations and the agent's todo plan show up in the panel. When a tool needs approval, Zed asks you with Allow / Deny.
+Then pick **Chatty** in the Agent Panel. `dev: open acp logs` shows the protocol messages; chatty's own log goes to stderr, which Zed writes to its log.
 
-Put other flags before `acp`, e.g. `"args": ["--model", "claude-sonnet", "acp"]` or `"args": ["--ollama", "acp"]`. What doesn't work over ACP yet: the model asking you a clarifying question (`ask-user` is turned off), MCP servers configured in Zed (chatty uses its own), images in the prompt, and reopening an earlier thread. Logs go to stderr, which Zed writes to its own log; `dev: open acp logs` shows the protocol messages.
+### VS Code
+
+VS Code has no built-in ACP support, and chatty does not appear in Copilot Chat. Install an ACP extension instead, such as [ACP Client](https://marketplace.visualstudio.com/items?itemName=formulahendry.acp-client) (also on [Open VSX](https://open-vsx.org/extension/formulahendry/acp-client) for Cursor and Windsurf), and add chatty to your `settings.json`:
+
+```json
+{
+  "acp.agents": {
+    "Chatty": {
+      "command": "/path/to/chatty-tui",
+      "args": ["acp"],
+      "env": {}
+    }
+  }
+}
+```
+
+Open the ACP panel in the Activity Bar and click **Chatty** to connect. Keep `acp.autoApprovePermissions` at `ask` so chatty's approval prompts reach you; `allowAll` approves everything. **ACP: Show Protocol Traffic** shows the protocol messages.
+
+### Not supported yet
+
+- The model asking you a clarifying question (`ask-user` is off over ACP).
+- MCP servers configured in the editor (chatty uses its own).
+- Images in the prompt.
+- Reopening an earlier thread or session.
+- `--team`.
+
+Other ACP editors should work the same way — JetBrains IDEs and Neovim (CodeCompanion, avante.nvim) among them — but only Zed and VS Code are described here.
 
 ## Shared configuration
 
