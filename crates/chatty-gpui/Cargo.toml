@@ -32,6 +32,8 @@ dirs.workspace = true
 uuid.workspace = true
 futures.workspace = true
 anyhow.workspace = true
+# Implementing chatty-core's `TerminalSource` for the embedded terminals (AGE-583).
+async-trait.workspace = true
 # Decoding browser screencast frames into gpui's RenderImage (AGE-155) —
 # must resolve to the same version gpui uses internally for its own images.
 image.workspace = true

@@ -3739,6 +3739,74 @@ mod terminal_dock_tests {
         });
     }
 
+    /// AGE-583: every dock tab is in the agent's registry, unshared; the
+    /// eye icon asks how much to share unless a choice was remembered, and
+    /// unshares a shared tab at once. The last focused shared tab is listed
+    /// first, and a closed tab is gone.
+    #[gpui::test]
+    fn sharing_a_tab_asks_unless_a_choice_is_remembered(cx: &mut gpui::TestAppContext) {
+        use crate::chatty::views::terminal::registry::EmbeddedTerminals;
+        use chatty_core::services::terminal::{TerminalAccess, TerminalSource};
+        use chatty_core::settings::models::general_model::TerminalShareDefault;
+        use gpui_component::WindowExt as _;
+
+        let (view, window) = harness(cx);
+        let registry = cx.update(EmbeddedTerminals::global);
+        let listed = |registry: &EmbeddedTerminals| {
+            futures::executor::block_on(registry.list())
+                .into_iter()
+                .map(|t| (t.id, t.access))
+                .collect::<Vec<_>>()
+        };
+        with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| {
+                v.new_terminal(window, cx);
+                v.new_terminal(window, cx);
+            });
+            let dock = view.read(cx).terminal_dock.clone();
+            let [first, second] = dock.read(cx).tab_ids()[..] else {
+                panic!("two tabs");
+            };
+            // Newest (focused) first, nothing shared.
+            assert_eq!(
+                listed(&registry),
+                [
+                    ("term-2".to_string(), TerminalAccess::None),
+                    ("term-1".to_string(), TerminalAccess::None)
+                ]
+            );
+
+            // Ask (the default): the dialog opens, nothing is shared yet.
+            dock.update(cx, |d, cx| d.share_clicked(first, window, cx));
+            assert!(window.has_active_dialog(cx));
+            assert_eq!(dock.read(cx).tab_access(first), TerminalAccess::None);
+            window.close_dialog(cx);
+
+            // Remembered: shared at once, no dialog.
+            cx.global_mut::<GeneralSettingsModel>()
+                .terminal
+                .share_default = TerminalShareDefault::ReadOnly;
+            dock.update(cx, |d, cx| d.share_clicked(first, window, cx));
+            assert!(!window.has_active_dialog(cx));
+            assert_eq!(dock.read(cx).tab_access(first), TerminalAccess::Read);
+
+            // Focusing the first tab makes it the one listed first.
+            dock.update(cx, |d, cx| d.activate(0, window, cx));
+            assert_eq!(
+                listed(&registry)[0],
+                ("term-1".to_string(), TerminalAccess::Read)
+            );
+
+            // A shared tab unshares at once, whatever the setting.
+            dock.update(cx, |d, cx| d.share_clicked(first, window, cx));
+            assert!(!window.has_active_dialog(cx));
+            assert_eq!(dock.read(cx).tab_access(first), TerminalAccess::None);
+
+            dock.update(cx, |d, cx| d.close(second, window, cx));
+            assert_eq!(listed(&registry).len(), 1);
+        });
+    }
+
     #[gpui::test]
     fn new_close_and_reorder_tabs(cx: &mut gpui::TestAppContext) {
         let (view, window) = harness(cx);

@@ -22,6 +22,7 @@ use crate::services::shell_service::ShellSession;
 use crate::services::skill_service::SkillService;
 use crate::services::spend_gate::SpendGate;
 use crate::services::team::TeamSkill;
+use crate::services::terminal::TerminalSource;
 use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::search_settings::SearchSettingsModel;
@@ -105,6 +106,12 @@ pub struct AgentBuildContext {
     /// when every tool group is off, yet the project's instructions still
     /// apply. `None` falls back to `exec_settings.workspace_dir`.
     pub instructions_dir: Option<std::path::PathBuf>,
+    /// The desktop's embedded terminal tabs (AGE-583), a live registry the
+    /// dock keeps current. When set, `terminal_read` is always offered and
+    /// reads the tabs the human shared (per tab, at call time); a tab never
+    /// shared is never read. Only chatty-gpui sets it, on top of
+    /// [`Self::from_services`]; chatty-tui and hive keep the tmux-only gate.
+    pub embedded_terminals: Option<std::sync::Arc<dyn TerminalSource>>,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -232,6 +239,8 @@ impl AgentBuildContext {
             // chatty-tui sets it from its ungated settings; everyone else
             // leaves it to `exec_settings`.
             instructions_dir: None,
+            // Only the desktop has embedded terminals.
+            embedded_terminals: None,
         }
     }
 }

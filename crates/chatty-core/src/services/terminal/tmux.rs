@@ -8,7 +8,8 @@ use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 
 use super::{
-    Region, TerminalBackend, TerminalInfo, TerminalSource, TerminalText, trim_terminal_text,
+    Region, TerminalAccess, TerminalBackend, TerminalInfo, TerminalKind, TerminalSource,
+    TerminalText, trim_terminal_text,
 };
 
 /// A tmux call that takes longer than this is treated as a failure, so a
@@ -203,7 +204,9 @@ fn parse_pane_row(line: &str) -> Option<PaneRow> {
             title,
             cwd,
             backend: TerminalBackend::Tmux,
-            shared: true,
+            kind: TerminalKind::Human,
+            // The `terminal_access` setting shares every pane, read-only.
+            access: TerminalAccess::Read,
         },
         session_activity,
         window_active,
@@ -266,13 +269,14 @@ mod tests {
     }
 
     #[test]
-    fn list_rows_carry_title_cwd_backend_and_shared() {
+    fn list_rows_carry_title_cwd_backend_and_access() {
         let terminals = parse_list_panes(LIST, None);
         let build = terminals.iter().find(|t| t.id == "%0").unwrap();
         assert_eq!(build.title, "work:0.0 bash");
         assert_eq!(build.cwd.as_deref(), Some("/home/m/proj"));
         assert_eq!(build.backend, TerminalBackend::Tmux);
-        assert!(build.shared);
+        assert_eq!(build.kind, TerminalKind::Human);
+        assert_eq!(build.access, TerminalAccess::Read);
 
         let vim = terminals.iter().find(|t| t.id == "%2").unwrap();
         assert_eq!(vim.title, "work:1.0 vim — notes.md");

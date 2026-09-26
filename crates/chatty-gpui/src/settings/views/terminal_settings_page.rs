@@ -3,13 +3,34 @@
 use crate::settings::controllers::general_settings_controller::update_terminal_settings;
 use crate::settings::models::GeneralSettingsModel;
 use chatty_core::settings::models::general_model::{
-    DEFAULT_TERMINAL_DOCK_HEIGHT, DEFAULT_TERMINAL_SCROLLBACK,
+    DEFAULT_TERMINAL_DOCK_HEIGHT, DEFAULT_TERMINAL_SCROLLBACK, TerminalShareDefault,
 };
 use gpui::{App, SharedString};
 use gpui_component::ActiveTheme;
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
+
+/// The "When sharing a terminal" choices, as (value, label).
+const SHARE_DEFAULTS: [(TerminalShareDefault, &str, &str); 3] = [
+    (TerminalShareDefault::Ask, "ask", "Ask"),
+    (TerminalShareDefault::ReadOnly, "read_only", "Read only"),
+    (TerminalShareDefault::ReadRun, "read_run", "Read + run"),
+];
+
+fn share_default_key(value: TerminalShareDefault) -> &'static str {
+    SHARE_DEFAULTS
+        .iter()
+        .find(|(v, _, _)| *v == value)
+        .map_or("ask", |(_, key, _)| key)
+}
+
+fn share_default_from_key(key: &str) -> TerminalShareDefault {
+    SHARE_DEFAULTS
+        .iter()
+        .find(|(_, k, _)| *k == key)
+        .map_or(TerminalShareDefault::Ask, |(v, _, _)| *v)
+}
 
 /// An empty or blank text field means "not set".
 fn non_empty(value: &str) -> Option<String> {
@@ -105,6 +126,33 @@ pub fn terminal_settings_page() -> SettingPage {
                 )
                 .description("Lines kept above the screen. Applies to new terminals."),
             ]),
+            SettingGroup::new().title("Agent access").items(vec![
+                SettingItem::new(
+                    "When sharing a terminal",
+                    SettingField::dropdown(
+                        SHARE_DEFAULTS
+                            .iter()
+                            .map(|(_, key, label)| ((*key).into(), (*label).into()))
+                            .collect(),
+                        |cx: &App| {
+                            share_default_key(
+                                cx.global::<GeneralSettingsModel>().terminal.share_default,
+                            )
+                            .into()
+                        },
+                        |val: SharedString, cx: &mut App| {
+                            update_terminal_settings(cx, |t| {
+                                t.share_default = share_default_from_key(&val)
+                            });
+                        },
+                    ),
+                )
+                .description(
+                    "What the eye icon on a terminal tab does. Ask shows the Read only / \
+                     Read + run choice each time; the other two share at that level at once. \
+                     Terminals are never shared with the agent until you click the eye.",
+                ),
+            ]),
             SettingGroup::new().title("Dock").items(vec![
                 SettingItem::new(
                     "Dock Height",
@@ -132,7 +180,16 @@ pub fn terminal_settings_page() -> SettingPage {
 
 #[cfg(test)]
 mod tests {
-    use super::non_empty;
+    use super::*;
+
+    #[test]
+    fn share_default_keys_round_trip() {
+        for (value, key, _) in SHARE_DEFAULTS {
+            assert_eq!(share_default_key(value), key);
+            assert_eq!(share_default_from_key(key), value);
+        }
+        assert_eq!(share_default_from_key("junk"), TerminalShareDefault::Ask);
+    }
 
     #[test]
     fn blank_fields_mean_unset() {

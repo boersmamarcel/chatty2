@@ -441,7 +441,7 @@ impl ListToolsTool {
             native_tools.push(ToolInfo {
                 name: "terminal_read".to_string(),
                 description:
-                    "Read the user's own terminal (their tmux panes) as plain text. Read-only."
+                    "Read the user's own terminal (a tab they shared, or their tmux panes) as plain text. Read-only."
                         .to_string(),
                 source: "native".to_string(),
             });

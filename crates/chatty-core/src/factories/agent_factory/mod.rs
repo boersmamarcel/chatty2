@@ -274,6 +274,7 @@ impl AgentClient {
             answer_file,
             ask_user_enabled,
             instructions_dir,
+            embedded_terminals,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -1020,24 +1021,47 @@ impl AgentClient {
             None
         };
 
-        // Read-only view of the user's terminal (AGE-577): only when the
-        // setting is on and a source has a terminal to read right now, so a
-        // machine without tmux never shows the model a tool that cannot work.
-        let terminal_read_tool: Option<TerminalReadTool> =
-            match exec_settings.as_ref().filter(|s| s.terminal_access) {
-                Some(settings) => {
-                    let source: std::sync::Arc<dyn crate::services::terminal::TerminalSource> =
-                        std::sync::Arc::new(crate::services::terminal::TmuxSource::new());
-                    if source.list().await.is_empty() {
-                        tracing::info!("Terminal read tool skipped: no tmux terminals to read");
-                        None
-                    } else {
-                        tracing::info!("Terminal read tool enabled");
-                        Some(TerminalReadTool::new(source, settings.max_output_bytes))
-                    }
+        // Read-only view of the user's terminal (AGE-577). The tmux panes
+        // only when the setting is on and there is a pane to read right now,
+        // so a machine without tmux never shows the model a tool that cannot
+        // work. The desktop's embedded tabs (AGE-583) whenever the host has
+        // them: tabs are opened and shared long after the agent is built,
+        // so the tool is always offered there and checks each tab's access
+        // at call time; with nothing shared it only says so.
+        let terminal_read_tool: Option<TerminalReadTool> = {
+            use crate::services::terminal::{TerminalSource, TerminalSources, TmuxSource};
+            let mut sources: Vec<std::sync::Arc<dyn TerminalSource>> = Vec::new();
+            // First, so the tab the user focused last is the default target.
+            sources.extend(embedded_terminals);
+            if exec_settings.as_ref().is_some_and(|s| s.terminal_access) {
+                let tmux = TmuxSource::new();
+                if tmux.list().await.is_empty() {
+                    tracing::info!("Terminal read: no tmux terminals to read");
+                } else {
+                    sources.push(std::sync::Arc::new(tmux));
                 }
-                None => None,
-            };
+            }
+            let max_output_bytes = exec_settings.as_ref().map_or_else(
+                || crate::settings::models::ExecutionSettingsModel::default().max_output_bytes,
+                |s| s.max_output_bytes,
+            );
+            match sources.len() {
+                0 => None,
+                1 => {
+                    tracing::info!("Terminal read tool enabled");
+                    sources
+                        .pop()
+                        .map(|source| TerminalReadTool::new(source, max_output_bytes))
+                }
+                _ => {
+                    tracing::info!("Terminal read tool enabled (embedded tabs and tmux)");
+                    Some(TerminalReadTool::new(
+                        std::sync::Arc::new(TerminalSources::new(sources)),
+                        max_output_bytes,
+                    ))
+                }
+            }
+        };
 
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
@@ -1589,6 +1613,15 @@ mod tests {
     /// sends, for a context with no execution settings — what a gating host
     /// passes when every tool group is off — and a clarification store.
     async fn tool_names_without_exec_settings(ask_user_enabled: bool) -> Vec<String> {
+        tool_names_with(ask_user_enabled, None).await
+    }
+
+    /// [`tool_names_without_exec_settings`], with the host's embedded
+    /// terminals (AGE-583) when given.
+    async fn tool_names_with(
+        ask_user_enabled: bool,
+        embedded_terminals: Option<std::sync::Arc<dyn crate::services::terminal::TerminalSource>>,
+    ) -> Vec<String> {
         use super::{AgentBuildContext, AgentClient, AgentServices};
         use crate::models::clarification_store::ClarificationStore;
         use crate::settings::models::models_store::ModelConfig;
@@ -1598,6 +1631,7 @@ mod tests {
         let ctx = AgentBuildContext {
             pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
             ask_user_enabled,
+            embedded_terminals,
             ..AgentBuildContext::from_services(AgentServices::default())
         };
         let built = AgentClient::from_model_config_with_tools(
@@ -1638,5 +1672,33 @@ mod tests {
                 .await
                 .contains(&"ask_user".to_string())
         );
+    }
+
+    /// AGE-583: a host with embedded terminals (the desktop) always gets
+    /// `terminal_read`, since tabs are shared after the agent is built; the
+    /// tool itself refuses a tab that is not shared. Without them (and with
+    /// `terminal_access` off) there is no tool at all.
+    #[tokio::test]
+    async fn embedded_terminals_always_offer_terminal_read() {
+        use crate::services::terminal::{Region, TerminalInfo, TerminalSource, TerminalText};
+
+        struct NoTabs;
+        #[async_trait::async_trait]
+        impl TerminalSource for NoTabs {
+            async fn list(&self) -> Vec<TerminalInfo> {
+                Vec::new()
+            }
+            async fn read(&self, id: &str, _: Region) -> anyhow::Result<TerminalText> {
+                anyhow::bail!("no terminal `{id}`")
+            }
+        }
+
+        let terminal_read = "terminal_read".to_string();
+        assert!(
+            tool_names_with(true, Some(std::sync::Arc::new(NoTabs)))
+                .await
+                .contains(&terminal_read)
+        );
+        assert!(!tool_names_with(true, None).await.contains(&terminal_read));
     }
 }

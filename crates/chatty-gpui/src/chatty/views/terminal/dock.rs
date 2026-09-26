@@ -12,13 +12,23 @@
 //! [`TerminalSettings::dock_height`] and the chat column (which knows its
 //! own height) applies drags to it; focus moves between the dock and the
 //! composer in `ChatView`, which has both.
+//!
+//! Every tab is registered in [`EmbeddedTerminals`], what the agent's
+//! `terminal_read` sees (AGE-583). A tab starts unshared; the eye icon on it
+//! shares it (after a Read only / Read + run choice, unless one was
+//! remembered) or unshares it, and a tab the agent reads flashes briefly.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
+use chatty_core::services::terminal::{TerminalAccess, TerminalKind};
 use chatty_core::settings::models::ExecutionSettingsModel;
 use chatty_core::settings::models::general_model::TerminalSettings;
 use chatty_terminal::{TerminalConfig, TerminalHandle};
+use futures::StreamExt;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
@@ -26,10 +36,15 @@ use gpui::{
     Subscription, Task, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex};
 use tracing::warn;
 
+use super::registry::{
+    EmbeddedTerminals, ShareClick, remembered_default, share_click, share_tooltip,
+};
 use super::{TerminalView, TerminalViewEvent};
+use crate::settings::controllers::general_settings_controller::update_terminal_settings;
 use crate::settings::models::GeneralSettingsModel;
 
 /// Chords that show or hide the dock. Each is in
@@ -55,6 +70,8 @@ pub const MIN_DOCK_HEIGHT: f32 = 100.;
 pub const MIN_CHAT_HEIGHT: f32 = 160.;
 /// Quiet time after a drag before the new height is written to disk.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+/// How long a tab stays highlighted after the agent read it.
+const READ_FLASH: Duration = Duration::from_millis(1500);
 
 /// What the dock asks of the chat view around it.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +104,9 @@ struct DockTab {
     /// [`LIVE_REFRESH`] (Linux; `None` elsewhere).
     live_program: Option<String>,
     live_cwd: Option<PathBuf>,
+    /// The tab's id in [`EmbeddedTerminals`] (`term-1`), what the agent
+    /// names it by.
+    registry_id: String,
     _events: Subscription,
 }
 
@@ -101,6 +121,11 @@ pub struct TerminalDock {
     _quit: Subscription,
     /// Polls tab titles every [`LIVE_REFRESH`]; only while the dock is open.
     live_refresh: Option<Task<()>>,
+    /// What the agent may read of the tabs (shared with its tool).
+    registry: Arc<EmbeddedTerminals>,
+    /// The tab the agent just read, and the timer that clears it.
+    read_flash: Option<(String, Task<()>)>,
+    _reads: Task<()>,
 }
 
 impl EventEmitter<TerminalDockEvent> for TerminalDock {}
@@ -117,6 +142,15 @@ impl Focusable for TerminalDock {
 
 impl TerminalDock {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let registry = EmbeddedTerminals::global(cx);
+        let mut reads = registry.subscribe_reads();
+        let _reads = cx.spawn(async move |this, cx| {
+            while let Some(id) = reads.next().await {
+                if this.update(cx, |dock, cx| dock.flash_read(id, cx)).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             tabs: Vec::new(),
             active: 0,
@@ -129,11 +163,154 @@ impl TerminalDock {
             // process teardown: `TerminalHandle`'s drop kills the whole
             // process group and reaps it.
             _quit: cx.on_app_quit(|dock, _cx| {
-                dock.tabs.clear();
+                for tab in dock.tabs.drain(..) {
+                    dock.registry.remove(&tab.registry_id);
+                }
                 async {}
             }),
             live_refresh: None,
+            registry,
+            read_flash: None,
+            _reads,
         }
+    }
+
+    /// Highlight the tab the agent read, if it is one of ours, for
+    /// [`READ_FLASH`].
+    fn flash_read(&mut self, registry_id: String, cx: &mut Context<Self>) {
+        if !self.tabs.iter().any(|tab| tab.registry_id == registry_id) {
+            return;
+        }
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(READ_FLASH).await;
+            let _ = this.update(cx, |dock, cx| {
+                dock.read_flash = None;
+                cx.notify();
+            });
+        });
+        self.read_flash = Some((registry_id, timer));
+        cx.notify();
+    }
+
+    /// The access the human gave tab `id` (the dock's own id).
+    pub fn tab_access(&self, id: u64) -> TerminalAccess {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .map_or(TerminalAccess::None, |tab| {
+                self.registry.access(&tab.registry_id)
+            })
+    }
+
+    /// Share tab `id` at `access`, or unshare it with
+    /// [`TerminalAccess::None`].
+    pub fn set_tab_access(&mut self, id: u64, access: TerminalAccess, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
+            self.registry.set_access(&tab.registry_id, access);
+            cx.notify();
+        }
+    }
+
+    /// The eye icon on tab `id`: unshare a shared tab at once; share an
+    /// unshared one at the remembered level, or ask how much.
+    pub fn share_clicked(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let remembered = cx
+            .try_global::<GeneralSettingsModel>()
+            .map(|s| s.terminal.share_default)
+            .unwrap_or_default();
+        match share_click(self.tab_access(id), remembered) {
+            ShareClick::Unshare => self.set_tab_access(id, TerminalAccess::None, cx),
+            ShareClick::Share(access) => self.set_tab_access(id, access, cx),
+            ShareClick::Ask => self.open_share_dialog(id, window, cx),
+        }
+    }
+
+    /// The share choice: Read only or Read + run, and whether to remember
+    /// it as the "When sharing a terminal" setting.
+    fn open_share_dialog(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        let label = tab.title();
+        let dock = cx.entity();
+        let remember = Rc::new(Cell::new(false));
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme();
+            let (muted, border, hover) = (theme.muted_foreground, theme.border, theme.list_hover);
+            let choice = |key: &'static str,
+                          title: &'static str,
+                          detail: &'static str,
+                          access: TerminalAccess| {
+                let dock = dock.clone();
+                let remember = remember.clone();
+                v_flex()
+                    .id(key)
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_0p5()
+                    .border_1()
+                    .border_color(border)
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(div().text_xs().text_color(muted).child(detail))
+                    .on_click(move |_, window, cx| {
+                        if remember.get() {
+                            update_terminal_settings(cx, |t| {
+                                t.share_default = remembered_default(access)
+                            });
+                        }
+                        dock.update(cx, |dock, cx| dock.set_tab_access(id, access, cx));
+                        window.close_dialog(cx);
+                    })
+            };
+            let remember_box = {
+                let remember = remember.clone();
+                Checkbox::new("terminal-share-remember")
+                    .label("Remember this, don't ask again")
+                    .checked(remember.get())
+                    .on_click(move |checked, window, _| {
+                        remember.set(*checked);
+                        window.refresh();
+                    })
+            };
+            dialog
+                .title("Share this terminal with the agent?")
+                .w(px(420.))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .px_1()
+                        .child(div().text_sm().text_color(muted).child(format!(
+                            "'{label}' is yours: the agent cannot see it until you share it."
+                        )))
+                        .child(choice(
+                            "terminal-share-read",
+                            "Read only",
+                            "The agent can see the screen and scrollback.",
+                            TerminalAccess::Read,
+                        ))
+                        .child(choice(
+                            "terminal-share-read-run",
+                            "Read + run",
+                            "The agent can also run commands here, each after your approval.",
+                            TerminalAccess::ReadRun,
+                        ))
+                        .child(div().pt_1().text_sm().child(remember_box))
+                        .child(
+                            div().text_xs().text_color(muted).child(
+                                "A remembered choice can be changed in Settings → Terminal.",
+                            ),
+                        ),
+                )
+        });
     }
 
     /// Start polling tab titles, if not already: they follow `cd` and the
@@ -262,6 +439,8 @@ impl TerminalDock {
     fn focus_active(&self, window: &mut Window, cx: &App) {
         if let Some(tab) = self.tabs.get(self.active) {
             window.focus(&tab.view.read(cx).focus_handle(cx));
+            // The default `terminal_read` target, when shared.
+            self.registry.focused(&tab.registry_id);
         }
     }
 
@@ -292,13 +471,21 @@ impl TerminalDock {
         let events = cx.subscribe(&view, |_, _, _: &TerminalViewEvent, cx| cx.notify());
         let id = self.next_id;
         self.next_id += 1;
+        let cwd = cwd.unwrap_or_default();
+        let registry_id = self.registry.register(
+            view.read(cx).handle(),
+            TerminalKind::Human,
+            shell_name.clone(),
+            cwd.clone(),
+        );
         self.tabs.push(DockTab {
             id,
             view,
             shell_name,
-            cwd: cwd.unwrap_or_default(),
+            cwd,
             live_program: None,
             live_cwd: None,
+            registry_id,
             _events: events,
         });
         self.active = self.tabs.len() - 1;
@@ -344,7 +531,8 @@ impl TerminalDock {
             return;
         };
         let was_active = index == self.active;
-        self.tabs.remove(index);
+        let tab = self.tabs.remove(index);
+        self.registry.remove(&tab.registry_id);
         if index < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
@@ -417,8 +605,12 @@ impl Render for TerminalDock {
             "Ctrl+J"
         };
 
+        let flashed = self.read_flash.as_ref().map(|(id, _)| id.as_str());
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
             let active = index == self.active;
+            let access = self.registry.access(&tab.registry_id);
+            let shared = access.can_read();
+            let read_now = flashed == Some(tab.registry_id.as_str());
             let exit = exit_text(tab.view.read(cx).exit_status());
             let exited = exit.is_some();
             let label: SharedString = tab.title().into();
@@ -447,6 +639,8 @@ impl Render for TerminalDock {
                     this.text_color(theme.muted_foreground)
                         .hover(|s| s.bg(theme.list_hover))
                 })
+                // The agent just read this tab.
+                .when(read_now, |this| this.bg(theme.info.opacity(0.25)))
                 .on_click({
                     let dock = dock.clone();
                     move |_, window, cx| {
@@ -496,6 +690,27 @@ impl Render for TerminalDock {
                             .child(exit),
                     )
                 })
+                .child(
+                    Button::new(("terminal-tab-share", id))
+                        .ghost()
+                        .xsmall()
+                        .icon(
+                            Icon::new(if shared {
+                                IconName::Eye
+                            } else {
+                                IconName::EyeOff
+                            })
+                            .when(shared, |icon| icon.text_color(theme.info)),
+                        )
+                        .tooltip(share_tooltip(access))
+                        .on_click({
+                            let dock = dock.clone();
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                dock.update(cx, |dock, cx| dock.share_clicked(id, window, cx));
+                            }
+                        }),
+                )
                 .child(
                     Button::new(("terminal-tab-close", id))
                         .ghost()

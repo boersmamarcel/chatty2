@@ -338,3 +338,57 @@ fn foreground_process_name_and_current_dir_follow_the_shell() {
     });
     assert_eq!(term.foreground_process_name(), None);
 }
+
+fn poll_input_hidden(term: &TerminalHandle, want: bool, what: &str) {
+    let start = Instant::now();
+    while term.input_hidden() != Some(want) {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "timed out waiting for {what}; input_hidden = {:?}, screen:\n{}",
+            term.input_hidden(),
+            term.snapshot(Region::Screen).text
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `terminal_read` refuses a terminal at a password prompt (AGE-583): a
+/// program turned echo off with canonical input on (`stty -echo`, what
+/// `sudo` and `ssh` do). The shell's own line editor turns echo off too,
+/// but in non-canonical mode, and that is not hidden input.
+#[test]
+fn input_hidden_follows_stty_echo_but_not_the_line_editor() {
+    let config = TerminalConfig {
+        shell: Some("bash".into()),
+        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
+        ..TerminalConfig::default()
+    };
+    let (term, events) = TerminalHandle::spawn(config).unwrap();
+    wait_until(&term, &events, "the prompt", |t, _| {
+        t.snapshot(Region::Screen).text.contains('$')
+    });
+    // readline at its prompt: echo off, non-canonical.
+    poll_input_hidden(&term, false, "the prompt to read as visible input");
+
+    term.write(b"stty -echo; sleep 30\r").unwrap();
+    poll_input_hidden(&term, true, "stty -echo to hide input");
+
+    // Ctrl+C ends the sleep; `stty echo` puts echo back.
+    term.write(b"\x03").unwrap();
+    term.write(b"stty echo\r").unwrap();
+    term.write(b"sleep 30\r").unwrap();
+    poll_input_hidden(&term, false, "echo to come back");
+    term.write(b"\x03").unwrap();
+
+    // `read -s` is the same prompt a script's password question uses.
+    term.write(b"read -s secret\r").unwrap();
+    poll_input_hidden(&term, true, "read -s to hide input");
+    term.write(b"\x03").unwrap();
+
+    term.kill();
+    wait_until(&term, &events, "ChildExit", |_, seen| {
+        seen.iter()
+            .any(|e| matches!(e, TerminalEvent::ChildExit(_)))
+    });
+    assert_eq!(term.input_hidden(), None);
+}

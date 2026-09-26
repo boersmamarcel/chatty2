@@ -72,6 +72,8 @@ Shell commands and code runs follow your approval mode; sandboxed commands run w
 
 The agent sees whatever the pane shows, secrets included, so leave it off unless you want this. The tool is only offered while tmux is running; in the terminal interface the group is called `terminal` (`--enable terminal`, or `/tools`).
 
+In the desktop app you can also share the terminals in its own [terminal dock](./terminal-dock.md#sharing-a-terminal-with-the-agent), one tab at a time, with the eye icon on the tab; that needs no setting, and a tab you never share is never read.
+
 ### Data and documents
 
 The agent can run SQL over CSV, Parquet and JSON files in the workspace and describe their schema — Excel and ODS files too — read and write Excel, Word and PowerPoint files, extract text and page images from PDFs, typeset PDFs and draw charts. Results open as [artifacts](./chatting.md) beside the chat.

@@ -386,6 +386,8 @@ impl ChattyApp {
                                 mcp_tools,
                                 theme_colors,
                                 conversation_id: Some(conv_id.clone()),
+                                embedded_terminals:
+                                    crate::chatty::views::terminal::registry::embedded_terminal_source(cx),
                                 // `pending_*` are the session's (AGE-272) and
                                 // `pending_artifacts` is set inside
                                 // `Conversation::new`.
@@ -551,6 +553,8 @@ impl ChattyApp {
                             AgentBuildContext {
                                 theme_colors,
                                 conversation_id: Some(conv_id.clone()),
+                                embedded_terminals:
+                                    crate::chatty::views::terminal::registry::embedded_terminal_source(cx),
                                 // `pending_*` are the session's (AGE-272).
                                 ..AgentBuildContext::from_services(AgentServices {
                                     exec_settings: Some(exec_settings.clone()),

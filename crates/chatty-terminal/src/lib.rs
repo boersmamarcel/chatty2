@@ -324,6 +324,35 @@ impl TerminalHandle {
         None
     }
 
+    /// Whether the terminal is at a hidden-input prompt: the PTY's `ECHO`
+    /// flag is off while the line discipline is canonical (`ICANON`), which
+    /// is what `sudo`, `ssh`, `getpass(3)` and `read -s` set while a password
+    /// or passphrase is typed. `ECHO` alone is not enough: line editors
+    /// (bash's readline, zsh's zle) and full-screen programs turn it off too,
+    /// but they also leave canonical mode, and they draw what is typed
+    /// themselves.
+    ///
+    /// `None` where that cannot be told (Windows: ConPTY exposes no termios),
+    /// after exit, or on error.
+    pub fn input_hidden(&self) -> Option<bool> {
+        if self.has_exited() {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use nix::sys::termios::LocalFlags;
+            let flags = nix::sys::termios::tcgetattr(self.master.as_ref()?)
+                .ok()?
+                .local_flags;
+            Some(is_hidden_input(
+                flags.contains(LocalFlags::ECHO),
+                flags.contains(LocalFlags::ICANON),
+            ))
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
     /// Name of the program holding the terminal's foreground (`vim`,
     /// `cargo`, or the shell itself at its prompt), for a tab title. Linux
     /// only (read from `/proc`); `None` elsewhere, after exit, or on error.
@@ -396,6 +425,12 @@ impl Drop for TerminalHandle {
             drop(thread.join());
         }
     }
+}
+
+/// A password prompt: canonical line input that is not echoed.
+#[cfg(unix)]
+fn is_hidden_input(echo: bool, canonical: bool) -> bool {
+    !echo && canonical
 }
 
 /// `Dimensions` for a bare grid size.
