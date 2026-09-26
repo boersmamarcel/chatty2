@@ -1834,6 +1834,7 @@ dependencies = [
  "bytes",
  "calamine 0.36.1",
  "chatty-optimize",
+ "chatty-terminal",
  "chromiumoxide",
  "chrono",
  "comemo",

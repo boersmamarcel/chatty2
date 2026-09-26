@@ -1,15 +1,29 @@
 //! `shell_service` — persistent shell session for the agent.
 //!
-//! Spawns a long-running shell child process and exposes a streaming
-//! send-input / read-output API on top of it. Used by the shell tool when
-//! the user enables local execution.
+//! Runs a long-lived bash on a PTY (through `chatty-terminal`) and executes
+//! the agent's commands in it. Used by the shell tool when the user enables
+//! local execution.
 //!
 //! # What lives here
 //!
-//! - `ShellService` — owns the child `Child`, stdin/stdout pipes, and a
-//!   mutex-protected reader loop.
-//! - Cross-platform process spawning (bash on Unix, PowerShell on Windows).
-//! - Output framing, timeouts, and graceful shutdown.
+//! - `ShellSession` — owns the shell's [`TerminalHandle`] and what the byte
+//!   tap has read from it: prompt state, completion marks, command output.
+//! - Spawning (bash, inside bubblewrap on Linux or sandbox-exec on macOS
+//!   when available), the shell's init, timeouts, and shutdown.
+//!
+//! # How a command runs
+//!
+//! The shell's prompt marks itself with OSC 133 `A`/`B`, `PS0` prints `C`
+//! when a command starts and `PROMPT_COMMAND` prints `D;<exit>` when it
+//! ends. An agent command is written to a private file and run by typing
+//! one short line that sources it through [`RUNNER`], which brackets it with
+//! chatty's private OSC 6973 and the command's id. Only that line goes
+//! through readline, so this works from bash 3.2 (macOS) up. Nothing of it
+//! stays visible in a terminal view: the line is redrawn as the command, so
+//! the view shows a normal prompt, the command and its output. The model's
+//! result is the output between the two id marks, read from the byte
+//! stream as clean text (see [`chatty_terminal::CleanText`]), not from the
+//! grid.
 //!
 //! # What does NOT live here
 //!
@@ -19,14 +33,16 @@
 //! - Sandboxed execution (Docker / Daytona) — `sandbox/` and `tools::daytona_tool`.
 
 use anyhow::{Result, anyhow};
+use chatty_terminal::{Mark, MarkScanner, TerminalConfig, TerminalEvent, TerminalHandle};
 use serde::Serialize;
+use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Output from a shell command execution
@@ -63,31 +79,41 @@ pub struct ShellStatus {
     pub uptime_seconds: u64,
 }
 
-/// Internal state for the running bash process
+/// The running shell.
 struct ShellProcess {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    terminal: Arc<TerminalHandle>,
+    tap: Arc<Tap>,
     is_sandboxed: bool,
+    /// Private (0700) directory holding [`RUNNER`] and each agent command's
+    /// file while it runs; removed with the process.
+    dir: tempfile::TempDir,
+}
+
+impl ShellProcess {
+    /// Kill the shell (its whole process group) now, whoever else still
+    /// holds the terminal.
+    fn kill(&self) {
+        self.terminal.kill();
+    }
 }
 
 /// How long the login-profile init may take before the session gives up on
-/// it and runs without the profile (see [`LOGIN_PROFILE_INIT`]).
-const LOGIN_PROFILE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+/// it and runs without the profile (see [`LOGIN_PROFILE_INIT`]). Also bounds
+/// the wait for the first prompt of a shell started without it.
+const LOGIN_PROFILE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Loads what a login shell (`bash -l`, the way other agent harnesses run
 /// commands) would: `/etc/profile`, then the first of `~/.bash_profile`,
 /// `~/.bash_login`, `~/.profile` (Debian/Ubuntu's `~/.profile` sources
 /// `~/.bashrc` in turn). The shell itself starts with `--norc --noprofile`
-/// and runs this as its first command instead, because a profile sourced by
-/// bash at startup would share the command pipe: output it prints would land
-/// in the first command's result, a `read` in it would swallow queued
-/// commands, and a hang would wedge every command after. Here its stdin is
-/// `/dev/null`, its output is discarded, `set -e`/`-u` it may leave behind
-/// are undone (either would end the persistent shell on the model's first
-/// failing command), as is `set -x`/`-v` (the trace would land in every
-/// command's output), the starting directory is restored, and the caller
-/// bounds the whole thing with [`LOGIN_PROFILE_TIMEOUT`].
+/// and runs this before its first prompt instead (see [`shell_init`]), so
+/// output the profile prints stays out of the terminal, a `read` in it
+/// cannot take keystrokes, and a hang is bounded: its stdin is `/dev/null`,
+/// its output is discarded, `set -e`/`-u` it may leave behind are undone
+/// (either would end the persistent shell on the model's first failing
+/// command), as is `set -x`/`-v` (the trace would land in every command's
+/// output), the starting directory is restored, and the caller bounds the
+/// whole thing with [`LOGIN_PROFILE_TIMEOUT`].
 ///
 /// `PATH` entries the shell inherited but the profile dropped are appended
 /// back: Debian's `/etc/profile` resets `PATH` to the system directories,
@@ -114,26 +140,367 @@ export PATH
 unset __chatty_cwd __chatty_f __chatty_path __chatty_pa __chatty_p
 "#;
 
-/// How long to wait for the shell to become waitable after its stdout hit
-/// EOF. Exit is near-instant; this only bounds the pathological case of a
-/// shell that closed stdout and kept running.
-const EXIT_REAP_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+/// The rest of the shell's init, after the profile and the secrets.
+///
+/// The shell is interactive (it has a terminal), which a profile or a
+/// command could notice; this keeps what the model's commands see as close
+/// to the old non-interactive shell as a terminal allows: no job control
+/// (every command stays in the shell's process group, so a timeout's kill
+/// takes it down, and no job notices), no `!` history expansion (it would
+/// rewrite `echo "hi!"`), no aliases from the profile (`rm -i`; an
+/// interactive bash expands them whatever `expand_aliases` says), no history
+/// file, no auto-logout, no command-not-found suggestions, and pagers that
+/// print instead of waiting for a key.
+///
+/// The marks: `PS1` wraps the prompt in `A`/`B`, `PS0` prints `C` (bash
+/// 4.4 and newer have it) and `PROMPT_COMMAND` prints `D;<exit>`.
+/// `__chatty_marks` puts them back when something replaces `PS1` or
+/// `PROMPT_COMMAND` (sourcing a stock `~/.bashrc`, `conda activate`), keeping
+/// what that set: the new prompt goes between the marks, the new prompt
+/// command runs after ours. An agent command runs through [`RUNNER`]. Only
+/// plain bash 3.2 syntax, so macOS's `/bin/bash` runs it too. The last line
+/// says the init is done.
+const SHELL_INIT: &str = r#"set +m +H
+shopt -u expand_aliases
+unalias -a
+unset HISTFILE MAILCHECK TMOUT ALACRITTY_WINDOW_ID WINDOWID __CHATTY_INIT PROMPT_COMMAND
+unset -f command_not_found_handle
+trap - DEBUG
+export PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS=-FRX
+HISTCONTROL=ignoreboth
+__chatty_a='\[\033]133;A\007\]'
+__chatty_b='\[\033]133;B\007\]'
+__chatty_marks() {
+case $PS1 in "$__chatty_a"*"$__chatty_b") ;; *)
+PS1=${PS1//"$__chatty_a"/}
+PS1=${PS1//"$__chatty_b"/}
+PS1=$__chatty_a$PS1$__chatty_b ;;
+esac
+case $PROMPT_COMMAND in __chatty_prompt*) ;; *)
+PROMPT_COMMAND="__chatty_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+esac
+PS0='\033]133;C\007'
+}
+__chatty_status() { return "$1"; }
+__chatty_prompt() {
+local ec=$?
+printf '\033]133;D;%s\007' "$ec"
+if [ -n "${__chatty_id-}" ]; then printf '\033]6973;D;%s;%s\007' "$__chatty_id" "$ec"; __chatty_id=; fi
+__chatty_marks
+}
+PS1='\w\$ '
+PS2='> '
+PROMPT_COMMAND=
+__chatty_marks
+export -n PROMPT_COMMAND PS1 PS0
+printf '\033]6973;ready\007'
+"#;
 
-struct CommandReadResult {
-    exit_code: i32,
-    shell_exited: bool,
+/// Runs one agent command. The session writes the command to
+/// `<dir>/cmd-<id>` and types ` . "$__chatty_r" <id> <column>` (a leading
+/// space keeps it out of the history); this file then redraws that line as
+/// the command itself (so a terminal view shows what ran, as if typed),
+/// prints the start mark, and sources the command in the current shell. So
+/// `cd`, variables (`declare` too: this is not a function), functions,
+/// heredocs, `set -e` and `exit` behave as typed, and the exit code is the
+/// last command's. It prints the end mark itself (a `PROMPT_COMMAND` the
+/// command replaced cannot lose it), puts the marks back, and returns the
+/// command's exit code, so `$?` is what typing would have left. Nothing goes
+/// through readline but the short line: no key bindings, no bracketed
+/// paste, bash 3.2 and newer.
+const RUNNER: &str = r#"__chatty_ec=$?
+__chatty_id=$1
+printf '\033[1A\033[%sG\033[K%s\n' "$(($2 + 1))" "$(<"${__chatty_r%/*}/cmd-$1")"
+printf '\033]6973;C;%s\007' "$1"
+set --
+__chatty_status "$__chatty_ec"
+. "${__chatty_r%/*}/cmd-$__chatty_id"
+__chatty_ec=$?
+printf '\033]6973;D;%s;%s\007' "$__chatty_id" "$__chatty_ec"
+__chatty_id=
+__chatty_marks
+return $__chatty_ec
+"#;
+
+/// Terminal size when no view is attached: wide, so programs that fit their
+/// output to the terminal (`ls`, `git`, test runners) don't wrap it early.
+const HEADLESS_COLS: u16 = 200;
+const HEADLESS_ROWS: u16 = 50;
+
+/// How long an agent command waits for the terminal to be back at an empty
+/// prompt (someone typing, a command started from a view) before giving up.
+const BUSY_WAIT: Duration = Duration::from_secs(2);
+
+/// How long the shell must have printed nothing, with no prompt, nothing
+/// running and nobody typing, before the session stops waiting for a prompt
+/// and acts on its own (see `execute_with_timeout`). Longer than
+/// [`BUSY_WAIT`], so a shell that is merely slow to draw its prompt (a busy
+/// machine, keystrokes it has not echoed yet) is not taken for a lost one.
+const LOST_PROMPT_QUIET: Duration = Duration::from_secs(5);
+
+/// Build the init the shell runs before its first prompt: the login profile
+/// (when `load_login_profile`), then the user's secrets as exports, so a
+/// profile cannot override them, then where [`RUNNER`] is and [`SHELL_INIT`].
+fn shell_init(
+    load_login_profile: bool,
+    secrets: &[(String, String)],
+    runner: &std::path::Path,
+) -> String {
+    let mut init = String::new();
+    if load_login_profile {
+        // Without a `PS1` the profile takes the non-interactive branches the
+        // old piped shell took (`/etc/profile` skips `/etc/bash.bashrc` and
+        // bash-completion, a stock root `.bashrc` returns early); the init
+        // sets the prompt afterwards.
+        init.push_str("unset PS1\n");
+        init.push_str(LOGIN_PROFILE_INIT);
+    }
+    if !secrets.is_empty() {
+        let secret_keys: Vec<&str> = secrets.iter().map(|(k, _)| k.as_str()).collect();
+        info!(keys = ?secret_keys, "Injecting user secrets into shell session");
+    }
+    for (key, value) in secrets {
+        // Validate key (same rules as set_env)
+        if key.chars().all(|c| c.is_alphanumeric() || c == '_') && !key.is_empty() {
+            let escaped_value = value.replace('\'', "'\\''");
+            init.push_str(&format!("export {}='{}'\n", key, escaped_value));
+        } else {
+            warn!(key = %key, "Skipping invalid secret key name");
+        }
+    }
+    init.push_str(&format!(
+        "__chatty_r={}\n",
+        shell_escape(&runner.to_string_lossy())
+    ));
+    init.push_str(SHELL_INIT);
+    init
+}
+
+/// What the byte tap has read from the shell, shared between the PTY
+/// thread and the session.
+struct Tap {
+    state: std::sync::Mutex<TapState>,
+    /// Woken whenever `state` may have changed.
+    changed: Notify,
+}
+
+impl Tap {
+    fn lock(&self) -> std::sync::MutexGuard<'_, TapState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn update(&self, f: impl FnOnce(&mut TapState)) {
+        f(&mut self.lock());
+        self.changed.notify_waiters();
+    }
+
+    /// Wait until `check` returns something, or `deadline` passes.
+    async fn wait_for<T>(
+        &self,
+        deadline: Instant,
+        mut check: impl FnMut(&mut TapState) -> Option<T>,
+    ) -> Option<T> {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(value) = check(&mut self.lock()) {
+                return Some(value);
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return check(&mut self.lock());
+            }
+        }
+    }
+}
+
+/// Where the shell is, read from its marks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Prompt {
+    /// Nothing seen yet, or between a command's end and the next prompt.
+    Between,
+    /// Printing the prompt (after `A`, before `B`).
+    Printing,
+    /// At the prompt, reading a command line (after `B`).
+    Reading,
+    /// Running the command typed at the prompt (after `C`).
+    Running { command_line: String },
+}
+
+struct AgentCommand {
+    id: String,
+    /// Output is being kept (its start mark was seen, its end mark not yet).
+    capturing: bool,
+    /// Output and exit code, once its end mark was seen.
+    done: Option<(String, i32)>,
+}
+
+struct TapState {
+    scanner: MarkScanner,
+    prompt: Prompt,
+    /// The init finished.
+    ready: bool,
+    command: Option<AgentCommand>,
+    /// The shell exited, with this code.
+    exited: Option<i32>,
+    /// Width of the last prompt, where readline puts the command line.
+    prompt_width: usize,
+    /// An agent command was the last thing to run and nothing started
+    /// since: the shell is back at a prompt even if that prompt lost its
+    /// marks.
+    agent_last: bool,
+    /// When the PTY last printed anything.
+    last_output: Instant,
+}
+
+impl TapState {
+    fn new() -> Self {
+        let mut scanner = MarkScanner::new();
+        // Keep what the shell prints before its first prompt: if it fails
+        // to start (a sandbox error), that is the reason.
+        scanner.text_mut().set_enabled(true);
+        Self {
+            scanner,
+            prompt: Prompt::Between,
+            ready: false,
+            command: None,
+            exited: None,
+            prompt_width: 0,
+            agent_last: false,
+            last_output: Instant::now(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        self.last_output = Instant::now();
+        let Self {
+            scanner,
+            prompt,
+            ready,
+            command,
+            prompt_width,
+            agent_last,
+            ..
+        } = self;
+        scanner.feed(bytes, |mark, text| {
+            let capturing = command.as_ref().is_some_and(|c| c.capturing);
+            match mark {
+                Mark::PromptStart => {
+                    *prompt = Prompt::Printing;
+                    if !capturing {
+                        // Keep the prompt, to know where the command line
+                        // starts on its row.
+                        text.set_enabled(false);
+                        text.set_enabled(true);
+                    }
+                }
+                Mark::CommandStart => {
+                    let was_printing = *prompt == Prompt::Printing;
+                    *prompt = Prompt::Reading;
+                    if !capturing && was_printing {
+                        // From here on, keep what is typed at the prompt
+                        // (to tell whether someone is typing, and what
+                        // they ran). Readline redraws relative to the
+                        // prompt's width, so start after it.
+                        let shown = text.take();
+                        let width = shown.rsplit('\n').next().unwrap_or("").chars().count();
+                        *prompt_width = width;
+                        text.set_enabled(true);
+                        text.move_to_column(width);
+                    }
+                }
+                Mark::OutputStart => {
+                    let typed = if capturing {
+                        String::new()
+                    } else {
+                        text.take()
+                    };
+                    let command_line = typed
+                        .lines()
+                        .rev()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .unwrap_or_default()
+                        .to_string();
+                    *prompt = Prompt::Running { command_line };
+                    *agent_last = false;
+                    if !capturing {
+                        text.set_enabled(false);
+                    }
+                }
+                Mark::CommandEnd { .. } => {
+                    *prompt = Prompt::Between;
+                    if !capturing {
+                        text.set_enabled(false);
+                    }
+                }
+                Mark::Private(fields) => {
+                    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                    match (fields.as_slice(), command.as_mut()) {
+                        (["ready"], _) => *ready = true,
+                        // `PS0` shows again for each command of a
+                        // multi-line command line: the first one starts it.
+                        (["C", id], Some(cmd))
+                            if *id == cmd.id && !cmd.capturing && cmd.done.is_none() =>
+                        {
+                            cmd.capturing = true;
+                            text.set_enabled(false);
+                            text.set_enabled(true);
+                        }
+                        (["D", id, code], Some(cmd)) if *id == cmd.id && cmd.capturing => {
+                            let code = code.parse().unwrap_or(-1);
+                            cmd.done = Some((text.take(), code));
+                            cmd.capturing = false;
+                            text.set_enabled(false);
+                            // Our command is over, whether or not a
+                            // `PROMPT_COMMAND` says so.
+                            *prompt = Prompt::Between;
+                            *agent_last = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    /// Why an agent command can't be sent now, or `None` when the shell is
+    /// at an empty prompt. [`Self::lost_prompt`] says whether a refusal is
+    /// only for lack of marks.
+    fn busy(&self) -> Option<String> {
+        match &self.prompt {
+            Prompt::Reading if self.scanner.text().is_blank() => None,
+            Prompt::Reading => Some("someone is typing at the prompt".to_string()),
+            Prompt::Running { command_line } if !command_line.is_empty() => {
+                Some(format!("`{command_line}` is running"))
+            }
+            Prompt::Running { .. } => Some("a command is running".to_string()),
+            Prompt::Between | Prompt::Printing => {
+                Some("the shell is not at its prompt".to_string())
+            }
+        }
+    }
+
+    /// Nothing runs and nobody types, yet no prompt was seen: its marks are
+    /// gone, or the shell is stuck between commands.
+    fn lost_prompt(&self) -> bool {
+        matches!(self.prompt, Prompt::Between | Prompt::Printing)
+    }
 }
 
 /// A persistent shell session that maintains state across multiple commands.
 ///
-/// The session keeps a bash process alive, preserving environment variables,
-/// working directory, and other shell state between invocations.
+/// The session keeps a bash process alive on a PTY, preserving environment
+/// variables, working directory, and other shell state between invocations.
 ///
 /// Security: When sandboxing is available (bubblewrap on Linux, sandbox-exec on macOS),
 /// the shell process runs inside a sandbox with filesystem and network restrictions.
 /// Network isolation is controlled by the `network_isolation` setting.
 pub struct ShellSession {
     process: Mutex<Option<ShellProcess>>,
+    /// The running shell's terminal, readable while a command holds
+    /// `process` (a view attaching, Ctrl+C from one).
+    terminal: std::sync::Mutex<Option<Arc<TerminalHandle>>>,
     workspace_dir: Option<String>,
     network_isolation: bool,
     timeout_seconds: u32,
@@ -150,7 +517,14 @@ pub struct ShellSession {
     load_login_profile: AtomicBool,
     /// `HOME` for the shell when set; tests point it at a scratch profile.
     home_override: Option<String>,
+    /// Tests: run this instead of (sandboxed) `/bin/bash`, given the session
+    /// directory (another bash version in a container).
+    #[cfg(test)]
+    test_shell: Option<TestShell>,
 }
+
+#[cfg(test)]
+type TestShell = Box<dyn Fn(&std::path::Path) -> TerminalConfig + Send + Sync>;
 
 impl ShellSession {
     /// Create a new shell session with user secrets that will be injected
@@ -169,6 +543,7 @@ impl ShellSession {
         let secret_key_names = secrets.iter().map(|(k, _)| k.clone()).collect();
         Self {
             process: Mutex::new(None),
+            terminal: std::sync::Mutex::new(None),
             workspace_dir,
             network_isolation,
             timeout_seconds,
@@ -178,6 +553,8 @@ impl ShellSession {
             secret_key_names,
             load_login_profile: AtomicBool::new(true),
             home_override: None,
+            #[cfg(test)]
+            test_shell: None,
         }
     }
 
@@ -191,6 +568,20 @@ impl ShellSession {
     /// Return the key names of user secrets (for masking in tool output).
     pub fn secret_key_names(&self) -> &[String] {
         &self.secret_key_names
+    }
+
+    /// The terminal the shell runs in, while one is running: for a view to
+    /// attach to (it may resize it and type into it) or a reader to take
+    /// snapshots of. A respawned shell has a new one.
+    pub fn terminal(&self) -> Option<Arc<TerminalHandle>> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_terminal(&self, terminal: Option<Arc<TerminalHandle>>) {
+        *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = terminal;
     }
 
     /// Check if sandboxing is available on this platform
@@ -259,10 +650,6 @@ impl ShellSession {
         status.code().unwrap_or(-1)
     }
 
-    fn decode_output_line(line: &[u8]) -> String {
-        String::from_utf8_lossy(line).into_owned()
-    }
-
     /// Check if the current session process is running inside a sandbox
     pub async fn is_sandboxed(&self) -> bool {
         let process = self.process.lock().await;
@@ -271,119 +658,126 @@ impl ShellSession {
             .map_or(Self::can_sandbox(), |p| p.is_sandboxed)
     }
 
-    /// Ensure the bash process is running, spawning it if necessary.
+    /// Ensure the shell is running, spawning it if necessary.
     ///
     /// Attempts to spawn inside a sandbox (bubblewrap on Linux, sandbox-exec on macOS).
     /// Falls back to unsandboxed execution if sandboxing is unavailable.
-    /// After spawning, loads the login profile ([`LOGIN_PROFILE_INIT`]; a
-    /// profile that fails respawns the shell without it), then injects any
-    /// `startup_env_vars` (user secrets) via export commands, so a profile
-    /// cannot override them.
-    async fn ensure_started(
-        process: &mut Option<ShellProcess>,
-        workspace_dir: &Option<String>,
-        network_isolation: bool,
-        startup_env_vars: &[(String, String)],
-        load_login_profile: &AtomicBool,
-        home: Option<&str>,
-    ) -> Result<()> {
-        if process.is_some() {
-            // Check if process is still alive
-            if let Some(proc) = process {
-                match proc.child.try_wait() {
-                    Ok(Some(status)) => {
-                        warn!(exit_status = ?status, "Shell process exited unexpectedly, respawning");
-                        *process = None;
-                    }
-                    Ok(None) => return Ok(()), // Still running
-                    Err(e) => {
-                        warn!(error = ?e, "Failed to check shell process status, respawning");
-                        *process = None;
-                    }
+    /// The shell runs its init ([`shell_init`]: the login profile, the
+    /// secrets, the marks) before its first prompt; a login profile that
+    /// hangs or ends the shell respawns it without the profile.
+    async fn ensure_started(&self, process: &mut Option<ShellProcess>) -> Result<()> {
+        if let Some(proc) = process.as_ref() {
+            match proc.tap.lock().exited {
+                None => return Ok(()), // Still running
+                Some(code) => {
+                    warn!(
+                        exit_code = code,
+                        "Shell process exited unexpectedly, respawning"
+                    );
                 }
             }
+            *process = None;
+            self.set_terminal(None);
         }
 
-        info!(workspace = ?workspace_dir, "Spawning persistent shell session");
+        info!(workspace = ?self.workspace_dir, "Spawning persistent shell session");
 
-        let (child, is_sandboxed, mut stdin, reader) = loop {
-            let (mut child, is_sandboxed) =
-                Self::spawn_shell(workspace_dir, network_isolation, home)?;
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| anyhow!("Failed to capture shell stdin"))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| anyhow!("Failed to capture shell stdout"))?;
-            let mut reader = BufReader::new(stdout);
-
-            if !load_login_profile.load(Ordering::Relaxed) {
-                break (child, is_sandboxed, stdin, reader);
-            }
-            match Self::run_login_profile(&mut stdin, &mut reader).await {
-                Ok(()) => break (child, is_sandboxed, stdin, reader),
-                Err(e) => {
+        loop {
+            let load_login_profile = self.load_login_profile.load(Ordering::Relaxed);
+            let dir = session_dir()?;
+            let runner = dir.path().join("run");
+            let init = shell_init(load_login_profile, &self.startup_env_vars, &runner);
+            #[cfg(test)]
+            let custom = self.test_shell.as_ref().map(|shell| shell(dir.path()));
+            #[cfg(not(test))]
+            let custom = None;
+            let proc = Self::spawn_shell(
+                &self.workspace_dir,
+                self.network_isolation,
+                self.home_override.as_deref(),
+                &init,
+                dir,
+                custom,
+            )?;
+            match Self::wait_ready(&proc).await {
+                Ok(()) => {
+                    info!(pid = ?proc.terminal.pid(), sandboxed = proc.is_sandboxed, "Shell session started");
+                    self.set_terminal(Some(Arc::clone(&proc.terminal)));
+                    *process = Some(proc);
+                    return Ok(());
+                }
+                Err(e) if load_login_profile => {
                     // A profile that hangs, exits or execs: run this session
                     // without it rather than lose the shell.
                     warn!(error = %e, "Login profile did not load; continuing without it");
-                    load_login_profile.store(false, Ordering::Relaxed);
-                    #[cfg(unix)]
-                    if !is_sandboxed {
-                        kill_process_group(child.id());
-                    }
-                    let _ = child.kill().await;
+                    self.load_login_profile.store(false, Ordering::Relaxed);
+                    proc.kill();
+                }
+                Err(e) => {
+                    proc.kill();
+                    return Err(e);
                 }
             }
-        };
-
-        let pid = child.id();
-        info!(pid = ?pid, sandboxed = is_sandboxed, "Shell session started");
-
-        // Inject user secrets as environment variables before any user commands.
-        // Written directly to stdin to avoid going through execute() which would
-        // re-enter the mutex.
-        if !startup_env_vars.is_empty() {
-            let secret_keys: Vec<&str> = startup_env_vars.iter().map(|(k, _)| k.as_str()).collect();
-            info!(keys = ?secret_keys, "Injecting user secrets into shell session");
-
-            for (key, value) in startup_env_vars {
-                // Validate key (same rules as set_env)
-                if key.chars().all(|c| c.is_alphanumeric() || c == '_') && !key.is_empty() {
-                    let escaped_value = value.replace('\'', "'\\''");
-                    let cmd = format!("export {}='{}'\n", key, escaped_value);
-                    stdin.write_all(cmd.as_bytes()).await?;
-                } else {
-                    warn!(key = %key, "Skipping invalid secret key name");
-                }
-            }
-            stdin.flush().await?;
         }
+    }
 
-        *process = Some(ShellProcess {
-            child,
-            stdin,
-            reader,
-            is_sandboxed,
-        });
-
-        Ok(())
+    /// Wait, up to [`LOGIN_PROFILE_TIMEOUT`], for a freshly spawned shell to
+    /// finish its init and show its first prompt. An error means the shell
+    /// is unusable (hung, exited) and must be killed.
+    async fn wait_ready(proc: &ShellProcess) -> Result<()> {
+        let deadline = Instant::now() + LOGIN_PROFILE_TIMEOUT;
+        let outcome = proc
+            .tap
+            .wait_for(deadline, |state| {
+                if let Some(code) = state.exited {
+                    let said = state.scanner.text_mut().take();
+                    let said = said.trim();
+                    return Some(Err(if said.is_empty() {
+                        anyhow!("the shell exited before its first prompt (exit code {code})")
+                    } else {
+                        anyhow!(
+                            "the shell exited before its first prompt (exit code {code}): {said}"
+                        )
+                    }));
+                }
+                (state.ready && state.prompt == Prompt::Reading).then_some(Ok(()))
+            })
+            .await;
+        outcome.unwrap_or_else(|| {
+            Err(anyhow!(
+                "the shell's init took longer than {}s",
+                LOGIN_PROFILE_TIMEOUT.as_secs()
+            ))
+        })
     }
 
     /// Spawn the shell: inside a sandbox when one is available, else (or
-    /// when the sandboxed spawn fails) unsandboxed. Returns whether it is
-    /// sandboxed.
+    /// when the sandboxed spawn fails) unsandboxed.
     fn spawn_shell(
         workspace_dir: &Option<String>,
         network_isolation: bool,
         home: Option<&str>,
-    ) -> Result<(Child, bool)> {
+        init: &str,
+        dir: tempfile::TempDir,
+        custom: Option<TerminalConfig>,
+    ) -> Result<ShellProcess> {
+        let session_dir = dir.path().to_path_buf();
+        let process = |(terminal, tap), is_sandboxed| ShellProcess {
+            terminal,
+            tap,
+            is_sandboxed,
+            dir,
+        };
+        if let Some(config) = custom {
+            return Ok(process(Self::spawn_terminal(config, home, init)?, false));
+        }
         if Self::can_sandbox() {
-            match Self::spawn_sandboxed(workspace_dir, network_isolation, home) {
-                Ok(child) => {
+            match Self::sandboxed_config(workspace_dir, network_isolation, &session_dir)
+                .and_then(|config| Self::spawn_terminal(config, home, init))
+            {
+                Ok(spawned) => {
                     info!("Shell session spawned inside sandbox");
-                    return Ok((child, true));
+                    return Ok(process(spawned, true));
                 }
                 Err(e) => {
                     warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
@@ -392,68 +786,49 @@ impl ShellSession {
         } else {
             info!("Sandboxing not available, spawning unsandboxed shell session");
         }
-        Ok((Self::spawn_unsandboxed(workspace_dir, home)?, false))
+        let config = TerminalConfig {
+            shell: Some("/bin/bash".to_string()),
+            args: bash_args(),
+            cwd: workspace_dir.as_ref().map(Into::into),
+            ..TerminalConfig::default()
+        };
+        Ok(process(Self::spawn_terminal(config, home, init)?, false))
     }
 
-    /// Load the login profile into a freshly spawned shell
-    /// ([`LOGIN_PROFILE_INIT`]) and wait, up to [`LOGIN_PROFILE_TIMEOUT`],
-    /// for it to finish. An error means the shell is unusable (hung, exited)
-    /// and must be killed.
-    async fn run_login_profile(
-        stdin: &mut ChildStdin,
-        reader: &mut BufReader<ChildStdout>,
-    ) -> Result<()> {
-        let marker = format!("__CHATTY_SHELL_READY_{}__", uuid::Uuid::new_v4().simple());
-        let script = format!("{LOGIN_PROFILE_INIT}printf '\\n%s\\n' \"{marker}\"\n");
-        stdin.write_all(script.as_bytes()).await?;
-        stdin.flush().await?;
-
-        tokio::time::timeout(LOGIN_PROFILE_TIMEOUT, async {
-            loop {
-                let mut line = Vec::new();
-                if reader.read_until(b'\n', &mut line).await? == 0 {
-                    return Err(anyhow!("the shell exited while loading the login profile"));
-                }
-                if Self::decode_output_line(&line).trim_end() == marker {
-                    return Ok(());
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "the login profile took longer than {}s",
-                LOGIN_PROFILE_TIMEOUT.as_secs()
-            )
-        })?
-    }
-
-    /// Spawn an unsandboxed bash process (fallback)
-    fn spawn_unsandboxed(workspace_dir: &Option<String>, home: Option<&str>) -> Result<Child> {
-        let mut cmd = tokio::process::Command::new("/bin/bash");
-        cmd.args(["--norc", "--noprofile"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        // Its own process group, so a timed-out command can be killed along
-        // with the shell: SIGKILL on bash alone leaves the command it was
-        // running (a test suite, a build) orphaned and still going.
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        if let Some(dir) = workspace_dir {
-            cmd.current_dir(dir);
-        }
+    /// Start `config` on a PTY with the agent's environment and the byte tap.
+    fn spawn_terminal(
+        mut config: TerminalConfig,
+        home: Option<&str>,
+        init: &str,
+    ) -> Result<(Arc<TerminalHandle>, Arc<Tap>)> {
+        config.size = (HEADLESS_COLS, HEADLESS_ROWS);
+        config.env.extend(agent_env());
         if let Some(home) = home {
-            cmd.env("HOME", home);
+            config.env.insert("HOME".into(), home.into());
         }
+        // The init runs as the first prompt command, so nothing is typed
+        // into the terminal to start the shell.
+        config.env.insert("__CHATTY_INIT".into(), init.into());
+        config
+            .env
+            .insert("PROMPT_COMMAND".into(), "eval \"$__CHATTY_INIT\"".into());
 
-        cmd.spawn()
-            .map_err(|e| anyhow!("Failed to spawn shell process: {}", e))
+        let tap = Arc::new(Tap {
+            state: std::sync::Mutex::new(TapState::new()),
+            changed: Notify::new(),
+        });
+        let (terminal, events) = TerminalHandle::spawn_with_tap(config, {
+            let tap = Arc::clone(&tap);
+            move |bytes| tap.update(|state| state.feed(bytes))
+        })
+        .map_err(|e| anyhow!("Failed to spawn shell process: {}", e))?;
+        watch_exit(events, Arc::clone(&tap));
+
+        Ok((Arc::new(terminal), tap))
     }
 
-    /// Spawn a sandboxed bash process (Linux: bubblewrap, macOS: sandbox-exec)
+    /// The sandbox wrapper as the PTY's program (Linux: bubblewrap, macOS:
+    /// sandbox-exec), running bash.
     ///
     /// The persistent bash process runs inside the sandbox, inheriting all
     /// restrictions (filesystem isolation, network isolation). State (env vars,
@@ -461,39 +836,53 @@ impl ShellSession {
     ///
     /// The login profile loads inside the sandbox too, so it only finds what
     /// the sandbox exposes (bubblewrap binds neither `/etc` nor `HOME`).
-    fn spawn_sandboxed(
+    ///
+    /// `session_dir` (see [`ShellProcess::dir`]) is readable inside it.
+    fn sandboxed_config(
         workspace_dir: &Option<String>,
         network_isolation: bool,
-        home: Option<&str>,
-    ) -> Result<Child> {
+        session_dir: &std::path::Path,
+    ) -> Result<TerminalConfig> {
         #[cfg(target_os = "linux")]
         {
-            Self::spawn_sandboxed_linux(workspace_dir, network_isolation, home)
+            Ok(Self::sandboxed_config_linux(
+                workspace_dir,
+                network_isolation,
+                session_dir,
+            ))
         }
 
+        // macOS: the profile allows reads outside the credential paths it
+        // lists, and the session directory is under `$TMPDIR`.
         #[cfg(target_os = "macos")]
         {
-            Self::spawn_sandboxed_macos(workspace_dir, network_isolation, home)
+            let _ = session_dir;
+            Self::sandboxed_config_macos(workspace_dir, network_isolation)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (workspace_dir, network_isolation, home);
+            let _ = (workspace_dir, network_isolation, session_dir);
             Err(anyhow!("Sandboxing not supported on this platform"))
         }
     }
 
-    /// Spawn a sandboxed bash process using bubblewrap on Linux
+    /// bubblewrap around bash on Linux.
+    ///
+    /// No `--new-session`: it would `setsid()` bash away from the PTY, and
+    /// without a controlling terminal Ctrl+C and job control stop working.
+    /// What it guards against, a sandboxed process pushing keystrokes into
+    /// the terminal outside the sandbox with `TIOCSTI`, has no target here:
+    /// the controlling terminal is this private PTY, whose only reader is
+    /// the sandboxed bash itself.
     #[cfg(target_os = "linux")]
-    fn spawn_sandboxed_linux(
+    fn sandboxed_config_linux(
         workspace_dir: &Option<String>,
         network_isolation: bool,
-        home: Option<&str>,
-    ) -> Result<Child> {
-        let mut cmd = tokio::process::Command::new("bwrap");
-
-        // Bind essential system directories as read-only
-        cmd.args([
+        session_dir: &std::path::Path,
+    ) -> TerminalConfig {
+        let mut args: Vec<String> = [
+            // Bind essential system directories as read-only
             "--ro-bind",
             "/usr",
             "/usr",
@@ -516,68 +905,61 @@ impl ShellSession {
             // below with --share-net when network_isolation is false.
             "--unshare-all",
             "--die-with-parent",
-        ]);
+        ]
+        .map(String::from)
+        .to_vec();
 
         // Re-enable network access when isolation is not requested
         if !network_isolation {
-            cmd.arg("--share-net");
+            args.push("--share-net".into());
         }
 
         // Check for /lib64 (exists on many 64-bit Linux systems)
         if std::path::Path::new("/lib64").exists() {
-            cmd.args(["--ro-bind", "/lib64", "/lib64"]);
+            args.extend(["--ro-bind", "/lib64", "/lib64"].map(String::from));
         }
+
+        // The session directory (runner and command files), read-only, at
+        // its own path: after `--tmpfs /tmp`, so it shows through that.
+        let session_dir = session_dir.to_string_lossy().into_owned();
+        args.extend(["--ro-bind".into(), session_dir.clone(), session_dir]);
 
         // Bind workspace at its original path so existing path references work
         if let Some(workspace) = workspace_dir {
-            cmd.args(["--bind", workspace, workspace]);
-            cmd.args(["--chdir", workspace]);
+            args.extend(["--bind", workspace, workspace].map(String::from));
+            args.extend(["--chdir", workspace].map(String::from));
         }
 
-        cmd.args(["/bin/bash", "--norc", "--noprofile"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(home) = home {
-            cmd.env("HOME", home);
+        args.push("/bin/bash".into());
+        args.extend(bash_args());
+        TerminalConfig {
+            shell: Some("bwrap".to_string()),
+            args,
+            ..TerminalConfig::default()
         }
-
-        cmd.spawn()
-            .map_err(|e| anyhow!("Failed to spawn sandboxed shell: {}", e))
     }
 
-    /// Spawn a sandboxed bash process using sandbox-exec on macOS
+    /// sandbox-exec around bash on macOS.
     #[cfg(target_os = "macos")]
-    fn spawn_sandboxed_macos(
+    fn sandboxed_config_macos(
         workspace_dir: &Option<String>,
         network_isolation: bool,
-        home: Option<&str>,
-    ) -> Result<Child> {
+    ) -> Result<TerminalConfig> {
         let profile = Self::build_macos_sandbox_profile(workspace_dir, network_isolation)?;
 
-        let mut cmd = tokio::process::Command::new("sandbox-exec");
-        cmd.args(["-p", &profile, "/bin/bash", "--norc", "--noprofile"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+        let mut args = vec!["-p".to_string(), profile, "/bin/bash".to_string()];
+        args.extend(bash_args());
+        Ok(TerminalConfig {
+            shell: Some("sandbox-exec".to_string()),
+            args,
+            cwd: workspace_dir.as_ref().map(Into::into),
             // In sandboxed sessions we only allow writes under /tmp by default.
             // Point TMPDIR to /tmp so tools that rely on temporary files (e.g. `uv`)
             // don't attempt writes to /var/folders/... and fail with EPERM.
-            .env("TMPDIR", "/tmp")
-            .kill_on_drop(true);
-
-        if let Some(workspace) = workspace_dir {
-            cmd.current_dir(workspace);
-        }
-        if let Some(home) = home {
-            cmd.env("HOME", home);
-        }
-
-        cmd.spawn()
-            .map_err(|e| anyhow!("Failed to spawn sandboxed shell: {}", e))
+            env: HashMap::from([("TMPDIR".to_string(), "/tmp".to_string())]),
+            ..TerminalConfig::default()
+        })
     }
-
     /// Build the macOS sandbox profile (SBPL)
     ///
     /// - Allows default operations
@@ -694,8 +1076,8 @@ impl ShellSession {
     /// Execute a command in the persistent shell session, using the
     /// session's configured default timeout.
     ///
-    /// The command's stdout and stderr are merged (stderr redirected to stdout).
-    /// Returns the combined output and exit code.
+    /// The command's stdout and stderr both go to the terminal, so they are
+    /// merged. Returns the combined output and exit code.
     pub async fn execute(&self, command: &str) -> Result<ShellOutput> {
         self.execute_with_timeout(command, None).await
     }
@@ -704,12 +1086,17 @@ impl ShellSession {
     /// overriding the session's configured default timeout for this one
     /// call. The override is bounded by [`MAX_SHELL_CALL_TIMEOUT_SECONDS`].
     ///
-    /// The command's stdout and stderr are merged (stderr redirected to stdout).
-    /// Returns the combined output and exit code. If the command times out,
-    /// this does not error: it returns whatever output was captured before
-    /// the session was killed, with a note appended saying the command timed
-    /// out (`timed_out: true`) so the caller sees the partial progress
-    /// instead of losing it.
+    /// The command's stdout and stderr both go to the terminal, so they are
+    /// merged. Returns the combined output and exit code. If the command
+    /// times out, this does not error: it returns whatever output was
+    /// captured before the session was killed, with a note appended saying
+    /// the command timed out (`timed_out: true`) so the caller sees the
+    /// partial progress instead of losing it.
+    ///
+    /// The command is only sent when the shell is at an empty prompt. If
+    /// someone is typing at it or running something from a terminal view,
+    /// this waits up to [`BUSY_WAIT`] and then fails saying so; it never
+    /// types into a running program.
     pub async fn execute_with_timeout(
         &self,
         command: &str,
@@ -719,136 +1106,150 @@ impl ShellSession {
             resolve_call_timeout_seconds(self.timeout_seconds, timeout_override);
 
         let mut process = self.process.lock().await;
-        Self::ensure_started(
-            &mut process,
-            &self.workspace_dir,
-            self.network_isolation,
-            &self.startup_env_vars,
-            &self.load_login_profile,
-            self.home_override.as_deref(),
-        )
-        .await?;
+        self.ensure_started(&mut process).await?;
 
         // SAFETY: ensure_started() guarantees process is Some on Ok return
         let proc = process.as_mut().unwrap();
-        let marker = uuid::Uuid::new_v4().to_string().replace('-', "");
-        let marker_prefix = format!("__CHATTY_SHELL_MARKER_{}_", marker);
 
-        // Write command with stderr redirect and end marker.
-        // Wrap in { ...; } so 2>&1 applies to the whole group — this ensures
-        // stderr is captured even when the command itself redirects to stderr
-        // (e.g. `echo msg >&2`).  Without the group, `cmd >&2 2>&1` fails
-        // because bash applies redirections left-to-right.
-        // The marker line format: __CHATTY_SHELL_MARKER_{uuid}_{exit_code}__
-        //
-        // `printf`'s leading `\n` guarantees the marker always starts its own
-        // line even when the command's own output has no trailing newline
-        // (e.g. `printf abc`, `head -c N file`) — otherwise the marker glues
-        // onto the end of the last output line and the read loop below never
-        // recognizes it, burning the full command timeout (AGE-505). The read
-        // loop absorbs the resulting blank line via the existing
-        // `trim_end()` on the captured output.
-        let wrapped_command = format!(
-            "{{ {}\n}} 2>&1\n__chatty_ec=$?\nprintf '\\n%s%s__\\n' \"{}\" \"$__chatty_ec\"\n",
-            command, marker_prefix
+        let at_prompt = proc
+            .tap
+            .wait_for(Instant::now() + BUSY_WAIT, |state| {
+                state.busy().is_none().then_some(())
+            })
+            .await;
+        let mut restarted = false;
+        if at_prompt.is_none() {
+            // No prompt yet, nothing running, nobody typing: give the shell
+            // until it has been quiet for LOST_PROMPT_QUIET.
+            loop {
+                let (free, lost_prompt, quiet) = {
+                    let state = proc.tap.lock();
+                    (
+                        state.busy().is_none(),
+                        state.lost_prompt(),
+                        state.last_output.elapsed(),
+                    )
+                };
+                if free || !lost_prompt || quiet >= LOST_PROMPT_QUIET {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let (free, reason, lost_prompt, agent_last) = {
+                let state = proc.tap.lock();
+                (
+                    state.busy().is_none(),
+                    state.busy().unwrap_or_default(),
+                    state.lost_prompt(),
+                    state.agent_last,
+                )
+            };
+            if !free && !lost_prompt {
+                // Someone is typing, or a command they started is running.
+                return Err(anyhow!(
+                    "the terminal is busy: {reason}. The command was not sent; \
+                     run it again once the shell is back at its prompt."
+                ));
+            }
+            // Quiet, no prompt, nothing running, nobody typing. After our
+            // own command that is a prompt without its marks: go ahead.
+            // Otherwise the shell is stuck; never refuse forever, restart
+            // it like a timeout does.
+            if !free && !agent_last {
+                warn!("Shell lost its prompt, restarting the session");
+                if let Some(stuck) = process.take() {
+                    stuck.kill();
+                }
+                self.set_terminal(None);
+                self.ensure_started(&mut process).await?;
+                restarted = true;
+            }
+        }
+        // SAFETY: still Some, or just restarted by ensure_started()
+        let proc = process.as_mut().unwrap();
+
+        let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let command_file = proc.dir.path().join(format!("cmd-{id}"));
+        write_private(&command_file, format!("{command}\n").as_bytes())?;
+        let column = {
+            let mut state = proc.tap.lock();
+            state.command = Some(AgentCommand {
+                id: id.clone(),
+                capturing: false,
+                done: None,
+            });
+            state.prompt_width
+        };
+
+        // Type one short line that sources the command file through
+        // [`RUNNER`]; the command itself never goes through readline.
+        let line = format!(" . \"$__chatty_r\" {id} {column}\r");
+        if let Err(e) = proc.terminal.write(line.as_bytes()) {
+            let _ = std::fs::remove_file(&command_file);
+            return Err(anyhow!("Failed to write to the shell's terminal: {}", e));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(effective_timeout_seconds as u64);
+        let finished = proc
+            .tap
+            .wait_for(deadline, |state| {
+                if let Some((output, exit_code)) =
+                    state.command.as_mut().and_then(|c| c.done.take())
+                {
+                    return Some((output, exit_code, false));
+                }
+                let exit_code = state.exited?;
+                // `exit N`: the shell is gone; what it printed since the
+                // command started is the output.
+                let capturing = state.command.as_ref().is_some_and(|c| c.capturing);
+                let output = if capturing {
+                    state.scanner.text_mut().take()
+                } else {
+                    String::new()
+                };
+                Some((output, exit_code, true))
+            })
+            .await;
+        let _ = std::fs::remove_file(&command_file);
+        // Said at the end of the result, like the timeout note.
+        let restart_note = restarted.then_some(
+            "[shell_execute: the shell had lost its prompt and was restarted before this \
+             command ran: the working directory and any exported variables were back to \
+             their defaults.]",
         );
 
-        proc.stdin
-            .write_all(wrapped_command.as_bytes())
-            .await
-            .map_err(|e| anyhow!("Failed to write to shell stdin: {}", e))?;
-        proc.stdin
-            .flush()
-            .await
-            .map_err(|e| anyhow!("Failed to flush shell stdin: {}", e))?;
-
-        // Read output until we find the marker
-        let mut output = String::new();
-        let timeout_duration = tokio::time::Duration::from_secs(effective_timeout_seconds as u64);
-
-        let read_result = tokio::time::timeout(timeout_duration, async {
-            loop {
-                let mut line = Vec::new();
-                let bytes_read = proc
-                    .reader
-                    .read_until(b'\n', &mut line)
-                    .await
-                    .map_err(|e| anyhow!("Failed to read from shell stdout: {}", e))?;
-
-                if bytes_read == 0 {
-                    // EOF means the shell closed its stdout, normally because
-                    // it is exiting (`exit 42`). Linux closes a process's file
-                    // descriptors before it becomes waitable, so a one-shot
-                    // `try_wait` here can still see it running and report a
-                    // successful exit as a failure. Wait for the exit, bounded
-                    // so a shell that merely closed stdout cannot hang us.
-                    return match tokio::time::timeout(EXIT_REAP_TIMEOUT, proc.child.wait()).await {
-                        Ok(Ok(status)) => Ok(CommandReadResult {
-                            exit_code: Self::exit_code_from_status(status),
-                            shell_exited: true,
-                        }),
-                        Ok(Err(e)) => Err(anyhow!(
-                            "Failed to read shell exit status after stdout closed: {}",
-                            e
-                        )),
-                        Err(_) => Err(anyhow!("Shell stdout closed before command completion")),
-                    };
-                }
-
-                let line = Self::decode_output_line(&line);
-
-                // `starts_with` is correct and sufficient here: the shell
-                // side (`printf`, above) unconditionally writes a leading
-                // `\n` before the marker, so the marker always begins a
-                // fresh line by construction — it can never be glued to
-                // preceding output (AGE-505). Matching anywhere in the line
-                // (`contains`) was tried and rejected: a command that echoes
-                // its own stdin (e.g. bare `cat`) sees the wrapper script's
-                // own source text, which contains the marker prefix as a
-                // substring without starting a line with it, so `contains`
-                // falsely treats that echoed line as the terminator — a
-                // silent, permanent session wedge that's worse than the
-                // original bug.
-                if line.starts_with(&marker_prefix) {
-                    // Parse exit code from marker line
-                    let exit_code = line[marker_prefix.len()..]
-                        .trim_end()
-                        .strip_suffix("__")
-                        .and_then(|s| s.parse::<i32>().ok())
-                        .unwrap_or(-1);
-
-                    return Ok(CommandReadResult {
-                        exit_code,
-                        shell_exited: false,
-                    });
-                }
-
-                output.push_str(&line);
-            }
-        })
-        .await;
-
-        match read_result {
-            Ok(Ok(result)) => {
-                if result.shell_exited {
+        match finished {
+            Some((mut output, exit_code, shell_exited)) => {
+                proc.tap.lock().command = None;
+                if shell_exited {
+                    // An interactive bash says `exit` as it leaves; the old
+                    // non-interactive shell did not.
+                    strip_exit_notice(&mut output);
                     process.take();
+                    self.set_terminal(None);
                 }
 
+                // The piped shell's end marker began with a newline, so the
+                // text it capped was one `\n` longer; keep omission counts
+                // the same.
+                output.push('\n');
                 let truncated = Self::bound_output(&mut output, self.max_output_bytes);
+                let mut stdout = output.trim_end().to_string();
+                if let Some(note) = restart_note {
+                    if !stdout.is_empty() {
+                        stdout.push('\n');
+                    }
+                    stdout.push_str(note);
+                }
 
                 Ok(ShellOutput {
-                    stdout: output.trim_end().to_string(),
-                    exit_code: result.exit_code,
+                    stdout,
+                    exit_code,
                     truncated,
                     timed_out: false,
                 })
             }
-            Ok(Err(e)) => {
-                // Process terminated (e.g., EOF). Clear so next call respawns.
-                process.take();
-                Err(e)
-            }
-            Err(_) => {
+            None => {
                 // Timeout - the process may be stuck. Kill it and respawn on
                 // next use, but keep whatever output the command produced
                 // before that instead of discarding it (AGE evidence: models
@@ -858,17 +1259,22 @@ impl ShellSession {
                     timeout = effective_timeout_seconds,
                     "Shell command timed out, killing session"
                 );
-                if let Some(mut proc) = process.take() {
-                    // An unsandboxed shell leads its own process group (see
-                    // `spawn_unsandboxed`); take the command down with it.
-                    // bubblewrap's `--die-with-parent` and PID namespace do
-                    // the same for a sandboxed one.
-                    #[cfg(unix)]
-                    if !proc.is_sandboxed {
-                        kill_process_group(proc.child.id());
+                let mut output = {
+                    let mut state = proc.tap.lock();
+                    let capturing = state.command.as_ref().is_some_and(|c| c.capturing);
+                    if capturing {
+                        state.scanner.text_mut().take()
+                    } else {
+                        String::new()
                     }
-                    let _ = proc.child.kill().await;
+                };
+                // The shell leads its own process group, and no job control
+                // keeps the command in it; bubblewrap's `--die-with-parent`
+                // and PID namespace take a sandboxed one down with bwrap.
+                if let Some(proc) = process.take() {
+                    proc.kill();
                 }
+                self.set_terminal(None);
 
                 let truncated = Self::bound_output(&mut output, self.max_output_bytes);
                 let mut stdout = output.trim_end().to_string();
@@ -881,6 +1287,10 @@ impl ShellSession {
                      directory and any exported variables are back to their defaults.]",
                     effective_timeout_seconds
                 ));
+                if let Some(note) = restart_note {
+                    stdout.push('\n');
+                    stdout.push_str(note);
+                }
 
                 Ok(ShellOutput {
                     stdout,
@@ -981,7 +1391,7 @@ impl ShellSession {
 
         let pid = {
             let process = self.process.lock().await;
-            process.as_ref().and_then(|p| p.child.id())
+            process.as_ref().and_then(|p| p.terminal.pid())
         };
 
         let uptime = SystemTime::now()
@@ -1002,10 +1412,10 @@ impl ShellSession {
     #[allow(dead_code)]
     pub async fn shutdown(&self) {
         let mut process = self.process.lock().await;
-        if let Some(mut proc) = process.take() {
+        if let Some(proc) = process.take() {
             debug!("Shutting down shell session");
-            let _ = proc.stdin.shutdown().await;
-            let _ = proc.child.kill().await;
+            proc.kill();
+            self.set_terminal(None);
         }
     }
 
@@ -1021,12 +1431,109 @@ impl Drop for ShellSession {
     fn drop(&mut self) {
         // Best-effort synchronous cleanup
         if let Ok(mut process) = self.process.try_lock()
-            && let Some(ref mut proc) = *process
+            && let Some(proc) = process.take()
         {
             debug!("Shell session dropped, killing process");
-            // Child::kill_on_drop handles this, but be explicit
-            let _ = proc.child.start_kill();
+            // Dropping the last handle kills it too, but a terminal view may
+            // still hold one.
+            proc.kill();
         }
+    }
+}
+
+/// A fresh private directory for one shell: [`RUNNER`] in it, and room for
+/// the command files, 0700.
+fn session_dir() -> Result<tempfile::TempDir> {
+    let dir = tempfile::Builder::new()
+        .prefix("chatty-shell-")
+        .tempdir()
+        .map_err(|e| anyhow!("Failed to create the shell's session directory: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).map_err(
+            |e| {
+                anyhow!(
+                    "Failed to make the shell's session directory private: {}",
+                    e
+                )
+            },
+        )?;
+    }
+    write_private(&dir.path().join("run"), RUNNER.as_bytes())?;
+    Ok(dir)
+}
+
+/// Write `contents` to `path`, readable by this user only: an agent command
+/// may carry secrets.
+fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(contents))
+        .map_err(|e| anyhow!("Failed to write {}: {}", path.display(), e))
+}
+
+/// bash's arguments: no rc files (the init loads the login profile itself,
+/// bounded), interactive (it has a terminal; this makes it explicit).
+fn bash_args() -> Vec<String> {
+    ["--norc", "--noprofile", "-i"].map(String::from).to_vec()
+}
+
+/// Environment for the agent's terminal: pagers that print instead of
+/// waiting for a key, and a width to match [`HEADLESS_COLS`]. The init sets
+/// the pagers again after the login profile, which may have its own.
+fn agent_env() -> HashMap<String, String> {
+    let cols = HEADLESS_COLS.to_string();
+    [
+        ("PAGER", "cat"),
+        ("GIT_PAGER", "cat"),
+        ("MANPAGER", "cat"),
+        ("LESS", "-FRX"),
+        ("TERM", "xterm-256color"),
+        ("COLUMNS", cols.as_str()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+/// Record the shell's exit code in `tap` once the PTY has been drained
+/// after it: the `Wakeup` that follows `ChildExit` comes after the last read.
+fn watch_exit(events: std::sync::mpsc::Receiver<TerminalEvent>, tap: Arc<Tap>) {
+    let spawned = std::thread::Builder::new()
+        .name("chatty-shell-exit".into())
+        .spawn(move || {
+            let mut exit_code = None;
+            for event in events {
+                match event {
+                    TerminalEvent::ChildExit(status) => {
+                        exit_code = Some(ShellSession::exit_code_from_status(status));
+                    }
+                    TerminalEvent::Wakeup if exit_code.is_some() => break,
+                    _ => {}
+                }
+            }
+            // Also reached when the terminal is dropped: a shell with no
+            // exit status seen is gone all the same.
+            tap.update(|state| state.exited = Some(exit_code.unwrap_or(-1)));
+        });
+    if let Err(e) = spawned {
+        warn!(error = %e, "Could not start the shell exit watcher");
+    }
+}
+
+/// Drop the `exit` line an interactive bash prints when it exits.
+fn strip_exit_notice(output: &mut String) {
+    let trimmed = output.trim_end();
+    if let Some(rest) = trimmed.strip_suffix("exit")
+        && (rest.is_empty() || rest.ends_with('\n'))
+    {
+        output.truncate(rest.len());
     }
 }
 
@@ -1044,22 +1551,6 @@ fn resolve_call_timeout_seconds(
         .filter(|t| *t > 0)
         .map(|t| t.min(MAX_SHELL_CALL_TIMEOUT_SECONDS))
         .unwrap_or(default_timeout_seconds)
-}
-
-/// SIGKILL the process group `group` leads. `ESRCH` means nothing is left.
-#[cfg(unix)]
-fn kill_process_group(group: Option<u32>) {
-    use nix::errno::Errno;
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
-    let Some(group) = group.and_then(|g| i32::try_from(g).ok()) else {
-        return;
-    };
-    match killpg(Pid::from_raw(group), Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => {}
-        Err(e) => warn!(group, error = %e, "Could not kill the timed-out shell's process group"),
-    }
 }
 
 /// Escape a string for safe use in a shell command.
