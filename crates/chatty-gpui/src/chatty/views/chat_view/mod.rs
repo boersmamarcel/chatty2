@@ -3959,6 +3959,36 @@ mod terminal_dock_tests {
         let screen = futures::executor::block_on(registry.read(&id, Region::Screen)).unwrap();
         assert!(screen.text.contains("echo agent-ran"), "{}", screen.text);
 
+        // Hidden, the dock lets go of the shell: unlisted, and no view (with
+        // its repaint timer) is left running. A switch while hidden must not
+        // leave this conversation's shell listed as the agent's terminal.
+        let weak_view = cx.update(|cx| dock.read(cx).agent_view().unwrap().downgrade());
+        cx.update(|cx| dock.update(cx, |d, cx| d.hide(cx)));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(dock.read(cx).agent_view().is_none());
+            assert_eq!(dock.read(cx).agent_registry_id(), None);
+        });
+        assert!(weak_view.upgrade().is_none(), "the hidden view was dropped");
+        assert!(futures::executor::block_on(registry.list()).is_empty());
+        cx.update(|cx| {
+            dock.update(cx, |d, _| {
+                d.agent_source = Some((Some("c2".into()), None));
+            })
+        });
+        assert!(futures::executor::block_on(registry.list()).is_empty());
+        // Shown again on the first conversation: attached and listed again.
+        with_window(cx, window, |window, cx| {
+            dock.update(cx, |d, cx| {
+                d.agent_source = Some((Some("c1".into()), Some(session.clone())));
+                d.show_agent(window, cx);
+            });
+            assert!(dock.read(cx).agent_view().is_some());
+        });
+        let listed = futures::executor::block_on(registry.list());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].kind, TerminalKind::Agent);
+
         // Another conversation, without a shell: empty state, unlisted.
         with_window(cx, window, |_, cx| {
             dock.update(cx, |d, cx| {

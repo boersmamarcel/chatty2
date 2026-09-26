@@ -475,13 +475,22 @@ impl TerminalDock {
     }
 
     /// Hide the dock. Its terminals keep running; the polls stop, and the
-    /// agent's shell gets its own size back.
+    /// Agent tab lets go of the agent's shell (see [`Self::stop_agent`]).
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.live_refresh = None;
-        self.agent_refresh = None;
-        self.release_agent_size(cx);
+        self.stop_agent(cx);
         cx.notify();
+    }
+
+    /// The dock is going out of sight: stop following the conversation and
+    /// detach from its shell. Nothing refreshes a hidden dock, so an attached
+    /// view would keep a conversation's shell listed to the agent after a
+    /// switch, and its repaint timer would wake the app. Showing the dock
+    /// again re-attaches (`refresh_agent`).
+    fn stop_agent(&mut self, cx: &mut Context<Self>) {
+        self.agent_refresh = None;
+        self.detach_agent(cx);
     }
 
     /// Open a new terminal as the last tab, show the dock and focus it.
@@ -624,7 +633,7 @@ impl TerminalDock {
             self.open = false;
             self.maximized = false;
             self.live_refresh = None;
-            self.agent_refresh = None;
+            self.stop_agent(cx);
             cx.emit(TerminalDockEvent::Hidden);
         } else if was_active {
             self.focus_active(window, cx);
@@ -775,6 +784,12 @@ impl TerminalDock {
     #[cfg(test)]
     pub fn agent_is_active(&self) -> bool {
         self.agent_active
+    }
+
+    /// The Agent tab's view on the agent's shell, while attached (tests).
+    #[cfg(test)]
+    pub fn agent_view(&self) -> Option<Entity<TerminalView>> {
+        self.agent.view.clone()
     }
 
     /// The Agent tab's id in [`EmbeddedTerminals`], while attached (tests).
@@ -1284,7 +1299,14 @@ impl TerminalDock {
         });
         let notice = self.agent.notice.as_ref().map(|(text, _)| text.clone());
         let body = match (&self.agent.view, &self.agent.session) {
-            (Some(view), _) => div().flex_1().min_h_0().w_full().child(view.clone()),
+            // Absolutely placed, so the grid measures the space left under
+            // a banner rather than the whole body.
+            (Some(view), _) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .child(div().absolute().inset_0().child(view.clone())),
             (None, Some(_)) => div().flex_1().min_h_0().w_full().child(
                 v_flex()
                     .size_full()
