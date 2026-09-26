@@ -15,12 +15,15 @@
 //!
 //! The shell's prompt marks itself with OSC 133 `A`/`B`, `PS0` prints `C`
 //! when a command starts and `PROMPT_COMMAND` prints `D;<exit>` when it
-//! ends. An agent command also carries an id, sent through a key binding
-//! rather than typed, so its `C` and `D` are followed by chatty's private
-//! OSC 6973 with that id. Nothing of this is visible in a terminal view: it
-//! shows a normal prompt and the command. The model's result is the output
-//! between the two id marks, read from the byte stream as clean text (see
-//! [`chatty_terminal::CleanText`]), not from the grid.
+//! ends. An agent command is written to a private file and run by typing
+//! one short line that sources it through [`RUNNER`], which brackets it with
+//! chatty's private OSC 6973 and the command's id. Only that line goes
+//! through readline, so this works from bash 3.2 (macOS) up. Nothing of it
+//! stays visible in a terminal view: the line is redrawn as the command, so
+//! the view shows a normal prompt, the command and its output. The model's
+//! result is the output between the two id marks, read from the byte
+//! stream as clean text (see [`chatty_terminal::CleanText`]), not from the
+//! grid.
 //!
 //! # What does NOT live here
 //!
@@ -81,6 +84,9 @@ struct ShellProcess {
     terminal: Arc<TerminalHandle>,
     tap: Arc<Tap>,
     is_sandboxed: bool,
+    /// Private (0700) directory holding [`RUNNER`] and each agent command's
+    /// file while it runs; removed with the process.
+    dir: tempfile::TempDir,
 }
 
 impl ShellProcess {
@@ -146,11 +152,14 @@ unset __chatty_cwd __chatty_f __chatty_path __chatty_pa __chatty_p
 /// file, no auto-logout, no command-not-found suggestions, and pagers that
 /// print instead of waiting for a key.
 ///
-/// Then the marks: `\e[6973~` is bound to a function that takes the line
-/// typed so far as the next command's id (the session pastes the id, then
-/// that key, then the command), `PS0` prints `C` (plus the id mark),
-/// `PROMPT_COMMAND` prints `D` (plus the id mark), and `PS1` wraps a plain
-/// prompt in `A`/`B`. The last line says the init is done.
+/// The marks: `PS1` wraps the prompt in `A`/`B`, `PS0` prints `C` (bash
+/// 4.4 and newer have it) and `PROMPT_COMMAND` prints `D;<exit>`.
+/// `__chatty_marks` puts them back when something replaces `PS1` or
+/// `PROMPT_COMMAND` (sourcing a stock `~/.bashrc`, `conda activate`), keeping
+/// what that set: the new prompt goes between the marks, the new prompt
+/// command runs after ours. An agent command runs through [`RUNNER`]. Only
+/// plain bash 3.2 syntax, so macOS's `/bin/bash` runs it too. The last line
+/// says the init is done.
 const SHELL_INIT: &str = r#"set +m +H
 shopt -u expand_aliases
 unalias -a
@@ -158,34 +167,60 @@ unset HISTFILE MAILCHECK TMOUT ALACRITTY_WINDOW_ID WINDOWID __CHATTY_INIT PROMPT
 unset -f command_not_found_handle
 trap - DEBUG
 export PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS=-FRX
-__chatty_take_id() {
-__chatty_id=$READLINE_LINE
-__chatty_ps0=$'\e]133;C\a\e]6973;C;'"$__chatty_id"$'\a'
-READLINE_LINE=
-READLINE_POINT=0
+HISTCONTROL=ignoreboth
+__chatty_a='\[\033]133;A\007\]'
+__chatty_b='\[\033]133;B\007\]'
+__chatty_marks() {
+case $PS1 in "$__chatty_a"*"$__chatty_b") ;; *)
+PS1=${PS1//"$__chatty_a"/}
+PS1=${PS1//"$__chatty_b"/}
+PS1=$__chatty_a$PS1$__chatty_b ;;
+esac
+case $PROMPT_COMMAND in __chatty_prompt*) ;; *)
+PROMPT_COMMAND="__chatty_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+esac
+PS0='\033]133;C\007'
 }
+__chatty_status() { return "$1"; }
 __chatty_prompt() {
 local ec=$?
-printf '\e]133;D;%s\a' "$ec"
-if [ -n "${__chatty_id-}" ]; then printf '\e]6973;D;%s;%s\a' "$__chatty_id" "$ec"; __chatty_id=; fi
-__chatty_ps0=$'\e]133;C\a'
+printf '\033]133;D;%s\007' "$ec"
+if [ -n "${__chatty_id-}" ]; then printf '\033]6973;D;%s;%s\007' "$__chatty_id" "$ec"; __chatty_id=; fi
+__chatty_marks
 }
-bind 'set enable-bracketed-paste on'
-bind -m emacs -x '"\e[6973~": __chatty_take_id'
-bind -m vi-insert -x '"\e[6973~": __chatty_take_id'
-__chatty_ps0=$'\e]133;C\a'
-PS0='${__chatty_ps0}'
-PS1='\[\e]133;A\a\]\w\$ \[\e]133;B\a\]'
+PS1='\w\$ '
 PS2='> '
-PROMPT_COMMAND=__chatty_prompt
-export -n PROMPT_COMMAND
-printf '\e]6973;ready\a'
+PROMPT_COMMAND=
+__chatty_marks
+export -n PROMPT_COMMAND PS1 PS0
+printf '\033]6973;ready\007'
 "#;
 
-/// The key bound to `__chatty_take_id` in [`SHELL_INIT`].
-const TAKE_ID_KEY: &[u8] = b"\x1b[6973~";
-const PASTE_START: &[u8] = b"\x1b[200~";
-const PASTE_END: &[u8] = b"\x1b[201~";
+/// Runs one agent command. The session writes the command to
+/// `<dir>/cmd-<id>` and types ` . "$__chatty_r" <id> <column>` (a leading
+/// space keeps it out of the history); this file then redraws that line as
+/// the command itself (so a terminal view shows what ran, as if typed),
+/// prints the start mark, and sources the command in the current shell. So
+/// `cd`, variables (`declare` too: this is not a function), functions,
+/// heredocs, `set -e` and `exit` behave as typed, and the exit code is the
+/// last command's. It prints the end mark itself (a `PROMPT_COMMAND` the
+/// command replaced cannot lose it), puts the marks back, and returns the
+/// command's exit code, so `$?` is what typing would have left. Nothing goes
+/// through readline but the short line: no key bindings, no bracketed
+/// paste, bash 3.2 and newer.
+const RUNNER: &str = r#"__chatty_ec=$?
+__chatty_id=$1
+printf '\033[1A\033[%sG\033[K%s\n' "$(($2 + 1))" "$(<"${__chatty_r%/*}/cmd-$1")"
+printf '\033]6973;C;%s\007' "$1"
+set --
+__chatty_status "$__chatty_ec"
+. "${__chatty_r%/*}/cmd-$__chatty_id"
+__chatty_ec=$?
+printf '\033]6973;D;%s;%s\007' "$__chatty_id" "$__chatty_ec"
+__chatty_id=
+__chatty_marks
+return $__chatty_ec
+"#;
 
 /// Terminal size when no view is attached: wide, so programs that fit their
 /// output to the terminal (`ls`, `git`, test runners) don't wrap it early.
@@ -196,10 +231,21 @@ const HEADLESS_ROWS: u16 = 50;
 /// prompt (someone typing, a command started from a view) before giving up.
 const BUSY_WAIT: Duration = Duration::from_secs(2);
 
+/// How long the shell must have printed nothing, with no prompt, nothing
+/// running and nobody typing, before the session stops waiting for a prompt
+/// and acts on its own (see `execute_with_timeout`). Longer than
+/// [`BUSY_WAIT`], so a shell that is merely slow to draw its prompt (a busy
+/// machine, keystrokes it has not echoed yet) is not taken for a lost one.
+const LOST_PROMPT_QUIET: Duration = Duration::from_secs(5);
+
 /// Build the init the shell runs before its first prompt: the login profile
 /// (when `load_login_profile`), then the user's secrets as exports, so a
-/// profile cannot override them, then [`SHELL_INIT`].
-fn shell_init(load_login_profile: bool, secrets: &[(String, String)]) -> String {
+/// profile cannot override them, then where [`RUNNER`] is and [`SHELL_INIT`].
+fn shell_init(
+    load_login_profile: bool,
+    secrets: &[(String, String)],
+    runner: &std::path::Path,
+) -> String {
     let mut init = String::new();
     if load_login_profile {
         // Without a `PS1` the profile takes the non-interactive branches the
@@ -222,6 +268,10 @@ fn shell_init(load_login_profile: bool, secrets: &[(String, String)]) -> String 
             warn!(key = %key, "Skipping invalid secret key name");
         }
     }
+    init.push_str(&format!(
+        "__chatty_r={}\n",
+        shell_escape(&runner.to_string_lossy())
+    ));
     init.push_str(SHELL_INIT);
     init
 }
@@ -279,7 +329,7 @@ enum Prompt {
 
 struct AgentCommand {
     id: String,
-    /// Output is being kept (its start mark was seen).
+    /// Output is being kept (its start mark was seen, its end mark not yet).
     capturing: bool,
     /// Output and exit code, once its end mark was seen.
     done: Option<(String, i32)>,
@@ -293,6 +343,14 @@ struct TapState {
     command: Option<AgentCommand>,
     /// The shell exited, with this code.
     exited: Option<i32>,
+    /// Width of the last prompt, where readline puts the command line.
+    prompt_width: usize,
+    /// An agent command was the last thing to run and nothing started
+    /// since: the shell is back at a prompt even if that prompt lost its
+    /// marks.
+    agent_last: bool,
+    /// When the PTY last printed anything.
+    last_output: Instant,
 }
 
 impl TapState {
@@ -307,21 +365,25 @@ impl TapState {
             ready: false,
             command: None,
             exited: None,
+            prompt_width: 0,
+            agent_last: false,
+            last_output: Instant::now(),
         }
     }
 
     fn feed(&mut self, bytes: &[u8]) {
+        self.last_output = Instant::now();
         let Self {
             scanner,
             prompt,
             ready,
             command,
+            prompt_width,
+            agent_last,
             ..
         } = self;
         scanner.feed(bytes, |mark, text| {
-            let capturing = command
-                .as_ref()
-                .is_some_and(|c| c.capturing && c.done.is_none());
+            let capturing = command.as_ref().is_some_and(|c| c.capturing);
             match mark {
                 Mark::PromptStart => {
                     *prompt = Prompt::Printing;
@@ -333,14 +395,16 @@ impl TapState {
                     }
                 }
                 Mark::CommandStart => {
+                    let was_printing = *prompt == Prompt::Printing;
                     *prompt = Prompt::Reading;
-                    if !capturing {
+                    if !capturing && was_printing {
                         // From here on, keep what is typed at the prompt
                         // (to tell whether someone is typing, and what
                         // they ran). Readline redraws relative to the
                         // prompt's width, so start after it.
                         let shown = text.take();
                         let width = shown.rsplit('\n').next().unwrap_or("").chars().count();
+                        *prompt_width = width;
                         text.set_enabled(true);
                         text.move_to_column(width);
                     }
@@ -359,6 +423,7 @@ impl TapState {
                         .unwrap_or_default()
                         .to_string();
                     *prompt = Prompt::Running { command_line };
+                    *agent_last = false;
                     if !capturing {
                         text.set_enabled(false);
                     }
@@ -375,7 +440,9 @@ impl TapState {
                         (["ready"], _) => *ready = true,
                         // `PS0` shows again for each command of a
                         // multi-line command line: the first one starts it.
-                        (["C", id], Some(cmd)) if *id == cmd.id && !cmd.capturing => {
+                        (["C", id], Some(cmd))
+                            if *id == cmd.id && !cmd.capturing && cmd.done.is_none() =>
+                        {
                             cmd.capturing = true;
                             text.set_enabled(false);
                             text.set_enabled(true);
@@ -383,7 +450,12 @@ impl TapState {
                         (["D", id, code], Some(cmd)) if *id == cmd.id && cmd.capturing => {
                             let code = code.parse().unwrap_or(-1);
                             cmd.done = Some((text.take(), code));
+                            cmd.capturing = false;
                             text.set_enabled(false);
+                            // Our command is over, whether or not a
+                            // `PROMPT_COMMAND` says so.
+                            *prompt = Prompt::Between;
+                            *agent_last = true;
                         }
                         _ => {}
                     }
@@ -393,7 +465,8 @@ impl TapState {
     }
 
     /// Why an agent command can't be sent now, or `None` when the shell is
-    /// at an empty prompt.
+    /// at an empty prompt. [`Self::lost_prompt`] says whether a refusal is
+    /// only for lack of marks.
     fn busy(&self) -> Option<String> {
         match &self.prompt {
             Prompt::Reading if self.scanner.text().is_blank() => None,
@@ -406,6 +479,12 @@ impl TapState {
                 Some("the shell is not at its prompt".to_string())
             }
         }
+    }
+
+    /// Nothing runs and nobody types, yet no prompt was seen: its marks are
+    /// gone, or the shell is stuck between commands.
+    fn lost_prompt(&self) -> bool {
+        matches!(self.prompt, Prompt::Between | Prompt::Printing)
     }
 }
 
@@ -438,7 +517,14 @@ pub struct ShellSession {
     load_login_profile: AtomicBool,
     /// `HOME` for the shell when set; tests point it at a scratch profile.
     home_override: Option<String>,
+    /// Tests: run this instead of (sandboxed) `/bin/bash`, given the session
+    /// directory (another bash version in a container).
+    #[cfg(test)]
+    test_shell: Option<TestShell>,
 }
+
+#[cfg(test)]
+type TestShell = Box<dyn Fn(&std::path::Path) -> TerminalConfig + Send + Sync>;
 
 impl ShellSession {
     /// Create a new shell session with user secrets that will be injected
@@ -467,6 +553,8 @@ impl ShellSession {
             secret_key_names,
             load_login_profile: AtomicBool::new(true),
             home_override: None,
+            #[cfg(test)]
+            test_shell: None,
         }
     }
 
@@ -596,12 +684,20 @@ impl ShellSession {
 
         loop {
             let load_login_profile = self.load_login_profile.load(Ordering::Relaxed);
-            let init = shell_init(load_login_profile, &self.startup_env_vars);
+            let dir = session_dir()?;
+            let runner = dir.path().join("run");
+            let init = shell_init(load_login_profile, &self.startup_env_vars, &runner);
+            #[cfg(test)]
+            let custom = self.test_shell.as_ref().map(|shell| shell(dir.path()));
+            #[cfg(not(test))]
+            let custom = None;
             let proc = Self::spawn_shell(
                 &self.workspace_dir,
                 self.network_isolation,
                 self.home_override.as_deref(),
                 &init,
+                dir,
+                custom,
             )?;
             match Self::wait_ready(&proc).await {
                 Ok(()) => {
@@ -662,14 +758,26 @@ impl ShellSession {
         network_isolation: bool,
         home: Option<&str>,
         init: &str,
+        dir: tempfile::TempDir,
+        custom: Option<TerminalConfig>,
     ) -> Result<ShellProcess> {
+        let session_dir = dir.path().to_path_buf();
+        let process = |(terminal, tap), is_sandboxed| ShellProcess {
+            terminal,
+            tap,
+            is_sandboxed,
+            dir,
+        };
+        if let Some(config) = custom {
+            return Ok(process(Self::spawn_terminal(config, home, init)?, false));
+        }
         if Self::can_sandbox() {
-            match Self::sandboxed_config(workspace_dir, network_isolation)
-                .and_then(|config| Self::spawn_terminal(config, home, init, true))
+            match Self::sandboxed_config(workspace_dir, network_isolation, &session_dir)
+                .and_then(|config| Self::spawn_terminal(config, home, init))
             {
-                Ok(proc) => {
+                Ok(spawned) => {
                     info!("Shell session spawned inside sandbox");
-                    return Ok(proc);
+                    return Ok(process(spawned, true));
                 }
                 Err(e) => {
                     warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
@@ -684,7 +792,7 @@ impl ShellSession {
             cwd: workspace_dir.as_ref().map(Into::into),
             ..TerminalConfig::default()
         };
-        Self::spawn_terminal(config, home, init, false)
+        Ok(process(Self::spawn_terminal(config, home, init)?, false))
     }
 
     /// Start `config` on a PTY with the agent's environment and the byte tap.
@@ -692,8 +800,7 @@ impl ShellSession {
         mut config: TerminalConfig,
         home: Option<&str>,
         init: &str,
-        is_sandboxed: bool,
-    ) -> Result<ShellProcess> {
+    ) -> Result<(Arc<TerminalHandle>, Arc<Tap>)> {
         config.size = (HEADLESS_COLS, HEADLESS_ROWS);
         config.env.extend(agent_env());
         if let Some(home) = home {
@@ -717,11 +824,7 @@ impl ShellSession {
         .map_err(|e| anyhow!("Failed to spawn shell process: {}", e))?;
         watch_exit(events, Arc::clone(&tap));
 
-        Ok(ShellProcess {
-            terminal: Arc::new(terminal),
-            tap,
-            is_sandboxed,
-        })
+        Ok((Arc::new(terminal), tap))
     }
 
     /// The sandbox wrapper as the PTY's program (Linux: bubblewrap, macOS:
@@ -733,26 +836,33 @@ impl ShellSession {
     ///
     /// The login profile loads inside the sandbox too, so it only finds what
     /// the sandbox exposes (bubblewrap binds neither `/etc` nor `HOME`).
+    ///
+    /// `session_dir` (see [`ShellProcess::dir`]) is readable inside it.
     fn sandboxed_config(
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        session_dir: &std::path::Path,
     ) -> Result<TerminalConfig> {
         #[cfg(target_os = "linux")]
         {
             Ok(Self::sandboxed_config_linux(
                 workspace_dir,
                 network_isolation,
+                session_dir,
             ))
         }
 
+        // macOS: the profile allows reads outside the credential paths it
+        // lists, and the session directory is under `$TMPDIR`.
         #[cfg(target_os = "macos")]
         {
+            let _ = session_dir;
             Self::sandboxed_config_macos(workspace_dir, network_isolation)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (workspace_dir, network_isolation);
+            let _ = (workspace_dir, network_isolation, session_dir);
             Err(anyhow!("Sandboxing not supported on this platform"))
         }
     }
@@ -769,6 +879,7 @@ impl ShellSession {
     fn sandboxed_config_linux(
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        session_dir: &std::path::Path,
     ) -> TerminalConfig {
         let mut args: Vec<String> = [
             // Bind essential system directories as read-only
@@ -807,6 +918,11 @@ impl ShellSession {
         if std::path::Path::new("/lib64").exists() {
             args.extend(["--ro-bind", "/lib64", "/lib64"].map(String::from));
         }
+
+        // The session directory (runner and command files), read-only, at
+        // its own path: after `--tmpfs /tmp`, so it shows through that.
+        let session_dir = session_dir.to_string_lossy().into_owned();
+        args.extend(["--ro-bind".into(), session_dir.clone(), session_dir]);
 
         // Bind workspace at its original path so existing path references work
         if let Some(workspace) = workspace_dir {
@@ -995,43 +1111,83 @@ impl ShellSession {
         // SAFETY: ensure_started() guarantees process is Some on Ok return
         let proc = process.as_mut().unwrap();
 
-        let busy = proc
+        let at_prompt = proc
             .tap
             .wait_for(Instant::now() + BUSY_WAIT, |state| {
                 state.busy().is_none().then_some(())
             })
             .await;
-        if busy.is_none() {
-            let reason = proc.tap.lock().busy().unwrap_or_default();
-            return Err(anyhow!(
-                "the terminal is busy: {reason}. The command was not sent; \
-                 run it again once the shell is back at its prompt."
-            ));
+        let mut restarted = false;
+        if at_prompt.is_none() {
+            // No prompt yet, nothing running, nobody typing: give the shell
+            // until it has been quiet for LOST_PROMPT_QUIET.
+            loop {
+                let (free, lost_prompt, quiet) = {
+                    let state = proc.tap.lock();
+                    (
+                        state.busy().is_none(),
+                        state.lost_prompt(),
+                        state.last_output.elapsed(),
+                    )
+                };
+                if free || !lost_prompt || quiet >= LOST_PROMPT_QUIET {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let (free, reason, lost_prompt, agent_last) = {
+                let state = proc.tap.lock();
+                (
+                    state.busy().is_none(),
+                    state.busy().unwrap_or_default(),
+                    state.lost_prompt(),
+                    state.agent_last,
+                )
+            };
+            if !free && !lost_prompt {
+                // Someone is typing, or a command they started is running.
+                return Err(anyhow!(
+                    "the terminal is busy: {reason}. The command was not sent; \
+                     run it again once the shell is back at its prompt."
+                ));
+            }
+            // Quiet, no prompt, nothing running, nobody typing. After our
+            // own command that is a prompt without its marks: go ahead.
+            // Otherwise the shell is stuck; never refuse forever, restart
+            // it like a timeout does.
+            if !free && !agent_last {
+                warn!("Shell lost its prompt, restarting the session");
+                if let Some(stuck) = process.take() {
+                    stuck.kill();
+                }
+                self.set_terminal(None);
+                self.ensure_started(&mut process).await?;
+                restarted = true;
+            }
         }
+        // SAFETY: still Some, or just restarted by ensure_started()
+        let proc = process.as_mut().unwrap();
 
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        proc.tap.lock().command = Some(AgentCommand {
-            id: id.clone(),
-            capturing: false,
-            done: None,
-        });
+        let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let command_file = proc.dir.path().join(format!("cmd-{id}"));
+        write_private(&command_file, format!("{command}\n").as_bytes())?;
+        let column = {
+            let mut state = proc.tap.lock();
+            state.command = Some(AgentCommand {
+                id: id.clone(),
+                capturing: false,
+                done: None,
+            });
+            state.prompt_width
+        };
 
-        // Paste the id and hand it to the shell with the bound key, then
-        // paste the command and accept it. A paste arrives as one line, so
-        // a multi-line command runs as one unit (one `C`, one `D`, the last
-        // command's exit code) and a tab in it is not a completion request.
-        let mut input = Vec::with_capacity(command.len() + 64);
-        input.extend_from_slice(PASTE_START);
-        input.extend_from_slice(id.as_bytes());
-        input.extend_from_slice(PASTE_END);
-        input.extend_from_slice(TAKE_ID_KEY);
-        input.extend_from_slice(PASTE_START);
-        input.extend_from_slice(command.replace("\x1b[201~", "").as_bytes());
-        input.extend_from_slice(PASTE_END);
-        input.push(b'\r');
-        proc.terminal
-            .write(&input)
-            .map_err(|e| anyhow!("Failed to write to the shell's terminal: {}", e))?;
+        // Type one short line that sources the command file through
+        // [`RUNNER`]; the command itself never goes through readline.
+        let line = format!(" . \"$__chatty_r\" {id} {column}\r");
+        if let Err(e) = proc.terminal.write(line.as_bytes()) {
+            let _ = std::fs::remove_file(&command_file);
+            return Err(anyhow!("Failed to write to the shell's terminal: {}", e));
+        }
 
         let deadline = Instant::now() + Duration::from_secs(effective_timeout_seconds as u64);
         let finished = proc
@@ -1054,6 +1210,13 @@ impl ShellSession {
                 Some((output, exit_code, true))
             })
             .await;
+        let _ = std::fs::remove_file(&command_file);
+        // Said at the end of the result, like the timeout note.
+        let restart_note = restarted.then_some(
+            "[shell_execute: the shell had lost its prompt and was restarted before this \
+             command ran: the working directory and any exported variables were back to \
+             their defaults.]",
+        );
 
         match finished {
             Some((mut output, exit_code, shell_exited)) => {
@@ -1071,9 +1234,16 @@ impl ShellSession {
                 // the same.
                 output.push('\n');
                 let truncated = Self::bound_output(&mut output, self.max_output_bytes);
+                let mut stdout = output.trim_end().to_string();
+                if let Some(note) = restart_note {
+                    if !stdout.is_empty() {
+                        stdout.push('\n');
+                    }
+                    stdout.push_str(note);
+                }
 
                 Ok(ShellOutput {
-                    stdout: output.trim_end().to_string(),
+                    stdout,
                     exit_code,
                     truncated,
                     timed_out: false,
@@ -1117,6 +1287,10 @@ impl ShellSession {
                      directory and any exported variables are back to their defaults.]",
                     effective_timeout_seconds
                 ));
+                if let Some(note) = restart_note {
+                    stdout.push('\n');
+                    stdout.push_str(note);
+                }
 
                 Ok(ShellOutput {
                     stdout,
@@ -1265,6 +1439,43 @@ impl Drop for ShellSession {
             proc.kill();
         }
     }
+}
+
+/// A fresh private directory for one shell: [`RUNNER`] in it, and room for
+/// the command files, 0700.
+fn session_dir() -> Result<tempfile::TempDir> {
+    let dir = tempfile::Builder::new()
+        .prefix("chatty-shell-")
+        .tempdir()
+        .map_err(|e| anyhow!("Failed to create the shell's session directory: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).map_err(
+            |e| {
+                anyhow!(
+                    "Failed to make the shell's session directory private: {}",
+                    e
+                )
+            },
+        )?;
+    }
+    write_private(&dir.path().join("run"), RUNNER.as_bytes())?;
+    Ok(dir)
+}
+
+/// Write `contents` to `path`, readable by this user only: an agent command
+/// may carry secrets.
+fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(contents))
+        .map_err(|e| anyhow!("Failed to write {}: {}", path.display(), e))
 }
 
 /// bash's arguments: no rc files (the init loads the login profile itself,

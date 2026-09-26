@@ -1058,8 +1058,8 @@ async fn terminal_view_shows_no_marks() {
     for leak in ["133;", "CHATTY", "__chatty", "\x1b"] {
         assert!(!screen.contains(leak), "{leak:?} in {screen}");
     }
-    // Prompt + command, output, prompt: the command's id was pasted and
-    // taken back off the line.
+    // Prompt + command, output, prompt: the line that ran the command file
+    // was redrawn as the command itself.
     let lines: Vec<&str> = screen.lines().collect();
     assert_eq!(lines.len(), 3, "{screen}");
     // `$`, or `#` as root.
@@ -1088,6 +1088,26 @@ async fn wait_for_screen(terminal: &chatty_terminal::TerminalHandle, needle: &st
     );
 }
 
+/// Wait until the tap's state satisfies `check`.
+async fn wait_for_state(session: &ShellSession, check: impl Fn(&TapState) -> bool) {
+    for _ in 0..400 {
+        {
+            let process = session.process.lock().await;
+            if check(&process.as_ref().unwrap().tap.lock()) {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let process = session.process.lock().await;
+    let state = process.as_ref().unwrap().tap.lock();
+    panic!(
+        "the shell never reached the expected state: {:?}, typed {:?}",
+        state.prompt,
+        state.scanner.text().text()
+    );
+}
+
 /// Shared keyboard: while someone types at the prompt the agent's command
 /// is not sent (it would be glued onto their line).
 #[tokio::test]
@@ -1095,8 +1115,10 @@ async fn busy_while_someone_is_typing() {
     let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
     session.execute("true").await.unwrap();
     let terminal = session.terminal().unwrap();
+    // They type at the prompt they see, and the shell echoes it.
+    wait_for_state(&session, |state| state.prompt == Prompt::Reading).await;
     terminal.write(b"echo half-typ").unwrap();
-    wait_for_screen(&terminal, "half-typ").await;
+    wait_for_state(&session, |state| state.busy().is_some()).await;
 
     let err = session.execute("echo agent").await.unwrap_err().to_string();
     assert!(
@@ -1117,24 +1139,12 @@ async fn busy_while_a_command_runs() {
     let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
     session.execute("true").await.unwrap();
     let terminal = session.terminal().unwrap();
+    wait_for_state(&session, |state| state.prompt == Prompt::Reading).await;
     terminal.write(b"sleep 30\r").unwrap();
-    for _ in 0..100 {
-        if matches!(
-            session
-                .process
-                .lock()
-                .await
-                .as_ref()
-                .unwrap()
-                .tap
-                .lock()
-                .prompt,
-            Prompt::Running { .. }
-        ) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    wait_for_state(&session, |state| {
+        matches!(&state.prompt, Prompt::Running { command_line } if command_line == "sleep 30")
+    })
+    .await;
 
     let err = session.execute("echo agent").await.unwrap_err().to_string();
     assert!(
@@ -1195,4 +1205,318 @@ async fn sandboxed_shell_runs_on_the_pty() {
     };
     assert!(session.is_sandboxed().await);
     assert_eq!(output.stdout, "tty\nno-home", "{output:?}");
+}
+
+// ── Review round (AGE-585): delivery through a command file, prompt loss ─────
+
+/// A stock Ubuntu `~/.bashrc`: returns early unless interactive, then sets
+/// its own `PS1` (with a title escape), an alias, shell options.
+const UBUNTU_BASHRC: &str = r#"case $- in
+    *i*) ;;
+      *) return;;
+esac
+HISTCONTROL=ignoreboth
+shopt -s checkwinsize
+PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+case "$TERM" in
+xterm*|rxvt*)
+    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+    ;;
+esac
+alias ls='ls --color=auto'
+"#;
+
+/// `source ~/.bashrc && conda activate …` replaces `PS1` in an interactive
+/// shell. The marks must come back (keeping the new prompt and a venv
+/// prefix), and later commands must run, not report a busy terminal.
+#[tokio::test]
+async fn sourcing_a_stock_bashrc_does_not_wedge_the_session() {
+    let (_workspace, workspace, home) = workspace_with_profile("");
+    std::fs::write(format!("{home}/.bashrc"), UBUNTU_BASHRC).unwrap();
+    let session =
+        ShellSession::with_secrets(Some(workspace), 30, 51200, false, vec![]).with_home(&home);
+
+    let output = session
+        .execute("source ~/.bashrc && echo sourced")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "sourced");
+    for n in 1..=3 {
+        let output = session.execute(&format!("echo after-{n}")).await.unwrap();
+        assert_eq!(output.stdout, format!("after-{n}"));
+    }
+    // A venv/conda-style prefix is kept, inside the marks.
+    session.execute("PS1=\"(venv) $PS1\"").await.unwrap();
+    let output = session.execute("cd /tmp && pwd").await.unwrap();
+    assert_eq!(output.stdout, "/tmp");
+    let terminal = session.terminal().unwrap();
+    wait_for_screen(&terminal, "(venv) ").await;
+    assert_eq!(session.execute("echo last").await.unwrap().stdout, "last");
+    // Typing detection still lines up with the new prompt.
+    terminal.write(b"x").unwrap();
+    wait_for_state(&session, |state| state.busy().is_some()).await;
+    terminal.write(b"\x7f").unwrap(); // Backspace
+    assert_eq!(
+        session
+            .execute("echo typed-and-erased")
+            .await
+            .unwrap()
+            .stdout,
+        "typed-and-erased"
+    );
+}
+
+/// A command that replaces `PROMPT_COMMAND` and `PS1` outright: the end mark
+/// does not depend on them, and both are put back (the new prompt command
+/// still runs, after ours).
+#[tokio::test]
+async fn replacing_prompt_command_and_ps1_keeps_working() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session
+        .execute("PROMPT_COMMAND='CHATTY_PC=ran'; PS1='plain> '; echo replaced")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "replaced");
+    let output = session
+        .execute("echo \"$CHATTY_PC $PROMPT_COMMAND\"")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "ran __chatty_prompt;CHATTY_PC=ran");
+    let output = session
+        .execute("unset PROMPT_COMMAND; PS1=; false")
+        .await
+        .unwrap();
+    assert_eq!(output.exit_code, 1);
+    assert_eq!(session.execute("echo fine").await.unwrap().stdout, "fine");
+}
+
+/// The command runs in the shell itself, not in a function: `declare` makes
+/// globals, `$?` is left as typing would leave it.
+#[tokio::test]
+async fn command_state_persists_like_typing() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session
+        .execute("declare -a arr=(x y); f() { echo \"f:$1\"; }; (exit 4)")
+        .await
+        .unwrap();
+    let output = session.execute("echo \"$? ${arr[1]}\"; f z").await.unwrap();
+    assert_eq!(output.stdout, "4 y\nf:z");
+}
+
+/// The command file is private and gone once the command finished.
+#[cfg(unix)]
+#[tokio::test]
+async fn command_files_are_private_and_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session
+        .execute("stat -c %a \"${__chatty_r%/*}\" \"${__chatty_r%/*}\"/cmd-*")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "700\n600", "{output:?}");
+    let dir = session
+        .process
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .dir
+        .path()
+        .to_path_buf();
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(left, vec!["run".to_string()]);
+    assert_eq!(
+        std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+/// Wait for the prompt after a command, then pretend its marks never came.
+async fn lose_prompt(session: &ShellSession) {
+    for _ in 0..100 {
+        {
+            let process = session.process.lock().await;
+            let mut state = process.as_ref().unwrap().tap.lock();
+            if state.prompt == Prompt::Reading {
+                state.prompt = Prompt::Between;
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("no prompt after the command");
+}
+
+/// Stuck with no prompt, nothing running and nobody typing (not after our
+/// own command): the session restarts the shell instead of refusing
+/// forever, and says so.
+#[tokio::test]
+async fn a_lost_prompt_restarts_the_shell() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.execute("export BEFORE=1").await.unwrap();
+    lose_prompt(&session).await;
+    {
+        let process = session.process.lock().await;
+        process.as_ref().unwrap().tap.lock().agent_last = false;
+    }
+    let output = session.execute("echo \"[$BEFORE]\"").await.unwrap();
+    assert!(output.stdout.starts_with("[]\n"), "{output:?}");
+    assert!(
+        output.stdout.contains("lost its prompt and was restarted"),
+        "{output:?}"
+    );
+
+    // Right after our own command, a missing prompt is just missing marks.
+    session.execute("export KEPT=1").await.unwrap();
+    lose_prompt(&session).await;
+    {
+        let process = session.process.lock().await;
+        assert!(process.as_ref().unwrap().tap.lock().agent_last);
+    }
+    let output = session.execute("echo \"[$KEPT]\"").await.unwrap();
+    assert_eq!(output.stdout, "[1]");
+}
+
+/// The multi-line protocol check run against each bash below.
+async fn check_protocol(session: &ShellSession, version: &str) {
+    let output = session
+        .execute("for i in 1 2; do\n\techo \"n=$i\"\ndone\ncat <<'EOF'\nline1\n\tx!y\nEOF\nfalse")
+        .await
+        .unwrap_or_else(|e| panic!("bash {version}: {e}"));
+    assert_eq!(output.stdout, "n=1\nn=2\nline1\n\tx!y", "bash {version}");
+    assert_eq!(output.exit_code, 1, "bash {version}");
+    let output = session.execute("cd /tmp && X=5").await.unwrap();
+    assert_eq!(output.exit_code, 0, "bash {version}");
+    let output = session
+        .execute("pwd; echo \"$X\"; echo err >&2")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, "/tmp\n5\nerr", "bash {version}");
+    let output = session.execute("echo bye; exit 3").await.unwrap();
+    assert_eq!(
+        (output.stdout.as_str(), output.exit_code),
+        ("bye", 3),
+        "bash {version}"
+    );
+    assert_eq!(
+        session.execute("echo back").await.unwrap().stdout,
+        "back",
+        "bash {version}"
+    );
+    // `set -e` ends the shell on the failure, as it did typed.
+    let output = session.execute("set -e; false; echo no").await.unwrap();
+    assert_eq!(
+        (output.stdout.as_str(), output.exit_code),
+        ("", 1),
+        "bash {version}"
+    );
+    assert_eq!(
+        session.execute("echo again").await.unwrap().stdout,
+        "again",
+        "bash {version}"
+    );
+}
+
+/// Removes the test's containers (one per shell it spawned) when the test
+/// ends, however it ends.
+struct Container(String);
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        let listed = std::process::Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=chatty-shell-test={}", self.0),
+            ])
+            .output();
+        if let Ok(listed) = listed {
+            for id in String::from_utf8_lossy(&listed.stdout).split_whitespace() {
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "-f", id])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+}
+
+/// A session whose shell is `bash:<version>` in a container, or `None`
+/// (skip) where docker or the image is not available.
+fn docker_bash(version: &str) -> Option<(ShellSession, Container)> {
+    let image = format!("bash:{version}");
+    let quiet = |args: &[&str]| {
+        std::process::Command::new("docker")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if !quiet(&["image", "inspect", &image]) && !quiet(&["pull", "-q", &image]) {
+        eprintln!("skipping bash {version}: docker or {image} not available");
+        return None;
+    }
+    let name = format!("chatty-shell-test-{}", uuid::Uuid::new_v4().simple());
+    let mut session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let container = name.clone();
+    session.test_shell = Some(Box::new(move |dir| {
+        let dir = dir.to_string_lossy();
+        let label = format!("chatty-shell-test={container}");
+        let mut args: Vec<String> = ["run", "--rm", "-i", "-t", "--label", &label]
+            .map(String::from)
+            .to_vec();
+        args.extend(["-v".into(), format!("{dir}:{dir}:ro")]);
+        for var in ["__CHATTY_INIT", "PROMPT_COMMAND", "TERM", "COLUMNS"] {
+            args.extend(["-e".into(), var.into()]);
+        }
+        args.extend([image.clone(), "bash".into()]);
+        args.extend(bash_args());
+        TerminalConfig {
+            shell: Some("docker".into()),
+            args,
+            ..TerminalConfig::default()
+        }
+    }));
+    Some((session, Container(name)))
+}
+
+#[tokio::test]
+async fn protocol_works_on_bash_3_2() {
+    // macOS's /bin/bash.
+    if let Some((session, _container)) = docker_bash("3.2") {
+        check_protocol(&session, "3.2").await;
+    }
+}
+
+#[tokio::test]
+async fn protocol_works_on_bash_4_4() {
+    if let Some((session, _container)) = docker_bash("4.4") {
+        check_protocol(&session, "4.4").await;
+    }
+}
+
+#[tokio::test]
+async fn protocol_works_on_bash_5_0() {
+    if let Some((session, _container)) = docker_bash("5.0") {
+        check_protocol(&session, "5.0").await;
+    }
+}
+
+#[tokio::test]
+async fn protocol_works_on_bash_5_1() {
+    if let Some((session, _container)) = docker_bash("5.1") {
+        check_protocol(&session, "5.1").await;
+    }
+}
+
+#[tokio::test]
+async fn protocol_works_on_the_host_bash() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    check_protocol(&session, "host").await;
 }
