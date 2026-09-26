@@ -30,7 +30,7 @@ crates/
 │                             #   repositories, factories, exporters
 ├── chatty-gpui/              # Desktop binary `chatty` (GPUI)
 ├── chatty-tui/               # Terminal binary `chatty-tui` (Ratatui)
-│                             #   also: --headless and --pipe modes
+│                             #   also: --headless, --pipe, and acp (stdio) modes
 ├── chatty-terminal/          # Embedded terminal model: PTY + alacritty Term (no UI)
 ├── chatty-wasm-runtime/      # Wasmtime runtime for WASM agent modules
 ├── chatty-module-registry/   # Module discovery, manifest, lifecycle
