@@ -69,6 +69,9 @@ pub enum ChatInputEvent {
     /// A slash command that should be executed immediately (no args required).
     SlashCommandSelected(String),
     WorkingDirChanged(Option<PathBuf>),
+    /// The `/` picker just opened; the skill list should be rescanned so a
+    /// skill added on disk since the last scan appears in it.
+    SlashMenuOpened,
 }
 
 impl EventEmitter<ChatInputEvent> for ChatInputState {}
@@ -121,7 +124,7 @@ pub struct ChatInputState {
     pending_slash_insert: Option<String>,
     /// Per-conversation working directory override (None = use global workspace_dir setting)
     working_dir: Option<PathBuf>,
-    /// Filesystem skills loaded from the workspace `.claude/skills/` and global skills
+    /// Filesystem skills loaded from the project and global skill directories
     /// directories.  Updated whenever the working directory changes.
     available_skills: Vec<SkillEntry>,
     /// Cached list of files for the `@` mention picker (loaded on first use).

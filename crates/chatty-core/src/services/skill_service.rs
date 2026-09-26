@@ -132,21 +132,63 @@ fn keyword_overlap_score(query_words: &HashSet<String>, skill_name: &str, conten
     matches as f32 / query_words.len() as f32
 }
 
+// ── Skill directories ────────────────────────────────────────────────────────
+
+/// Folders that carry a `skills/` directory, in precedence order.
+///
+/// `.agents` is the cross-tool Agent Skills location (Codex, opencode, Cursor,
+/// Warp and the `npx skills` installer all read or write it); `.claude` is
+/// Claude Code's. Reading both means a skill installed for either tool shows
+/// up in Chatty too.
+const SKILL_ROOTS: &[&str] = &[".agents", ".claude"];
+
+fn skill_dirs_in(dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    SKILL_ROOTS
+        .iter()
+        .map(move |root| dir.join(root).join("skills"))
+}
+
+/// Global skill directories, in precedence order: `~/.agents/skills/`, then
+/// `~/.claude/skills/`. The same paths on every platform.
+pub fn global_skill_dirs() -> Vec<PathBuf> {
+    dirs::home_dir()
+        .map(|home| skill_dirs_in(&home).collect())
+        .unwrap_or_default()
+}
+
+/// Project skill directories for `workspace`, nearest first: `.agents/skills/`
+/// and `.claude/skills/` in the workspace and in every parent up to the
+/// enclosing git repository root, so a conversation rooted in a subfolder
+/// still sees the repository's skills. Outside a git repository only the
+/// workspace itself is searched.
+pub fn workspace_skill_dirs(workspace: &Path) -> Vec<PathBuf> {
+    let in_repo = workspace.ancestors().any(|d| d.join(".git").exists());
+    let mut dirs = Vec::new();
+    for dir in workspace.ancestors() {
+        dirs.extend(skill_dirs_in(dir));
+        if !in_repo || dir.join(".git").exists() {
+            break;
+        }
+    }
+    dirs
+}
+
 // ── SkillService ─────────────────────────────────────────────────────────────
 
-/// Loads filesystem-based skills from one or two directories and scores them
-/// against a query, with on-disk embedding caching to avoid redundant API calls.
+/// Loads filesystem skills and scores them against a query, with on-disk
+/// embedding caching to avoid redundant API calls.
 ///
 /// ## Skill directories
-/// - **Workspace**: `<workspace>/.claude/skills/` — project-local skills
-/// - **Global**:    `<data_dir>/chatty/skills/`   — permanent user skills
-///   - Linux:   `~/.local/share/chatty/skills/`
-///   - macOS:   `~/Library/Application Support/chatty/skills/`
-///   - Windows: `%APPDATA%\chatty\skills\`
+/// Searched in this order; the first skill of a given name wins:
+/// 1. **Project**: [`workspace_skill_dirs`] — `.agents/skills/` and
+///    `.claude/skills/` from the workspace up to its git root
+/// 2. **Global**: [`global_skill_dirs`] — `~/.agents/skills/` and
+///    `~/.claude/skills/`
 ///
-/// Each directory is scanned for immediate subdirectories that contain a
-/// `SKILL.md` (or `skill.md`) file. The subdirectory name becomes the skill
-/// name. Embeddings are cached as sidecar files inside each skill subdirectory.
+/// Each directory is scanned for immediate subdirectories (symlinks followed)
+/// that contain a `SKILL.md` (or `skill.md`) file. The subdirectory name
+/// becomes the skill name. Embeddings are cached as sidecar files inside each
+/// skill subdirectory.
 ///
 /// ## Scoring
 /// When a `query_embedding` is provided skills are scored by cosine similarity
@@ -155,7 +197,7 @@ fn keyword_overlap_score(query_words: &HashSet<String>, skill_name: &str, conten
 /// Falls back to keyword overlap when no embedding is available.
 #[derive(Clone)]
 pub struct SkillService {
-    global_skills_dir: PathBuf,
+    global_skill_dirs: Vec<PathBuf>,
     embedding_service: Option<EmbeddingService>,
 }
 
@@ -164,9 +206,6 @@ pub struct SkillService {
 /// Returns a list of `(name, description)` pairs for every skill subdirectory
 /// that contains a `SKILL.md` or `skill.md` file.  Skills without a frontmatter
 /// `description` field fall back to `"Skill: <name>"`.
-///
-/// This is a lightweight, blocking helper intended for UI use (e.g. populating
-/// the slash-command picker) where async I/O would be inconvenient.
 pub fn list_skills_from_dir(dir: &Path) -> Vec<(String, String)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -205,27 +244,14 @@ pub fn list_skills_from_dir(dir: &Path) -> Vec<(String, String)> {
     skills
 }
 
-/// Workspace skills first, then global skills, deduplicated by name so a
-/// workspace skill shadows a global one of the same name.
-fn list_all_skills_from_dirs(
-    workspace_skills_dir: Option<&Path>,
-    global_skills_dir: &Path,
-) -> Vec<(String, String)> {
+/// Every skill in `dirs`, deduplicated by name so a skill in an earlier
+/// directory shadows a same-named one in a later directory.
+fn list_all_skills_from_dirs(dirs: &[(PathBuf, MemoryHitSource)]) -> Vec<(String, String)> {
     let mut seen = HashSet::new();
-    let mut result = Vec::new();
-
-    let workspace_skills = workspace_skills_dir
-        .map(list_skills_from_dir)
-        .unwrap_or_default();
-    let global_skills = list_skills_from_dir(global_skills_dir);
-
-    for (name, desc) in workspace_skills.into_iter().chain(global_skills) {
-        if seen.insert(name.clone()) {
-            result.push((name, desc));
-        }
-    }
-
-    result
+    dirs.iter()
+        .flat_map(|(dir, _)| list_skills_from_dir(dir))
+        .filter(|(name, _)| seen.insert(name.clone()))
+        .collect()
 }
 
 impl SkillService {
@@ -233,46 +259,51 @@ impl SkillService {
     ///
     /// `embedding_service` is optional; pass `None` to use keyword-only scoring.
     pub fn new(embedding_service: Option<EmbeddingService>) -> Self {
-        let global_skills_dir = dirs::data_dir()
-            .map(|d| d.join("chatty").join("skills"))
-            .unwrap_or_else(|| PathBuf::from(".chatty_skills"));
         Self {
-            global_skills_dir,
+            global_skill_dirs: global_skill_dirs(),
             embedding_service,
         }
     }
 
-    /// Create a `SkillService` with a custom global skills directory.
+    /// Create a `SkillService` with custom global skill directories.
     #[cfg(test)]
-    pub fn with_global_dir(global_skills_dir: PathBuf) -> Self {
+    pub fn with_global_dirs(global_skill_dirs: Vec<PathBuf>) -> Self {
         Self {
-            global_skills_dir,
+            global_skill_dirs,
             embedding_service: None,
         }
     }
 
-    /// Return the path to the global skills directory.
-    pub fn global_skills_dir(&self) -> &Path {
-        &self.global_skills_dir
+    /// Every directory searched for `workspace_dir`, in precedence order,
+    /// tagged with where it came from.
+    pub fn skill_dirs(&self, workspace_dir: Option<&Path>) -> Vec<(PathBuf, MemoryHitSource)> {
+        let workspace = workspace_dir
+            .map(workspace_skill_dirs)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| (d, MemoryHitSource::WorkspaceSkillFile));
+        let global = self
+            .global_skill_dirs
+            .iter()
+            .cloned()
+            .map(|d| (d, MemoryHitSource::GlobalSkillFile));
+        workspace.chain(global).collect()
     }
 
-    /// Synchronously list all skills from the workspace and global directories.
+    /// Synchronously list all skills visible from `workspace_dir` (the
+    /// workspace root, not a skills directory).
     ///
-    /// Workspace skills are listed first, followed by global skills.  Duplicate
-    /// names are deduplicated (workspace takes precedence).
+    /// Project skills are listed first, followed by global skills. Duplicate
+    /// names are deduplicated (the first directory wins).
     ///
     /// This walks the filesystem on the calling thread. Callers on a
     /// latency-sensitive path (the desktop app builds its window on the main
     /// thread) want [`Self::list_all_skills`] instead.
-    pub fn list_all_skills_sync(
-        &self,
-        workspace_skills_dir: Option<&Path>,
-    ) -> Vec<(String, String)> {
-        list_all_skills_from_dirs(workspace_skills_dir, &self.global_skills_dir)
+    pub fn list_all_skills_sync(&self, workspace_dir: Option<&Path>) -> Vec<(String, String)> {
+        list_all_skills_from_dirs(&self.skill_dirs(workspace_dir))
     }
 
-    /// List all skills from the workspace and global directories, off the
-    /// calling thread.
+    /// List all skills visible from `workspace_dir`, off the calling thread.
     ///
     /// Same result as [`Self::list_all_skills_sync`], but the directory walk
     /// runs on a blocking-pool thread so it cannot stall the caller. The
@@ -281,40 +312,41 @@ impl SkillService {
     ///
     /// Takes the workspace directory by value because the walk outlives the
     /// call.
-    pub async fn list_all_skills(
-        &self,
-        workspace_skills_dir: Option<PathBuf>,
-    ) -> Vec<(String, String)> {
-        let global_skills_dir = self.global_skills_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            list_all_skills_from_dirs(workspace_skills_dir.as_deref(), &global_skills_dir)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = ?e, "Skill listing task failed; reporting no skills");
-            Vec::new()
-        })
+    pub async fn list_all_skills(&self, workspace_dir: Option<PathBuf>) -> Vec<(String, String)> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || service.list_all_skills_sync(workspace_dir.as_deref()))
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = ?e, "Skill listing task failed; reporting no skills");
+                Vec::new()
+            })
     }
 
-    /// Load skill hits from both the workspace and global directories.
+    /// Load skill hits from every project and global skills directory.
     ///
-    /// Skills are scored by cosine similarity (cached) or keyword overlap.
-    /// The caller should sort and truncate the returned hits together with
-    /// any persisted memory hits before injecting them into context.
+    /// Skills are scored by cosine similarity (cached) or keyword overlap. A
+    /// name found in more than one directory is reported once, from the first
+    /// directory. The caller should sort and truncate the returned hits
+    /// together with any persisted memory hits before injecting them into
+    /// context.
     pub async fn load_hits(
         &self,
         query: &str,
         query_embedding: Option<&[f32]>,
-        workspace_skills_dir: Option<&Path>,
+        workspace_dir: Option<&Path>,
     ) -> Vec<MemoryHit> {
+        let mut seen = HashSet::new();
         let mut hits = Vec::new();
-        if let Some(dir) = workspace_skills_dir {
-            hits.extend(self.load_from_dir(dir, query, query_embedding).await);
+        for (dir, source) in self.skill_dirs(workspace_dir) {
+            for hit in self
+                .load_from_dir(&dir, source, query, query_embedding)
+                .await
+            {
+                if seen.insert(hit.title.clone()) {
+                    hits.push(hit);
+                }
+            }
         }
-        hits.extend(
-            self.load_from_dir(&self.global_skills_dir, query, query_embedding)
-                .await,
-        );
         hits
     }
 
@@ -322,6 +354,7 @@ impl SkillService {
     async fn load_from_dir(
         &self,
         skills_dir: &Path,
+        source: MemoryHitSource,
         query: &str,
         query_embedding: Option<&[f32]>,
     ) -> Vec<MemoryHit> {
@@ -399,11 +432,6 @@ impl SkillService {
                 keyword_overlap_score(&query_words, skill_name, &content)
             };
 
-            let source = if skills_dir == self.global_skills_dir.as_path() {
-                MemoryHitSource::GlobalSkillFile
-            } else {
-                MemoryHitSource::WorkspaceSkillFile
-            };
             // Store only the description so the context block stays slim.
             // The full content is still used above for scoring (embedding + keyword).
             // Filesystem skills can be expanded later with `read_skill`.
@@ -470,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn load_hits_returns_description_not_full_content() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("my-skill");
+        let skill_dir = tmp.path().join(".agents/skills/my-skill");
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         let content = "---\nname: my-skill\ndescription: Short description.\n---\n\n# Heading\n\nLong content that should NOT be in context.";
         tokio::fs::write(skill_dir.join("SKILL.md"), content)
@@ -479,7 +507,7 @@ mod tests {
 
         // Use an empty global dir so only the workspace skill is found.
         let empty_global = tempfile::tempdir().unwrap();
-        let service = SkillService::with_global_dir(empty_global.path().to_path_buf());
+        let service = SkillService::with_global_dirs(vec![empty_global.path().to_path_buf()]);
         let hits = service
             .load_hits("my skill query", None, Some(tmp.path()))
             .await;
@@ -552,11 +580,12 @@ mod tests {
     fn list_all_skills_sync_deduplicates_workspace_wins() {
         let global_tmp = tempfile::tempdir().unwrap();
         let workspace_tmp = tempfile::tempdir().unwrap();
+        let workspace_skills = workspace_tmp.path().join(".agents/skills");
 
         // Same skill name in both — workspace description should win
         for (dir, desc) in [
             (global_tmp.path(), "Global description"),
-            (workspace_tmp.path(), "Workspace description"),
+            (workspace_skills.as_path(), "Workspace description"),
         ] {
             let skill_dir = dir.join("shared-skill");
             std::fs::create_dir_all(&skill_dir).unwrap();
@@ -576,8 +605,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut service = SkillService::new(None);
-        service.global_skills_dir = global_tmp.path().to_path_buf();
+        let service = SkillService::with_global_dirs(vec![global_tmp.path().to_path_buf()]);
 
         let skills = service.list_all_skills_sync(Some(workspace_tmp.path()));
 
@@ -597,16 +625,21 @@ mod tests {
     async fn list_all_skills_matches_the_sync_listing() {
         let global_tmp = tempfile::tempdir().unwrap();
         let workspace_tmp = tempfile::tempdir().unwrap();
+        let workspace_skills = workspace_tmp.path().join(".agents/skills");
 
         for (dir, name, desc) in [
             (global_tmp.path(), "shared-skill", "Global description"),
             (global_tmp.path(), "global-only", "Global only"),
             (
-                workspace_tmp.path(),
+                workspace_skills.as_path(),
                 "shared-skill",
                 "Workspace description",
             ),
-            (workspace_tmp.path(), "workspace-only", "Workspace only"),
+            (
+                workspace_skills.as_path(),
+                "workspace-only",
+                "Workspace only",
+            ),
         ] {
             let skill_dir = dir.join(name);
             std::fs::create_dir_all(&skill_dir).unwrap();
@@ -617,8 +650,7 @@ mod tests {
             .unwrap();
         }
 
-        let mut service = SkillService::new(None);
-        service.global_skills_dir = global_tmp.path().to_path_buf();
+        let service = SkillService::with_global_dirs(vec![global_tmp.path().to_path_buf()]);
 
         let sync = service.list_all_skills_sync(Some(workspace_tmp.path()));
         let asynchronous = service
@@ -627,5 +659,102 @@ mod tests {
 
         assert_eq!(sync, asynchronous);
         assert_eq!(sync.len(), 3, "shared-skill must be deduplicated");
+    }
+    fn write_skill(dir: &Path, name: &str, desc: &str) {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {desc}\n---\n# Body"),
+        )
+        .unwrap();
+    }
+
+    /// The open Agent Skills location and Claude Code's are both read, in
+    /// the project and globally, and `.agents` wins a name clash.
+    #[test]
+    fn reads_agents_and_claude_dirs_in_project_and_global() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_skill(&project.path().join(".agents/skills"), "proj-agents", "A.");
+        write_skill(&project.path().join(".claude/skills"), "proj-claude", "C.");
+        write_skill(
+            &project.path().join(".agents/skills"),
+            "clash",
+            "From .agents.",
+        );
+        write_skill(
+            &project.path().join(".claude/skills"),
+            "clash",
+            "From .claude.",
+        );
+        write_skill(&home.path().join(".agents/skills"), "global-agents", "GA.");
+        write_skill(&home.path().join(".claude/skills"), "global-claude", "GC.");
+
+        let service = SkillService::with_global_dirs(skill_dirs_in(home.path()).collect());
+        let skills = service.list_all_skills_sync(Some(project.path()));
+        let names: Vec<&str> = skills.iter().map(|(n, _)| n.as_str()).collect();
+
+        assert_eq!(
+            names,
+            [
+                "clash",
+                "proj-agents",
+                "proj-claude",
+                "global-agents",
+                "global-claude"
+            ]
+        );
+        assert_eq!(skills[0].1, "From .agents.");
+    }
+
+    /// A workspace in a subfolder of a repository still sees the skills at
+    /// the repository root, and the walk stops there.
+    #[test]
+    fn workspace_dirs_walk_up_to_the_git_root() {
+        let outer = tempfile::tempdir().unwrap();
+        let repo = outer.path().join("repo");
+        let sub = repo.join("crates/app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let dirs = workspace_skill_dirs(&sub);
+
+        assert_eq!(dirs.first(), Some(&sub.join(".agents/skills")));
+        assert!(dirs.contains(&repo.join(".agents/skills")));
+        assert!(dirs.contains(&repo.join(".claude/skills")));
+        assert!(!dirs.contains(&outer.path().join(".agents/skills")));
+    }
+
+    #[test]
+    fn workspace_dirs_outside_a_repo_are_the_workspace_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = workspace_skill_dirs(tmp.path());
+        // tempdir may itself sit under a git checkout; only assert the
+        // no-repo case when it does not.
+        if !tmp.path().ancestors().any(|d| d.join(".git").exists()) {
+            assert_eq!(
+                dirs,
+                [
+                    tmp.path().join(".agents/skills"),
+                    tmp.path().join(".claude/skills")
+                ]
+            );
+        }
+    }
+
+    /// `npx skills` installs into `.agents/skills` and symlinks the same
+    /// skill into `.claude/skills`; it must reach the context once.
+    #[tokio::test]
+    async fn load_hits_reports_a_skill_in_two_dirs_once() {
+        let project = tempfile::tempdir().unwrap();
+        write_skill(&project.path().join(".agents/skills"), "twice", "Twice.");
+        write_skill(&project.path().join(".claude/skills"), "twice", "Twice.");
+        let empty_global = tempfile::tempdir().unwrap();
+        let service = SkillService::with_global_dirs(vec![empty_global.path().to_path_buf()]);
+
+        let hits = service.load_hits("twice", None, Some(project.path())).await;
+
+        assert_eq!(hits.len(), 1);
     }
 }

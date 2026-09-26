@@ -37,7 +37,7 @@ pub struct SearchMemoryTool {
     embedding_service: Option<EmbeddingService>,
     /// Optional skill service for filesystem skill discovery.
     skill_service: Option<SkillService>,
-    workspace_skills_dir: Option<PathBuf>,
+    workspace_dir: Option<PathBuf>,
 }
 
 impl SearchMemoryTool {
@@ -45,13 +45,13 @@ impl SearchMemoryTool {
         memory_service: MemoryService,
         embedding_service: Option<EmbeddingService>,
         skill_service: Option<SkillService>,
-        workspace_skills_dir: Option<PathBuf>,
+        workspace_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             memory_service,
             embedding_service,
             skill_service,
-            workspace_skills_dir,
+            workspace_dir,
         }
     }
 }
@@ -159,7 +159,7 @@ impl Tool for SearchMemoryTool {
                 .load_hits(
                     &args.query,
                     query_embedding_opt.as_deref(),
-                    self.workspace_skills_dir.as_deref(),
+                    self.workspace_dir.as_deref(),
                 )
                 .await
         } else {

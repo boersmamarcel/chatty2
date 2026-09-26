@@ -341,7 +341,16 @@ fn handle_terminal_event(
     input_state: &mut InputState,
 ) -> KeyAction {
     match event {
-        Event::Key(key) => handle_key_event(key, engine, input_state),
+        Event::Key(key) => {
+            let menu_was_open = input_state.is_slash_menu_open();
+            let action = handle_key_event(key, engine, input_state);
+            // Rescan on every fresh `/` so a skill dropped into a skills
+            // directory mid-session shows up without a restart.
+            if !menu_was_open && input_state.is_slash_menu_open() {
+                refresh_skills(engine, input_state);
+            }
+            action
+        }
         Event::Mouse(mouse) => {
             handle_mouse_event(mouse, engine);
             KeyAction::None
@@ -766,10 +775,9 @@ fn show_paste(engine: &mut ChatEngine, arg: Option<&str>) {
 fn refresh_skills(engine: &ChatEngine, input_state: &mut InputState) {
     use std::path::Path;
     let workspace_dir = engine.execution_settings().workspace_dir.as_deref();
-    let workspace_skills_dir = workspace_dir.map(|d| Path::new(d).join(".claude").join("skills"));
     let skills = engine
         .skill_service()
-        .list_all_skills_sync(workspace_skills_dir.as_deref());
+        .list_all_skills_sync(workspace_dir.map(Path::new));
     input_state.set_available_skills(skills);
 }
 
