@@ -229,7 +229,20 @@ pub struct ChatView {
     /// rather than per conversation: terminals belong to the window.
     terminal_dock: Entity<TerminalDock>,
     _terminal_dock_events: Subscription,
+    /// Keeps the composer's terminal-snapshot chip current while the dock
+    /// is open (AGE-587); `None` while it is hidden.
+    terminal_context_poll: Option<Task<()>>,
+    /// What the chip was last computed from, so an unchanged terminal is
+    /// not read again.
+    terminal_context_key: Option<u64>,
+    /// Watches the dock for the above; armed on first render, since it
+    /// needs an entity handle `ChatView::new` does not have.
+    terminal_dock_observer: Option<Subscription>,
 }
+
+/// How often the composer's terminal-snapshot chip is brought up to date
+/// while the dock is open (AGE-587).
+const TERMINAL_CONTEXT_POLL: Duration = Duration::from_millis(500);
 
 /// What the last transcript refresh cost, for the `CHATTY_DEBUG_UI` overlay.
 #[derive(Clone, Copy, Default)]
@@ -609,7 +622,84 @@ impl ChatView {
             pr_status: cx.new(|_cx| PrStatusBarView::new()),
             _terminal_dock_events: terminal_dock_events,
             terminal_dock,
+            terminal_context_poll: None,
+            terminal_context_key: None,
+            terminal_dock_observer: None,
         }
+    }
+
+    /// The dock changed: poll the terminal for the composer's snapshot chip
+    /// while it is open, and drop the chip once it is hidden (AGE-587).
+    pub fn sync_terminal_context(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal_dock.read(cx).is_open() {
+            self.terminal_context_poll = None;
+            self.terminal_context_key = None;
+            self.chat_input_state
+                .update(cx, |state, cx| state.set_terminal_context(None, cx));
+            return;
+        }
+        self.refresh_terminal_context(cx);
+        if self.terminal_context_poll.is_none() {
+            self.terminal_context_poll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(TERMINAL_CONTEXT_POLL).await;
+                    if this
+                        .update(cx, |view, cx| view.refresh_terminal_context(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    /// Recompute the snapshot the next message would carry: the dock's
+    /// readable terminal, unless the setting is off or the conversation's
+    /// last attached snapshot is the same (AGE-587).
+    pub fn refresh_terminal_context(&mut self, cx: &mut Context<Self>) {
+        use crate::chatty::models::ConversationsStore;
+        use chatty_core::services::terminal::context::to_attach;
+        use std::hash::{Hash, Hasher};
+
+        let enabled = cx
+            .try_global::<GeneralSettingsModel>()
+            .is_none_or(|settings| settings.terminal.auto_attach_context);
+        let source = if enabled {
+            self.terminal_dock.read(cx).context_source(cx)
+        } else {
+            None
+        };
+        let store = cx.try_global::<ConversationsStore>();
+        let conversation = store
+            .and_then(|store| store.active_id())
+            .and_then(|id| store.and_then(|store| store.get_conversation(id)));
+
+        let key = source.as_ref().map(|source| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::sync::Arc::as_ptr(&source.handle).hash(&mut hasher);
+            source.handle.generation().hash(&mut hasher);
+            source.tab.hash(&mut hasher);
+            source.cwd.hash(&mut hasher);
+            conversation
+                .map(|c| (c.id(), c.entries().len()))
+                .hash(&mut hasher);
+            hasher.finish()
+        });
+        if key == self.terminal_context_key {
+            return;
+        }
+        self.terminal_context_key = key;
+
+        let context = source.as_ref().map(super::terminal::context::read_context);
+        let context = match conversation {
+            Some(conversation) => {
+                to_attach(context, conversation.entries().iter().map(|e| &e.message))
+            }
+            None => context,
+        };
+        self.chat_input_state
+            .update(cx, |state, cx| state.set_terminal_context(context, cx));
     }
 
     /// Ctrl/Cmd+J, Ctrl+`: open the dock and focus its terminal (starting
@@ -1805,6 +1895,11 @@ impl ChatView {
         self.reset_clarification_inputs(window, cx);
         self.sync_pr_status(cx);
         self.ensure_scroll_handler(cx);
+        if self.terminal_dock_observer.is_none() {
+            self.terminal_dock_observer = Some(cx.observe(&self.terminal_dock, |view, _, cx| {
+                view.sync_terminal_context(cx);
+            }));
+        }
         self.refresh_turns(cx);
         self.last_settled_assistant_idx = self
             .turns
@@ -4132,5 +4227,122 @@ mod terminal_dock_tests {
                 420.
             );
         });
+    }
+
+    /// AGE-587: a message's terminal snapshot comes only from the tab on
+    /// screen in an open dock, and only once the agent may read it: an
+    /// unshared human tab gives nothing, a shared one its screen, a hidden
+    /// input prompt nothing, a hidden dock nothing. The chip in the composer
+    /// follows, and turning the setting off drops it.
+    #[gpui::test]
+    fn the_snapshot_is_what_the_agent_may_read_on_screen(cx: &mut gpui::TestAppContext) {
+        use crate::chatty::views::terminal::context::read_context;
+        use chatty_core::services::terminal::TerminalAccess;
+
+        let (view, window) = harness(cx);
+        let dock = cx.update(|cx| view.read(cx).terminal_dock.clone());
+        let handle = with_window(cx, window, |window, cx| {
+            view.update(cx, |v, cx| v.new_terminal(window, cx));
+            dock.read(cx)
+                .active_view()
+                .unwrap()
+                .read(cx)
+                .handle()
+                .clone()
+        });
+        handle.write(b"echo ctx-marker-$((6*7))\r").unwrap();
+        let source = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| dock.read(cx).context_source(cx).map(|s| read_context(&s)))
+        };
+        let chip = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                view.update(cx, |v, cx| v.refresh_terminal_context(cx));
+                view.read(cx)
+                    .chat_input_state
+                    .read(cx)
+                    .terminal_context()
+                    .cloned()
+            })
+        };
+
+        // Unshared: nothing, however much is on screen.
+        eventually("the marker on screen", || {
+            handle
+                .snapshot(chatty_terminal::Region::Screen)
+                .text
+                .contains("\nctx-marker-42")
+        });
+        assert_eq!(source(cx), None);
+        assert_eq!(chip(cx), None);
+
+        // Shared read-only: the screen (sh has no command marks).
+        let id = cx.update(|cx| dock.read(cx).tab_ids()[0]);
+        cx.update(|cx| dock.update(cx, |d, cx| d.set_tab_access(id, TerminalAccess::Read, cx)));
+        let context = source(cx).expect("a shared tab is read");
+        assert!(context.block.contains("screen:\n"), "{}", context.block);
+        assert!(
+            context.block.contains("\nctx-marker-42\n"),
+            "{}",
+            context.block
+        );
+        assert_eq!(chip(cx), Some(context));
+
+        // The setting off: no chip.
+        cx.update(|cx| {
+            cx.global_mut::<GeneralSettingsModel>()
+                .terminal
+                .auto_attach_context = false
+        });
+        assert_eq!(chip(cx), None);
+        cx.update(|cx| {
+            cx.global_mut::<GeneralSettingsModel>()
+                .terminal
+                .auto_attach_context = true
+        });
+
+        // A password prompt (echo off, canonical input): nothing.
+        handle.write(b"stty -echo\r").unwrap();
+        eventually("echo off", || handle.input_hidden() == Some(true));
+        assert_eq!(source(cx), None);
+        assert_eq!(chip(cx), None);
+        handle.write(b"stty echo\r").unwrap();
+        eventually("echo back on", || handle.input_hidden() == Some(false));
+        assert!(source(cx).is_some());
+
+        // The dock hidden: nothing.
+        cx.update(|cx| dock.update(cx, |d, cx| d.hide(cx)));
+        assert_eq!(source(cx), None);
+        assert_eq!(chip(cx), None);
+    }
+
+    /// AGE-587: the Agent tab is always readable, and the agent shell's
+    /// command marks give its last command with the exit code (T8a).
+    #[gpui::test]
+    fn the_agent_tab_snapshot_is_its_last_command(cx: &mut gpui::TestAppContext) {
+        use crate::chatty::views::terminal::context::read_context;
+
+        let (rt, session) = agent_session(true);
+        rt.block_on(session.execute("echo agent-ran; false"))
+            .unwrap();
+        let (view, window) = harness(cx);
+        let dock = cx.update(|cx| view.read(cx).terminal_dock.clone());
+        with_window(cx, window, |window, cx| {
+            dock.update(cx, |d, cx| {
+                d.agent_source = Some((Some("c1".into()), Some(session.clone())));
+                d.show_agent(window, cx);
+            });
+        });
+        let context = cx
+            .update(|cx| dock.read(cx).context_source(cx).map(|s| read_context(&s)))
+            .expect("the Agent tab is always read");
+        assert_eq!(context.tab, "Agent");
+        assert!(
+            context
+                .block
+                .contains("command: echo agent-ran; false\nexit code: 1\noutput:\nagent-ran\n"),
+            "{}",
+            context.block
+        );
+        drop(rt);
     }
 }

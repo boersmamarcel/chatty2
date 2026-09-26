@@ -44,6 +44,9 @@ use chatty_core::session::{Arrival, Decision, QueuedId, TurnEnd};
 pub(super) struct QueuedSend {
     pub message: String,
     pub attachments: Vec<PathBuf>,
+    /// The `<terminal_context>` block the composer attached (AGE-587),
+    /// taken when the message was sent, not when it runs.
+    pub terminal_context: Option<String>,
 }
 
 impl ChattyApp {
@@ -65,16 +68,18 @@ impl ChattyApp {
         &mut self,
         message: String,
         attachments: Vec<PathBuf>,
+        terminal_context: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(conv_id) = self.active_conversation_id(cx) else {
             // No conversation yet: nothing can be streaming in it.
-            self.send_message_inner(message, attachments, true, cx);
+            self.send_message_inner(message, attachments, terminal_context, true, cx);
             return;
         };
         let arrival = Arrival::Message(QueuedSend {
             message,
             attachments,
+            terminal_context,
         });
         self.route(&conv_id, arrival, cx);
     }
@@ -111,12 +116,13 @@ impl ChattyApp {
     /// turn if there is one (AGE-242 / D3; one slot).
     pub(super) fn send_protocol_follow_up(&mut self, message: String, cx: &mut Context<Self>) {
         let Some(conv_id) = self.active_conversation_id(cx) else {
-            self.send_message_inner(message, vec![], false, cx);
+            self.send_message_inner(message, vec![], None, false, cx);
             return;
         };
         let arrival = Arrival::FollowUp(QueuedSend {
             message,
             attachments: vec![],
+            terminal_context: None,
         });
         self.route(&conv_id, arrival, cx);
     }
@@ -147,6 +153,7 @@ impl ChattyApp {
                 self.send_message_inner(
                     next.message.message,
                     next.message.attachments,
+                    next.message.terminal_context,
                     !next.follow_up,
                     cx,
                 );
@@ -199,6 +206,7 @@ impl ChattyApp {
         &mut self,
         message: String,
         attachments: Vec<PathBuf>,
+        terminal_context: Option<String>,
         show_in_transcript: bool,
         cx: &mut Context<Self>,
     ) {
@@ -329,7 +337,13 @@ impl ChattyApp {
                     view.set_conversation_id(conv_id.clone(), cx);
                     // Protocol follow-ups reach the LLM but skip the user bubble.
                     if show_in_transcript {
-                        view.add_user_message(message.clone(), attachments.clone(), cx);
+                        // The same text a reload shows: the snapshot after
+                        // what was typed, rendered as a chip (AGE-587).
+                        let shown = match &terminal_context {
+                            Some(block) => format!("{message}\n{block}"),
+                            None => message.clone(),
+                        };
+                        view.add_user_message(shown, attachments.clone(), cx);
                         debug!("User message added to UI");
                     } else {
                         debug!("Protocol follow-up: skipping user bubble in transcript");
@@ -423,6 +437,18 @@ impl ChattyApp {
                 let mut contents = vec![rig_core::message::UserContent::Text(
                     rig_core::completion::message::Text::new(message.clone()),
                 )];
+                // The terminal snapshot is part of the user turn, after the
+                // typed text, and persisted with it (AGE-587).
+                if let Some(block) = terminal_context {
+                    info!(
+                        tokens = chatty_core::token_budget::counter::TokenCounter::for_model("")
+                            .count(&block),
+                        "Attaching terminal context"
+                    );
+                    contents.push(rig_core::message::UserContent::Text(
+                        rig_core::completion::message::Text::new(block),
+                    ));
+                }
 
                 // Convert file attachments to UserContent
                 // Filter based on model capabilities to prevent panics in rig-core
@@ -849,6 +875,7 @@ impl ChattyApp {
             self.send_message_inner(
                 next.message.message,
                 next.message.attachments,
+                next.message.terminal_context,
                 !next.follow_up,
                 cx,
             );
@@ -1385,7 +1412,7 @@ impl ChattyApp {
         // release mid-stream is left to the running turn: its next tool call
         // succeeds now, and the row it just got says why.
         if !taken && !streaming {
-            self.send_message(browser_handback_message(&url), vec![], cx);
+            self.send_message(browser_handback_message(&url), vec![], None, cx);
         }
     }
 

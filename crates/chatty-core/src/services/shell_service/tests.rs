@@ -1739,3 +1739,14 @@ async fn a_narrow_view_does_not_wrap_the_models_output() {
     let (cols, rows) = HEADLESS_SIZE;
     session.terminal().unwrap().resize(cols, rows).unwrap();
 }
+
+/// AGE-587: the terminal's record of an agent command is the runner line;
+/// its id finds the command itself.
+#[test]
+fn a_runner_line_names_its_agent_command() {
+    assert_eq!(
+        runner_command_id(". \"$__chatty_r\" f21804639ba7 6"),
+        Some("f21804639ba7")
+    );
+    assert_eq!(runner_command_id("ls -la"), None);
+}

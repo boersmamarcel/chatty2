@@ -152,6 +152,26 @@ pub fn terminal_settings_page() -> SettingPage {
                      Read + run choice each time; the other two share at that level at once. \
                      Terminals are never shared with the agent until you click the eye.",
                 ),
+                SettingItem::new(
+                    "Attach terminal context automatically",
+                    SettingField::switch(
+                        |cx: &App| {
+                            cx.global::<GeneralSettingsModel>()
+                                .terminal
+                                .auto_attach_context
+                        },
+                        |val: bool, cx: &mut App| {
+                            update_terminal_settings(cx, |t| t.auto_attach_context = val);
+                        },
+                    )
+                    .default_value(true),
+                )
+                .description(
+                    "While the dock is open on a terminal the agent may read (its own tab, or \
+                     one you shared), each message carries a short snapshot of it: the last \
+                     command, its exit code and the end of its output. Only when it changed \
+                     since the last one; the chip in the composer shows it and × leaves it out.",
+                ),
             ]),
             SettingGroup::new().title("Dock").items(vec![
                 SettingItem::new(

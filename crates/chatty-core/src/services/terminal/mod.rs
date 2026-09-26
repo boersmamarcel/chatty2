@@ -11,6 +11,7 @@
 //! [`TerminalSource::run`]; only the desktop's embedded tabs shared as
 //! [`TerminalAccess::ReadRun`] take one, every other source refuses.
 
+pub mod context;
 mod tmux;
 
 use std::sync::Arc;
