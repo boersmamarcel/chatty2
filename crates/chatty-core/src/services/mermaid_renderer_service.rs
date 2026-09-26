@@ -301,7 +301,7 @@ impl MermaidRendererService {
 
     /// Cache version — bump whenever rendering or sanitization logic changes
     /// to invalidate stale on-disk SVGs from previous builds.
-    const CACHE_VERSION: &'static str = "v4";
+    const CACHE_VERSION: &'static str = "v5";
 
     fn make_cache_key(&self, source: &str, is_dark: bool) -> String {
         let mut hasher = Sha256::new();
@@ -453,14 +453,13 @@ mod tests {
     }
 
     #[test]
-    fn test_render_invalid_syntax_produces_output() {
-        // mermaid-rs-renderer is permissive and does not return an error for
-        // unrecognised input — it produces whatever SVG it can. The render
-        // function returns Ok as long as the underlying library does not panic.
+    fn test_render_invalid_syntax_is_an_error_not_a_panic() {
+        // Since mermaid-rs-renderer 0.3 (AGE-572) unrecognised input is an
+        // error rather than whatever SVG it could scrape together; callers
+        // then show the diagram's source instead of a broken picture.
         let service = MermaidRendererService::new();
         let result = service.render_to_svg("this is not valid mermaid at all!!!", false);
-        // Renderer is lenient — expect Ok (not an error)
-        assert!(result.is_ok(), "Renderer should not panic on unknown input");
+        assert!(result.is_err(), "invalid mermaid should not render");
     }
 
     #[test]

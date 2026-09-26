@@ -470,8 +470,11 @@ impl ChattyApp {
                 Task::ready(Err(anyhow::anyhow!(err_msg)))
             }
         } else {
+            // The expected state on a fresh install, and on every launch
+            // until Ollama discovery lands; the composer already says "No
+            // models", so this is not an error for the footer (AGE-569).
             let err_msg = "No models configured";
-            error!("{}", err_msg);
+            info!("{}", err_msg);
             Task::ready(Err(anyhow::anyhow!(err_msg)))
         }
     }

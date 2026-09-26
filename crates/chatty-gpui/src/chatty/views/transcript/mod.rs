@@ -45,6 +45,7 @@ mod diff_parse;
 /// (`crate::chatty::views::sidebar_file_tree`) owns the tree now and needs
 /// this model from outside the `transcript` module tree.
 pub(crate) mod file_tree;
+mod markdown_mermaid;
 mod plan;
 mod run_pin;
 mod session_changes;

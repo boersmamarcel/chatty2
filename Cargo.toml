@@ -127,7 +127,7 @@ typst-assets = { version = "0.15.1", features = ["fonts"] }
 comemo = "0.5.1"
 
 # Mermaid / SVG
-mermaid-rs-renderer = { version = "0.2", default-features = false }
+mermaid-rs-renderer = { version = "0.3", default-features = false }
 resvg = "0.47.0"
 usvg = "0.47.0"
 

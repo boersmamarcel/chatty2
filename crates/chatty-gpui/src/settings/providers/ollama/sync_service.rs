@@ -143,11 +143,35 @@ pub async fn sync_ollama_models(ollama_base_url: &str, cx: &mut AsyncApp) -> Res
 
             Ok(0)
         }
-        Err(e) => {
-            warn!(url = %ollama_base_url, error = ?e, "Could not connect to Ollama, make sure Ollama is running or install from: https://ollama.ai");
-            Err(e)
-        }
+        // Logged by the caller: at boot an unreachable Ollama is worth a
+        // warning, on a Settings-open resync it is just not running.
+        Err(e) => Err(e.context(format!(
+            "could not connect to Ollama at {ollama_base_url}; make sure Ollama is \
+             running or install it from https://ollama.ai"
+        ))),
     }
+}
+
+/// Re-run Ollama discovery in the background, against the configured Ollama
+/// URL. Boot discovers once; the Settings window calls this whenever it opens
+/// or is brought forward, so an Ollama started (or a model pulled) after
+/// Chatty shows up where the user goes to look, without a restart (AGE-568).
+pub fn resync_ollama_models(cx: &mut App) {
+    use crate::settings::models::providers_store::ProviderModel;
+
+    let base_url = cx
+        .global::<ProviderModel>()
+        .providers()
+        .iter()
+        .find(|p| matches!(p.provider_type, ProviderType::Ollama))
+        .and_then(|p| p.base_url.clone())
+        .unwrap_or_else(|| "http://localhost:11434".to_string());
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        if let Err(e) = sync_ollama_models(&base_url, cx).await {
+            debug!(error = ?e, "Ollama resync skipped");
+        }
+    })
+    .detach();
 }
 
 /// Ensure default Ollama provider exists

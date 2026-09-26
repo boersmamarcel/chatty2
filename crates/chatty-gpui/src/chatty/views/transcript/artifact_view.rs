@@ -51,11 +51,14 @@ use super::artifact_kind::{
 };
 use super::diff::DiffHunkList;
 use super::file_tree::{FileOp, rebase_path};
+use super::markdown_mermaid::{DocPart, split_mermaid};
 use super::run_pin::{RunPin, RunPinKind};
 use super::session_review_panel::{ReviewFileSection, SessionReviewPanel};
 use super::table::render_table_preview_view;
+use crate::chatty::services::MermaidRendererService;
 use crate::chatty::views::chart_renderer::render_chart_panel;
 use crate::chatty::views::diff_view_component::diff_line_stats_fast;
+use crate::chatty::views::mermaid_component::MermaidComponent;
 
 /// PDF page rasters are requested in steps of this many device pixels
 /// (AGE-472), so a split drag settles on one pdfium render rather than one
@@ -184,8 +187,29 @@ enum BrowserPreview {
     #[default]
     Idle,
     Starting,
+    /// First launch fetching the pinned Chrome build (AGE-565), 0.0..=1.0.
+    Downloading(f32),
     Frame(Arc<RenderImage>),
     Error(String),
+}
+
+/// The Rendered tab's markdown, split around its mermaid diagrams with each
+/// diagram already rendered to an SVG file (AGE-566). Rebuilt only when the
+/// text or the theme's light/dark mode changes, not every frame.
+#[derive(Default)]
+struct RenderedDoc {
+    key: Option<(u64, bool)>,
+    parts: Rc<Vec<RenderedPart>>,
+}
+
+enum RenderedPart {
+    Markdown(SharedString),
+    /// `svg` is `None` when the diagram failed to render; the component then
+    /// shows its source.
+    Mermaid {
+        source: String,
+        svg: Option<PathBuf>,
+    },
 }
 
 /// One artifact workbench entity: Closed | Docked | Full. Reparent, do not rebuild.
@@ -193,6 +217,7 @@ pub struct ArtifactView {
     pub mode: ArtifactMode,
     pub path: Option<PathBuf>,
     pub rendered: String,
+    rendered_doc: RenderedDoc,
     pub source: String,
     pub old: String,
     files: Vec<(PathBuf, String, Option<String>)>,
@@ -354,6 +379,7 @@ impl ArtifactView {
             mode: ArtifactMode::Closed,
             path: None,
             rendered: String::new(),
+            rendered_doc: RenderedDoc::default(),
             source: String::new(),
             old: String::new(),
             files: Vec::new(),
@@ -557,8 +583,43 @@ impl ArtifactView {
         self.browser = BrowserPreview::Starting;
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
+        // Mirror a first-use Chrome download into the panel (AGE-565). The
+        // watcher is dropped with the resolve below, so it lives exactly as
+        // long as the wait it describes.
+        let mut progress_rx = manager.watch_download_progress();
+        let progress_watcher = cx.spawn(async move |this, cx| {
+            let mut shown_percent = None;
+            while progress_rx.changed().await.is_ok() {
+                let Some(fraction) = *progress_rx.borrow_and_update() else {
+                    continue;
+                };
+                let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u32;
+                if shown_percent == Some(percent) {
+                    continue;
+                }
+                shown_percent = Some(percent);
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.load_gen == load_id
+                            && matches!(
+                                this.browser,
+                                BrowserPreview::Starting | BrowserPreview::Downloading(_)
+                            )
+                        {
+                            this.browser = BrowserPreview::Downloading(fraction);
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    return;
+                }
+            }
+        });
         cx.spawn(async move |this, cx| {
-            let session = match manager.session().await {
+            let session = manager.session().await;
+            drop(progress_watcher);
+            let session = match session {
                 Ok(session) => session,
                 Err(e) => {
                     this.update(cx, |this, cx| {
@@ -2025,6 +2086,45 @@ impl ArtifactView {
         }));
     }
 
+    /// Re-split the Rendered tab's markdown around its mermaid diagrams when
+    /// the text or light/dark mode changed (AGE-566). Renders each diagram
+    /// once per change; every other frame reuses the cached parts.
+    fn sync_rendered_doc(&mut self, cx: &App) {
+        if !self
+            .path
+            .as_ref()
+            .is_some_and(|path| is_markdown_artifact_path(path))
+        {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let is_dark = cx.theme().mode.is_dark();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.rendered.hash(&mut hasher);
+        let key = (hasher.finish(), is_dark);
+        if self.rendered_doc.key == Some(key) {
+            return;
+        }
+        let parts = split_mermaid(&self.rendered)
+            .into_iter()
+            .map(|part| match part {
+                DocPart::Markdown(text) => RenderedPart::Markdown(text.into()),
+                DocPart::Mermaid(source) => {
+                    let svg = cx.try_global::<MermaidRendererService>().and_then(|svc| {
+                        svc.render_to_svg_file(&source, is_dark)
+                            .map_err(|e| warn!(error = ?e, "Failed to render mermaid diagram"))
+                            .ok()
+                    });
+                    RenderedPart::Mermaid { source, svg }
+                }
+            })
+            .collect();
+        self.rendered_doc = RenderedDoc {
+            key: Some(key),
+            parts: Rc::new(parts),
+        };
+    }
+
     fn sync_outline(&mut self, cx: &mut Context<Self>) {
         if self.outline_synced_gen == self.load_gen {
             return;
@@ -2439,14 +2539,43 @@ fn browser_rendered_body(
             .text_color(cx.theme().muted_foreground)
             .child("Starting browser…")
             .into_any_element(),
-        BrowserPreview::Error(message) => div()
+        BrowserPreview::Downloading(fraction) => div()
             .flex()
             .flex_1()
             .items_center()
             .justify_center()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(message.clone())
+            .child(browser_download_label(*fraction))
+            .into_any_element(),
+        // Kept inside the panel: Chrome's launch errors carry its stderr,
+        // one long line that used to be drawn across the whole window
+        // (AGE-563). `min_w_0` + `overflow_hidden` bound it to the panel;
+        // the inner full-width block lets it wrap.
+        BrowserPreview::Error(message) => v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .justify_center()
+            .gap_1()
+            .p_4()
+            .child(
+                div()
+                    .w_full()
+                    .text_sm()
+                    .text_center()
+                    .text_color(cx.theme().foreground)
+                    .child("Couldn't start the browser"),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(message.clone()),
+            )
             .into_any_element(),
         BrowserPreview::Frame(image) => {
             let bounds_for_prepaint = frame_bounds.clone();
@@ -2943,6 +3072,13 @@ fn pptx_rendered_body(
     }
 }
 
+/// "Downloading Chrome… 42%" for the panel while the first launch fetches
+/// the pinned build (AGE-565).
+fn browser_download_label(fraction: f32) -> String {
+    let percent = (fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
+    format!("Downloading Chrome… {percent}% (first use only)")
+}
+
 fn document_text_style() -> TextViewStyle {
     TextViewStyle::default()
         .paragraph_gap(rems(1.15))
@@ -2955,19 +3091,40 @@ fn document_text_style() -> TextViewStyle {
 }
 
 fn artifact_rendered_markdown(
-    rendered: &str,
+    parts: &[RenderedPart],
     full: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let view = TextView::markdown("artifact-md", rendered.to_string(), window, cx)
-        .style(document_text_style())
-        .selectable(true);
-    let inner = div()
+    let mut inner = div()
         .w_full()
         .when(full, |this| this.max_w(px(DOCUMENT_MEASURE_PX)).mx_auto())
-        .line_height(relative(1.7))
-        .child(view);
+        .line_height(relative(1.7));
+    for (ix, part) in parts.iter().enumerate() {
+        inner = match part {
+            // The first markdown run keeps the old id, so a document with no
+            // diagrams keeps its TextView state exactly as before.
+            RenderedPart::Markdown(text) => {
+                let id: ElementId = if ix == 0 {
+                    "artifact-md".into()
+                } else {
+                    ElementId::Name(format!("artifact-md-{ix}").into())
+                };
+                inner.child(
+                    TextView::markdown(id, text.clone(), window, cx)
+                        .style(document_text_style())
+                        .selectable(true),
+                )
+            }
+            RenderedPart::Mermaid { source, svg } => {
+                let id = ElementId::Name(format!("artifact-mermaid-{ix}").into());
+                inner.child(match svg {
+                    Some(svg) => MermaidComponent::with_svg_path(source.clone(), id, svg.clone()),
+                    None => MermaidComponent::new(source.clone(), id),
+                })
+            }
+        };
+    }
     div()
         .id("artifact-rendered")
         .flex_1()
@@ -2981,7 +3138,7 @@ fn artifact_rendered_markdown(
 
 fn artifact_primary_body(
     path: Option<&PathBuf>,
-    rendered: &str,
+    rendered: &[RenderedPart],
     editor: &Entity<InputState>,
     full: bool,
     window: &mut Window,
@@ -3035,6 +3192,7 @@ impl Render for ArtifactView {
             self.refresh_staleness();
             self.sync_editor(window, cx);
             self.sync_outline(cx);
+            self.sync_rendered_doc(cx);
             if self.browser_shown {
                 self.sync_browser_address(window, cx);
                 self.sync_browser_viewport_size(cx);
@@ -3043,7 +3201,6 @@ impl Render for ArtifactView {
         }
         let tab = self.tab;
         let source = self.source.clone();
-        let rendered = self.rendered.clone();
         let old = self.old.clone();
         let full = self.mode == ArtifactMode::Full;
         let entity = cx.entity();
@@ -3057,6 +3214,7 @@ impl Render for ArtifactView {
         let is_tabular = matches!(self.tabular, TabularPreview::Ready(_))
             || self.path.as_ref().is_some_and(|path| is_tabular_path(path));
         let path_ref = self.path.clone();
+        let rendered_parts = self.rendered_doc.parts.clone();
         let pdf = self.pdf.clone();
         let pptx = self.pptx.clone();
         let tabular = self.tabular.clone();
@@ -3278,7 +3436,7 @@ impl Render for ArtifactView {
                                         this.flex_1().min_h_0().h_full().child(
                                             artifact_primary_body(
                                                 path_ref.as_ref(),
-                                                &rendered,
+                                                &rendered_parts,
                                                 &editor,
                                                 full,
                                                 window,
