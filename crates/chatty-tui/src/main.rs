@@ -1,3 +1,4 @@
+mod acp;
 mod app;
 mod engine;
 mod events;
@@ -16,7 +17,7 @@ use chatty_core::settings::models::extensions_store::ExtensionsModel;
 use chatty_core::settings::models::models_store::{ModelConfig, resolve_model_query};
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use chatty_core::tools::LocalModuleAgentSummary;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::Path;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -34,7 +35,7 @@ pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
     long_about = "\
 Terminal chat interface for Chatty — chat with LLMs from your terminal.
 
-chatty-tui provides three operating modes:
+chatty-tui provides four operating modes:
 
   INTERACTIVE (default):  Full TUI with message history, streaming responses,
                           tool approval prompts, and inline model/tool switching.
@@ -50,6 +51,11 @@ chatty-tui provides three operating modes:
   PIPE (--pipe):          Read input from stdin, send it as a message, print
                           the response to stdout. Works with shell pipes:
                           echo \"explain this\" | chatty-tui --pipe
+
+  ACP (acp):              Serve the Agent Client Protocol on stdin/stdout, so
+                          an editor such as Zed can run chatty as its agent.
+                          Global flags go before the subcommand:
+                          chatty-tui --model claude-3.5-sonnet acp
 
 PREREQUISITES:
   Providers and models must be configured first. chatty-tui reads settings from
@@ -351,14 +357,48 @@ struct Cli {
     /// Example: --team coder-reviewer --headless -m "Fix the overdraft bug."
     #[arg(long, value_name = "ID")]
     team: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+enum Command {
+    /// Serve the Agent Client Protocol (ACP) on stdin/stdout.
+    ///
+    /// For editors that run an external agent over ACP, such as Zed: each
+    /// ACP session is a conversation rooted at the editor's project
+    /// directory, tool approvals are asked through the editor, and the
+    /// model's ask_user tool is off. Logs go to stderr. Flags such as
+    /// --model and --auto-approve go before `acp`.
+    Acp,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let acp_mode = cli.command == Some(Command::Acp);
+    if acp_mode && (cli.headless || cli.pipe || cli.participant_socket.is_some()) {
+        bail!("acp cannot be combined with --headless, --pipe or --participant-socket");
+    }
+    if acp_mode && cli.team.is_some() {
+        bail!("acp does not support --team yet");
+    }
+
     // Initialize logging
-    if cli.headless || cli.pipe || cli.participant_socket.is_some() {
+    if acp_mode {
+        // ACP: stdout carries the protocol; the client keeps stderr as the
+        // agent's log.
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::WARN.into()),
+            )
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    } else if cli.headless || cli.pipe || cli.participant_socket.is_some() {
         // Headless/pipe: suppress all logging to keep stdout clean
     } else {
         // Interactive TUI: log to file to avoid corrupting the terminal
@@ -660,7 +700,35 @@ async fn main() -> Result<()> {
     // doesn't matter for non-interactive use), while the interactive TUI defers
     // heavy services to a background task so the UI appears instantly.
     let participant_mode = cli.participant_socket.is_some();
-    let result = if cli.pipe || cli.headless || participant_mode {
+    let result = if acp_mode {
+        // ── ACP: load everything, then serve sessions until stdin closes ──
+        let (user_secrets, mcp_service, memory_service, search_settings) =
+            load_deferred_services(&execution_settings).await;
+        let embedding_service =
+            init_embedding_service(&execution_settings, &providers, &memory_service).await;
+        acp::run(ChatEngineConfig {
+            model_config,
+            provider_config,
+            execution_settings,
+            module_settings,
+            broker_port,
+            models,
+            providers,
+            mcp_service,
+            memory_service,
+            search_settings,
+            embedding_service,
+            user_secrets,
+            remote_agents,
+            module_agents,
+            role,
+            team: None,
+            is_sub_agent: false,
+            services_loaded: true,
+            surface: chatty_core::services::StreamSurface::InteractiveTui,
+        })
+        .await
+    } else if cli.pipe || cli.headless || participant_mode {
         // ── Headless / pipe / participant: load everything before running ──
         let (user_secrets, mcp_service, memory_service, search_settings) =
             load_deferred_services(&execution_settings).await;
@@ -1784,6 +1852,21 @@ mod cli_smoke_tests {
         assert!(help.contains("--headless"), "{help}");
         assert!(help.contains("--pipe"), "{help}");
         assert!(help.contains("--broker"), "{help}");
+    }
+
+    /// AGE-414: `acp` is a subcommand; the global flags come before it.
+    #[test]
+    fn acp_subcommand_parses_after_global_flags() {
+        let cli = Cli::try_parse_from(["chatty-tui", "--model", "m", "--auto-approve", "acp"])
+            .expect("acp parses");
+        assert_eq!(cli.command, Some(super::Command::Acp));
+        assert_eq!(cli.model.as_deref(), Some("m"));
+        assert!(
+            Cli::try_parse_from(["chatty-tui"])
+                .unwrap()
+                .command
+                .is_none()
+        );
     }
 
     /// AGE-376: `--broker` is valid with `--headless`, `--pipe` and the bare
