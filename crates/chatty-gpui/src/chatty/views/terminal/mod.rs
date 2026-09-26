@@ -18,6 +18,7 @@
 //! ([`keys::RESERVED_KEYS`]). Terminals open in the bottom dock under the chat ([`dock`], T4).
 //! What the agent may read of them is the [`registry`] (T5).
 
+pub mod context;
 pub mod dock;
 mod element;
 pub mod grid;

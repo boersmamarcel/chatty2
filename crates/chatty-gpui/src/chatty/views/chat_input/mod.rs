@@ -50,6 +50,7 @@ use tracing::{debug, warn};
 use super::attachment_validation::validate_attachment;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use crate::settings::models::providers_store::ProviderType;
+use chatty_core::services::terminal::context::{TerminalContext, split_terminal_context};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -63,6 +64,8 @@ pub enum ChatInputEvent {
     Send {
         message: String,
         attachments: Vec<PathBuf>,
+        /// The terminal snapshot block to attach (AGE-587).
+        terminal_context: Option<String>,
     },
     ModelChanged(String),
     Stop,
@@ -143,6 +146,12 @@ pub struct ChatInputState {
     /// (`TurnOutcome::DroppedAndRolledBack`) so the user doesn't lose what
     /// they typed (AGE-243).
     pending_restore_text: Option<String>,
+    /// The terminal snapshot the next message carries, shown as a chip
+    /// (AGE-587). Kept current by the chat view while the dock is open.
+    terminal_context: Option<TerminalContext>,
+    /// The block last removed with × or sent: not offered again until the
+    /// terminal shows something else.
+    terminal_context_done: Option<String>,
 }
 
 impl ChatInputState {
@@ -170,6 +179,35 @@ impl ChatInputState {
             last_at_query: None,
             pending_at_insert: None,
             pending_restore_text: None,
+            terminal_context: None,
+            terminal_context_done: None,
+        }
+    }
+
+    /// The snapshot the next message would carry (AGE-587), `None` when the
+    /// dock shows nothing the agent may read or nothing changed.
+    pub fn set_terminal_context(
+        &mut self,
+        context: Option<TerminalContext>,
+        cx: &mut Context<Self>,
+    ) {
+        let context =
+            context.filter(|c| self.terminal_context_done.as_deref() != Some(c.block.as_str()));
+        if context != self.terminal_context {
+            self.terminal_context = context;
+            cx.notify();
+        }
+    }
+
+    pub fn terminal_context(&self) -> Option<&TerminalContext> {
+        self.terminal_context.as_ref()
+    }
+
+    /// × on the chip: this message goes without the snapshot.
+    pub fn remove_terminal_context(&mut self, cx: &mut Context<Self>) {
+        if let Some(context) = self.terminal_context.take() {
+            self.terminal_context_done = Some(context.block);
+            cx.notify();
         }
     }
 
@@ -362,10 +400,16 @@ impl ChatInputState {
             return;
         }
 
+        let terminal_context = self.terminal_context.take().map(|context| context.block);
+        if terminal_context.is_some() {
+            self.terminal_context_done = terminal_context.clone();
+        }
+
         debug!("Emitting ChatInputEvent::Send");
         cx.emit(ChatInputEvent::Send {
             message: message.clone(),
             attachments: attachments.clone(),
+            terminal_context,
         });
 
         self.should_clear = true;
@@ -389,6 +433,10 @@ impl ChatInputState {
     /// (`TurnOutcome::DroppedAndRolledBack`) so the user doesn't lose what
     /// they typed (AGE-243).
     pub fn restore_draft_text(&mut self, text: String) {
+        // The terminal snapshot the message carried is not the user's text.
+        // Its snapshot was rolled back with it: offer it again.
+        let text = split_terminal_context(&text).0.to_string();
+        self.terminal_context_done = None;
         self.pending_restore_text = Some(text);
     }
 

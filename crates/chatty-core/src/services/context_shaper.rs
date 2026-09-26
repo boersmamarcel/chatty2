@@ -52,6 +52,7 @@
 //!
 //! | # | Stage | What it does |
 //! |---|-------|--------------|
+//! | 0 | Terminal context | Stub every `<terminal_context>` snapshot but the newest (AGE-587) |
 //! | 1 | Cap | Stub every tool result over `tool_result_cap_bytes` outside the tail |
 //! | 2 | Compact | Replace every tool result outside the tail with a one-liner |
 //! | 3 | Snip | Keep the first `keep_head` and last `keep_tail` messages, drop the middle |
@@ -96,6 +97,7 @@ use tracing::{debug, warn};
 use crate::services::context_compaction::{
     Summarizer, SummaryInputs, build_summary, task_max_chars,
 };
+use crate::services::terminal::context::stub_older_contexts;
 use crate::services::{call_ids, enforce_tool_round_trips, result_ids, tool_round_trips_intact};
 use crate::settings::models::models_store::ModelConfig;
 use crate::token_budget::counter::TokenCounter;
@@ -152,6 +154,8 @@ const COMPACTION_MIN_FREED_FRACTION: f64 = 0.25;
 /// Which stage was the last one applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextShaperStage {
+    /// Older terminal snapshots stubbed (AGE-587).
+    TerminalContext,
     Cap,
     Compact,
     Snip,
@@ -592,12 +596,21 @@ impl ContextShaper {
         let len = messages.len();
         let tail_start = len.saturating_sub(settings.keep_tail);
         let fits = |counts: &[usize]| counts.iter().sum::<usize>() <= budget;
-        let mut stage = ContextShaperStage::Cap;
+
+        // Stage 0: every terminal snapshot but the newest (AGE-587). The
+        // screen it showed has moved on; the newest one says where it is.
+        let mut stage = ContextShaperStage::TerminalContext;
+        for i in stub_older_contexts(&mut messages) {
+            counts[i] = counter.count_message(&messages[i]);
+        }
 
         // Stage 1: cap oversized tool results outside the tail.
-        for i in 0..tail_start {
-            if cap_tool_results(&mut messages[i], settings.tool_result_cap_bytes) {
-                counts[i] = counter.count_message(&messages[i]);
+        if !fits(&counts) {
+            stage = ContextShaperStage::Cap;
+            for i in 0..tail_start {
+                if cap_tool_results(&mut messages[i], settings.tool_result_cap_bytes) {
+                    counts[i] = counter.count_message(&messages[i]);
+                }
             }
         }
 
@@ -960,6 +973,56 @@ mod tests {
         let history = vec![user_text("hello"), text_result("t1", 50)];
         let shaper = ContextShaper::new(settings(100), counter(), Some(10_000));
         assert!(shaper.shape(&history, 10).is_none());
+    }
+
+    /// AGE-587: an old terminal snapshot is the first thing to go, before
+    /// any tool result, and the newest one stays whole.
+    #[test]
+    fn old_terminal_snapshots_go_first() {
+        use crate::services::terminal::context::{
+            TerminalContext, TerminalContextInput, last_attached,
+        };
+        let snapshot = |text: &str| {
+            TerminalContext::build(
+                TerminalContextInput {
+                    tab: "bash",
+                    cwd: None,
+                    last_command: None,
+                    text,
+                },
+                &counter(),
+            )
+            .block
+        };
+        let with_snapshot = |typed: &str, block: String| Message::User {
+            content: vec![
+                UserContent::Text(Text::new(typed.to_string())),
+                UserContent::Text(Text::new(block)),
+            ],
+        };
+        let old = snapshot(&"old output line\n".repeat(30));
+        let new = snapshot("new output");
+        let history = vec![
+            with_snapshot("why?", old),
+            text_result("old", 200),
+            with_snapshot("and now?", new.clone()),
+            text_result("recent", 100),
+        ];
+        let shaper = shaper_just_over(&history, settings(100));
+        let shaped = shaper.shape(&history, 0).expect("over budget");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::TerminalContext);
+        assert_eq!(
+            result_text(&shaped.messages[1]),
+            result_text(&history[1]),
+            "tool results are untouched"
+        );
+        assert_eq!(last_attached(shaped.messages.iter()), Some(new.as_str()));
+        let Message::User { content } = &shaped.messages[0] else {
+            unreachable!()
+        };
+        assert!(
+            matches!(content.last(), Some(UserContent::Text(t)) if t.text.starts_with("[older terminal snapshot"))
+        );
     }
 
     /// The AGE-500 shape: the run is over budget, and there is old material

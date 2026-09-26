@@ -82,6 +82,17 @@ A tab you haven't shared is still listed to the agent (its name and folder), so 
 
 Every read shows up in the conversation as a tool row such as *Read terminal · bash — chatty2 · 42 lines*, naming the tab and how many lines the agent was given; the row's copy button gives the exact output. The tab it read lights up for a moment.
 
+## The terminal goes with your message
+
+While the dock is open on a terminal the agent may read (the Agent tab, or a tab you shared), each message you send carries a short snapshot of it, so *why did that fail?* works without pointing the agent at the terminal. A chip above the message box says what goes along, for example *Terminal: bash — chatty2 · 32 lines*:
+
+- **Click the chip** to see exactly what the agent gets: the tab's name and folder, then the last command, its exit code and the last 40 lines of its output. A shell that doesn't mark its commands gives the last 40 lines on screen instead. A snapshot is at most about 2,000 tokens; longer output is cut from the top, with a line telling the agent to read the terminal itself for more.
+- **Click its ×** to send this message without it.
+- **Nothing changed, nothing sent:** a snapshot goes along only when the terminal shows something different from the last one sent in this conversation, so a long chat doesn't pay for the same screen every message, and the chip isn't shown.
+- **Nothing is attached** while the dock is closed, from a tab you haven't shared, or at a password prompt.
+
+Your sent message shows the same chip; click it to see what was sent. **Settings → Terminal → Attach terminal context automatically** turns this off.
+
 The tmux panes outside Chatty are a separate switch, **Enable Terminal Access** in **Settings → Code Execution** (see [Agents and tools](./agents-and-tools.md)).
 
 ## Settings
@@ -96,5 +107,6 @@ The tmux panes outside Chatty are a separate switch, **Enable Terminal Access** 
 | Scrollback Lines | 10,000 | to new terminals |
 | Dock Height | 300 pixels | when the dock is next drawn |
 | When sharing a terminal | Ask | the next click on a tab's eye icon |
+| Attach terminal context automatically | on | the next message |
 
 Dragging the dock's top edge updates **Dock Height** too.
