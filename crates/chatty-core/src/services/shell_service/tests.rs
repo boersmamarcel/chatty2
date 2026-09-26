@@ -338,6 +338,9 @@ async fn test_multiline_output() {
 #[tokio::test]
 async fn test_no_trailing_newline_output_completes_without_timeout() {
     let session = ShellSession::with_secrets(None, 3, 51200, false, vec![]);
+    // Start the shell first, so the bound below times the command and not
+    // the PTY shell's startup (slow on a loaded machine).
+    session.execute("true").await.unwrap();
 
     let start = tokio::time::Instant::now();
     let result = session.execute("printf abc").await;
@@ -368,6 +371,9 @@ async fn test_echo_n_then_cat_completes_without_timeout() {
     let answer_path = answer_file.to_str().unwrap();
 
     let session = ShellSession::with_secrets(None, 3, 51200, false, vec![]);
+    // Start the shell first, so the bound below times the command and not
+    // the PTY shell's startup (slow on a loaded machine).
+    session.execute("true").await.unwrap();
 
     let start = tokio::time::Instant::now();
     let result = session
@@ -934,6 +940,8 @@ fn git_repo() -> (tempfile::TempDir, String) {
 async fn git_log_returns_without_a_pager() {
     let (_dir, repo) = git_repo();
     let session = ShellSession::with_secrets(Some(repo), 10, 51200, false, vec![]);
+    // Start the shell first, so the bound below times `git log` alone.
+    session.execute("true").await.unwrap();
     let started = std::time::Instant::now();
     let output = session.execute("git log").await.unwrap();
     assert!(!output.timed_out, "{output:?}");
