@@ -48,6 +48,25 @@ A few key combinations always go to Chatty, even while a terminal has the keyboa
 
 In a shell, Ctrl+J only types a newline, which Enter already does.
 
+## Sharing a terminal with the agent
+
+Your terminals are yours: the agent can't see what is in them until you share one. Each tab has an eye icon; crossed out, the tab is not shared.
+
+Click the eye on a tab that is not shared and choose how much the agent gets:
+
+- **Read only:** the agent can read the screen and the scrollback, for example to answer *Why did that fail?* after a failing build.
+- **Read + run:** the agent can also run commands in this terminal, each one only after you approve it.
+
+Tick **Remember this, don't ask again** to skip the question from then on: the eye shares every tab at that level with one click. **Settings → Terminal → When sharing a terminal** changes or undoes that choice (**Ask** brings the question back).
+
+Click the eye on a shared tab to stop sharing it at once.
+
+A tab you haven't shared is still listed to the agent (its name and folder), so it can tell you it isn't shared and ask you to share it, but its contents are never read. While a terminal waits at a plain text password prompt (`sudo`, `ssh`, `su`, `passwd`, a script's `read -s`, or `gpg` with `--pinentry-mode loopback`), the agent gets "terminal is at a hidden-input prompt" instead of the screen, even from a shared tab. Full-screen passphrase boxes, such as the one `gpg` usually draws in the terminal (pinentry-curses), and pinentry windows outside the terminal are not caught: the passphrase itself is never on screen there, but the rest of the terminal can be read as at any other moment. Windows has no way to tell that a program is asking for a password, so on Windows don't leave a shared tab at a password prompt.
+
+Every read shows up in the conversation as a tool row such as *Read terminal · bash — chatty2 · 42 lines*, naming the tab and how many lines the agent was given; the row's copy button gives the exact output. The tab it read lights up for a moment.
+
+The tmux panes outside Chatty are a separate switch, **Enable Terminal Access** in **Settings → Code Execution** (see [Agents and tools](./agents-and-tools.md)).
+
 ## Settings
 
 **Settings → Terminal:**
@@ -59,5 +78,6 @@ In a shell, Ctrl+J only types a newline, which Enter already does.
 | Shell | your login shell (`$SHELL` on macOS and Linux, PowerShell on Windows) | to new terminals |
 | Scrollback Lines | 10,000 | to new terminals |
 | Dock Height | 300 pixels | when the dock is next drawn |
+| When sharing a terminal | Ask | the next click on a tab's eye icon |
 
 Dragging the dock's top edge updates **Dock Height** too.

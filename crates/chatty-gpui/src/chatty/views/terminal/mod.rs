@@ -16,13 +16,16 @@
 //! wheel handlers) over the pure encoders in [`keys`], which also holds the
 //! one list of keys the app keeps while a terminal has focus
 //! ([`keys::RESERVED_KEYS`]). Terminals open in the bottom dock under the chat ([`dock`], T4).
+//! What the agent may read of them is the [`registry`] (T5).
 
 pub mod dock;
 mod element;
 pub mod grid;
 mod input;
 pub mod keys;
+pub mod registry;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chatty_terminal::alacritty_terminal::term::ClipboardType;
@@ -98,7 +101,9 @@ pub enum TerminalViewEvent {
 /// A terminal on screen: a running [`TerminalHandle`] and the element that
 /// paints it.
 pub struct TerminalView {
-    handle: TerminalHandle,
+    /// Shared with the agent's [`registry`] (weakly), which reads it off the
+    /// main thread.
+    handle: Arc<TerminalHandle>,
     focus_handle: FocusHandle,
     /// Where the grid was last laid out, for mouse → cell.
     geometry: Option<input::Geometry>,
@@ -130,7 +135,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            handle,
+            handle: Arc::new(handle),
             focus_handle: cx.focus_handle(),
             geometry: None,
             mouse: input::MouseState::default(),
@@ -147,7 +152,7 @@ impl TerminalView {
     }
 
     /// The running terminal.
-    pub fn handle(&self) -> &TerminalHandle {
+    pub fn handle(&self) -> &Arc<TerminalHandle> {
         &self.handle
     }
 

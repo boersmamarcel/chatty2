@@ -445,6 +445,14 @@ pub(super) fn format_tool_output(output: &str) -> String {
                 };
             }
 
+            // terminal_read (AGE-583): the terminal text exactly as sent.
+            if obj.contains_key("terminal")
+                && obj.contains_key("cols")
+                && let Some(text) = obj.get("text").and_then(|v| v.as_str())
+            {
+                return text.to_string();
+            }
+
             // Check for common output patterns (in order of priority)
             if let Some(stdout) = obj.get("stdout").and_then(|v| v.as_str()) {
                 return stdout.to_string();
@@ -533,4 +541,23 @@ pub(super) fn escape_markdown(s: &str) -> SharedString {
         }
     }
     SharedString::from(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tool_output;
+
+    /// A `terminal_read` body shows the terminal text exactly as the model
+    /// got it, not the JSON around it (AGE-583).
+    #[test]
+    fn terminal_read_body_is_the_text_sent() {
+        let output = serde_json::json!({
+            "terminal": "term-1",
+            "title": "bash — chatty2",
+            "text": "$ cargo test\nerror: boom",
+            "cursor_row": 1, "cols": 80, "rows": 24, "truncated": false,
+        })
+        .to_string();
+        assert_eq!(format_tool_output(&output), "$ cargo test\nerror: boom");
+    }
 }

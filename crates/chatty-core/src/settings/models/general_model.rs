@@ -47,6 +47,23 @@ pub struct TerminalSettings {
     /// Height the dock opens at, in pixels. Dragging the dock's top edge
     /// updates it.
     pub dock_height: f32,
+    /// What the eye icon on a terminal tab does (AGE-583): ask each time, or
+    /// share at a remembered level without asking.
+    pub share_default: TerminalShareDefault,
+}
+
+/// "When sharing a terminal" (AGE-583): the level the share dialog's
+/// "Remember this" saved, or `Ask`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalShareDefault {
+    /// Open the share dialog every time.
+    #[default]
+    Ask,
+    /// Share read-only without asking.
+    ReadOnly,
+    /// Share read + run without asking.
+    ReadRun,
 }
 
 impl Default for TerminalSettings {
@@ -57,6 +74,7 @@ impl Default for TerminalSettings {
             shell: None,
             scrollback_lines: DEFAULT_TERMINAL_SCROLLBACK,
             dock_height: DEFAULT_TERMINAL_DOCK_HEIGHT,
+            share_default: TerminalShareDefault::Ask,
         }
     }
 }
@@ -99,5 +117,16 @@ mod tests {
             loaded.terminal.scrollback_lines,
             DEFAULT_TERMINAL_SCROLLBACK
         );
+        assert_eq!(loaded.terminal.share_default, TerminalShareDefault::Ask);
+    }
+
+    /// The remembered share level round-trips in snake_case.
+    #[test]
+    fn share_default_round_trips() {
+        let json = r#"{"font_size":14.0,"terminal":{"share_default":"read_run"}}"#;
+        let loaded: GeneralSettingsModel = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.terminal.share_default, TerminalShareDefault::ReadRun);
+        let saved = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(saved["terminal"]["share_default"], "read_run");
     }
 }

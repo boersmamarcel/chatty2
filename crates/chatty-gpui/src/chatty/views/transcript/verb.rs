@@ -32,7 +32,11 @@ pub(crate) fn tool_row_label(
     output: Option<&str>,
 ) -> ToolRowLabel {
     let verb = verb_for(tool_name, display_name, state);
-    let subject = subject_for(tool_name, input, display_name);
+    let subject = if tool_name == "terminal_read" {
+        terminal_read_subject(output)
+    } else {
+        subject_for(tool_name, input, display_name)
+    };
     let (added, removed) = diff_stats(tool_name, input, output);
     ToolRowLabel {
         verb,
@@ -77,6 +81,25 @@ fn verb_for(tool_name: &str, display_name: &str, state: &ToolCallState) -> Strin
         ToolCallState::Running => running.to_string(),
         ToolCallState::Success => done.to_string(),
         ToolCallState::Error(_) => format!("Failed {done}"),
+    }
+}
+
+/// "· bash — chatty2 · 42 lines" for a `terminal_read` that read a terminal
+/// (AGE-583): which terminal, and how much of it was sent to the model.
+/// Empty while it runs, for a list, and on failure.
+fn terminal_read_subject(output: Option<&str>) -> String {
+    let Some(json) = output.and_then(|out| serde_json::from_str::<serde_json::Value>(out).ok())
+    else {
+        return String::new();
+    };
+    let Some(text) = json.get("text").and_then(|v| v.as_str()) else {
+        return String::new();
+    };
+    let lines = text.lines().count();
+    let count = format!("{lines} line{}", if lines == 1 { "" } else { "s" });
+    match json.get("title").and_then(|v| v.as_str()) {
+        Some(title) if !title.trim().is_empty() => format!("· {} · {count}", truncate(title, 48)),
+        _ => format!("· {count}"),
     }
 }
 
@@ -440,6 +463,23 @@ mod tests {
             None,
         );
         assert_eq!(label.headline(), "Read terminal");
+
+        // AGE-583: once read, which terminal and how many lines were sent.
+        let output = serde_json::json!({
+            "terminal": "term-1",
+            "title": "bash — chatty2",
+            "text": "a\nb\nerror: boom",
+            "cursor_row": 2, "cols": 80, "rows": 24, "truncated": false,
+        })
+        .to_string();
+        let label = tool_row_label(
+            "terminal_read",
+            "terminal_read",
+            &ToolCallState::Success,
+            "{}",
+            Some(&output),
+        );
+        assert_eq!(label.headline(), "Read terminal · bash — chatty2 · 3 lines");
     }
 
     #[test]

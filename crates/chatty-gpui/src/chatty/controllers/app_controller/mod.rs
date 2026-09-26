@@ -344,6 +344,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
         shell_session,
         theme_colors,
         conversation_id: Some(conv_id.clone()),
+        embedded_terminals: crate::chatty::views::terminal::registry::embedded_terminal_source(cx),
         ..AgentBuildContext::from_services(AgentServices {
             exec_settings,
             user_secrets,
