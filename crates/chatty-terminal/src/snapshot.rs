@@ -4,6 +4,8 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 
+use crate::commands::LastCommand;
+
 /// Which part of the terminal to read.
 ///
 /// Same shape as chatty-core's `Region` (AGE-577) so chatty-core can later
@@ -17,6 +19,13 @@ pub enum Region {
     /// row with content. Rows, not logical lines: a soft-wrapped line
     /// counts once per row it covers.
     Scrollback { lines: usize },
+    /// The last command run at an integrated shell's prompt (OSC 133): the
+    /// text is its output, capped at
+    /// [`LAST_COMMAND_OUTPUT_BYTES`](crate::LAST_COMMAND_OUTPUT_BYTES) (the
+    /// end is kept), and [`TerminalText::last_command`] says what ran and
+    /// how it exited. Without integration the text says so; it is not an
+    /// error.
+    LastCommand,
 }
 
 /// Plain text read from the terminal.
@@ -30,11 +39,29 @@ pub struct TerminalText {
     pub cursor_row: u16,
     pub cols: u16,
     pub rows: u16,
+    /// Set for [`Region::LastCommand`] only.
+    pub last_command: Option<LastCommand>,
 }
 
+/// `text` with `term`'s cursor and size.
+pub(crate) fn frame<T>(
+    term: &Term<T>,
+    text: String,
+    last_command: Option<LastCommand>,
+) -> TerminalText {
+    TerminalText {
+        text,
+        cursor_row: term.grid().cursor.point.line.0.max(0) as u16,
+        cols: term.columns() as u16,
+        rows: term.screen_lines() as u16,
+        last_command,
+    }
+}
+
+/// A grid region; [`Region::LastCommand`] is answered by the command
+/// tracker instead.
 pub(crate) fn snapshot<T>(term: &Term<T>, region: Region) -> TerminalText {
     let grid = term.grid();
-    let cursor = grid.cursor.point.line;
 
     let (top, bottom) = match region {
         Region::Screen => {
@@ -50,6 +77,7 @@ pub(crate) fn snapshot<T>(term: &Term<T>, region: Region) -> TerminalText {
             let top = Line((bottom.0 - wanted + 1).max(term.topmost_line().0));
             (top, bottom)
         }
+        Region::LastCommand => return frame(term, String::new(), None),
     };
 
     let mut text = term.bounds_to_string(
@@ -57,13 +85,7 @@ pub(crate) fn snapshot<T>(term: &Term<T>, region: Region) -> TerminalText {
         Point::new(bottom, term.last_column()),
     );
     text.truncate(text.trim_end().len());
-
-    TerminalText {
-        text,
-        cursor_row: cursor.0.max(0) as u16,
-        cols: term.columns() as u16,
-        rows: term.screen_lines() as u16,
-    }
+    frame(term, text, None)
 }
 
 #[cfg(test)]
