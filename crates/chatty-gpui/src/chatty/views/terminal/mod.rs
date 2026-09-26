@@ -12,20 +12,52 @@
 //! [`TerminalHandle::generation`] has not moved. An idle terminal draws
 //! nothing.
 //!
-//! Input (T3) and the docked panel (T4) come later; until then
+//! Input (T3) lives in [`input`] (the view's key, text, paste, mouse and
+//! wheel handlers) over the pure encoders in [`keys`], which also holds the
+//! one list of keys the app keeps while a terminal has focus
+//! ([`keys::RESERVED_KEYS`]). The docked panel (T4) comes later; until then
 //! [`debug_terminal_from_env`] is the only way to open one.
 
 mod element;
 pub mod grid;
+mod input;
+pub mod keys;
 
 use std::time::Duration;
 
+use chatty_terminal::alacritty_terminal::term::ClipboardType;
 use chatty_terminal::{TerminalConfig, TerminalEvent, TerminalHandle};
 use futures::StreamExt;
-use gpui::{App, AppContext, Context, Entity, IntoElement, Render, Task, Window};
+use gpui::{
+    App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Task, Window, actions,
+    div,
+};
 use tracing::warn;
 
 use element::{RenderCache, TerminalElement};
+
+actions!(
+    terminal,
+    [
+        /// Copy the terminal's selection to the clipboard.
+        Copy,
+        /// Paste the clipboard into the terminal (bracketed when the
+        /// program asked for it).
+        Paste
+    ]
+);
+
+/// Key context of a focused terminal.
+pub const KEY_CONTEXT: &str = "Terminal";
+
+/// Bind the terminal's own actions (copy, paste) to their reserved keys.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(keys::COPY_KEY, Copy, Some(KEY_CONTEXT)),
+        KeyBinding::new(keys::PASTE_KEY, Paste, Some(KEY_CONTEXT)),
+    ]);
+}
 
 /// How long the grid size must hold still before the PTY is resized, so
 /// dragging a panel edge does not reflow the shell on every frame.
@@ -57,6 +89,12 @@ impl Default for TerminalFontSettings {
 /// paints it.
 pub struct TerminalView {
     handle: TerminalHandle,
+    focus_handle: FocusHandle,
+    /// Where the grid was last laid out, for mouse → cell.
+    geometry: Option<input::Geometry>,
+    mouse: input::MouseState,
+    /// IME pre-edit text, while a composition is open.
+    marked_text: Option<String>,
     font: TerminalFontSettings,
     cache: RenderCache,
     /// Grid size last sent to the PTY.
@@ -64,6 +102,8 @@ pub struct TerminalView {
     /// Size waiting out [`RESIZE_DEBOUNCE`], and the timer that applies it.
     pending_resize: Option<((u16, u16), Task<()>)>,
     _events: Task<()>,
+    /// Sees keys before the app's keybindings (see [`input`]).
+    _intercept: Subscription,
 }
 
 impl TerminalView {
@@ -76,6 +116,11 @@ impl TerminalView {
     ) -> Self {
         Self {
             handle,
+            focus_handle: cx.focus_handle(),
+            geometry: None,
+            mouse: input::MouseState::default(),
+            marked_text: None,
+            _intercept: input::intercept_keys(cx),
             font: TerminalFontSettings::default(),
             cache: RenderCache::default(),
             grid_size: None,
@@ -111,11 +156,21 @@ impl TerminalView {
         cx.spawn(async move |this, cx| {
             while let Some(event) = rx.next().await {
                 let mut repaint = changes_screen(&event);
+                let mut clipboard = clipboard_store(event);
                 // Everything already queued rides on the same frame.
                 while let Ok(event) = rx.try_recv() {
                     repaint |= changes_screen(&event);
+                    clipboard = clipboard_store(event).or(clipboard);
                 }
-                if repaint && this.update(cx, |_, cx| cx.notify()).is_err() {
+                let updated = this.update(cx, |_, cx| {
+                    if let Some((kind, text)) = clipboard {
+                        write_clipboard(kind, text, cx);
+                    }
+                    if repaint {
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
                     break;
                 }
             }
@@ -156,6 +211,24 @@ impl TerminalView {
     }
 }
 
+/// An OSC 52 clipboard write from the program. Reads (`ClipboardLoad`) are
+/// never answered: `chatty-terminal` configures `Term` to drop them.
+fn clipboard_store(event: TerminalEvent) -> Option<(ClipboardType, String)> {
+    match event {
+        TerminalEvent::ClipboardStore(kind, text) => Some((kind, text)),
+        _ => None,
+    }
+}
+
+fn write_clipboard(kind: ClipboardType, text: String, cx: &mut App) {
+    let item = ClipboardItem::new_string(text);
+    match kind {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        ClipboardType::Selection => cx.write_to_primary(item),
+        _ => cx.write_to_clipboard(item),
+    }
+}
+
 fn changes_screen(event: &TerminalEvent) -> bool {
     matches!(
         event,
@@ -163,9 +236,21 @@ fn changes_screen(event: &TerminalEvent) -> bool {
     )
 }
 
+impl Focusable for TerminalView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        TerminalElement::new(cx.entity())
+        div()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::paste))
+            .child(TerminalElement::new(cx.entity(), self.focus_handle.clone()))
     }
 }
 

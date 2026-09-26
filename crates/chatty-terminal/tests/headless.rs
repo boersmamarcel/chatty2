@@ -201,3 +201,33 @@ fn wide_chars_and_trailing_blanks_in_snapshot() {
     let snap = term.snapshot(Region::Screen);
     assert_eq!(snap.text, "漢字 ok");
 }
+
+#[test]
+fn osc52_copy_is_forwarded_and_paste_is_never_answered() {
+    // Store "hello" ("aGVsbG8="), then ask for the clipboard; a reply would
+    // arrive on stdin and `read` would print it after "got:".
+    let (term, events) = TerminalHandle::spawn(sh(
+        "stty raw -echo; printf '\\033]52;c;aGVsbG8=\\007'; printf '\\033]52;c;?\\007'; \
+         if read -t 2 r; then printf 'got:%s' \"$r\"; else printf 'no-reply'; fi; sleep 5",
+    ))
+    .unwrap();
+
+    let seen = wait_until(&term, &events, "the read to time out", |t, _| {
+        screen_contains(t, "no-reply") || screen_contains(t, "got:")
+    });
+
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            TerminalEvent::ClipboardStore(_, text) if text == "hello"
+        )),
+        "no ClipboardStore: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, TerminalEvent::ClipboardLoad(..))),
+        "a ClipboardLoad was forwarded: {seen:?}"
+    );
+    assert!(screen_contains(&term, "no-reply"));
+}

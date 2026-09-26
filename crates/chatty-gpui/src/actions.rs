@@ -51,6 +51,9 @@ pub(crate) fn register_actions(cx: &mut App) {
         // Fuzzy quick-open over the workspace (AGE-480).
         KeyBinding::new("ctrl-p", QuickOpenFiles, None),
     ]);
+    // The embedded terminal's copy/paste; the keys it keeps from the shell
+    // are listed once in `terminal::keys::RESERVED_KEYS` (AGE-581).
+    chatty::views::terminal::init(cx);
     cx.on_action(|_: &OpenSettings, cx: &mut App| {
         debug!("Action triggered");
         SettingsView::open_or_focus_settings_window(cx);

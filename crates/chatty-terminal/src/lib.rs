@@ -26,7 +26,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{self, EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::{Config as TermConfig, Osc52};
 use alacritty_terminal::tty;
 
 mod snapshot;
@@ -201,8 +201,15 @@ impl TerminalHandle {
             shared: Arc::clone(&shared),
         };
 
+        // OSC 52: a program may set the clipboard (forwarded as
+        // `ClipboardStore`) but never read it; `OnlyCopy` drops the
+        // read request inside `Term`, so it is never answered.
+        let term_config = TermConfig {
+            osc52: Osc52::OnlyCopy,
+            ..TermConfig::default()
+        };
         let term = Arc::new(FairMutex::new(Term::new(
-            TermConfig::default(),
+            term_config,
             &GridSize::from(window_size),
             proxy(),
         )));
@@ -286,6 +293,14 @@ impl TerminalHandle {
     /// Read the terminal under its lock, without copying the grid.
     pub fn with_term<R>(&self, f: impl FnOnce(&TerminalModel) -> R) -> R {
         f(&self.term.lock())
+    }
+
+    /// Change the terminal under its lock: scroll the viewport, set the
+    /// selection. Bumps [`generation`](Self::generation) so the view repaints.
+    pub fn with_term_mut<R>(&self, f: impl FnOnce(&mut TerminalModel) -> R) -> R {
+        let result = f(&mut self.term.lock());
+        self.shared.generation.fetch_add(1, Ordering::Release);
+        result
     }
 
     /// Plain text of `region`.

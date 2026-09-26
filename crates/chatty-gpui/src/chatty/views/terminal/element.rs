@@ -15,10 +15,12 @@ use chatty_terminal::alacritty_terminal::index::Line;
 use chatty_terminal::alacritty_terminal::term::cell::Flags;
 use chatty_terminal::alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Element, ElementId, Entity, Font, FontStyle, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, ShapedLine,
-    SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill, font, outline,
-    point, px, relative, size,
+    App, BorderStyle, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, FocusHandle, Font, FontStyle, FontWeight, GlobalElementId, Hitbox,
+    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill, font, outline, point, px,
+    relative, size,
 };
 use gpui_component::ActiveTheme as _;
 use rustc_hash::FxHashMap;
@@ -28,6 +30,7 @@ use super::TerminalView;
 use super::grid::{
     BgRect, Palette, RunGrid, RunStyle, TextRunSpec, batch_row, cell_colors, to_hsla,
 };
+use super::input::Geometry;
 
 /// Painted width of a beam cursor and height of an underline cursor.
 const CURSOR_BAR: Pixels = px(2.);
@@ -183,6 +186,8 @@ pub(super) struct Frame {
     line_height: Pixels,
     background: Hsla,
     rows: Vec<PreparedRow>,
+    /// Selected cells, one rect per row.
+    selection: Vec<Bounds<Pixels>>,
     cursor: Option<CursorPaint>,
 }
 
@@ -230,6 +235,11 @@ impl TerminalView {
             }
         };
         self.request_resize(metrics.grid_size(bounds), cx);
+        self.geometry = Some(Geometry {
+            bounds,
+            cell_width: metrics.cell_width,
+            line_height: metrics.line_height,
+        });
         let frame = self.build_frame(bounds, palette, &metrics, window);
         self.cache.metrics = Some(metrics);
         frame
@@ -269,7 +279,7 @@ impl TerminalView {
 
         let locking = Instant::now();
         let mut lock_wait = std::time::Duration::ZERO;
-        let (rows, cursor) = self.handle.with_term(|term| {
+        let (rows, selection, cursor) = self.handle.with_term(|term| {
             // Time spent waiting for the PTY thread to release the grid.
             lock_wait = locking.elapsed();
             let grid = term.grid();
@@ -300,6 +310,32 @@ impl TerminalView {
                 .collect::<Vec<_>>();
 
             let content = term.renderable_content();
+            let columns = term.columns();
+            let selection = content
+                .selection
+                .map(|range| {
+                    (0..screen_lines)
+                        .filter_map(|i| {
+                            let line = Line(i as i32 - offset);
+                            if line < range.start.line || line > range.end.line {
+                                return None;
+                            }
+                            let first = if range.is_block || line == range.start.line {
+                                range.start.column.0
+                            } else {
+                                0
+                            };
+                            let last = if range.is_block || line == range.end.line {
+                                range.end.column.0
+                            } else {
+                                columns.saturating_sub(1)
+                            };
+                            (first <= last)
+                                .then(|| cell_bounds(first as u16, i, (last - first + 1) as u16))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let point = content.cursor.point;
             let row = point.line.0 + offset;
             let cursor = (content.cursor.shape != CursorShape::Hidden
@@ -339,7 +375,7 @@ impl TerminalView {
                     glyph,
                 }
             });
-            (rows, cursor)
+            (rows, selection, cursor)
         });
 
         trace!(
@@ -359,6 +395,7 @@ impl TerminalView {
             line_height,
             background: to_hsla(palette.background),
             rows,
+            selection,
             cursor,
         });
         cache.frame = Some(frame.clone());
@@ -401,11 +438,12 @@ fn shape_run(run: &TextRunSpec, metrics: &Metrics, window: &Window) -> ShapedLin
 /// Paints a [`TerminalView`]'s grid. Fills whatever box its parent gives it.
 pub(super) struct TerminalElement {
     view: Entity<TerminalView>,
+    focus_handle: FocusHandle,
 }
 
 impl TerminalElement {
-    pub(super) fn new(view: Entity<TerminalView>) -> Self {
-        Self { view }
+    pub(super) fn new(view: Entity<TerminalView>, focus_handle: FocusHandle) -> Self {
+        Self { view, focus_handle }
     }
 }
 
@@ -419,7 +457,7 @@ impl IntoElement for TerminalElement {
 
 impl Element for TerminalElement {
     type RequestLayoutState = ();
-    type PrepaintState = Rc<Frame>;
+    type PrepaintState = (Rc<Frame>, Hitbox);
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -460,7 +498,7 @@ impl Element for TerminalElement {
             prepaint_us = started.elapsed().as_micros() as u64,
             "terminal prepaint"
         );
-        frame
+        (frame, window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 
     fn paint(
@@ -469,18 +507,23 @@ impl Element for TerminalElement {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        frame: &mut Self::PrepaintState,
+        (frame, hitbox): &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
         let started = Instant::now();
+        self.register_input(bounds, hitbox, window, cx);
         let origin = bounds.origin;
+        let selection_color = cx.theme().selection;
         window.paint_quad(fill(bounds, frame.background));
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for row in &frame.rows {
                 for (rect, color) in &row.backgrounds {
                     window.paint_quad(fill(*rect + origin, *color));
                 }
+            }
+            for rect in &frame.selection {
+                window.paint_quad(fill(*rect + origin, selection_color));
             }
             for (i, row) in frame.rows.iter().enumerate() {
                 let y = origin.y + frame.line_height * i as f32;
@@ -500,6 +543,55 @@ impl Element for TerminalElement {
             paint_us = started.elapsed().as_micros() as u64,
             "terminal paint"
         );
+    }
+}
+
+impl TerminalElement {
+    /// Text input, mouse and wheel listeners for this frame.
+    fn register_input(
+        &self,
+        bounds: Bounds<Pixels>,
+        hitbox: &Hitbox,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        window.handle_input(
+            &self.focus_handle,
+            ElementInputHandler::new(bounds, self.view.clone()),
+            cx,
+        );
+
+        let view = self.view.clone();
+        let hovered = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble && hovered.is_hovered(window) {
+                view.update(cx, |view, cx| view.mouse_down(event, window, cx));
+                cx.stop_propagation();
+            }
+        });
+        let view = self.view.clone();
+        let hovered = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble {
+                let hovered = hovered.is_hovered(window);
+                view.update(cx, |view, cx| view.mouse_move(event, hovered, cx));
+            }
+        });
+        let view = self.view.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+            if phase == DispatchPhase::Bubble {
+                view.update(cx, |view, _| view.mouse_up(event));
+            }
+        });
+        let view = self.view.clone();
+        let hovered = hitbox.clone();
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble && hovered.is_hovered(window) {
+                view.update(cx, |view, cx| view.scroll_wheel(event, cx));
+                cx.stop_propagation();
+            }
+        });
     }
 }
 
