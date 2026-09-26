@@ -745,12 +745,22 @@ pub async fn run_headless(
                 break;
             }
             AppEvent::AgentProtocolFollowUp(prompt) => {
-                engine.handle_event(AppEvent::AgentProtocolFollowUp(prompt.clone()));
-                eprintln!("Agent protocol follow-up injected.");
-                tool_results_since_finalization = 0;
-                failed_tool_results_since_finalization = 0;
-                tool_budget_stop_requested = false;
-                failure_budget_stop_requested = false;
+                // The session's own next-turn prompt (the todo protocol's
+                // verify_completion reminder, a retry after a malformed or
+                // unknown tool call), emitted after `StreamCompleted`. That
+                // arm sequences the run's passes itself and has by now
+                // either sent the next one or left the loop, so this prompt
+                // is never the next turn: handed to the runner's mailbox it
+                // waited behind the pass in flight and started a turn once
+                // that pass ended — one `run_headless` returns in the middle
+                // of, or that pre-empts the pass this loop sends next (the
+                // runner refuses a send while streaming). Until the
+                // announced-step nudge the event was simply never read;
+                // dropping it keeps that.
+                eprintln!(
+                    "Agent protocol follow-up from the session dropped; headless sequences its own passes: {}",
+                    prompt.lines().next().unwrap_or_default()
+                );
                 continue;
             }
             AppEvent::Delegation(ref progress) => {

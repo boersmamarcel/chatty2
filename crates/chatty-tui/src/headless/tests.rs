@@ -2071,4 +2071,90 @@ mod runner {
             assert_eq!(*started.lock().unwrap(), 1, "{closing}");
         }
     }
+
+    /// A turn that writes a plan and then ends on `closing` with no further
+    /// tool call, so the session queues its todo-protocol follow-up after
+    /// the turn ends.
+    fn plan_then_say_turn(closing: &str) -> Scenario {
+        Scenario {
+            name: "plan_then_say",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_plan".into(),
+                    name: "write_todos".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_plan".into(),
+                    arguments: r#"{"goal":"fix","todos":[]}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_plan".into(),
+                    result: "ok".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text(closing.to_string())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    /// The session emits its todo-protocol follow-up after `TurnEnded`.
+    /// Headless never delivered it: the loop broke at `StreamCompleted`
+    /// before the event was read. A nudge sent at that `StreamCompleted`
+    /// keeps the loop reading, so the follow-up used to land in the mailbox
+    /// and start a third turn once the nudge pass ended — a turn nobody
+    /// waits for. Headless sequences its own passes; the session's
+    /// follow-up is dropped, as it always was.
+    #[tokio::test]
+    async fn the_sessions_todo_follow_up_never_runs_behind_a_headless_pass() {
+        let (mut runner, event_rx, started, _workspace) = scripted_runner(vec![
+            plan_then_say_turn("The plan is written. Let me apply the fix."),
+            answer_turn("Fixed."),
+            answer_turn("never reached"),
+        ])
+        .await;
+        let inputs = runner.scripted_inputs.clone();
+        // A scripted tool call never runs the tool: stand in for
+        // `write_todos` when its call starts, after the turn's reset.
+        let controller = runner
+            .session
+            .conversation()
+            .expect("the conversation exists")
+            .agent()
+            .task_controller();
+        let counter = started.clone();
+        runner.set_event_observer(Arc::new(move |event| match event {
+            chatty_core::session::SessionEvent::TurnStarted => {
+                *counter.lock().unwrap() += 1;
+            }
+            chatty_core::session::SessionEvent::ToolCallStarted { name, .. }
+                if name == "write_todos" =>
+            {
+                controller
+                    .write_todos(
+                        "fix".to_string(),
+                        vec![(
+                            "t1".to_string(),
+                            "Fix it".to_string(),
+                            "Apply the fix".to_string(),
+                        )],
+                    )
+                    .expect("the plan is accepted");
+            }
+            _ => {}
+        }));
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        let inputs = inputs.lock().unwrap();
+        assert_eq!(
+            inputs.len(),
+            2,
+            "the turn and its nudge, and nothing queued behind them: {inputs:?}"
+        );
+        assert_eq!(inputs[1], ANNOUNCED_STEP_NUDGE);
+        assert_eq!(*started.lock().unwrap(), 2);
+    }
 }
