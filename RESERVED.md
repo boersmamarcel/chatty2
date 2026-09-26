@@ -56,6 +56,7 @@ in the commit message.
 | `crates/chatty-optimize/src/archive.rs` | `SelectionStrategy` | AGE-7 | The shape AFlow, GEPA and DGM all instantiate. |
 | `crates/chatty-optimize/src/aflow/select.rs` | `soft_mixed_select` | AGE-13 | λ=0.2, α=0.4, plus the blank-template guarantee that stops local optima. |
 | `crates/chatty-optimize/src/gepa/select.rs` | `select_candidate` | AGE-15 | **GEPA's actual contribution.** ~30 lines, worth 6.4 points on the ablation. |
+| `crates/chatty-optimize/src/gepa/evolve.rs` | `evolve` | AGE-15 | **Algorithm 1 — the outer loop.** The minibatch-gated acceptance rule is where GEPA's sample efficiency comes from, and if the loop is wrong you debug it while believing you are debugging `select_candidate`. Helpers around it (`select_parent`, `select_module`, `sample_minibatch`, `score_all`, `maybe_merge`) are already built and are **not** reserved. |
 | `crates/chatty-optimize/src/gepa/merge.rs` | `merge` | AGE-15 | System-aware crossover: ancestry, desirability, per-module selection. |
 | `crates/chatty-optimize/src/gepa/prompts.rs` | `REFLECTION_META_PROMPT` | AGE-15 | Appendix B's wording is why GEPA produces declarative instructions rather than quasi-exemplars. Copying it without reasoning about it teaches nothing. Do not quote the passage. |
 | `crates/chatty-playbook/src/merge.rs` | `apply` | AGE-17 | **ACE's whole argument, as a type signature.** Pure, total, no LLM. ~40 lines. |
