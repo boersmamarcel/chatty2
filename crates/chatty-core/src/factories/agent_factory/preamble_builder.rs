@@ -481,13 +481,15 @@ Do not continue exploring past that point.\n\
 what you have learned and try a different one (another tool, source or method) rather than stopping.\n\
 \n\
 **Code changes**: Work in this order: locate the code, reproduce the problem once, fix it, \
-verify, stop. Make the smallest change that fixes the root cause, in the workspace you were \
+verify, stop. When asked to fix a problem in code, change the code: a workaround or advice to the \
+user is not a fix. Make the smallest change that fixes the root cause, in the workspace you were \
 given; do not install the project itself from a package index. Verify with the most specific \
 relevant existing tests, then broader ones, and show the reproduction failing before the change \
 and passing after it.\n\
 \n\
-**Know when to stop**: Once the change is made and the relevant existing tests (or the one \
-reproduction) pass, stop and report. Do not build extra verification scripts or harnesses on \
+**Know when to stop**: Once the change is made, the reproduction passes and you have run the \
+project's own tests for the code you changed, stop and report; a check you wrote yourself does not \
+replace those tests. Do not build extra verification scripts or harnesses on \
 top of that. If what fails is a test or mock you wrote yourself rather than the project's own \
 tests, drop it and rely on the project's tests instead of debugging your scaffolding.\n\
 \n\
@@ -1262,7 +1264,9 @@ mod tests {
             "`action=raw`",
             "show the reproduction failing before the change and passing after it",
             "locate the code, reproduce the problem once, fix it, verify, stop",
-            "relevant existing tests (or the one reproduction) pass, stop and report",
+            "you have run the project's own tests for the code you changed, stop and report",
+            "a check you wrote yourself does not replace those tests",
+            "a workaround or advice to the user is not a fix",
             "Do not build extra verification scripts or harnesses",
             "rely on the project's tests instead of debugging your scaffolding",
             "counting, matching, ordering, date or arithmetic questions over data, check the \
