@@ -11,6 +11,16 @@ use chatty_terminal::alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::{Hsla, Rgba};
 use gpui_component::ThemeColor;
 
+/// The id of the agent command shown on this row, if the row is one (the
+/// agent shell's runner links the command line to it, AGE-586), else
+/// `None` for a typed line or output.
+pub fn agent_command_on_row(cells: &[Cell]) -> Option<String> {
+    cells.iter().find_map(|cell| {
+        let link = cell.hyperlink()?;
+        chatty_core::services::shell_service::agent_command_id(link.uri()).map(str::to_string)
+    })
+}
+
 /// A colour as `0xRRGGBB`.
 pub type Rgb24 = u32;
 
@@ -417,6 +427,23 @@ mod tests {
         let mut parser: Processor = Processor::new();
         parser.advance(&mut term, bytes);
         batch_row(&term.grid()[Line(0)][..], term.colors(), &DARK())
+    }
+
+    /// An agent command line carries its id in an OSC 8 link; other links
+    /// and plain text do not count.
+    #[test]
+    fn agent_command_rows_are_found_by_their_link() {
+        let mut term = Term::new(Default::default(), &Size(40, 3), VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(
+            &mut term,
+            b"$ \x1b]8;;chatty-agent:abc123\x07ls -l\x1b]8;;\x07\r\n\
+              $ \x1b]8;;https://example.com\x07link\x1b]8;;\x07\r\n$ typed",
+        );
+        let row = |i| agent_command_on_row(&term.grid()[Line(i)][..]);
+        assert_eq!(row(0).as_deref(), Some("abc123"));
+        assert_eq!(row(1), None);
+        assert_eq!(row(2), None);
     }
 
     fn texts(row: &RowLayout) -> Vec<(&str, u16, u16)> {

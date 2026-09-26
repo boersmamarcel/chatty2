@@ -1528,3 +1528,214 @@ async fn protocol_works_on_the_host_bash() {
     let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
     check_protocol(&session, "host").await;
 }
+
+// --- The Agent tab (AGE-586): what a view of the agent's shell reads ---
+
+/// Wait until `check` holds for the session, polling its public accessors.
+async fn wait_until(what: &str, check: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("never reached: {what}");
+}
+
+/// "Start shell" starts the shell the agent then uses: the same terminal,
+/// with the session's secrets, not a second one.
+#[tokio::test]
+async fn start_starts_the_agents_own_shell() {
+    let session = ShellSession::with_secrets(
+        None,
+        30,
+        51200,
+        false,
+        vec![("AGE586_SECRET".into(), "s3cret".into())],
+    );
+    assert_eq!(session.activity(), ShellActivity::NotStarted);
+    assert!(session.terminal().is_none());
+    assert_eq!(session.running_sandboxed(), None);
+
+    session.start().await.unwrap();
+    let terminal = session.terminal().expect("started");
+    assert_eq!(
+        session.running_sandboxed(),
+        Some(session.is_sandboxed().await)
+    );
+    wait_until("idle", || session.activity() == ShellActivity::Idle).await;
+
+    let output = session.execute("echo $AGE586_SECRET").await.unwrap();
+    assert_eq!(output.stdout, "s3cret");
+    assert!(Arc::ptr_eq(&terminal, &session.terminal().unwrap()));
+    // Starting again is a no-op.
+    session.start().await.unwrap();
+    assert!(Arc::ptr_eq(&terminal, &session.terminal().unwrap()));
+}
+
+/// The status line: idle, the agent running its command, the human typing,
+/// the human's command running.
+#[tokio::test]
+async fn activity_tells_the_agent_from_the_human() {
+    let session = Arc::new(ShellSession::with_secrets(None, 30, 51200, false, vec![]));
+    session.start().await.unwrap();
+    let terminal = session.terminal().unwrap();
+    wait_until("idle", || session.activity() == ShellActivity::Idle).await;
+
+    terminal.write(b"echo half").unwrap();
+    wait_until("typing", || {
+        session.activity() == ShellActivity::HumanTyping
+    })
+    .await;
+    terminal.write(b"\x15").unwrap(); // Ctrl+U
+    wait_until("idle again", || session.activity() == ShellActivity::Idle).await;
+
+    terminal.write(b"sleep 30\r").unwrap();
+    wait_until("human running", || {
+        session.activity()
+            == ShellActivity::HumanRunning {
+                command: "sleep 30".into(),
+            }
+    })
+    .await;
+    terminal.write(b"\x03").unwrap();
+    wait_until("idle after ^C", || {
+        session.activity() == ShellActivity::Idle
+    })
+    .await;
+
+    let running = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move { session.execute("sleep 1; echo slept").await }
+    });
+    wait_until("agent running", || {
+        session.activity()
+            == ShellActivity::AgentRunning {
+                command: "sleep 1; echo slept".into(),
+            }
+    })
+    .await;
+    assert_eq!(running.await.unwrap().unwrap().stdout, "slept");
+    assert_eq!(session.activity(), ShellActivity::Idle);
+}
+
+/// Mid-typing: the agent's command waits, and says which command waits,
+/// until the human clears the line; then it runs.
+#[tokio::test]
+async fn a_waiting_agent_command_is_visible_until_the_line_is_cleared() {
+    let session = Arc::new(ShellSession::with_secrets(None, 30, 51200, false, vec![]));
+    session.start().await.unwrap();
+    let terminal = session.terminal().unwrap();
+    wait_until("idle", || session.activity() == ShellActivity::Idle).await;
+    assert_eq!(session.waiting_command(), None);
+
+    terminal.write(b"echo partial").unwrap();
+    wait_until("typing", || {
+        session.activity() == ShellActivity::HumanTyping
+    })
+    .await;
+    let queued = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move { session.execute("echo from-agent").await }
+    });
+    wait_until("waiting", || {
+        session.waiting_command().as_deref() == Some("echo from-agent")
+    })
+    .await;
+    terminal.write(b"\x15").unwrap(); // Ctrl+U: the line is cleared
+
+    let output = queued.await.unwrap().unwrap();
+    assert_eq!(output.stdout, "from-agent");
+    assert_eq!(session.waiting_command(), None);
+}
+
+/// Handover: the human answers a prompt the agent's command is waiting on,
+/// and the answer is in the tool result.
+#[tokio::test]
+async fn the_human_answers_the_agents_prompt() {
+    let session = Arc::new(ShellSession::with_secrets(None, 30, 51200, false, vec![]));
+    session.start().await.unwrap();
+    let terminal = session.terminal().unwrap();
+
+    let running = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .execute("read -p 'continue? ' x; echo \"got $x\"")
+                .await
+        }
+    });
+    wait_for_screen(&terminal, "continue? ").await;
+    terminal.write(b"yes\r").unwrap();
+
+    let output = running.await.unwrap().unwrap();
+    assert_eq!(output.exit_code, 0, "{output:?}");
+    assert!(output.stdout.contains("got yes"), "{output:?}");
+}
+
+/// Every grid row with its text and the OSC 8 link on it, if any, oldest
+/// first.
+fn rows_with_links(terminal: &chatty_terminal::TerminalHandle) -> Vec<(String, Option<String>)> {
+    use chatty_terminal::alacritty_terminal::grid::Dimensions;
+    use chatty_terminal::alacritty_terminal::index::Line;
+    terminal.with_term(|term| {
+        let grid = term.grid();
+        let top = -(grid.history_size() as i32);
+        let bottom = grid.screen_lines() as i32;
+        (top..bottom)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                let cells = &row[..];
+                let text: String = cells.iter().map(|c| c.c).collect();
+                let link = cells
+                    .iter()
+                    .find_map(|c| c.hyperlink().map(|h| h.uri().to_string()));
+                (text.trim_end().to_string(), link)
+            })
+            .collect()
+    })
+}
+
+/// Attribution: the line the agent's command shows on carries its id (an
+/// invisible OSC 8 link); a typed line and the output do not. The model's
+/// output is unchanged by it.
+#[tokio::test]
+async fn agent_command_lines_carry_their_id() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let output = session.execute("echo agent-$((40+2))").await.unwrap();
+    assert_eq!(output.stdout, "agent-42");
+    let terminal = session.terminal().unwrap();
+    let (id, command) = session.agent_commands().pop().unwrap();
+    assert_eq!(command, "echo agent-$((40+2))");
+
+    wait_until("prompt", || session.activity() == ShellActivity::Idle).await;
+    terminal.write(b"echo human-$((6*7))\r").unwrap();
+    wait_for_screen(&terminal, "\nhuman-42").await;
+
+    let rows = rows_with_links(&terminal);
+    let find = |needle: &str| {
+        rows.iter()
+            .find(|(text, _)| text.ends_with(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not in {rows:?}"))
+            .1
+            .clone()
+    };
+    let link = find(" echo agent-$((40+2))").expect("the agent's line is linked");
+    assert_eq!(agent_command_id(&link), Some(id.as_str()));
+    assert_eq!(find(" echo human-$((6*7))"), None, "typed lines are not");
+    assert_eq!(find("agent-42"), None, "output is not");
+    assert_eq!(find("human-42"), None);
+}
+
+/// A view attached at its own (narrow) size does not change what the model
+/// reads: the output comes from the stream, not the grid.
+#[tokio::test]
+async fn a_narrow_view_does_not_wrap_the_models_output() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.start().await.unwrap();
+    session.terminal().unwrap().resize(40, 10).unwrap();
+    let output = session.execute("printf '%0300d\\n' 0").await.unwrap();
+    assert_eq!(output.stdout, "0".repeat(300));
+    let (cols, rows) = HEADLESS_SIZE;
+    session.terminal().unwrap().resize(cols, rows).unwrap();
+}

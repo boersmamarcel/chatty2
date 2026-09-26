@@ -17,6 +17,16 @@
 //! `terminal_read` sees (AGE-583). A tab starts unshared; the eye icon on it
 //! shares it (after a Read only / Read + run choice, unless one was
 //! remembered) or unshares it, and a tab the agent reads flashes briefly.
+//!
+//! The pinned Agent tab (AGE-586) comes first: the active conversation's
+//! own agent shell ([`ShellSession`]), attached rather than spawned, so the
+//! human sees every command the agent ran with its output and can type in
+//! the same shell. It follows the active conversation (polled while the
+//! dock is open), is registered as [`TerminalKind::Agent`] while attached,
+//! says what the shell is doing (idle, the agent's command, the human
+//! typing, the agent waiting for the human) and whether it is sandboxed,
+//! and offers "Start shell" before the agent has used it. It has no close
+//! button: its "×" hides the dock, and the shell keeps running.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -24,6 +34,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chatty_core::services::shell_service::{HEADLESS_SIZE, ShellActivity, ShellSession};
 use chatty_core::services::terminal::{TerminalAccess, TerminalKind};
 use chatty_core::settings::models::ExecutionSettingsModel;
 use chatty_core::settings::models::general_model::TerminalSettings;
@@ -37,7 +48,9 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable, WindowExt as _, h_flex, v_flex,
+};
 use tracing::warn;
 
 use super::registry::{
@@ -72,6 +85,12 @@ pub const MIN_CHAT_HEIGHT: f32 = 160.;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 /// How long a tab stays highlighted after the agent read it.
 const READ_FLASH: Duration = Duration::from_millis(1500);
+/// How often the Agent tab re-reads the conversation's shell while the dock
+/// is open: fast enough to show an agent command waiting for the human (it
+/// waits two seconds at most).
+const AGENT_REFRESH: Duration = Duration::from_millis(150);
+/// How long a "Show in terminal" notice stays up.
+const AGENT_NOTICE: Duration = Duration::from_secs(4);
 
 /// What the dock asks of the chat view around it.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,9 +129,42 @@ struct DockTab {
     _events: Subscription,
 }
 
+/// The pinned Agent tab: the active conversation's agent shell.
+#[derive(Default)]
+struct AgentTab {
+    /// The conversation it shows, and that conversation's shell session
+    /// (`None` when execution is off for it).
+    conversation_id: Option<String>,
+    session: Option<Arc<ShellSession>>,
+    /// The view on the session's running terminal, while one runs.
+    view: Option<Entity<TerminalView>>,
+    /// Its id in [`EmbeddedTerminals`] while attached.
+    registry_id: Option<String>,
+    activity: Option<ShellActivity>,
+    /// The agent command waiting for the human to finish their line.
+    waiting: Option<String>,
+    sandboxed: Option<bool>,
+    /// "Start shell" was clicked and the shell is not up yet.
+    starting: bool,
+    /// A one-off message in the tab ("Show in terminal" found nothing, the
+    /// shell did not start), and the timer that clears it.
+    notice: Option<(String, Option<Task<()>>)>,
+}
+
 pub struct TerminalDock {
     tabs: Vec<DockTab>,
     active: usize,
+    /// The pinned Agent tab, first in the strip.
+    agent: AgentTab,
+    /// The Agent tab is the active one (else `tabs[active]`).
+    agent_active: bool,
+    /// Follows the conversation's shell every [`AGENT_REFRESH`]; only while
+    /// the dock is open.
+    agent_refresh: Option<Task<()>>,
+    /// Tests: the conversation and shell to show instead of the store's
+    /// active conversation (building a real conversation needs an agent).
+    #[cfg(test)]
+    pub agent_source: Option<(Option<String>, Option<Arc<ShellSession>>)>,
     next_id: u64,
     open: bool,
     maximized: bool,
@@ -133,9 +185,8 @@ impl EventEmitter<TerminalDockEvent> for TerminalDock {}
 impl Focusable for TerminalDock {
     /// The active terminal's focus, or the dock's own while it has none.
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.tabs
-            .get(self.active)
-            .map(|tab| tab.view.read(cx).focus_handle(cx))
+        self.active_view()
+            .map(|view| view.read(cx).focus_handle(cx))
             .unwrap_or_else(|| self.focus_handle.clone())
     }
 }
@@ -166,8 +217,16 @@ impl TerminalDock {
                 for tab in dock.tabs.drain(..) {
                     dock.registry.remove(&tab.registry_id);
                 }
+                if let Some(id) = dock.agent.registry_id.take() {
+                    dock.registry.remove(&id);
+                }
                 async {}
             }),
+            agent: AgentTab::default(),
+            agent_active: false,
+            agent_refresh: None,
+            #[cfg(test)]
+            agent_source: None,
             live_refresh: None,
             registry,
             read_flash: None,
@@ -178,7 +237,9 @@ impl TerminalDock {
     /// Highlight the tab the agent read, if it is one of ours, for
     /// [`READ_FLASH`].
     fn flash_read(&mut self, registry_id: String, cx: &mut Context<Self>) {
-        if !self.tabs.iter().any(|tab| tab.registry_id == registry_id) {
+        if !self.tabs.iter().any(|tab| tab.registry_id == registry_id)
+            && self.agent.registry_id.as_deref() != Some(registry_id.as_str())
+        {
             return;
         }
         let timer = cx.spawn(async move |this, cx| {
@@ -316,9 +377,11 @@ impl TerminalDock {
     /// Start polling tab titles, if not already: they follow `cd` and the
     /// program started at the prompt, which print nothing the dock would
     /// otherwise hear about. Only while the dock is open, so a closed or
-    /// never-opened dock never wakes the app.
+    /// never-opened dock never wakes the app. The Agent tab's poll starts
+    /// with it.
     fn start_live_refresh(&mut self, cx: &mut Context<Self>) {
         self.refresh_live(cx);
+        self.start_agent_refresh(cx);
         if self.live_refresh.is_some() {
             return;
         }
@@ -378,8 +441,12 @@ impl TerminalDock {
         self.active
     }
 
-    /// The active terminal, if any.
+    /// The active terminal, if any: the Agent tab's while it is active
+    /// (none before its shell starts).
     pub fn active_view(&self) -> Option<&Entity<TerminalView>> {
+        if self.agent_active {
+            return self.agent.view.as_ref();
+        }
         self.tabs.get(self.active).map(|tab| &tab.view)
     }
 
@@ -399,7 +466,7 @@ impl TerminalDock {
     /// active one.
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
-        if self.tabs.is_empty() {
+        if self.tabs.is_empty() && !self.agent_active {
             self.spawn_tab(cx);
         }
         self.start_live_refresh(cx);
@@ -407,17 +474,30 @@ impl TerminalDock {
         cx.notify();
     }
 
-    /// Hide the dock. Its terminals keep running; the title poll stops.
+    /// Hide the dock. Its terminals keep running; the polls stop, and the
+    /// Agent tab lets go of the agent's shell (see [`Self::stop_agent`]).
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.live_refresh = None;
+        self.stop_agent(cx);
         cx.notify();
+    }
+
+    /// The dock is going out of sight: stop following the conversation and
+    /// detach from its shell. Nothing refreshes a hidden dock, so an attached
+    /// view would keep a conversation's shell listed to the agent after a
+    /// switch, and its repaint timer would wake the app. Showing the dock
+    /// again re-attaches (`refresh_agent`).
+    fn stop_agent(&mut self, cx: &mut Context<Self>) {
+        self.agent_refresh = None;
+        self.detach_agent(cx);
     }
 
     /// Open a new terminal as the last tab, show the dock and focus it.
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.spawn_tab(cx);
+        self.set_agent_active(false, cx);
         self.start_live_refresh(cx);
         self.focus_active(window, cx);
         cx.notify();
@@ -431,12 +511,23 @@ impl TerminalDock {
     pub fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active = index;
+            self.set_agent_active(false, cx);
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
     fn focus_active(&self, window: &mut Window, cx: &App) {
+        if self.agent_active {
+            match &self.agent.view {
+                Some(view) => window.focus(&view.read(cx).focus_handle(cx)),
+                None => window.focus(&self.focus_handle),
+            }
+            if let Some(id) = &self.agent.registry_id {
+                self.registry.focused(id);
+            }
+            return;
+        }
         if let Some(tab) = self.tabs.get(self.active) {
             window.focus(&tab.view.read(cx).focus_handle(cx));
             // The default `terminal_read` target, when shared.
@@ -536,10 +627,13 @@ impl TerminalDock {
         if index < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
-        if self.tabs.is_empty() {
+        if self.agent_active {
+            // The Agent tab stays in front.
+        } else if self.tabs.is_empty() {
             self.open = false;
             self.maximized = false;
             self.live_refresh = None;
+            self.stop_agent(cx);
             cx.emit(TerminalDockEvent::Hidden);
         } else if was_active {
             self.focus_active(window, cx);
@@ -555,6 +649,240 @@ impl TerminalDock {
             self.active = move_item(&mut self.tabs, from, to, self.active);
             cx.notify();
         }
+    }
+
+    /// Follow the active conversation's shell every [`AGENT_REFRESH`] while
+    /// the dock is open, starting now.
+    fn start_agent_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_agent(cx);
+        if self.agent_refresh.is_some() {
+            return;
+        }
+        self.agent_refresh = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AGENT_REFRESH).await;
+                if this.update(cx, |dock, cx| dock.refresh_agent(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Re-read the active conversation and its shell: swap the Agent tab to
+    /// another conversation, attach to a shell that started (or restarted),
+    /// update its status. Notifies when anything shown changed.
+    pub fn refresh_agent(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        let (conversation_id, session) = self
+            .agent_source
+            .clone()
+            .unwrap_or_else(|| active_conversation_shell(cx));
+        #[cfg(not(test))]
+        let (conversation_id, session) = active_conversation_shell(cx);
+        let same_session = match (&self.agent.session, &session) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let mut changed = false;
+        if conversation_id != self.agent.conversation_id || !same_session {
+            self.detach_agent(cx);
+            self.agent.conversation_id = conversation_id;
+            self.agent.session = session;
+            self.agent.starting = false;
+            self.agent.notice = None;
+            changed = true;
+        }
+
+        let terminal = self.agent.session.as_ref().and_then(|s| s.terminal());
+        let attached = self
+            .agent
+            .view
+            .as_ref()
+            .map(|view| Arc::clone(view.read(cx).handle()));
+        let same_terminal = match (&attached, &terminal) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_terminal {
+            self.detach_agent(cx);
+            if let Some(terminal) = terminal {
+                self.attach_agent(terminal, cx);
+            }
+            changed = true;
+        }
+
+        let session = self.agent.session.as_ref();
+        let activity = session.map(|s| s.activity());
+        let waiting = session.and_then(|s| s.waiting_command());
+        let sandboxed = session.and_then(|s| s.running_sandboxed());
+        if activity != self.agent.activity
+            || waiting != self.agent.waiting
+            || sandboxed != self.agent.sandboxed
+        {
+            self.agent.activity = activity;
+            self.agent.waiting = waiting;
+            self.agent.sandboxed = sandboxed;
+            changed = true;
+        }
+        if self.agent.starting && self.agent.view.is_some() {
+            self.agent.starting = false;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Show `terminal` (the agent's running shell) in the Agent tab and let
+    /// the agent read it.
+    fn attach_agent(&mut self, terminal: Arc<TerminalHandle>, cx: &mut Context<Self>) {
+        let cwd = self
+            .agent
+            .session
+            .as_ref()
+            .and_then(|s| s.workspace_dir().map(PathBuf::from))
+            .unwrap_or_default();
+        self.agent.registry_id =
+            Some(
+                self.registry
+                    .register(&terminal, TerminalKind::Agent, "bash".into(), cwd),
+            );
+        self.agent.view = Some(cx.new(|cx| TerminalView::attach(terminal, cx)));
+    }
+
+    /// Let go of the agent's shell: give it its own size back, stop
+    /// listing it. The shell keeps running for the agent.
+    fn detach_agent(&mut self, cx: &mut Context<Self>) {
+        self.release_agent_size(cx);
+        self.agent.view = None;
+        if let Some(id) = self.agent.registry_id.take() {
+            self.registry.remove(&id);
+        }
+    }
+
+    /// The agent's shell takes the view's size only while the Agent tab is
+    /// on screen; otherwise it is back at its headless size, so the model's
+    /// commands see a wide terminal.
+    fn release_agent_size(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.agent.view
+            && !view.read(cx).handle().has_exited()
+        {
+            view.update(cx, |view, _| view.release_size(HEADLESS_SIZE));
+        }
+    }
+
+    fn set_agent_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.agent_active && !active {
+            self.release_agent_size(cx);
+        }
+        self.agent_active = active;
+    }
+
+    /// Whether the Agent tab is the active one (tests).
+    #[cfg(test)]
+    pub fn agent_is_active(&self) -> bool {
+        self.agent_active
+    }
+
+    /// The Agent tab's view on the agent's shell, while attached (tests).
+    #[cfg(test)]
+    pub fn agent_view(&self) -> Option<Entity<TerminalView>> {
+        self.agent.view.clone()
+    }
+
+    /// The Agent tab's id in [`EmbeddedTerminals`], while attached (tests).
+    #[cfg(test)]
+    pub fn agent_registry_id(&self) -> Option<String> {
+        self.agent.registry_id.clone()
+    }
+
+    /// Show the dock on the Agent tab and focus it.
+    pub fn show_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = true;
+        self.set_agent_active(true, cx);
+        self.start_live_refresh(cx);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// "Show in terminal" on a shell tool row: the Agent tab, scrolled to
+    /// the most recent run of `command` in its scrollback. The tool call
+    /// does not carry the run's id, so the same command run twice shows the
+    /// later run; one no longer in the scrollback leaves a notice.
+    pub fn show_agent_command(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_agent(window, cx);
+        let id = self.agent.session.as_ref().and_then(|session| {
+            session
+                .agent_commands()
+                .into_iter()
+                .rev()
+                .find(|(_, ran)| ran == command)
+                .map(|(id, _)| id)
+        });
+        let found = match (&self.agent.view, id) {
+            (Some(view), Some(id)) => {
+                view.update(cx, |view, cx| view.scroll_to_agent_command(&id, cx))
+            }
+            _ => false,
+        };
+        if !found {
+            self.set_agent_notice(
+                "That command is no longer in this shell's scrollback (the shell may have restarted)."
+                    .into(),
+                cx,
+            );
+        }
+    }
+
+    fn set_agent_notice(&mut self, notice: String, cx: &mut Context<Self>) {
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AGENT_NOTICE).await;
+            let _ = this.update(cx, |dock, cx| {
+                dock.agent.notice = None;
+                cx.notify();
+            });
+        });
+        self.agent.notice = Some((notice, Some(timer)));
+        cx.notify();
+    }
+
+    /// "Start shell": start the conversation's agent shell (the one the
+    /// agent's commands will run in, with its sandbox and secrets) before
+    /// the agent needs it.
+    fn start_agent_shell(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.agent.session.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!("terminal: no async runtime to start the agent's shell on");
+            return;
+        };
+        self.agent.starting = true;
+        cx.notify();
+        let started = runtime.spawn(async move { session.start().await });
+        cx.spawn(async move |this, cx| {
+            let result = match started.await {
+                Ok(result) => result,
+                Err(e) => Err(anyhow::anyhow!(e)),
+            };
+            let _ = this.update(cx, |dock, cx| {
+                dock.agent.starting = false;
+                if let Err(e) = result {
+                    warn!(error = %e, "terminal: the agent's shell did not start");
+                    dock.set_agent_notice(format!("The shell did not start: {e}"), cx);
+                }
+                dock.refresh_agent(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Set the dock height (a drag on its top edge) and save it once the
@@ -606,8 +934,9 @@ impl Render for TerminalDock {
         };
 
         let flashed = self.read_flash.as_ref().map(|(id, _)| id.as_str());
+        let agent_tab = self.render_agent_tab(flashed, cx);
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
-            let active = index == self.active;
+            let active = !self.agent_active && index == self.active;
             let access = self.registry.access(&tab.registry_id);
             let shared = access.can_read();
             let read_now = flashed == Some(tab.registry_id.as_str());
@@ -736,8 +1065,8 @@ impl Render for TerminalDock {
             .bg(theme.secondary)
             .border_b_1()
             .border_color(theme.border)
-            // T8b puts the pinned Agent tab first in this strip, before
-            // the human terminals.
+            // The pinned Agent tab first, before the human terminals.
+            .child(agent_tab)
             .child(
                 h_flex()
                     .id("terminal-dock-tabs")
@@ -815,7 +1144,12 @@ impl Render for TerminalDock {
                     .w_full()
                     .px_2()
                     .pt_1()
-                    .when_some(self.active_view().cloned(), |this, view| this.child(view)),
+                    .when(self.agent_active, |this| {
+                        this.child(self.render_agent_body(cx))
+                    })
+                    .when(!self.agent_active, |this| {
+                        this.when_some(self.active_view().cloned(), |this, view| this.child(view))
+                    }),
             )
             // The top-edge resize handle, over the border. Hidden while
             // maximised, as in VS Code.
@@ -832,6 +1166,322 @@ impl Render for TerminalDock {
                         .on_drag(DockResizeDrag, |_, _, _, cx| cx.new(|_| gpui::Empty)),
                 )
             })
+    }
+}
+
+impl TerminalDock {
+    /// The pinned Agent tab in the strip: its icon, name, status and
+    /// sandbox label.
+    fn render_agent_tab(&self, flashed: Option<&str>, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let dock = cx.entity();
+        let active = self.agent_active;
+        let status = agent_status(self.agent.activity.as_ref(), self.agent.waiting.as_deref());
+        let waiting = matches!(status, AgentStatus::Waiting { .. });
+        let sandbox = sandbox_label(
+            self.agent.sandboxed,
+            self.agent
+                .session
+                .as_ref()
+                .is_some_and(|s| s.network_isolation()),
+        );
+        let read_now = flashed.is_some() && flashed == self.agent.registry_id.as_deref();
+        h_flex()
+            .id("terminal-agent-tab")
+            .h_full()
+            .max_w(px(460.))
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .pr_1()
+            .border_r_1()
+            .border_color(theme.border)
+            .text_xs()
+            .cursor_pointer()
+            .when(active, |this| {
+                this.bg(theme.background).text_color(theme.foreground)
+            })
+            .when(!active, |this| {
+                this.text_color(theme.muted_foreground)
+                    .hover(|s| s.bg(theme.list_hover))
+            })
+            .when(read_now, |this| this.bg(theme.info.opacity(0.25)))
+            .when(waiting, |this| this.bg(theme.warning.opacity(0.2)))
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new(
+                    "The agent's shell: what it ran, with the output. You can type here too.",
+                )
+                .build(window, cx)
+            })
+            .on_click({
+                let dock = dock.clone();
+                move |_, window, cx| dock.update(cx, |dock, cx| dock.show_agent(window, cx))
+            })
+            .child(
+                Icon::new(IconName::Bot)
+                    .size_3()
+                    .flex_none()
+                    .text_color(theme.info),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Agent"),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(if waiting {
+                        theme.warning
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .when(waiting, |this| this.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(status.text()),
+            )
+            .when_some(sandbox, |this, label| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+            })
+            .child(
+                Button::new("terminal-agent-tab-hide")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Hide panel (the agent's shell keeps running)")
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        dock.update(cx, |dock, cx| {
+                            dock.hide(cx);
+                            cx.emit(TerminalDockEvent::Hidden);
+                        })
+                    }),
+            )
+    }
+
+    /// The Agent tab's body: the agent's terminal, under a line saying why
+    /// the agent waits (or a notice), or the empty state before its shell
+    /// runs.
+    fn render_agent_body(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let dock = cx.entity();
+        let banner = |text: String, color: gpui::Hsla| {
+            div()
+                .flex_none()
+                .w_full()
+                .px_2()
+                .py_1()
+                .mb_1()
+                .rounded_sm()
+                .text_xs()
+                .bg(color.opacity(0.15))
+                .text_color(theme.foreground)
+                .child(text)
+        };
+        let waiting = self.agent.waiting.as_deref().map(|command| {
+            format!(
+                "Agent waiting for you: it wants to run `{}`. Finish or clear your line (Ctrl+U) and it goes ahead.",
+                first_line(command, 120)
+            )
+        });
+        let notice = self.agent.notice.as_ref().map(|(text, _)| text.clone());
+        let body = match (&self.agent.view, &self.agent.session) {
+            // Absolutely placed, so the grid measures the space left under
+            // a banner rather than the whole body.
+            (Some(view), _) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .child(div().absolute().inset_0().child(view.clone())),
+            (None, Some(_)) => div().flex_1().min_h_0().w_full().child(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("The agent has not used the shell yet."),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Start it to prepare the environment before you ask; the agent runs its commands in the same shell."),
+                    )
+                    .child(
+                        Button::new("terminal-agent-start")
+                            .small()
+                            .icon(IconName::SquareTerminal)
+                            .label(if self.agent.starting {
+                                "Starting…"
+                            } else {
+                                "Start shell"
+                            })
+                            .disabled(self.agent.starting)
+                            .on_click(move |_, _, cx| {
+                                dock.update(cx, |dock, cx| dock.start_agent_shell(cx))
+                            }),
+                    ),
+            ),
+            (None, None) => {
+                let (headline, hint) = no_session_text(
+                    cx.try_global::<ExecutionSettingsModel>()
+                        .is_some_and(|s| s.enabled),
+                );
+                div().flex_1().min_h_0().w_full().child(
+                    v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(headline),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(hint),
+                        ),
+                )
+            }
+        };
+        v_flex()
+            .size_full()
+            .when_some(waiting, |this, text| {
+                this.child(banner(text, theme.warning))
+            })
+            .when_some(notice, |this, text| this.child(banner(text, theme.info)))
+            .child(body)
+    }
+}
+
+/// The active conversation and its agent shell session, if it has one.
+fn active_conversation_shell(cx: &App) -> (Option<String>, Option<Arc<ShellSession>>) {
+    let Some(store) = cx.try_global::<chatty_core::models::ConversationsStore>() else {
+        return (None, None);
+    };
+    let Some(id) = store.active_id().cloned() else {
+        return (None, None);
+    };
+    let session = store
+        .get_conversation(&id)
+        .and_then(|conv| conv.shell_session());
+    (Some(id), session)
+}
+
+/// The Agent tab's empty state when the conversation has no shell session:
+/// execution is off, or the conversation's agent is not built yet (a
+/// conversation is loaded when it is opened), so there is nothing to start.
+pub fn no_session_text(execution_enabled: bool) -> (&'static str, &'static str) {
+    if execution_enabled {
+        (
+            "The agent has not used the shell yet.",
+            "Its shell comes with this conversation's agent: open a conversation or send a message first.",
+        )
+    } else {
+        (
+            "The agent has no shell in this conversation.",
+            "Turn on code execution in Settings → Execution to give it one.",
+        )
+    }
+}
+
+/// The Agent tab's status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentStatus {
+    /// No shell yet.
+    NotStarted,
+    Idle,
+    /// The agent's command runs.
+    AgentRunning(String),
+    /// The human has a partial line at the prompt.
+    YouTyping,
+    /// A command the human typed runs.
+    YouRunning(String),
+    /// The agent's command waits for the human's line to be finished or
+    /// cleared (or their command to end).
+    Waiting {
+        command: String,
+    },
+}
+
+impl AgentStatus {
+    /// What the tab says.
+    pub fn text(&self) -> String {
+        match self {
+            Self::NotStarted => "not started".into(),
+            Self::Idle => "idle".into(),
+            Self::AgentRunning(command) => format!("agent running `{}`", first_line(command, 60)),
+            Self::YouTyping => "you typing".into(),
+            Self::YouRunning(command) => format!("you running `{}`", first_line(command, 60)),
+            Self::Waiting { command } => {
+                format!("Agent waiting for you · `{}`", first_line(command, 60))
+            }
+        }
+    }
+}
+
+/// The Agent tab's status from what the shell is doing and the agent
+/// command waiting for it, if any. A waiting command wins: it is why the
+/// agent paused.
+pub fn agent_status(activity: Option<&ShellActivity>, waiting: Option<&str>) -> AgentStatus {
+    if let Some(command) = waiting {
+        return AgentStatus::Waiting {
+            command: command.to_string(),
+        };
+    }
+    match activity {
+        None | Some(ShellActivity::NotStarted) => AgentStatus::NotStarted,
+        Some(ShellActivity::Idle) => AgentStatus::Idle,
+        Some(ShellActivity::AgentRunning { command }) => AgentStatus::AgentRunning(command.clone()),
+        Some(ShellActivity::HumanTyping) => AgentStatus::YouTyping,
+        Some(ShellActivity::HumanRunning { command }) => AgentStatus::YouRunning(command.clone()),
+    }
+}
+
+/// The Agent tab's sandbox label: what the human types there runs in the
+/// same sandbox as the agent's commands, so the tab says so. `None` when
+/// the shell is not sandboxed or not running.
+pub fn sandbox_label(sandboxed: Option<bool>, network_isolation: bool) -> Option<&'static str> {
+    match (sandboxed, network_isolation) {
+        (Some(true), true) => Some("sandboxed · no network"),
+        (Some(true), false) => Some("sandboxed"),
+        _ => None,
+    }
+}
+
+/// The first line of `text`, cut to `max` characters with an ellipsis.
+fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    let more_lines = text.trim_end().lines().nth(1).is_some();
+    if line.chars().count() > max {
+        let cut: String = line.chars().take(max).collect();
+        format!("{cut}…")
+    } else if more_lines {
+        format!("{line} …")
+    } else {
+        line.to_string()
     }
 }
 
@@ -1160,6 +1810,81 @@ mod tests {
             let keystroke = gpui::Keystroke::parse(key).unwrap();
             assert!(super::super::keys::is_reserved(&keystroke), "{key}");
         }
+    }
+
+    #[test]
+    fn agent_status_says_what_the_shell_does() {
+        use ShellActivity as A;
+        assert_eq!(agent_status(None, None).text(), "not started");
+        assert_eq!(agent_status(Some(&A::Idle), None).text(), "idle");
+        assert_eq!(
+            agent_status(
+                Some(&A::AgentRunning {
+                    command: "cargo test".into()
+                }),
+                None
+            )
+            .text(),
+            "agent running `cargo test`"
+        );
+        assert_eq!(
+            agent_status(Some(&A::HumanTyping), None).text(),
+            "you typing"
+        );
+        assert_eq!(
+            agent_status(
+                Some(&A::HumanRunning {
+                    command: "vim".into()
+                }),
+                None
+            )
+            .text(),
+            "you running `vim`"
+        );
+    }
+
+    /// Mid-typing: the header says the agent waits for the human, with the
+    /// command it wants to run.
+    #[test]
+    fn a_waiting_agent_command_wins_the_status() {
+        let status = agent_status(Some(&ShellActivity::HumanTyping), Some("ls -la"));
+        assert_eq!(
+            status,
+            AgentStatus::Waiting {
+                command: "ls -la".into()
+            }
+        );
+        assert_eq!(status.text(), "Agent waiting for you · `ls -la`");
+    }
+
+    #[test]
+    fn long_and_multi_line_commands_are_cut() {
+        assert_eq!(first_line("echo hi", 60), "echo hi");
+        assert_eq!(first_line("cd x\nmake", 60), "cd x …");
+        assert_eq!(
+            first_line(&"a".repeat(70), 60),
+            format!("{}…", "a".repeat(60))
+        );
+    }
+
+    /// With execution on, a missing session only means the conversation's
+    /// agent is not built yet; the tab must not send the human to settings.
+    #[test]
+    fn no_session_text_follows_the_execution_setting() {
+        assert!(no_session_text(false).1.contains("Turn on code execution"));
+        assert!(!no_session_text(true).1.contains("Turn on code execution"));
+    }
+
+    /// Sandbox honesty: what the human types runs in the agent's sandbox.
+    #[test]
+    fn sandbox_label_names_the_sandbox_and_the_network() {
+        assert_eq!(
+            sandbox_label(Some(true), true),
+            Some("sandboxed · no network")
+        );
+        assert_eq!(sandbox_label(Some(true), false), Some("sandboxed"));
+        assert_eq!(sandbox_label(Some(false), true), None);
+        assert_eq!(sandbox_label(None, true), None);
     }
 
     /// The settings default and the terminal crate's default agree.

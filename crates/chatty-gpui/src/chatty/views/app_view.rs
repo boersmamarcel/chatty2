@@ -55,6 +55,13 @@ impl Render for ChattyApp {
                         .update(cx, |view, cx| view.new_terminal(window, cx));
                 }),
             )
+            .on_action(cx.listener(
+                |this, action: &crate::actions::ShowInTerminal, window, cx| {
+                    this.chat_view.update(cx, |view, cx| {
+                        view.show_in_terminal(&action.command, window, cx)
+                    });
+                },
+            ))
             .child(
                 // Custom titlebar with toggle button
                 AppTitleBar::new(self.sidebar_view.clone(), self.chat_view.clone()),
