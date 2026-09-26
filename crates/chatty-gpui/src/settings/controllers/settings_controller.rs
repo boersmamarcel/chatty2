@@ -52,6 +52,10 @@ impl SettingsView {
     }
 
     pub fn open_or_focus_settings_window(cx: &mut App) {
+        // Models & Providers lives here: pick up an Ollama that started
+        // after Chatty did (AGE-568).
+        crate::settings::providers::resync_ollama_models(cx);
+
         // Check if we have a stored window handle
         if let Some(handle) = cx.global::<GlobalSettingsWindow>().handle {
             trace!(
