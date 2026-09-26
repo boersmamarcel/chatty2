@@ -260,7 +260,8 @@ impl UsageRecorder {
 /// Write the `cancelled` object when the process is interrupted, then die of
 /// the same signal as it would have without a usage file: the handler is
 /// put back to the default and the signal raised again, so the exit status
-/// a caller sees does not change. Only installed with `--usage-file`.
+/// a caller sees does not change. Only installed with `--usage-file`, and
+/// only for the signals the process does not already ignore.
 #[cfg(unix)]
 pub fn watch_for_interrupt(recorder: UsageRecorder) {
     use tokio::signal::unix::{SignalKind, signal};
@@ -273,6 +274,14 @@ pub fn watch_for_interrupt(recorder: UsageRecorder) {
         (SignalKind::hangup(), libc::SIGHUP),
     ];
     for (kind, signo) in kinds {
+        // A signal the process was started ignoring stays ignored: `nohup`
+        // sets SIGHUP to SIG_IGN and a non-interactive shell's `&` does the
+        // same for SIGINT, and tokio's handler would replace that with one
+        // of its own — this watcher would then re-raise the signal under
+        // the default action and kill a run that was meant to survive it.
+        if signal_is_ignored(signo) {
+            continue;
+        }
         let Ok(mut stream) = signal(kind) else {
             continue;
         };
@@ -290,6 +299,18 @@ pub fn watch_for_interrupt(recorder: UsageRecorder) {
                 }
             }
         });
+    }
+}
+
+/// Whether `signo`'s current disposition is `SIG_IGN`.
+#[cfg(unix)]
+fn signal_is_ignored(signo: libc::c_int) -> bool {
+    // SAFETY: querying a disposition (a null `act`) writes only into the
+    // zeroed `sigaction` this function owns.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(signo, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
     }
 }
 
@@ -390,6 +411,23 @@ mod tests {
         recorder.finish(RunExit::Completed);
         assert_eq!(read()["exit"], "deadline");
         assert_eq!(read()["tool_calls"], 1);
+    }
+
+    /// The watcher leaves an ignored signal ignored (`nohup`, a background
+    /// job's SIGINT); this is the check it relies on.
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_signal_is_recognised() {
+        // SIGUSR2 is nobody else's in this test binary.
+        assert!(!signal_is_ignored(libc::SIGUSR2));
+        // SAFETY: setting and restoring a disposition of a signal no test or
+        // runtime in this process handles.
+        unsafe {
+            libc::signal(libc::SIGUSR2, libc::SIG_IGN);
+            assert!(signal_is_ignored(libc::SIGUSR2));
+            libc::signal(libc::SIGUSR2, libc::SIG_DFL);
+        }
+        assert!(!signal_is_ignored(libc::SIGUSR2));
     }
 
     #[test]
