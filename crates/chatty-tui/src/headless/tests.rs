@@ -1988,4 +1988,187 @@ mod runner {
             inputs.lock().unwrap()
         );
     }
+
+    // -------------------------------------------------------------------
+    // --usage-file
+    // -------------------------------------------------------------------
+
+    use crate::headless::usage_file::UsageRecorder;
+    use chatty_core::models::token_usage::ApiCallUsage;
+
+    fn usage_chunk(input: u32, read: u32, output: u32, reasoning: u32) -> ScriptedItem {
+        ScriptedItem::Chunk(StreamChunk::ApiCallUsage(ApiCallUsage {
+            turn: 1,
+            input_tokens: input,
+            cache_read_tokens: read,
+            cache_write_tokens: 0,
+            output_tokens: output,
+            reasoning_tokens: reasoning,
+        }))
+    }
+
+    fn stall_chunk() -> ScriptedItem {
+        ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+            StreamErrorKind::Stalled,
+            stalled_stream_message(chatty_core::services::STALL_TIMEOUT),
+        )))
+    }
+
+    fn read_usage(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the usage file exists"))
+            .expect("the usage file is one JSON object")
+    }
+
+    /// Usage is summed per model call over every pass of the run: a pass
+    /// that stalls never gets its turn's `TokenUsage`, but the calls it
+    /// completed before the stall are counted all the same, as are the
+    /// passes headless sent itself to resume it.
+    #[tokio::test]
+    async fn the_usage_file_sums_every_model_call_across_the_runs_passes() {
+        let tool_pass = Scenario {
+            name: "tools_then_stall",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call-2".into(),
+                    name: "read_file".into(),
+                }),
+                usage_chunk(100, 0, 10, 4),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call-1".into(),
+                    result: "fn main() {}".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallError {
+                    id: "call-2".into(),
+                    error: "Error: read_file: no such file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text("Looking further".into())),
+                usage_chunk(50, 150, 5, 0),
+                stall_chunk(),
+            ],
+        };
+        let stalled_again = Scenario {
+            name: "stall_again",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Still here".into())),
+                usage_chunk(30, 0, 3, 0),
+                stall_chunk(),
+            ],
+        };
+        let answer = Scenario {
+            name: "answer",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Done.".into())),
+                usage_chunk(20, 200, 7, 0),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        };
+        let (mut runner, event_rx, started, workspace) =
+            scripted_runner(vec![tool_pass, stalled_again, answer]).await;
+        let path = workspace.path().join("usage.json");
+        runner.set_usage_recorder(UsageRecorder::new(Some(path.clone()), String::new()));
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect("the resumed run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 3);
+        let usage = read_usage(&path);
+        assert_eq!(usage["schema"], 1);
+        // Whole prompts: 100 + (50 + 150) + 30 + (20 + 200).
+        assert_eq!(usage["input_tokens"], 550);
+        assert_eq!(usage["output_tokens"], 25);
+        assert_eq!(usage["cache_read_tokens"], 350);
+        assert_eq!(usage["cache_write_tokens"], serde_json::Value::Null);
+        assert_eq!(usage["reasoning_tokens"], 4);
+        assert_eq!(usage["model_calls"], 4);
+        assert_eq!(usage["tool_calls"], 2);
+        assert_eq!(usage["tool_calls_failed"], 1);
+        assert_eq!(usage["turns"], 3);
+        assert_eq!(usage["follow_up_passes"], 2);
+        assert_eq!(usage["exit"], "completed");
+        assert_eq!(usage["model"], "llama3.2");
+        assert!(usage["duration_ms"].is_u64());
+        eprintln!(
+            "usage file: {}",
+            std::fs::read_to_string(&path).unwrap().trim()
+        );
+    }
+
+    /// A run its time budget ends still leaves its usage, marked as such.
+    #[tokio::test]
+    async fn the_usage_file_is_written_when_the_deadline_ends_the_run() {
+        let answer = Scenario {
+            name: "answer",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Partial answer.".into())),
+                usage_chunk(40, 0, 6, 0),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        };
+        let (mut runner, event_rx, _started, workspace) =
+            scripted_runner(vec![answer, answer_turn("never")]).await;
+        let path = workspace.path().join("usage.json");
+        runner.set_usage_recorder(UsageRecorder::new(Some(path.clone()), String::new()));
+        runner.set_max_duration(SPENT);
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect("running out of time is not a failure");
+
+        let usage = read_usage(&path);
+        assert_eq!(usage["exit"], "deadline");
+        assert_eq!(usage["model_calls"], 1);
+        assert_eq!(usage["input_tokens"], 40);
+        assert_eq!(usage["turns"], 1);
+        assert_eq!(usage["follow_up_passes"], 0);
+    }
+
+    /// A run that fails says so in its usage file, with what it spent.
+    #[tokio::test]
+    async fn the_usage_file_says_error_when_the_run_fails() {
+        let turns: Vec<Scenario> = (0..=HEADLESS_STALL_RESUME_ATTEMPTS)
+            .map(|_| Scenario {
+                name: "stalled",
+                progress: Vec::new(),
+                items: vec![
+                    ScriptedItem::Chunk(StreamChunk::Text("Working".into())),
+                    usage_chunk(10, 0, 1, 0),
+                    stall_chunk(),
+                ],
+            })
+            .collect();
+        let (mut runner, event_rx, _started, workspace) = scripted_runner(turns).await;
+        let path = workspace.path().join("usage.json");
+        runner.set_usage_recorder(UsageRecorder::new(Some(path.clone()), String::new()));
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect_err("a server that never recovers fails the run");
+
+        let usage = read_usage(&path);
+        assert_eq!(usage["exit"], "error");
+        assert_eq!(usage["model_calls"], 1 + HEADLESS_STALL_RESUME_ATTEMPTS);
+    }
+
+    /// An OpenAI-compatible server only reports usage on a stream when the
+    /// request asks for it; without it every call counted zero tokens.
+    #[tokio::test]
+    async fn an_openai_compatible_stream_asks_for_its_usage() {
+        let request =
+            first_request_of_a_coding_run(chatty_core::settings::models::ToolLoading::All).await;
+        assert_eq!(request["stream"], true);
+        assert_eq!(
+            request["stream_options"]["include_usage"], true,
+            "{}",
+            request["stream_options"]
+        );
+    }
 }

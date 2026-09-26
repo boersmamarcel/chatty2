@@ -540,6 +540,7 @@ fn final_metrics_carry_cache_counts_when_the_provider_reported_them() {
         cache_read_tokens: 0,
         cache_write_tokens: 900,
         output_tokens: 10,
+        reasoning_tokens: 0,
     }]));
     usage.add_usage(TokenUsage::from_calls(vec![ApiCallUsage {
         turn: 1,
@@ -547,6 +548,7 @@ fn final_metrics_carry_cache_counts_when_the_provider_reported_them() {
         cache_read_tokens: 1_200,
         cache_write_tokens: 0,
         output_tokens: 20,
+        reasoning_tokens: 0,
     }]));
 
     let conv = make_conversation_data(

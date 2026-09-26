@@ -30,8 +30,8 @@ crossterm.workspace = true
 tui-textarea.workspace = true
 clap.workspace = true
 
-# Async runtime
-tokio.workspace = true
+# Async runtime. `signal`: `--usage-file` writes its last object on SIGINT/SIGTERM.
+tokio = { workspace = true, features = ["signal"] }
 futures.workspace = true
 
 # Utilities
@@ -44,6 +44,11 @@ serde_json.workspace = true
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# `--usage-file` restores a signal's default action and re-raises it after
+# writing, so the exit status is the one the signal would have given.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Scripted stream fixtures shared with chatty-gpui's characterization tests.

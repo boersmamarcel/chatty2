@@ -572,6 +572,7 @@ mod empty_completion {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             output_tokens,
+            reasoning_tokens: 0,
         })
     }
 
@@ -910,6 +911,7 @@ mod totals_and_pricing {
             cache_read_tokens: read,
             cache_write_tokens: write,
             output_tokens: output,
+            reasoning_tokens: 0,
         }
     }
 
@@ -940,6 +942,7 @@ mod totals_and_pricing {
             cache_read_tokens: aggregate.cache_read_tokens,
             cache_write_tokens: aggregate.cache_write_tokens,
             output_tokens: aggregate.output_tokens,
+            reasoning_tokens: 0,
         })));
         items.push(ScriptedItem::Chunk(StreamChunk::Done));
         Scenario {
