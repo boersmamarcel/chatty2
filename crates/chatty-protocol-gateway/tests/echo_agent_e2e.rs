@@ -172,13 +172,13 @@ async fn step_02_echo_agent_is_discovered_and_loaded() {
 
     // The modules/ root is the parent of the echo-agent directory.
     let modules_root = module_dir.parent().expect("modules root");
-    let names = registry
+    let report = registry
         .scan_directory(modules_root)
         .expect("scan_directory failed");
 
     assert!(
-        names.contains(&"echo-agent".to_string()),
-        "echo-agent not discovered; found: {names:?}"
+        report.loaded_names().contains(&"echo-agent"),
+        "echo-agent not discovered; found: {report:?}"
     );
     assert!(
         registry.get("echo-agent").is_some(),

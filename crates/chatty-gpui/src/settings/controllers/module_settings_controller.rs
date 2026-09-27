@@ -364,18 +364,6 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
         };
     }
 
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(err) => {
-            return ScanSnapshot {
-                modules: Vec::new(),
-                scan_error: Some(format!(
-                    "Failed to read module directory {module_dir}: {err}"
-                )),
-            };
-        }
-    };
-
     let mut validation_registry =
         match ModuleRegistry::new(noop_provider(), ResourceLimits::default()) {
             Ok(registry) => registry,
@@ -387,89 +375,103 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
             }
         };
 
-    let mut modules = Vec::new();
-
-    for entry in entries.flatten() {
-        let module_dir = entry.path();
-        if !module_dir.is_dir() {
-            continue;
+    // The registry's scan is the one source of each entry's status: what it
+    // loaded, what is remote, and every failure with its reason (PL-H3).
+    let report = match validation_registry.scan_directory(root) {
+        Ok(report) => report,
+        Err(err) => {
+            return ScanSnapshot {
+                modules: Vec::new(),
+                scan_error: Some(format!(
+                    "Failed to read module directory {module_dir}: {err:#}"
+                )),
+            };
         }
+    };
 
-        let manifest_path = module_dir.join("module.toml");
-        if !manifest_path.exists() {
-            continue;
+    let loaded = report
+        .loaded
+        .into_iter()
+        .map(|(dir, manifest)| discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded));
+    let remote = report
+        .remote
+        .into_iter()
+        .map(|(dir, manifest)| discovered_entry(&dir, manifest, ModuleLoadStatus::Remote));
+    let failed = report.failed.into_iter().map(|(dir, reason)| {
+        let status = ModuleLoadStatus::Error(reason);
+        // A manifest that parses (the failure was its `.wasm` or a duplicate
+        // name) still names the module; otherwise the directory stands in.
+        match ModuleManifest::from_file(&dir.join("module.toml")) {
+            Ok(manifest) => discovered_entry(&dir, manifest, status),
+            Err(_) => invalid_manifest_entry(&dir, status),
         }
-
-        let directory_name = module_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        match ModuleManifest::from_file(&manifest_path) {
-            Ok(manifest) => {
-                let execution_mode = manifest.execution_mode.clone();
-                let is_remote = matches!(execution_mode.as_str(), "remote" | "remote_only");
-
-                // Remote modules run on hive-runner — skip WASM loading entirely.
-                let (status, wasm_file) = if is_remote {
-                    (ModuleLoadStatus::Remote, "remote".to_string())
-                } else {
-                    let st = match validation_registry.load(&module_dir) {
-                        Ok(_) => ModuleLoadStatus::Loaded,
-                        Err(err) => ModuleLoadStatus::Error(err.to_string()),
-                    };
-                    let wf = manifest
-                        .wasm_path
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    (st, wf)
-                };
-
-                modules.push(DiscoveredModuleEntry {
-                    directory_name,
-                    name: manifest.name,
-                    version: manifest.version,
-                    description: manifest.description,
-                    wasm_file,
-                    tools: manifest.capabilities.tools,
-                    chat: manifest.capabilities.chat,
-                    agent: manifest.capabilities.agent,
-                    openai_compat: manifest.protocols.openai_compat,
-                    mcp: manifest.protocols.mcp,
-                    a2a: manifest.protocols.a2a,
-                    status,
-                    execution_mode,
-                });
-            }
-            Err(err) => {
-                modules.push(DiscoveredModuleEntry {
-                    directory_name: directory_name.clone(),
-                    name: directory_name,
-                    version: "invalid".to_string(),
-                    description: "Manifest could not be parsed.".to_string(),
-                    wasm_file: "unknown".to_string(),
-                    tools: Vec::new(),
-                    chat: false,
-                    agent: false,
-                    openai_compat: false,
-                    mcp: false,
-                    a2a: false,
-                    status: ModuleLoadStatus::Error(err.to_string()),
-                    execution_mode: "local".to_string(),
-                });
-            }
-        }
-    }
+    });
+    let mut modules: Vec<DiscoveredModuleEntry> = loaded.chain(remote).chain(failed).collect();
 
     modules.sort_by_cached_key(|module| module.name.to_lowercase());
 
     ScanSnapshot {
         modules,
         scan_error: None,
+    }
+}
+
+fn directory_name(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn discovered_entry(
+    dir: &Path,
+    manifest: ModuleManifest,
+    status: ModuleLoadStatus,
+) -> DiscoveredModuleEntry {
+    let wasm_file = if manifest.execution_mode.is_remote() {
+        "remote".to_string()
+    } else {
+        manifest
+            .wasm_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    DiscoveredModuleEntry {
+        directory_name: directory_name(dir),
+        name: manifest.name,
+        version: manifest.version,
+        description: manifest.description,
+        wasm_file,
+        tools: manifest.capabilities.tools,
+        chat: manifest.capabilities.chat,
+        agent: manifest.capabilities.agent,
+        openai_compat: manifest.protocols.openai_compat,
+        mcp: manifest.protocols.mcp,
+        a2a: manifest.protocols.a2a,
+        status,
+        execution_mode: manifest.execution_mode.to_string(),
+    }
+}
+
+fn invalid_manifest_entry(dir: &Path, status: ModuleLoadStatus) -> DiscoveredModuleEntry {
+    let directory_name = directory_name(dir);
+    DiscoveredModuleEntry {
+        directory_name: directory_name.clone(),
+        name: directory_name,
+        version: "invalid".to_string(),
+        description: "Manifest could not be parsed.".to_string(),
+        wasm_file: "unknown".to_string(),
+        tools: Vec::new(),
+        chat: false,
+        agent: false,
+        openai_compat: false,
+        mcp: false,
+        a2a: false,
+        status,
+        execution_mode: "local".to_string(),
     }
 }
 

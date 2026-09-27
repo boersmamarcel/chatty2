@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub enum ModuleLoadStatus {
     Loaded,
-    #[allow(dead_code)]
+    /// The registry's scan refused the module, with its reason.
     Error(String),
     /// Module runs remotely on hive-runner; no local WASM binary.
     Remote,
