@@ -84,6 +84,8 @@ struct ShellProcess {
     terminal: Arc<TerminalHandle>,
     tap: Arc<Tap>,
     is_sandboxed: bool,
+    /// Why it runs unsandboxed although a sandbox was wanted.
+    unsandboxed_reason: Option<String>,
     /// Private (0700) directory holding [`RUNNER`] and each agent command's
     /// file while it runs; removed with the process.
     dir: tempfile::TempDir,
@@ -103,7 +105,19 @@ struct Live {
     terminal: Arc<TerminalHandle>,
     tap: Arc<Tap>,
     is_sandboxed: bool,
+    unsandboxed_reason: Option<String>,
 }
+
+/// bubblewrap, from `PATH`.
+const BWRAP: &str = "bwrap";
+
+/// Whether this platform has a sandbox for the shell (bubblewrap,
+/// sandbox-exec): only there is an unsandboxed shell worth a reason.
+const SANDBOX_EXPECTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
+/// How long the bubblewrap probe ([`probe_bwrap`]) may take.
+#[cfg(target_os = "linux")]
+const SANDBOX_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long the login-profile init may take before the session gives up on
 /// it and runs without the profile (see [`LOGIN_PROFILE_INIT`]). Also bounds
@@ -606,6 +620,9 @@ pub struct ShellSession {
     /// directory (another bash version in a container).
     #[cfg(test)]
     test_shell: Option<TestShell>,
+    /// Tests: this bubblewrap instead of the one on `PATH` (a fake).
+    #[cfg(test)]
+    test_bwrap: Option<String>,
 }
 
 #[cfg(test)]
@@ -642,6 +659,8 @@ impl ShellSession {
             home_override: None,
             #[cfg(test)]
             test_shell: None,
+            #[cfg(test)]
+            test_bwrap: None,
         }
     }
 
@@ -675,6 +694,7 @@ impl ShellSession {
             terminal: Arc::clone(&proc.terminal),
             tap: Arc::clone(&proc.tap),
             is_sandboxed: proc.is_sandboxed,
+            unsandboxed_reason: proc.unsandboxed_reason.clone(),
         });
     }
 
@@ -708,6 +728,17 @@ impl ShellSession {
         self.live().as_ref().map(|live| live.is_sandboxed)
     }
 
+    /// Why the running shell is not sandboxed although this platform has a
+    /// sandbox (bubblewrap can't create its namespaces here, isn't
+    /// installed, or the sandboxed shell died before its first prompt).
+    /// `None` when it is sandboxed, when no shell runs, or when there is no
+    /// sandbox to expect (Windows).
+    pub fn sandbox_unavailable_reason(&self) -> Option<String> {
+        self.live()
+            .as_ref()
+            .and_then(|live| live.unsandboxed_reason.clone())
+    }
+
     /// Recent agent commands, oldest first, as `(id, command)`. The id is
     /// the one in the command line's link (see [`agent_command_id`]).
     pub fn agent_commands(&self) -> Vec<(String, String)> {
@@ -719,28 +750,44 @@ impl ShellSession {
             .collect()
     }
 
-    /// Check if sandboxing is available on this platform
+    /// Check if sandboxing is available on this platform. On Linux this runs
+    /// bubblewrap for real, the way a session without network isolation
+    /// would (see [`Self::sandbox_check`]): an installed `bwrap` that can't
+    /// create its namespaces (Ubuntu 24.04's AppArmor default) is not
+    /// available.
     pub fn can_sandbox() -> bool {
+        Self::sandbox_check(BWRAP, false).is_ok()
+    }
+
+    /// Whether a shell can be sandboxed here, and if not, why. Linux: the
+    /// cached [`probe_bwrap`] of `bwrap`; macOS: `sandbox-exec` is always
+    /// there.
+    fn sandbox_check(bwrap: &str, network_isolation: bool) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
-            std::process::Command::new("bwrap")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            probe_bwrap(bwrap, network_isolation)
         }
 
         #[cfg(target_os = "macos")]
         {
-            true
+            let _ = (bwrap, network_isolation);
+            Ok(())
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            false
+            let _ = (bwrap, network_isolation);
+            Err("sandboxing is not supported on this platform".into())
         }
+    }
+
+    /// The bubblewrap to run: `bwrap` from `PATH` (tests: a fake).
+    fn bwrap(&self) -> &str {
+        #[cfg(test)]
+        if let Some(bwrap) = &self.test_bwrap {
+            return bwrap;
+        }
+        BWRAP
     }
 
     /// Return the network_isolation setting this session was created with
@@ -807,7 +854,9 @@ impl ShellSession {
     /// Falls back to unsandboxed execution if sandboxing is unavailable.
     /// The shell runs its init ([`shell_init`]: the login profile, the
     /// secrets, the marks) before its first prompt; a login profile that
-    /// hangs or ends the shell respawns it without the profile.
+    /// hangs or ends the shell respawns it without the profile. A sandboxed
+    /// shell that still exits before its first prompt is replaced, once, by
+    /// an unsandboxed one.
     async fn ensure_started(&self, process: &mut Option<ShellProcess>) -> Result<()> {
         if let Some(proc) = process.as_ref() {
             match proc.tap.lock().exited {
@@ -825,6 +874,9 @@ impl ShellSession {
 
         info!(workspace = ?self.workspace_dir, "Spawning persistent shell session");
 
+        // Set once a sandboxed shell died before its first prompt: why the
+        // next one runs without the sandbox.
+        let mut sandbox_died: Option<String> = None;
         loop {
             let load_login_profile = self.load_login_profile.load(Ordering::Relaxed);
             let dir = session_dir()?;
@@ -834,9 +886,15 @@ impl ShellSession {
             let custom = self.test_shell.as_ref().map(|shell| shell(dir.path()));
             #[cfg(not(test))]
             let custom = None;
+            let sandbox = match &sandbox_died {
+                Some(reason) => Err(reason.clone()),
+                None => Self::sandbox_check(self.bwrap(), self.network_isolation),
+            };
             let proc = Self::spawn_shell(
                 &self.workspace_dir,
                 self.network_isolation,
+                self.bwrap(),
+                sandbox,
                 self.home_override.as_deref(),
                 &init,
                 dir,
@@ -854,6 +912,15 @@ impl ShellSession {
                     // without it rather than lose the shell.
                     warn!(error = %e, "Login profile did not load; continuing without it");
                     self.load_login_profile.store(false, Ordering::Relaxed);
+                    proc.kill();
+                }
+                Err(e)
+                    if proc.is_sandboxed
+                        && sandbox_died.is_none()
+                        && proc.tap.lock().exited.is_some() =>
+                {
+                    warn!(error = %e, "The sandboxed shell died before its first prompt; falling back to an unsandboxed shell");
+                    sandbox_died = Some(format!("the sandboxed shell did not start: {e}"));
                     proc.kill();
                 }
                 Err(e) => {
@@ -894,48 +961,65 @@ impl ShellSession {
         })
     }
 
-    /// Spawn the shell: inside a sandbox when one is available, else (or
-    /// when the sandboxed spawn fails) unsandboxed.
+    /// Spawn the shell: inside a sandbox when `sandbox` says one is
+    /// available, else (or when the sandboxed spawn fails) unsandboxed,
+    /// keeping the reason.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_shell(
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        bwrap: &str,
+        sandbox: Result<(), String>,
         home: Option<&str>,
         init: &str,
         dir: tempfile::TempDir,
         custom: Option<TerminalConfig>,
     ) -> Result<ShellProcess> {
         let session_dir = dir.path().to_path_buf();
-        let process = |(terminal, tap), is_sandboxed| ShellProcess {
+        let process = |(terminal, tap), unsandboxed_reason: Option<String>| ShellProcess {
             terminal,
             tap,
-            is_sandboxed,
+            is_sandboxed: unsandboxed_reason.is_none(),
+            // Only where a sandbox was to be expected (not Windows).
+            unsandboxed_reason: unsandboxed_reason.filter(|_| SANDBOX_EXPECTED),
             dir,
         };
         if let Some(config) = custom {
-            return Ok(process(Self::spawn_terminal(config, home, init)?, false));
+            return Ok(ShellProcess {
+                is_sandboxed: false,
+                ..process(Self::spawn_terminal(config, home, init)?, None)
+            });
         }
-        if Self::can_sandbox() {
-            match Self::sandboxed_config(workspace_dir, network_isolation, &session_dir)
-                .and_then(|config| Self::spawn_terminal(config, home, init))
-            {
-                Ok(spawned) => {
-                    info!("Shell session spawned inside sandbox");
-                    return Ok(process(spawned, true));
-                }
-                Err(e) => {
-                    warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
+        let reason = match &sandbox {
+            Ok(()) => {
+                match Self::sandboxed_config(workspace_dir, network_isolation, bwrap, &session_dir)
+                    .and_then(|config| Self::spawn_terminal(config, home, init))
+                {
+                    Ok(spawned) => {
+                        info!("Shell session spawned inside sandbox");
+                        return Ok(process(spawned, None));
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Sandboxed shell spawn failed, falling back to unsandboxed");
+                        format!("the sandboxed shell could not be spawned: {e}")
+                    }
                 }
             }
-        } else {
-            info!("Sandboxing not available, spawning unsandboxed shell session");
-        }
+            Err(reason) => {
+                info!(reason = %reason, "Sandboxing not available, spawning unsandboxed shell session");
+                reason.clone()
+            }
+        };
         let config = TerminalConfig {
             shell: Some("/bin/bash".to_string()),
             args: bash_args(),
             cwd: workspace_dir.as_ref().map(Into::into),
             ..TerminalConfig::default()
         };
-        Ok(process(Self::spawn_terminal(config, home, init)?, false))
+        Ok(process(
+            Self::spawn_terminal(config, home, init)?,
+            Some(reason),
+        ))
     }
 
     /// Start `config` on a PTY with the agent's environment and the byte tap.
@@ -984,33 +1068,38 @@ impl ShellSession {
     fn sandboxed_config(
         workspace_dir: &Option<String>,
         network_isolation: bool,
+        bwrap: &str,
         session_dir: &std::path::Path,
     ) -> Result<TerminalConfig> {
         #[cfg(target_os = "linux")]
         {
-            Ok(Self::sandboxed_config_linux(
-                workspace_dir,
-                network_isolation,
-                session_dir,
-            ))
+            let mut args = Self::bwrap_args(workspace_dir, network_isolation, session_dir);
+            args.push("/bin/bash".into());
+            args.extend(bash_args());
+            Ok(TerminalConfig {
+                shell: Some(bwrap.to_string()),
+                args,
+                ..TerminalConfig::default()
+            })
         }
 
         // macOS: the profile allows reads outside the credential paths it
         // lists, and the session directory is under `$TMPDIR`.
         #[cfg(target_os = "macos")]
         {
-            let _ = session_dir;
+            let _ = (bwrap, session_dir);
             Self::sandboxed_config_macos(workspace_dir, network_isolation)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (workspace_dir, network_isolation, session_dir);
+            let _ = (workspace_dir, network_isolation, bwrap, session_dir);
             Err(anyhow!("Sandboxing not supported on this platform"))
         }
     }
 
-    /// bubblewrap around bash on Linux.
+    /// bubblewrap's arguments around bash on Linux (the program to run
+    /// inside goes after them).
     ///
     /// No `--new-session`: it would `setsid()` bash away from the PTY, and
     /// without a controlling terminal Ctrl+C and job control stop working.
@@ -1019,11 +1108,11 @@ impl ShellSession {
     /// the controlling terminal is this private PTY, whose only reader is
     /// the sandboxed bash itself.
     #[cfg(target_os = "linux")]
-    fn sandboxed_config_linux(
+    fn bwrap_args(
         workspace_dir: &Option<String>,
         network_isolation: bool,
         session_dir: &std::path::Path,
-    ) -> TerminalConfig {
+    ) -> Vec<String> {
         let mut args: Vec<String> = [
             // Bind essential system directories as read-only
             "--ro-bind",
@@ -1072,14 +1161,7 @@ impl ShellSession {
             args.extend(["--bind", workspace, workspace].map(String::from));
             args.extend(["--chdir", workspace].map(String::from));
         }
-
-        args.push("/bin/bash".into());
-        args.extend(bash_args());
-        TerminalConfig {
-            shell: Some("bwrap".to_string()),
-            args,
-            ..TerminalConfig::default()
-        }
+        args
     }
 
     /// sandbox-exec around bash on macOS.
@@ -1615,6 +1697,96 @@ impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
+}
+
+/// Whether `bwrap` can run the session's sandbox here: `Err` carries why
+/// not. `bwrap --version` succeeding says nothing: with Ubuntu 24.04's
+/// default `kernel.apparmor_restrict_unprivileged_userns = 1` it is
+/// installed but can't create a user namespace, and a shell started in it
+/// exits at once. So this runs `bwrap`, with the arguments a session
+/// without a workspace uses (`network_isolation` picks `--share-net`), around
+/// `bash -c true`; only exit 0 is available. Once per process for each
+/// `(bwrap, network_isolation)`, bounded by [`SANDBOX_PROBE_TIMEOUT`]; a
+/// failure is logged once.
+#[cfg(target_os = "linux")]
+fn probe_bwrap(bwrap: &str, network_isolation: bool) -> Result<(), String> {
+    type Probes = HashMap<(String, bool), Result<(), String>>;
+    static PROBES: std::sync::OnceLock<std::sync::Mutex<Probes>> = std::sync::OnceLock::new();
+    // Held while probing: a second session waits for the first answer
+    // rather than probing again.
+    let mut probes = PROBES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    probes
+        .entry((bwrap.to_string(), network_isolation))
+        .or_insert_with(|| {
+            let result = run_bwrap_probe(bwrap, network_isolation);
+            match &result {
+                Ok(()) => debug!(bwrap, network_isolation, "bubblewrap sandbox works"),
+                Err(reason) => warn!(bwrap, network_isolation, %reason, "bubblewrap sandbox unavailable; the agent's shell runs unsandboxed"),
+            }
+            result
+        })
+        .clone()
+}
+
+/// One run of the [`probe_bwrap`] check.
+#[cfg(target_os = "linux")]
+fn run_bwrap_probe(bwrap: &str, network_isolation: bool) -> Result<(), String> {
+    use std::io::Read;
+    let dir = session_dir().map_err(|e| e.to_string())?;
+    let mut args = ShellSession::bwrap_args(&None, network_isolation, dir.path());
+    args.extend(["/bin/bash", "--norc", "--noprofile", "-c", "true"].map(String::from));
+    let mut child = std::process::Command::new(bwrap)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "bubblewrap (bwrap) is not installed".to_string(),
+            _ => format!("bwrap could not be run: {e}"),
+        })?;
+    let deadline = std::time::Instant::now() + SANDBOX_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "bwrap did not finish its check within {}s",
+                    SANDBOX_PROBE_TIMEOUT.as_secs()
+                ));
+            }
+            Err(e) => return Err(format!("bwrap could not be waited for: {e}")),
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut said = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut said);
+    }
+    let restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|value| value.trim() == "1");
+    let what = if restricted {
+        "bwrap can't create a user namespace on this system (AppArmor)"
+    } else {
+        "bwrap can't start its sandbox on this system"
+    };
+    let said = said.trim();
+    Err(if said.is_empty() {
+        format!("{what} (exit status {status})")
+    } else {
+        format!("{what}: {said}")
+    })
 }
 
 /// A fresh private directory for one shell: [`RUNNER`] in it, and room for
