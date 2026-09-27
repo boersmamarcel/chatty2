@@ -19,7 +19,8 @@ picked up by the next agent, and by `reload` or a new scan here.
 ## Public surface
 
 - [`ModuleRegistry`] — owns all loaded modules, exposes
-  `scan_directory`, `load`, `unload`, `reload`, `get`, `module_names`
+  `scan_directory`, `load`, `unload`, `reload`, `get`, `manifest`,
+  `module_names`, `len` and `is_empty`
 - [`ModuleManifest`] + [`ModuleCapabilities`], [`ModuleProtocols`],
   [`ModuleResourceLimits`]
 
@@ -27,8 +28,13 @@ See the rustdoc on [`ModuleRegistry`] for the canonical usage example.
 
 ## Where modules live by default
 
-`~/.chatty/modules/` (override via `ChattyApp` settings). Each subdirectory
-is one module: a `.wasm` plus a `module.toml`.
+Platform-native app-data directories, not a single fixed path:
+`~/Library/Application Support/chatty/modules/` on macOS,
+`~/.local/share/chatty/modules/` (or `$XDG_DATA_HOME/chatty/modules/`) on
+Linux, `%APPDATA%\chatty\modules\` on Windows — overridable in module
+settings. `.chatty/modules` (relative to the working directory) is only a
+last-resort fallback when the platform data directory can't be determined.
+Each subdirectory is one module: a `.wasm` plus a `module.toml`.
 
 See [`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md)
 for the end-to-end module flow.

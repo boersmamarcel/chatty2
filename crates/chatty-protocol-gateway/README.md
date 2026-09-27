@@ -260,11 +260,16 @@ silently running the worker unisolated.
 
 ## Running
 
-```sh
-cargo run -p chatty-protocol-gateway -- --modules-dir ~/.local/share/chatty/modules
-```
+This crate is a library, not a binary — it has no `[[bin]]` target and no
+`--modules-dir` CLI. An embedder constructs a `ModuleRegistry`, calls
+`scan_directory`, and passes it to `ProtocolGateway::new(registry, port)`.
+The desktop (`chatty-gpui`) and `chatty-tui --broker` both do this; see their
+module-settings / broker wiring for a worked example, or
+`crates/chatty-protocol-gateway/tests/` for a minimal one.
 
-The server binds to `http://0.0.0.0:8420` by default.
+The gateway binds to `127.0.0.1:<port>` — never `0.0.0.0` — on whatever port
+the embedder passes to `ProtocolGateway::new`; the desktop defaults that port
+to `8420`.
 
 ## Being a worker (`worker` feature)
 

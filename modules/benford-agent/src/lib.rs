@@ -10,11 +10,11 @@
 //!
 //! ## Usage
 //!
-//! Via the chatty `/agent` command (local module runtime):
-//!
-//! ```text
-//! /agent benford-agent Analyze these invoice amounts: 1234 4521 891 2340 567 8901
-//! ```
+//! From a conversation, via the `invoke_agent` tool (not the `/agent` slash
+//! command, which only dispatches by name to a *remote* agent registered in
+//! Settings → A2A Agents): ask the assistant to use `benford-agent`, and it
+//! calls `invoke_agent { "agent": "benford-agent", "prompt": "..." }` after
+//! finding it in `list_agents`.
 //!
 //! Via A2A HTTP (protocol gateway exposes `/a2a/benford-agent`):
 //!
