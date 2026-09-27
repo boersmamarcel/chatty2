@@ -365,18 +365,25 @@ impl ModuleRegistry {
         Ok(name)
     }
 
+    /// The registry's limits, lowered by the manifest's `[resources]`.
+    ///
+    /// A manifest may only lower a limit (0 means "not set"), and the result
+    /// never exceeds the host ceilings (PL-D3).
     fn limits_from_manifest(&self, manifest: &ModuleManifest) -> ResourceLimits {
         let mut limits = self.default_limits.clone();
 
         if manifest.resources.max_memory_mb > 0 {
-            limits.max_memory_bytes = manifest.resources.max_memory_mb * 1024 * 1024;
+            let bytes = manifest.resources.max_memory_mb.saturating_mul(1024 * 1024);
+            limits.max_memory_bytes = limits.max_memory_bytes.min(bytes);
         }
 
         if manifest.resources.max_execution_ms > 0 {
-            limits.max_execution_ms = manifest.resources.max_execution_ms;
+            limits.max_execution_ms = limits
+                .max_execution_ms
+                .min(manifest.resources.max_execution_ms);
         }
 
-        limits
+        limits.clamped()
     }
 }
 
@@ -475,6 +482,36 @@ max_execution_ms = 10000
         let limits = reg.limits_from_manifest(&manifest);
         assert_eq!(limits.max_memory_bytes, 128 * 1024 * 1024);
         assert_eq!(limits.max_execution_ms, 10000);
+    }
+
+    #[test]
+    fn manifest_limits_are_clamped_to_ceilings() {
+        let reg = noop_registry();
+        let manifest = crate::manifest::ModuleManifest::from_str(
+            r#"
+[module]
+name = "x"
+version = "1.0.0"
+wasm = "x.wasm"
+
+[resources]
+max_memory_mb = 9007199254740992
+max_execution_ms = 9223372036854775807
+"#,
+            std::path::Path::new("/fake/module.toml"),
+        )
+        .unwrap();
+
+        let limits = reg.limits_from_manifest(&manifest);
+        assert_eq!(
+            limits.max_memory_bytes,
+            chatty_wasm_runtime::MAX_MEMORY_BYTES_CEILING
+        );
+        assert_eq!(
+            limits.max_execution_ms,
+            chatty_wasm_runtime::MAX_EXECUTION_MS_CEILING
+        );
+        assert_eq!(limits.max_fuel, chatty_wasm_runtime::MAX_FUEL_CEILING);
     }
 
     #[test]
