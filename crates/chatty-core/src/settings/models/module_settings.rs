@@ -35,15 +35,22 @@ pub struct ModuleSettingsModel {
     /// provider reports about itself.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub endpoint_budgets: HashMap<String, usize>,
-    /// The broker's virtual agents (ADR-0011 C10): each is a name the leader
-    /// can delegate to, with its own model and tool set. Empty means the one
-    /// default worker, `local-agent`, which runs the roster's default model
-    /// with the leader's tools.
+    /// The broker's virtual agents (ADR-0011 C10), by agent spec name
+    /// (AGE-614): each names a spec in `<workspace>/.chatty/agents/`, the
+    /// data directory's `chatty/agents/`, or the presets. Empty means the
+    /// one default worker, `local-agent`, which runs the roster's default
+    /// model with the leader's tools.
     ///
     /// Roles are declared here rather than passed on `invoke_agent`, so the
-    /// leader's tool schema and prompt stay identical whatever the team.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub virtual_agents: Vec<VirtualAgentConfig>,
+    /// leader's tool schema and prompt stay identical whatever the team. A
+    /// file still listing agent objects (the old `VirtualAgentConfig`
+    /// shape) fails to load, naming this field.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_roster"
+    )]
+    pub virtual_agents: Vec<String>,
     /// What the whole team shares, as opposed to what one agent does
     /// (AGE-406). Absent in a settings file written before it existed, and
     /// then exactly the empty declaration.
@@ -76,51 +83,28 @@ impl TeamConfig {
     }
 }
 
-/// One named virtual agent the broker publishes (ADR-0011 C10).
-///
-/// Each becomes a worker runner whose children get `--model <model>` when
-/// set, `--disable <groups>` when set, `--max-agent-turns <n>` when set,
-/// then `extra_args`, on top of the flags every worker gets.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct VirtualAgentConfig {
-    /// The name callers address at `/a2a/{name}`, e.g. `local-reviewer`.
-    pub name: String,
-    /// The model the worker runs, as `chatty-tui --model` resolves it (id,
-    /// name, or a substring of the model identifier). `None` leaves the
-    /// child to resolve the roster's default, as an undeclared worker does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Tool groups the worker runs without, as `chatty-tui --disable` names
-    /// them: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`,
-    /// `docker-exec`. Composes with `tools` (AGE-452): a profile only ever
-    /// takes tools away, so this can narrow a named profile further, e.g.
-    /// disabling `ask_user` for a worker that otherwise uses `reviewer`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disable_tools: Vec<String>,
-    /// The role's standing instructions, appended to the worker's system
-    /// prompt (ADR-0011 C11). Without one, a reviewer only knows it is a
-    /// reviewer if the leader says so in the task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preamble: Option<String>,
-    /// The named tool profile the worker runs — `coordinator`, `coder` or
-    /// `reviewer` (`chatty_core::factories::tool_profile`). An allowlist of
-    /// tool *names*, composed with `disable_tools`' whole groups (AGE-452):
-    /// both apply, so `disable_tools` can only ever narrow the profile
-    /// further, never re-enable a tool the profile already excludes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<String>,
-    /// This worker's own turn budget, overriding the default (10,
-    /// `execution_settings::default_max_agent_turns`) its `chatty-tui`
-    /// child would otherwise run with. Unlike `TeamFile::max_agent_turns`
-    /// (the leader's budget, `services::team::Team::apply_turn_budget`),
-    /// this is per named agent, so one roster can give a multi-step worker
-    /// more turns without changing the leader's own budget or any other
-    /// worker's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_agent_turns: Option<u32>,
-    /// Any further `chatty-tui` flags, appended verbatim.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_args: Vec<String>,
+/// `virtual_agents` as spec names. An agent object — the `VirtualAgentConfig`
+/// shape before agent specs — is refused with where its fields went, not
+/// read (no backward compatibility, PL-D2).
+fn deserialize_roster<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|entry| match entry {
+            serde_json::Value::String(name) => Ok(name),
+            serde_json::Value::Object(_) => Err(D::Error::custom(
+                "virtual_agents lists an agent object (the old VirtualAgentConfig shape), \
+                 which is no longer read: write each agent as a spec in \
+                 .chatty/agents/<name>.toml and list its name here",
+            )),
+            other => Err(D::Error::custom(format!(
+                "virtual_agents entries are agent spec names, got {other}"
+            ))),
+        })
+        .collect()
 }
 
 impl ModuleSettingsModel {
@@ -146,7 +130,7 @@ impl ModuleSettingsModel {
         if self.virtual_agents.is_empty() {
             vec![crate::tools::LOCAL_AGENT_NAME.to_string()]
         } else {
-            self.virtual_agents.iter().map(|a| a.name.clone()).collect()
+            self.virtual_agents.clone()
         }
     }
 }
@@ -340,25 +324,14 @@ mod tests {
     #[test]
     fn declared_virtual_agents_survive_a_roundtrip_and_name_themselves() {
         let original = ModuleSettingsModel {
-            virtual_agents: vec![
-                VirtualAgentConfig {
-                    name: "local-coder".to_string(),
-                    model: Some("qwen3:4b".to_string()),
-                    ..VirtualAgentConfig::default()
-                },
-                VirtualAgentConfig {
-                    name: "local-reviewer".to_string(),
-                    model: Some("gemma4:26b".to_string()),
-                    disable_tools: vec!["fs-write".into(), "shell".into(), "git".into()],
-                    preamble: Some("You review, you do not edit.".to_string()),
-                    tools: Some("reviewer".to_string()),
-                    max_agent_turns: Some(30),
-                    extra_args: vec!["--enable".into(), "fetch".into()],
-                },
-            ],
+            virtual_agents: vec!["local-coder".to_string(), "local-reviewer".to_string()],
             ..ModuleSettingsModel::default()
         };
         let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains(r#""virtual_agents":["local-coder","local-reviewer"]"#),
+            "{json}"
+        );
         let restored: ModuleSettingsModel = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.virtual_agents, original.virtual_agents);
         assert_eq!(
@@ -366,33 +339,25 @@ mod tests {
             vec!["local-coder".to_string(), "local-reviewer".to_string()],
             "declared names replace the default worker rather than joining it"
         );
+    }
 
-        // A role survives the file as written (ADR-0011 C11).
-        let reviewer = &restored.virtual_agents[1];
-        assert_eq!(reviewer.tools.as_deref(), Some("reviewer"));
-        assert_eq!(
-            reviewer.preamble.as_deref(),
-            Some("You review, you do not edit.")
-        );
-        assert_eq!(reviewer.max_agent_turns, Some(30));
+    /// AGE-614, no backward compatibility: a settings file still declaring
+    /// agents as objects fails to load, naming the field and where agents
+    /// are declared now.
+    #[test]
+    fn old_virtual_agents_config_is_refused() {
+        let err = serde_json::from_str::<ModuleSettingsModel>(
+            r#"{"virtual_agents":[{"name":"local-coder","model":"qwen3:4b","extra_args":[]}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("virtual_agents"), "{err}");
+        assert!(err.contains(".chatty/agents/"), "{err}");
 
-        // Neither is written out when unset, so a pre-C11 file round-trips
-        // byte for byte.
-        let coder = serde_json::to_string(&original.virtual_agents[0]).unwrap();
-        assert!(!coder.contains("preamble"), "{coder}");
-        assert!(!coder.contains("tools"), "{coder}");
-        assert!(!coder.contains("max_agent_turns"), "{coder}");
-
-        // The schema the docs promise: a declaration needs only a name.
-        let minimal: ModuleSettingsModel =
-            serde_json::from_str(r#"{"virtual_agents":[{"name":"local-coder"}]}"#).unwrap();
-        assert_eq!(
-            minimal.virtual_agents,
-            vec![VirtualAgentConfig {
-                name: "local-coder".to_string(),
-                ..VirtualAgentConfig::default()
-            }]
-        );
+        let err = serde_json::from_str::<ModuleSettingsModel>(r#"{"virtual_agents":[7]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("virtual_agents"), "{err}");
     }
 
     /// AGE-406 Do item 3: `team.verification` is optional, round-trips, and

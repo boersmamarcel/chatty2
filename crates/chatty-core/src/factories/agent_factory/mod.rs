@@ -59,7 +59,9 @@ use preamble_builder::build_preamble;
 use tool_collector::*;
 use tool_registry::active_native_tool_names;
 
-pub use build_context::{AgentBuildContext, AgentRole, AgentServices, gated_exec_settings};
+pub use build_context::{
+    AgentBuildContext, AgentRole, AgentServices, SpecBuild, gated_exec_settings,
+};
 pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
 pub(crate) use provider_builder::ollama_think;
 pub use request_recorder::RequestRecorder;

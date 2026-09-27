@@ -1092,7 +1092,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
-                role: Default::default(),
+                spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,
                 services_loaded: true,
@@ -1131,17 +1131,12 @@ mod tests {
         use chatty_core::services::StreamSurface;
         use chatty_core::services::team::load_team;
         use chatty_core::settings::models::models_store::ModelConfig;
-        use chatty_core::settings::models::module_settings::{
-            ModuleSettingsModel, VirtualAgentConfig,
-        };
+        use chatty_core::settings::models::module_settings::ModuleSettingsModel;
         use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
         use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
 
         let on_disk = ModuleSettingsModel {
-            virtual_agents: vec![VirtualAgentConfig {
-                name: "on-disk-agent".to_string(),
-                ..VirtualAgentConfig::default()
-            }],
+            virtual_agents: vec!["on-disk-agent".to_string()],
             ..ModuleSettingsModel::default()
         };
         let mut team = load_team("coder-reviewer", None, None).expect("the preset loads");
@@ -1168,7 +1163,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
-                role: Default::default(),
+                spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: Some(team),
                 is_sub_agent: false,
                 services_loaded: true,

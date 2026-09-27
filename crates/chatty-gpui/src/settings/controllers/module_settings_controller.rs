@@ -7,6 +7,8 @@ use crate::settings::models::{
     ModuleLoadStatus,
 };
 use anyhow::{Context, Result};
+#[cfg(unix)]
+use chatty_core::agent_spec::load_roster;
 use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
 #[cfg(unix)]
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
@@ -780,10 +782,25 @@ pub fn refresh_runtime(cx: &mut App) {
                                         .try_global::<ProviderModel>()
                                         .map(|p| p.providers())
                                         .unwrap_or(&[]);
+                                    // The roster's specs, looked up from the
+                                    // workspace a worker's tree comes from. A
+                                    // spec that does not load leaves the
+                                    // broker without workers, loudly.
+                                    let agents = match load_roster(
+                                        &settings.virtual_agents,
+                                        exec.workspace_dir.as_deref().map(Path::new),
+                                    ) {
+                                        Ok(agents) => agents,
+                                        Err(e) => {
+                                            error!(error = ?e, "Failed to load the virtual agents' specs");
+                                            return (exec.workspace_dir.clone(), Vec::new());
+                                        }
+                                    };
                                     let specs = resolve_virtual_agents(
                                         models,
                                         providers,
                                         &settings,
+                                        &agents,
                                         &common_args,
                                     );
                                     (exec.workspace_dir.clone(), specs)

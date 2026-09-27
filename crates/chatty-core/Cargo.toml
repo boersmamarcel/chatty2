@@ -16,6 +16,7 @@ bytes.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 dirs.workspace = true
+toml = "0.8"
 uuid.workspace = true
 
 # Docker sandbox

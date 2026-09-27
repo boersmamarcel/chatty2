@@ -1,22 +1,20 @@
 //! Goldens for the `coder-reviewer` team (AGE-614): what its leader and
 //! workers are built with, and the leader's prompt-cache prefix.
 //!
-//! The goldens were recorded from `main` before agents became specs, so a
-//! rewrite of how a team is declared has to reproduce them exactly.
+//! The goldens were recorded from `main` before agents became specs (this
+//! file's first commit built both the old way), so declaring the team as
+//! agent specs has to reproduce them exactly.
 //! `UPDATE_GOLDENS=1` rewrites them.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use chatty_core::factories::agent_factory::{
-    AgentBuildContext, AgentClient, AgentServices, gated_exec_settings,
-};
+use chatty_core::factories::agent_factory::{AgentBuildContext, AgentClient, AgentServices};
 use chatty_core::models::clarification_store::ClarificationStore;
 use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
 use chatty_core::models::write_approval_store::WriteApprovalStore;
 use chatty_core::services::team::load_team;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
-use chatty_core::settings::models::execution_settings::ApprovalMode;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
@@ -24,7 +22,7 @@ use clap::Parser;
 use rig_agent::completion::Prompt;
 use serde_json::{Value, json};
 
-use crate::{Cli, apply_tool_only, apply_tool_overrides, resolve_role, unattended_run_limits};
+use crate::{Cli, apply_run_limits, run_spec};
 
 /// The workspace every context is built in; only its name reaches a golden.
 const WORKSPACE: &str = "/golden/workspace";
@@ -81,32 +79,52 @@ fn project(ctx: &AgentBuildContext, model: Option<&str>) -> Value {
     })
 }
 
+/// What `chatty-tui` builds for `argv`, exactly as `run()` does: the team
+/// and the spec it runs as, its limits, then `AgentBuildContext::from_spec`.
+fn context_for(
+    argv: &[String],
+    workspace: &str,
+    local_agents: Vec<String>,
+) -> (AgentBuildContext, Option<String>) {
+    let cli = Cli::try_parse_from(argv).expect("the argv parses");
+    let team = cli
+        .team
+        .as_deref()
+        .map(|id| load_team(id, None, None).expect("the team loads"));
+    let mut spec = run_spec(&cli, team.as_ref(), None).expect("the spec is valid");
+    let mut settings = base_settings(workspace);
+    apply_run_limits(&cli, team.as_ref(), &mut spec, &mut settings).unwrap();
+    let built = AgentBuildContext::from_spec(
+        &spec,
+        AgentServices {
+            exec_settings: Some(settings),
+            local_agents,
+            ..AgentServices::default()
+        },
+    )
+    .expect("the spec builds");
+    let ctx = AgentBuildContext {
+        team_skill: team.as_ref().and_then(|t| t.skill()),
+        unattended: true,
+        ..built.context
+    };
+    (ctx, built.model)
+}
+
 /// The `coder-reviewer` leader as `--team coder-reviewer --headless` builds
 /// it: its context and the model it asks for.
 fn leader_context(workspace: &str) -> (AgentBuildContext, Option<String>) {
     let team = load_team("coder-reviewer", None, None).expect("the preset loads");
-    let mut settings = base_settings(workspace);
-    team.apply_turn_budget(&mut settings);
-    let (turns, _) = unattended_run_limits(None, team.file.max_agent_turns, None);
-    settings.max_agent_turns = turns;
-    let role = resolve_role(
-        team.file.leader.profile.as_deref(),
-        team.file.leader.preamble.as_deref(),
-    )
-    .expect("the leader's role resolves");
-    let ctx = AgentBuildContext {
-        role,
-        team_skill: team.skill(),
-        unattended: true,
-        ask_user_enabled: settings.ask_user_enabled,
-        instructions_dir: Some(PathBuf::from(workspace)),
-        ..AgentBuildContext::from_services(AgentServices {
-            exec_settings: gated_exec_settings(&settings),
-            local_agents: team.agent_names(),
-            ..AgentServices::default()
-        })
-    };
-    (ctx, team.file.leader.model.clone())
+    let argv = [
+        "chatty-tui",
+        "--team",
+        "coder-reviewer",
+        "--headless",
+        "-m",
+        "go",
+    ]
+    .map(str::to_string);
+    context_for(&argv, workspace, team.agent_names())
 }
 
 /// Each `coder-reviewer` worker as its `chatty-tui` child builds itself from
@@ -114,46 +132,34 @@ fn leader_context(workspace: &str) -> (AgentBuildContext, Option<String>) {
 fn worker_contexts(workspace: &str) -> Vec<(String, AgentBuildContext, Option<String>)> {
     let team = load_team("coder-reviewer", None, None).expect("the preset loads");
     let module_settings = team.run_module_settings(&ModuleSettingsModel::default());
-    resolve_virtual_agents(&[], &[], &module_settings, &["--auto-approve".to_string()])
-        .into_iter()
-        .map(|spec| {
-            let mut argv = vec!["chatty-tui".to_string()];
-            argv.extend(spec.args.iter().cloned());
-            argv.extend(
-                [
-                    "--participant-socket",
-                    "/golden/sock",
-                    "--participant-name",
-                    "w-0",
-                ]
-                .map(str::to_string),
-            );
-            let cli = Cli::try_parse_from(&argv).expect("the worker's argv parses");
-            let mut settings = base_settings(workspace);
-            let (turns, _) = unattended_run_limits(cli.max_agent_turns, None, cli.max_duration);
-            settings.max_agent_turns = turns;
-            apply_tool_overrides(&mut settings, &cli.enable, &cli.disable).unwrap();
-            if !cli.only.is_empty() {
-                apply_tool_only(&mut settings, &cli.only).unwrap();
-            }
-            let role = resolve_role(cli.tools.as_deref(), cli.preamble.as_deref()).unwrap();
-            if cli.auto_approve {
-                settings.approval_mode = ApprovalMode::AutoApproveAll;
-            }
-            let ctx = AgentBuildContext {
-                role,
-                unattended: true,
-                ask_user_enabled: settings.ask_user_enabled,
-                instructions_dir: Some(PathBuf::from(workspace)),
-                ..AgentBuildContext::from_services(AgentServices {
-                    exec_settings: gated_exec_settings(&settings),
-                    local_agents: ModuleSettingsModel::default().virtual_agent_names(),
-                    ..AgentServices::default()
-                })
-            };
-            (spec.name, ctx, cli.model)
-        })
-        .collect()
+    resolve_virtual_agents(
+        &[],
+        &[],
+        &module_settings,
+        &team.agents,
+        &["--auto-approve".to_string()],
+    )
+    .into_iter()
+    .map(|spec| {
+        let mut argv = vec!["chatty-tui".to_string()];
+        argv.extend(spec.args.iter().cloned());
+        argv.extend(
+            [
+                "--participant-socket",
+                "/golden/sock",
+                "--participant-name",
+                "w-0",
+            ]
+            .map(str::to_string),
+        );
+        let (ctx, model) = context_for(
+            &argv,
+            workspace,
+            ModuleSettingsModel::default().virtual_agent_names(),
+        );
+        (spec.name, ctx, model)
+    })
+    .collect()
 }
 
 #[test]
