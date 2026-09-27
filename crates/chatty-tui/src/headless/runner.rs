@@ -121,13 +121,15 @@ impl HeadlessRunner {
     pub fn new(config: ChatEngineConfig, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let skill_service =
             chatty_core::services::SkillService::new(config.embedding_service.clone());
-        let session = AgentSession::new(AgentSessionConfig {
+        let mut session = AgentSession::new(AgentSessionConfig {
             execution_settings: config.execution_settings.clone(),
             surface: StreamSurface::Headless,
             // `run_headless` runs its own loop guard over the events, with
             // the answer-file deadline the session's does not know about.
             loop_guard: false,
         });
+        // Delegated lines are priced at the model they name (AGE-682).
+        session.set_price_book(config.models.price_book());
         let pending_first_turn = config.team.as_ref().and_then(Team::first_turn_instruction);
         Self {
             session,
@@ -635,11 +637,13 @@ impl HeadlessRunner {
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
             AppEvent::Delegation(progress) => {
                 if let chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished {
-                    usage: Some(usage),
+                    usage,
                     ..
                 } = &progress
                 {
-                    self.usage.update(|t| t.add_delegated(usage));
+                    for line in usage {
+                        self.usage.update(|t| t.add_delegated(line));
+                    }
                 }
                 self.session.note_delegation(&progress);
                 let line = crate::engine::helpers::delegation_line(&progress);

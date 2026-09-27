@@ -11,14 +11,14 @@ use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::models::clarification_store::{
     CLARIFICATION_TIMEOUT, ClarificationAnswer, ClarifyingQuestion,
 };
-use crate::models::token_usage::TokenUsage;
+use crate::models::token_usage::{ModelRef, TokenUsage};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 
 /// The key under a status's `metadata` that carries what an
@@ -53,20 +53,105 @@ impl A2aClarificationRequest {
 /// this is the one place it rides (ADR-0011).
 pub const USAGE_METADATA_KEY: &str = "usage";
 
-/// The usage a delegated task reports on its terminal status, if any:
-/// `metadata.usage.{inputTokens, outputTokens, cacheReadTokens,
-/// cacheWriteTokens}`. Whatever the worker itself delegated is already folded
-/// in by its mapper, so this is one number for the whole subtree (AGE-415).
-pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Option<TokenUsage> {
-    let usage = metadata?.get(USAGE_METADATA_KEY)?;
-    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
-    Some(TokenUsage {
-        input_tokens: count("inputTokens"),
-        output_tokens: count("outputTokens"),
-        cache_read_tokens: count("cacheReadTokens"),
-        cache_write_tokens: count("cacheWriteTokens"),
-        ..TokenUsage::default()
+/// One usage line as it rides the wire (AGE-682): tokens, the model they
+/// were spent on, and when — never a price. The reader prices it.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireUsageLine {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<ModelRef>,
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+    #[serde(default)]
+    cache_read_tokens: u32,
+    #[serde(default)]
+    cache_write_tokens: u32,
+    /// Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<u64>,
+    #[serde(default)]
+    duration_ms: u64,
+}
+
+/// `metadata.usage` for a terminal status: the four token totals, and
+/// `lines`, one per model (AGE-682). The totals are the lines summed, for a
+/// reader that only wants the number; nothing on it is a price.
+pub fn usage_metadata(lines: &[TokenUsage]) -> Value {
+    let sum = |bucket: fn(&TokenUsage) -> u32| {
+        lines
+            .iter()
+            .fold(0u32, |total, line| total.saturating_add(bucket(line)))
+    };
+    let wire: Vec<WireUsageLine> = lines
+        .iter()
+        .map(|line| WireUsageLine {
+            model: line.model.clone(),
+            input_tokens: line.input_tokens,
+            output_tokens: line.output_tokens,
+            cache_read_tokens: line.cache_read_tokens,
+            cache_write_tokens: line.cache_write_tokens,
+            at: line
+                .at
+                .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+                .map(|since| since.as_millis() as u64),
+            duration_ms: line.duration_ms,
+        })
+        .collect();
+    json!({
+        "inputTokens": sum(|l| l.input_tokens),
+        "outputTokens": sum(|l| l.output_tokens),
+        "cacheReadTokens": sum(|l| l.cache_read_tokens),
+        "cacheWriteTokens": sum(|l| l.cache_write_tokens),
+        "lines": wire,
     })
+}
+
+/// The usage a delegated task reports on its terminal status:
+/// `metadata.usage.lines`, one [`TokenUsage`] per model, each naming its
+/// model (AGE-682). Whatever the worker itself delegated is already folded
+/// in by its mapper, so this is the whole subtree (AGE-415). A line that does
+/// not parse is logged and skipped, not the whole report; a report with the
+/// four totals but no `lines` is one line naming no model, so it counts,
+/// unpriced. Empty when the status carries no usage.
+pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Vec<TokenUsage> {
+    let Some(usage) = metadata.and_then(|m| m.get(USAGE_METADATA_KEY)) else {
+        return Vec::new();
+    };
+    let Some(lines) = usage.get("lines").and_then(Value::as_array) else {
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+        let totals = TokenUsage {
+            input_tokens: count("inputTokens"),
+            output_tokens: count("outputTokens"),
+            cache_read_tokens: count("cacheReadTokens"),
+            cache_write_tokens: count("cacheWriteTokens"),
+            ..TokenUsage::default()
+        };
+        let spent = totals.input_tokens
+            + totals.output_tokens
+            + totals.cache_read_tokens
+            + totals.cache_write_tokens;
+        return if spent == 0 { Vec::new() } else { vec![totals] };
+    };
+    lines
+        .iter()
+        .filter_map(|line| {
+            serde_json::from_value::<WireUsageLine>(line.clone())
+                .map_err(|e| warn!(error = %e, "Skipping a usage line that does not parse"))
+                .ok()
+        })
+        .map(|line| TokenUsage {
+            input_tokens: line.input_tokens,
+            output_tokens: line.output_tokens,
+            cache_read_tokens: line.cache_read_tokens,
+            cache_write_tokens: line.cache_write_tokens,
+            model: line.model,
+            at: line.at.map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
+            duration_ms: line.duration_ms,
+            ..TokenUsage::default()
+        })
+        .collect()
 }
 
 /// The key under a terminal status's `metadata` that carries the worker's
@@ -763,25 +848,98 @@ mod tests {
         assert!(A2aClarificationRequest::from_status_metadata(Some(&usage_only)).is_none());
     }
 
-    /// AGE-415: the terminal status's `metadata.usage`, spelled as the
-    /// broker's worker mapper writes it, reads back as a `TokenUsage`.
+    /// AGE-415 / AGE-682: the terminal status's `metadata.usage`, spelled
+    /// as the broker's worker mapper writes it, reads back as one
+    /// `TokenUsage` per line, each naming its model.
     #[test]
     fn a_terminal_status_carries_the_workers_usage() {
-        let block = r#"data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-abc","status":{"state":"completed","metadata":{"usage":{"inputTokens":120,"outputTokens":34,"cacheReadTokens":900,"cacheWriteTokens":50}}},"final":true}}"#;
+        let block = r#"data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-abc","status":{"state":"completed","metadata":{"usage":{"inputTokens":120,"outputTokens":34,"cacheReadTokens":900,"cacheWriteTokens":50,"lines":[{"model":{"provider":"ollama","model_id":"qwen3:32b"},"inputTokens":120,"outputTokens":34,"cacheReadTokens":900,"cacheWriteTokens":50,"at":1790000000000,"durationMs":1500}]}}},"final":true}}"#;
         let A2aStreamEvent::StatusUpdate { metadata, .. } = parse_sse_event(block).unwrap() else {
             panic!("Expected StatusUpdate");
         };
-        let usage =
-            usage_from_status_metadata(metadata.as_ref()).expect("usage is in the metadata");
+        let lines = usage_from_status_metadata(metadata.as_ref());
+        assert_eq!(lines.len(), 1, "usage is in the metadata");
+        let usage = &lines[0];
         assert_eq!(usage.input_tokens, 120);
         assert_eq!(usage.output_tokens, 34);
         assert_eq!(usage.cache_read_tokens, 900);
         assert_eq!(usage.cache_write_tokens, 50);
+        assert_eq!(
+            usage.model,
+            Some(ModelRef {
+                provider: crate::settings::models::providers_store::ProviderType::Ollama,
+                model_id: "qwen3:32b".to_string(),
+            })
+        );
+        assert_eq!(
+            usage.at,
+            Some(UNIX_EPOCH + Duration::from_millis(1_790_000_000_000))
+        );
+        assert_eq!(usage.duration_ms, 1500);
         assert_eq!(usage.delegated_to, None, "the caller names the agent");
 
-        assert!(usage_from_status_metadata(None).is_none());
+        assert!(usage_from_status_metadata(None).is_empty());
         let clarification_only = json!({ "clarification": { "id": "r", "questions": [] } });
-        assert!(usage_from_status_metadata(Some(&clarification_only)).is_none());
+        assert!(usage_from_status_metadata(Some(&clarification_only)).is_empty());
+    }
+
+    /// What the writer writes, the reader reads — model, tokens and time,
+    /// line for line.
+    #[test]
+    fn usage_lines_round_trip_through_the_metadata() {
+        let line = TokenUsage {
+            model: Some(ModelRef {
+                provider: crate::settings::models::providers_store::ProviderType::OpenRouter,
+                model_id: "anthropic/claude-sonnet-5".to_string(),
+            }),
+            at: Some(UNIX_EPOCH + Duration::from_millis(1_790_000_000_123)),
+            duration_ms: 42,
+            cache_read_tokens: 7,
+            cache_write_tokens: 3,
+            ..TokenUsage::new(100, 20)
+        };
+        let metadata = json!({ "usage": usage_metadata(std::slice::from_ref(&line)) });
+        let back = usage_from_status_metadata(Some(&metadata));
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].model, line.model);
+        assert_eq!(back[0].at, line.at);
+        assert_eq!(back[0].duration_ms, 42);
+        assert_eq!(
+            (
+                back[0].input_tokens,
+                back[0].output_tokens,
+                back[0].cache_read_tokens,
+                back[0].cache_write_tokens
+            ),
+            (100, 20, 7, 3)
+        );
+    }
+
+    /// AGE-682: a line that does not parse costs only itself, not the rest
+    /// of the worker's report.
+    #[test]
+    fn a_bad_usage_line_is_skipped_not_the_report() {
+        let metadata = json!({ "usage": { "lines": [
+            { "inputTokens": 10, "outputTokens": 2 },
+            { "model": { "provider": "no_such_provider", "model_id": "x" }, "inputTokens": 5 },
+            { "inputTokens": 7 },
+        ] } });
+        let lines = usage_from_status_metadata(Some(&metadata));
+        let inputs: Vec<u32> = lines.iter().map(|l| l.input_tokens).collect();
+        assert_eq!(inputs, vec![10, 7]);
+    }
+
+    /// AGE-682: a report with the four totals but no `lines` still counts,
+    /// as one line naming no model; a report with neither is no usage.
+    #[test]
+    fn totals_without_lines_are_one_unattributed_line() {
+        let metadata = json!({ "usage": { "inputTokens": 30, "outputTokens": 15 } });
+        let lines = usage_from_status_metadata(Some(&metadata));
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].input_tokens, lines[0].output_tokens), (30, 15));
+        assert_eq!(lines[0].model, None);
+
+        assert!(usage_from_status_metadata(Some(&json!({ "usage": {} }))).is_empty());
     }
 
     /// AGE-467: a worker's compacted trace rides the terminal status next to
@@ -807,17 +965,13 @@ mod tests {
     fn usage_and_trace_round_trip_from_the_same_metadata() {
         let trace = "### read_file (ok)\ninput: {}\noutput: # Chatty";
         let metadata = json!({
-            "usage": {
-                "inputTokens": 120,
-                "outputTokens": 34,
-                "cacheReadTokens": 0,
-                "cacheWriteTokens": 0,
-            },
+            "usage": usage_metadata(&[TokenUsage::new(120, 34)]),
             "trace": trace,
         });
 
-        let usage = usage_from_status_metadata(Some(&metadata)).expect("usage is in the metadata");
-        assert_eq!((usage.input_tokens, usage.output_tokens), (120, 34));
+        let usage = usage_from_status_metadata(Some(&metadata));
+        assert_eq!(usage.len(), 1, "usage is in the metadata");
+        assert_eq!((usage[0].input_tokens, usage[0].output_tokens), (120, 34));
         assert_eq!(
             trace_from_status_metadata(Some(&metadata)).as_deref(),
             Some(trace),

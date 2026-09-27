@@ -334,7 +334,7 @@ impl ChattyApp {
                         }
                         // The conversation's session owns the stores its
                         // agent's tools raise requests on (AGE-195).
-                        let session = AgentSession::new(desktop_session_config(cx));
+                        let session = desktop_session(cx);
                         let secrets = cx
                             .global::<crate::settings::models::UserSecretsModel>()
                             .as_env_pairs();
@@ -542,7 +542,7 @@ impl ChattyApp {
                 let exec_settings = cx.update_global::<crate::settings::models::ExecutionSettingsModel, _>(|s, _| s.clone())?;
                 // The conversation's session owns the stores its agent's tools
                 // raise requests on (AGE-195).
-                let mut session = cx.update(|cx| AgentSession::new(desktop_session_config(cx)))?;
+                let mut session = cx.update(|cx| desktop_session(cx))?;
                 let user_secrets = cx.update_global::<crate::settings::models::UserSecretsModel, _>(|m, _| m.as_env_pairs()).unwrap_or_default();
                 let theme_colors = cx
                     .update(|cx| extract_theme_chart_colors(cx))

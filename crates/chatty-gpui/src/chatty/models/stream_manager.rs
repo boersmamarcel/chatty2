@@ -190,6 +190,9 @@ pub struct StreamState {
 /// Each variant is tagged with `conversation_id` so subscribers can filter.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+// `StreamEnded` carries the turn's `TokenUsage`, which names its model and
+// time (AGE-682); it is emitted once per turn, so boxing it buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum StreamManagerEvent {
     StreamStarted {
         conversation_id: String,
@@ -599,6 +602,9 @@ impl StreamManager {
         }
         match chunk {
             StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta => {}
+            // Folded into the turn's usage by the session (AGE-683); the
+            // desktop never compacts, so it never sees one here.
+            StreamChunk::CompactionUsage(_) => {}
             StreamChunk::Text(text) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.pending_text.push_str(&text);

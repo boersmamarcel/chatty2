@@ -37,6 +37,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use parking_lot::Mutex;
 use similar::TextDiff;
 
 use super::*;
@@ -50,7 +51,16 @@ use crate::testing::fake_model::{FakeDaemon, sse_stream};
 // `FakeDaemon` (`testing::fake_model`, AGE-632) plays both providers: Ollama
 // (`/api/chat`, NDJSON) and an OpenAI-compatible endpoint (`/chat/completions`,
 // SSE), replaying the canned responses below in order and recording every
-// body exactly as rig serialized it.
+// body exactly as rig serialized it. `compaction_call_usage_is_counted` below
+// needs to tell the summary request from the model's own by its raw body, so
+// it drives the daemon's callback mode (`FakeDaemon::start_with`) instead.
+
+/// The first byte index of `needle` in `haystack`, or `None` when it is absent.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
 
 /// One `/api/chat` NDJSON record whose assistant message calls `list_directory`.
 fn tool_call_response(path: &str) -> String {
@@ -657,5 +667,147 @@ async fn a_result_over_the_recording_cap_is_recorded_truncated_once() {
             .iter()
             .any(|m| serde_json::to_string(m).unwrap().contains(header)),
         "the conversation persists the recorded form"
+    );
+}
+
+/// The opening of the compaction summary prompt (`context_compaction`), which
+/// is how the daemon tells the summary request from the model's own.
+const SUMMARY_PROMPT_MARKER: &[u8] = b"You are compacting the working history";
+
+/// One non-streamed `/api/chat` record answering the summary request.
+fn summary_response() -> String {
+    serde_json::json!({
+        "model": "llama3.2",
+        "created_at": "2026-01-01T00:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": "Done so far: listed payload.\nFindings: many files.\n\
+                        Open questions: none.\nNext step: answer."
+        },
+        "done": true,
+        "done_reason": "stop",
+        "prompt_eval_count": 777,
+        "eval_count": 77
+    })
+    .to_string()
+        + "\n"
+}
+
+/// The usage the fake daemon reported on one of its responses.
+fn served_usage(response: &str) -> (u32, u32) {
+    let record: serde_json::Value =
+        serde_json::from_str(response.trim()).expect("an NDJSON record");
+    let count = |key: &str| record[key].as_u64().expect("a usage count") as u32;
+    (count("prompt_eval_count"), count("eval_count"))
+}
+
+/// AGE-683: an unattended run compacts near the window with one tool-free
+/// summary call. That call is a request the provider bills like any other,
+/// so the turn's usage is the sum of every request the daemon served, the
+/// summary request included — as its own call, on the model that served it.
+#[tokio::test]
+async fn compaction_call_usage_is_counted() {
+    let workspace = workspace_with_payload(140);
+    const TOOL_CALLS: usize = 4;
+    let mut scripted: std::collections::VecDeque<String> = (0..TOOL_CALLS)
+        .map(|_| tool_call_response("payload"))
+        .chain([text_response("A lot of files.")])
+        .collect();
+    let served: Arc<Mutex<Vec<String>>> = Arc::default();
+    let served_log = served.clone();
+    let daemon = FakeDaemon::start_with("application/x-ndjson", move |body| {
+        let response = if find(body, SUMMARY_PROMPT_MARKER).is_some() {
+            summary_response()
+        } else {
+            scripted.pop_front()?
+        };
+        served_log.lock().push(response.clone());
+        Some(response)
+    });
+
+    let mut model_config = ModelConfig::new(
+        "age-683".to_string(),
+        "Compaction Fixture".to_string(),
+        ProviderType::Ollama,
+        "llama3.2".to_string(),
+    );
+    model_config.max_context_window = Some(32_000);
+    model_config.max_tokens = Some(64);
+    let provider_config = ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama)
+        .with_base_url(daemon.base_url());
+    let _ = crate::init_repositories();
+    let settings = execution_settings(workspace.path());
+    let mut session = AgentSession::new(AgentSessionConfig {
+        execution_settings: settings.clone(),
+        surface: StreamSurface::Headless,
+        loop_guard: false,
+    });
+    session
+        .create_conversation(
+            "c1".to_string(),
+            "New Chat".to_string(),
+            &model_config,
+            &provider_config,
+            AgentBuildContext {
+                // Unattended runs are the ones that compact.
+                unattended: true,
+                ..AgentBuildContext::from_services(AgentServices {
+                    exec_settings: Some(settings),
+                    ..AgentServices::default()
+                })
+            },
+        )
+        .await
+        .expect("the fixture conversation builds");
+
+    let events = run_and_commit_turn(&mut session, "what is in payload?").await;
+    assert_no_stream_error(&events, "the turn");
+
+    let bodies = daemon.bodies();
+    let summaries = bodies
+        .iter()
+        .filter(|body| find(body, SUMMARY_PROMPT_MARKER).is_some())
+        .count();
+    assert_eq!(summaries, 1, "the run compacts once");
+    assert_eq!(
+        bodies.len(),
+        TOOL_CALLS + 2,
+        "the tool calls, the summary, the answer"
+    );
+
+    let served = served.lock().clone();
+    let (served_input, served_output) = served
+        .iter()
+        .map(|response| served_usage(response))
+        .fold((0, 0), |(i, o), (di, d_o)| (i + di, o + d_o));
+
+    let usage = session
+        .conversation()
+        .expect("the conversation")
+        .token_usage()
+        .last_usage()
+        .expect("the turn's usage")
+        .clone();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens),
+        (served_input, served_output),
+        "every request the daemon served is counted, the summary included"
+    );
+    assert_eq!(usage.api_turn_count as usize, TOOL_CALLS + 2);
+    let summary_call = usage
+        .calls
+        .iter()
+        .find(|call| (call.input_tokens, call.output_tokens) == (777, 77))
+        .expect("the summary call is its own record");
+    assert_eq!(summary_call.turn, 0, "outside the model loop");
+    assert_eq!(
+        summary_call.model,
+        Some(model_config.model_ref()),
+        "named for the model that served it"
+    );
+    assert_eq!(
+        usage.last_call().map(|call| call.output_tokens),
+        Some(12),
+        "the model's last call is still the last record"
     );
 }
