@@ -1,0 +1,245 @@
+//! A gateway on an ephemeral port, loaded with real fixture modules, plus
+//! the few helpers every row needs.
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+use chatty_module_registry::ModuleRegistry;
+use chatty_protocol_gateway::ProtocolGateway;
+use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
+use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
+use reqwest::StatusCode;
+use serde_json::Value;
+use tokio::sync::RwLock;
+
+// ---------------------------------------------------------------------------
+// Which modules a gateway loads
+// ---------------------------------------------------------------------------
+
+/// One module to load. The two real modules load from their shipped
+/// `module.toml`; a fixture is staged under a manifest of its own, because
+/// the fixtures declare no `[protocols]` and would be unreachable once the
+/// gateway enforces those flags (PL-H4).
+pub struct Module {
+    fixture: &'static str,
+    name: Option<&'static str>,
+    protocols: Option<[bool; 3]>,
+}
+
+impl Module {
+    /// `echo-agent` or `benford-agent`, exactly as shipped.
+    pub fn shipped(fixture: &'static str) -> Self {
+        Self {
+            fixture,
+            name: None,
+            protocols: None,
+        }
+    }
+
+    /// A PL-E1 fixture with every protocol enabled.
+    pub fn fixture(fixture: &'static str) -> Self {
+        Self {
+            fixture,
+            name: None,
+            protocols: Some([true; 3]),
+        }
+    }
+
+    /// Serve this module's wasm under another name.
+    pub fn named(mut self, name: &'static str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// `[protocols]` as `openai_compat`, `mcp`, `a2a`.
+    pub fn protocols(mut self, openai_compat: bool, mcp: bool, a2a: bool) -> Self {
+        self.protocols = Some([openai_compat, mcp, a2a]);
+        self
+    }
+
+    /// The directory the registry loads: the staged fixture itself, or a
+    /// copy of its wasm under `root` with a written manifest.
+    fn directory(&self, root: &Path) -> PathBuf {
+        let wasm = fixture_path(self.fixture);
+        let shipped = wasm
+            .parent()
+            .expect("a fixture has a directory")
+            .to_path_buf();
+        let (Some(protocols), name) = (self.protocols, self.name.unwrap_or(self.fixture)) else {
+            assert!(self.name.is_none(), "a renamed module needs a manifest");
+            return shipped;
+        };
+
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("a module directory");
+        let wasm_file = format!("{}.wasm", self.fixture);
+        std::fs::copy(&wasm, dir.join(&wasm_file)).expect("the fixture wasm copies");
+        let [openai_compat, mcp, a2a] = protocols;
+        let manifest = format!(
+            "[module]\nname = \"{name}\"\nversion = \"0.1.0\"\n\
+             description = \"conformance copy of {fixture}\"\nwasm = \"{wasm_file}\"\n\n\
+             [capabilities]\nchat = true\nagent = true\n\n\
+             [protocols]\nopenai_compat = {openai_compat}\nmcp = {mcp}\na2a = {a2a}\n",
+            fixture = self.fixture,
+        );
+        std::fs::write(dir.join("module.toml"), manifest).expect("the manifest writes");
+        dir
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The gateway under test
+// ---------------------------------------------------------------------------
+
+pub struct Gateway {
+    /// `http://127.0.0.1:<port>`.
+    pub base: String,
+    /// The one provider behind every module's `llm::complete`: what a guest
+    /// forwards to it is what the guest itself received.
+    pub llm: Arc<FakeLlm>,
+    #[cfg(unix)]
+    pub socket: PathBuf,
+    pub http: reqwest::Client,
+    _dir: tempfile::TempDir,
+}
+
+impl Gateway {
+    /// Load `modules`, script the fake LLM, and serve on an ephemeral port.
+    pub async fn start(modules: Vec<Module>, script: Vec<FakeResponse>) -> Self {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let llm = Arc::new(FakeLlm::new(script));
+        let provider: Arc<dyn LlmProvider> = llm.clone();
+        let mut registry = ModuleRegistry::new(provider, ResourceLimits::default()).unwrap();
+        for module in &modules {
+            let path = module.directory(dir.path());
+            registry
+                .load(&path)
+                .unwrap_or_else(|e| panic!("{} loads: {e:#}", path.display()));
+        }
+
+        let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)), 0);
+
+        // The participant socket is served here rather than by `start()`,
+        // which binds a fixed port instead of an ephemeral one.
+        #[cfg(unix)]
+        let socket = {
+            let socket = dir.path().join("participants.sock");
+            let listener =
+                chatty_protocol_gateway::participant::bind(&socket).expect("the socket binds");
+            tokio::spawn(chatty_protocol_gateway::participant::serve(
+                listener,
+                gateway.participants(),
+            ));
+            socket
+        };
+
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral port");
+        let base = format!("http://{}", tcp.local_addr().unwrap());
+        let router = gateway.build_router();
+        tokio::spawn(async move {
+            axum::serve(tcp, router).await.ok();
+        });
+
+        Self {
+            base,
+            llm,
+            #[cfg(unix)]
+            socket,
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap(),
+            _dir: dir,
+        }
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base, path)
+    }
+
+    /// POST `body` as JSON; the status and the body parsed as JSON
+    /// (`Value::Null` when it is not JSON).
+    pub async fn post(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        let resp = self
+            .http
+            .post(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("POST {path}: {e}"));
+        let status = resp.status();
+        let bytes = resp.bytes().await.unwrap_or_default();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// An `A2aAgentConfig` for `/a2a/{name}`, as `invoke_agent` builds one.
+    pub fn a2a_agent(&self, name: &str) -> A2aAgentConfig {
+        A2aAgentConfig {
+            name: name.to_string(),
+            url: self.url(&format!("/a2a/{name}")),
+            api_key: None,
+            enabled: true,
+            skills: vec![],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Real third-party clients
+// ---------------------------------------------------------------------------
+
+/// `tool` on `PATH`, if it is there.
+pub fn on_path(tool: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(tool))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Say why a real-client test did not run. Written straight to stderr, which
+/// the test harness does not capture, so the reason shows in every run
+/// rather than only in a failing one.
+pub fn skip(row: &str, reason: &str) {
+    let _ = writeln!(std::io::stderr(), "SKIP {row}: {reason}");
+}
+
+/// A measurement worth seeing in a green run too (3.11), uncaptured like
+/// [`skip`].
+pub fn record(row: &str, line: &str) {
+    let _ = writeln!(std::io::stderr(), "{row}: {line}");
+}
+
+/// Run a client process to completion within `limit`. Its package fetch
+/// (uv, npx) is the only network a test here does.
+pub async fn run_client(
+    row: &str,
+    mut command: tokio::process::Command,
+    limit: Duration,
+) -> std::process::Output {
+    command
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null());
+    let output = tokio::time::timeout(limit, command.output())
+        .await
+        .unwrap_or_else(|_| panic!("{row}: the client did not finish within {limit:?}"))
+        .unwrap_or_else(|e| panic!("{row}: the client did not start: {e}"));
+    assert!(
+        output.status.success(),
+        "{row}: the client failed ({})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    output
+}
