@@ -42,6 +42,7 @@ crates/
 ├── chatty-flow/              # Research: AFlow WorkflowRepr + IR (AGE-13, ships)
 ├── chatty-optimize/          # Research: GEPA/AFlow + paired stats + QA loaders
 ├── hive-client/              # Hive registry client
+├── hive-e2e/                 # Nightly chatty × Hive contract/trust suite (ignored, run by plugin-e2e.yml)
 └── hive-billing-sdk/         # Billing SDK (separate Cargo.lock)
 
 modules/                      # Reference WASM agent modules (echo, benford)

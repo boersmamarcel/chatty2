@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "description": "Tools for research, data gathering, and analysis",
+      "display_name": "Research & Analysis",
+      "module_count": 0,
+      "slug": "research"
+    },
+    {
+      "description": "Document processing, parsing, and OCR tools",
+      "display_name": "Documents & OCR",
+      "module_count": 0,
+      "slug": "documents"
+    },
+    {
+      "description": "Tools for software development and engineering",
+      "display_name": "Developer Tools",
+      "module_count": 10,
+      "slug": "developer-tools"
+    },
+    {
+      "description": "Data processing, visualization, and analytics",
+      "display_name": "Data Analytics",
+      "module_count": 0,
+      "slug": "data-analytics"
+    },
+    {
+      "description": "Knowledge bases, wikis, and information management",
+      "display_name": "Knowledge Management",
+      "module_count": 0,
+      "slug": "knowledge-management"
+    },
+    {
+      "description": "Financial analysis, accounting, and reporting tools",
+      "display_name": "Finance & Accounting",
+      "module_count": 0,
+      "slug": "finance"
+    }
+  ]
+}
