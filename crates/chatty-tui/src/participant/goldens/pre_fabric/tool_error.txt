@@ -1,0 +1,6 @@
+started kit-worker: do the delegated task
+progress read_file
+progress ✗ read_file
+progress That read failed.
+finished success=true usage=[input=20 output=10 cache_read=0 cache_write=0 calls=1] result=That read failed.
+answer success=true: That read failed.

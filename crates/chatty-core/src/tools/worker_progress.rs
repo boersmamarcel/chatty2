@@ -7,7 +7,7 @@
 //! binary, the broker's mapper renders the lines.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
@@ -45,10 +45,21 @@ pub fn progress_text_for_event(
 ///
 /// Used by the broker's local runner (AGE-301), which spawns the worker.
 pub fn worker_executable() -> PathBuf {
-    std::env::current_exe()
+    let dir = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("chatty-tui")))
-        .filter(|p| p.exists())
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    dir.iter()
+        .map(|d| d.join("chatty-tui"))
+        // A test binary runs from `target/<profile>/deps`, one level below
+        // the `chatty-tui` its crate builds — the swarm kit's real workers
+        // (AGE-632).
+        .chain(
+            dir.as_deref()
+                .filter(|d| d.ends_with("deps"))
+                .and_then(Path::parent)
+                .map(|d| d.join("chatty-tui")),
+        )
+        .find(|p| p.exists())
         .unwrap_or_else(|| {
             warn!("chatty-tui not found next to current binary, falling back to PATH");
             PathBuf::from("chatty-tui")

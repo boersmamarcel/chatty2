@@ -1,0 +1,4 @@
+started kit-worker: do the delegated task
+progress ask_user
+finished success=false usage=[none] result=⚠️ Agent 'kit-worker' asked a question and nobody here can answer it: Deploy to production?
+error: Invocation failed: Agent 'kit-worker' reported failure: Agent 'kit-worker' asked a question and nobody here can answer it: Deploy to production?
