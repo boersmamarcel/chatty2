@@ -1,19 +1,62 @@
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, EngineWeak, Store, Trap};
 
 use crate::bindings::Module;
 use crate::bindings::chatty::module::types::{
     AgentCard, ChatRequest, ChatResponse, ToolDefinition,
 };
+use crate::error::CallError;
 use crate::host::{BillingProvider, LlmProvider, ModuleManifest, ModuleState};
-use crate::limits::ResourceLimits;
+use crate::limits::{EPOCH_TICK, METADATA_CALL_MS, ResourceLimits};
+
+// ---------------------------------------------------------------------------
+// Epoch ticker
+// ---------------------------------------------------------------------------
+
+/// Every engine built by [`WasmModule::build_engine`] that is still alive.
+/// `None` until the ticker thread has been started.
+static TICKED_ENGINES: Mutex<Option<Vec<EngineWeak>>> = Mutex::new(None);
+
+/// Add `engine` to the process-wide epoch ticker, starting the ticker thread
+/// on first use. The thread advances every live engine's epoch once per
+/// [`EPOCH_TICK`]; that is what makes a store's epoch deadline fire. Engines
+/// are held weakly, so a dropped engine falls out of the list.
+fn tick_epochs_of(engine: &Engine) -> Result<()> {
+    let mut engines = TICKED_ENGINES.lock().unwrap_or_else(|e| e.into_inner());
+    let engines = match &mut *engines {
+        Some(engines) => engines,
+        None => {
+            std::thread::Builder::new()
+                .name("wasm-epoch-ticker".into())
+                .spawn(|| {
+                    loop {
+                        std::thread::sleep(EPOCH_TICK);
+                        let mut engines = TICKED_ENGINES.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(engines) = engines.as_mut() {
+                            engines.retain(|weak| match weak.upgrade() {
+                                Some(engine) => {
+                                    engine.increment_epoch();
+                                    true
+                                }
+                                None => false,
+                            });
+                        }
+                    }
+                })
+                .context("failed to start the WASM epoch ticker thread")?;
+            engines.insert(Vec::new())
+        }
+    };
+    engines.push(engine.weak());
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // WasmModule
@@ -23,38 +66,58 @@ use crate::limits::ResourceLimits;
 #[derive(Debug, Clone, Default)]
 pub struct InvocationMetrics {
     pub execution_ms: u32,
+    /// Fuel the call consumed, counted from its own per-call budget.
     pub fuel_consumed: u64,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
 }
 
-/// A loaded and instantiated WASM component module.
-///
-/// Wraps a Wasmtime [`Store`] and the generated [`Module`] binding so the
-/// host can call guest exports through a typed Rust API.
-pub struct WasmModule {
-    /// Wasmtime store holding the instance state.
+/// A live component instance: the store and the typed export bindings.
+struct Instance {
     store: Store<ModuleState>,
-    /// Generated world wrapper giving typed access to guest exports.
-    module: Module,
-    /// Resource limits — kept for timeout enforcement.
+    bindings: Module,
+}
+
+/// A loaded WASM component module.
+///
+/// Every export call runs under the per-call [`ResourceLimits`]: fuel is
+/// refilled and an epoch deadline is set before each call, and the call runs
+/// off the async executor (`spawn_blocking` for `chat` / `invoke_tool`, a
+/// scoped thread for the metadata exports), so a guest trap, panic or memory
+/// failure comes back as a [`CallError`] and never takes the host down.
+///
+/// A call that traps drops its instance; the next call instantiates the
+/// component afresh (guest state such as statics starts over).
+pub struct WasmModule {
+    engine: Engine,
+    component: Component,
+    linker: Linker<ModuleState>,
+    manifest: ModuleManifest,
+    llm_provider: Arc<dyn LlmProvider>,
+    billing_provider: Option<Arc<dyn BillingProvider>>,
+    /// Per-call limits.
     limits: ResourceLimits,
+    /// `None` after a trap, until the next call re-instantiates.
+    instance: Option<Instance>,
+    /// Progress channel for the next `chat` (see [`Self::set_progress_sender`]).
+    progress_tx: Option<UnboundedSender<String>>,
     /// Metrics from the most recent invocation.
     last_metrics: Option<InvocationMetrics>,
 }
 
 impl WasmModule {
-    /// Build a Wasmtime [`Engine`] pre-configured for the component model
-    /// and fuel metering.
+    /// Build a Wasmtime [`Engine`] pre-configured for the component model,
+    /// fuel metering and epoch interruption, and register it with the
+    /// process-wide epoch ticker that drives wall-clock deadlines.
     ///
-    /// Memory limits are enforced at runtime via [`StoreLimitsBuilder`] in
-    /// `from_component`; only fuel and component model are set on the engine.
-    ///
-    /// Callers may share one engine across multiple modules.
+    /// Memory limits are enforced per store (see `ModuleState`); limits
+    /// are not engine settings, so callers may share one engine across
+    /// modules with different limits.
     pub fn build_engine(_limits: &ResourceLimits) -> Result<Engine> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
+        config.epoch_interruption(true);
         // SIMD128: 4-wide f32/i32 vector ops — ~4× throughput for ML kernels.
         // Enabled here; modules opt in at compile time via +simd128 RUSTFLAGS.
         config.wasm_simd(true);
@@ -62,17 +125,20 @@ impl WasmModule {
         // parallelism in ML modules (wasm32-wasip2 + wasi:threads).
         config.wasm_threads(true);
 
-        Engine::new(&config).context("failed to create Wasmtime engine")
+        let engine = Engine::new(&config).context("failed to create Wasmtime engine")?;
+        tick_epochs_of(&engine)?;
+        Ok(engine)
     }
 
     /// Load a WASM component from `path` and instantiate it.
     ///
     /// # Arguments
-    /// * `engine`       — shared Wasmtime engine (must have `component-model` and `consume_fuel`)
+    /// * `engine`       — an engine from [`Self::build_engine`]
     /// * `path`         — path to a `.wasm` component file
     /// * `manifest`     — module metadata and config values
     /// * `llm_provider` — host callback for LLM completions
-    /// * `limits`       — resource caps (fuel, memory, timeout)
+    /// * `limits`       — per-call resource caps, used as given (the
+    ///   registry clamps manifest-supplied values to the host ceilings)
     pub fn from_file(
         engine: &Engine,
         path: &Path,
@@ -99,7 +165,7 @@ impl WasmModule {
 
         Self::from_component(
             engine,
-            &component,
+            component,
             manifest,
             llm_provider,
             billing_provider,
@@ -134,7 +200,7 @@ impl WasmModule {
 
         Self::from_component(
             engine,
-            &component,
+            component,
             manifest,
             llm_provider,
             billing_provider,
@@ -144,7 +210,7 @@ impl WasmModule {
 
     fn from_component(
         engine: &Engine,
-        component: &Component,
+        component: Component,
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
         billing_provider: Option<Arc<dyn BillingProvider>>,
@@ -160,27 +226,54 @@ impl WasmModule {
         Module::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 
-        let state = ModuleState::new(manifest, llm_provider, billing_provider, &limits);
-        let mut store = Store::new(engine, state);
-
-        // Register memory limiter.
-        store.limiter(|s| &mut s.limits);
-
-        // Set initial fuel.
-        store
-            .set_fuel(limits.max_fuel)
-            .context("failed to set fuel")?;
-
-        let module = Module::instantiate(&mut store, component, &linker)
-            .context("failed to instantiate WASM module")?;
-        debug!("WASM module instantiated successfully (chatty:module@0.2.0)");
-
-        Ok(Self {
-            store,
-            module,
+        let mut module = Self {
+            engine: engine.clone(),
+            component,
+            linker,
+            manifest,
+            llm_provider,
+            billing_provider,
             limits,
+            instance: None,
+            progress_tx: None,
             last_metrics: None,
-        })
+        };
+        // Instantiate now so a module that can't instantiate fails to load.
+        module.instance = Some(module.instantiate()?);
+        Ok(module)
+    }
+
+    /// Create a fresh store and instance of the component.
+    fn instantiate(&self) -> Result<Instance> {
+        let state = ModuleState::new(
+            self.manifest.clone(),
+            Arc::clone(&self.llm_provider),
+            self.billing_provider.clone(),
+            &self.limits,
+        );
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limiter);
+        // Instantiation may run guest code: bound it like a call.
+        store
+            .set_fuel(self.limits.max_fuel)
+            .context("failed to set fuel")?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.max_execution_ms));
+
+        let bindings = Module::instantiate(&mut store, &self.component, &self.linker)
+            .context("failed to instantiate WASM module")?;
+        debug!(module = %self.manifest.name, "WASM module instantiated (chatty:module@0.2.0)");
+        Ok(Instance { store, bindings })
+    }
+
+    /// The live instance, or a fresh one if the last call trapped.
+    fn take_instance(&mut self) -> Result<Instance> {
+        match self.instance.take() {
+            Some(instance) => Ok(instance),
+            None => {
+                debug!(module = %self.manifest.name, "re-instantiating after a trap");
+                self.instantiate()
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -188,128 +281,341 @@ impl WasmModule {
     // -----------------------------------------------------------------------
 
     /// Install a progress sender so module log messages are forwarded as
-    /// real-time progress events during `chat()`.
+    /// real-time progress events during the next `chat()`.
     pub fn set_progress_sender(&mut self, tx: UnboundedSender<String>) {
-        self.store.data_mut().progress_tx = Some(tx);
+        self.progress_tx = Some(tx);
     }
 
     // -----------------------------------------------------------------------
     // Guest export wrappers
     // -----------------------------------------------------------------------
 
-    /// Call the `agent::chat` export with a timeout.
+    /// Call the `agent::chat` export under the per-call limits.
     ///
-    /// Returns the chat response or a descriptive error if the module traps,
-    /// runs out of fuel, or exceeds the wall-clock timeout.
-    /// Call [`last_invocation_metrics`] after this to get execution metrics.
+    /// Returns the chat response, the guest's own error, or a [`CallError`]
+    /// (fuel, deadline, memory, trap, output size).
+    /// Call [`Self::last_invocation_metrics`] after this to get execution metrics.
     pub async fn chat(&mut self, req: ChatRequest) -> Result<ChatResponse> {
-        let timeout = Duration::from_millis(self.limits.max_execution_ms);
-        let start_time = std::time::Instant::now();
-        let initial_fuel = self.store.get_fuel().unwrap_or(0);
+        let result = self
+            .call_blocking(
+                "chat",
+                move |bindings, store| bindings.chatty_module_agent().call_chat(store, &req),
+                chat_response_size,
+            )
+            .await;
+        // The progress sender belongs to this one chat.
+        self.progress_tx = None;
 
-        let result = {
-            let store = &mut self.store;
-            let module = &self.module;
-
-            tokio::time::timeout(timeout, async move {
-                module
-                    .chatty_module_agent()
-                    .call_chat(store, &req)
-                    .context("WASM trap in agent::chat")?
-                    .map_err(|e| anyhow::anyhow!("agent::chat returned error: {e}"))
-            })
-            .await
-            .context("agent::chat timed out")?
-        };
-
-        // Capture metrics
-        let execution_ms = start_time.elapsed().as_millis() as u32;
-        let remaining_fuel = self.store.get_fuel().unwrap_or(0);
-        let fuel_consumed = initial_fuel.saturating_sub(remaining_fuel);
-
-        let (input_tokens, output_tokens) = match &result {
-            Ok(resp) => resp
-                .usage
-                .as_ref()
-                .map(|u| (Some(u.input_tokens), Some(u.output_tokens)))
-                .unwrap_or_default(),
-            Err(_) => (None, None),
-        };
-
-        self.last_metrics = Some(InvocationMetrics {
-            execution_ms,
-            fuel_consumed,
-            input_tokens,
-            output_tokens,
-        });
-
-        // Clear progress sender after chat completes
-        self.store.data_mut().progress_tx = None;
-
+        if let (Ok(resp), Some(metrics)) = (&result, self.last_metrics.as_mut())
+            && let Some(usage) = &resp.usage
+        {
+            metrics.input_tokens = Some(usage.input_tokens);
+            metrics.output_tokens = Some(usage.output_tokens);
+        }
         result
     }
 
-    /// Call the `agent::invoke-tool` export with a timeout.
+    /// Call the `agent::invoke-tool` export under the per-call limits.
     pub async fn invoke_tool(&mut self, name: &str, args: &str) -> Result<String> {
-        let timeout = Duration::from_millis(self.limits.max_execution_ms);
-        let start_time = std::time::Instant::now();
-        let initial_fuel = self.store.get_fuel().unwrap_or(0);
-
-        let store = &mut self.store;
-        let module = &self.module;
-
-        let result = tokio::time::timeout(timeout, async move {
-            module
-                .chatty_module_agent()
-                .call_invoke_tool(store, name, args)
-                .context("WASM trap in agent::invoke-tool")?
-                .map_err(|e| anyhow::anyhow!("agent::invoke-tool returned error: {e}"))
-        })
+        let (name, args) = (name.to_string(), args.to_string());
+        self.call_blocking(
+            "invoke-tool",
+            move |bindings, store| {
+                bindings
+                    .chatty_module_agent()
+                    .call_invoke_tool(store, &name, &args)
+            },
+            String::len,
+        )
         .await
-        .context("agent::invoke-tool timed out")?;
-
-        // Capture metrics
-        let execution_ms = start_time.elapsed().as_millis() as u32;
-        let remaining_fuel = self.store.get_fuel().unwrap_or(0);
-        let fuel_consumed = initial_fuel.saturating_sub(remaining_fuel);
-
-        self.last_metrics = Some(InvocationMetrics {
-            execution_ms,
-            fuel_consumed,
-            input_tokens: None,
-            output_tokens: None,
-        });
-
-        result
     }
 
-    /// Call the `agent::list-tools` export.
+    /// Call the `agent::list-tools` export (budget: [`METADATA_CALL_MS`]).
     pub fn list_tools(&mut self) -> Result<Vec<ToolDefinition>> {
-        self.module
-            .chatty_module_agent()
-            .call_list_tools(&mut self.store)
-            .context("WASM trap in agent::list-tools")
+        self.call_metadata(
+            "list-tools",
+            |bindings, store| {
+                bindings
+                    .chatty_module_agent()
+                    .call_list_tools(store)
+                    .map(Ok)
+            },
+            |tools| tools.iter().map(tool_definition_size).sum(),
+        )
     }
 
-    /// Call the `agent::get-agent-card` export.
+    /// Call the `agent::get-agent-card` export (budget: [`METADATA_CALL_MS`]).
     pub fn agent_card(&mut self) -> Result<AgentCard> {
-        self.module
-            .chatty_module_agent()
-            .call_get_agent_card(&mut self.store)
-            .context("WASM trap in agent::get-agent-card")
+        self.call_metadata(
+            "get-agent-card",
+            |bindings, store| {
+                bindings
+                    .chatty_module_agent()
+                    .call_get_agent_card(store)
+                    .map(Ok)
+            },
+            agent_card_size,
+        )
     }
 
-    /// Return the remaining fuel in the store.
-    ///
-    /// Useful for diagnostics and tests.
+    /// Fuel left in the store after the most recent call (each call starts
+    /// from the full per-call budget). Useful for diagnostics and tests.
     pub fn remaining_fuel(&self) -> u64 {
-        self.store.get_fuel().unwrap_or(0)
+        self.instance
+            .as_ref()
+            .and_then(|i| i.store.get_fuel().ok())
+            .unwrap_or(0)
     }
 
     /// Get the metrics from the most recent invocation (chat or invoke_tool).
     pub fn last_invocation_metrics(&self) -> Option<InvocationMetrics> {
         self.last_metrics.clone()
     }
+
+    /// Run `call` on the blocking pool under the full per-call limits, and
+    /// record [`InvocationMetrics`] for it.
+    async fn call_blocking<O: Send + 'static>(
+        &mut self,
+        export: &'static str,
+        call: impl FnOnce(&Module, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, String>>
+        + Send
+        + 'static,
+        size: fn(&O) -> usize,
+    ) -> Result<O> {
+        let mut instance = self.take_instance()?;
+        let limits = self.limits.clone();
+        let progress_tx = self.progress_tx.clone();
+        let start = Instant::now();
+
+        let joined = tokio::task::spawn_blocking(move || {
+            let budget = limits.max_execution_ms;
+            let report = run_export(&mut instance, &limits, budget, progress_tx, call, size);
+            (instance, report)
+        })
+        .await;
+
+        let (result, fuel_consumed) = match joined {
+            Ok((instance, report)) => {
+                if !report.trapped {
+                    self.instance = Some(instance);
+                }
+                (report.result, report.fuel_consumed)
+            }
+            Err(join) => (Err(host_panic(join.to_string())), 0),
+        };
+        self.last_metrics = Some(InvocationMetrics {
+            execution_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
+            fuel_consumed,
+            input_tokens: None,
+            output_tokens: None,
+        });
+        finish(export, result)
+    }
+
+    /// Run a metadata export on a scoped thread (off any async executor)
+    /// with a [`METADATA_CALL_MS`] budget.
+    fn call_metadata<O: Send>(
+        &mut self,
+        export: &'static str,
+        call: impl FnOnce(&Module, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, String>>
+        + Send,
+        size: fn(&O) -> usize,
+    ) -> Result<O> {
+        let mut instance = self.take_instance()?;
+        let limits = &self.limits;
+        let budget = METADATA_CALL_MS.min(limits.max_execution_ms);
+
+        let joined = std::thread::scope(|scope| {
+            scope
+                .spawn(|| run_export(&mut instance, limits, budget, None, call, size))
+                .join()
+        });
+        let result = match joined {
+            Ok(report) => {
+                if !report.trapped {
+                    self.instance = Some(instance);
+                }
+                report.result
+            }
+            Err(panic) => Err(host_panic(panic_message(&panic))),
+        };
+        finish(export, result)
+    }
+}
+
+/// Flatten a call's outcome into the wrapper's `Result`.
+fn finish<O>(export: &str, result: Result<Result<O, String>>) -> Result<O> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(message)) => Err(anyhow::anyhow!("agent::{export} returned error: {message}")),
+        Err(e) => Err(e.context(format!("agent::{export} failed"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One export call under the limits
+// ---------------------------------------------------------------------------
+
+/// What one export call produced.
+struct CallReport<O> {
+    /// The guest's own `Ok`/`Err`, or why the call failed.
+    result: Result<Result<O, String>>,
+    /// Fuel used, from this call's own budget.
+    fuel_consumed: u64,
+    /// The call trapped; the instance must not be entered again.
+    trapped: bool,
+}
+
+/// Epoch ticks covering `ms` milliseconds (at least one).
+fn epoch_ticks(ms: u64) -> u64 {
+    ms.div_ceil(EPOCH_TICK.as_millis() as u64).max(1)
+}
+
+/// Refill fuel, arm the epoch deadline and the host-time deadline, run
+/// `call`, then map how it ended. Runs on whatever thread calls it; callers
+/// keep it off async executor threads (WASI's sync bindings `block_on`).
+fn run_export<O>(
+    instance: &mut Instance,
+    limits: &ResourceLimits,
+    budget_ms: u64,
+    progress_tx: Option<UnboundedSender<String>>,
+    call: impl FnOnce(&Module, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, String>>,
+    size: fn(&O) -> usize,
+) -> CallReport<O> {
+    let store = &mut instance.store;
+    if let Err(e) = store.set_fuel(limits.max_fuel) {
+        return CallReport {
+            result: Err(e.context("failed to set fuel")),
+            fuel_consumed: 0,
+            trapped: false,
+        };
+    }
+    store.set_epoch_deadline(epoch_ticks(budget_ms));
+    {
+        let state = store.data_mut();
+        state.deadline = Some(Instant::now() + Duration::from_millis(budget_ms));
+        state.deadline_hit = false;
+        state.limiter.memory_denied = false;
+        state.stderr.clear();
+        state.progress_tx = progress_tx;
+    }
+
+    let outcome = call(&instance.bindings, store);
+
+    let fuel_consumed = limits
+        .max_fuel
+        .saturating_sub(store.get_fuel().unwrap_or(0));
+    let state = store.data_mut();
+    state.deadline = None;
+    state.progress_tx = None;
+    let deadline = CallError::DeadlineExceeded {
+        max_execution_ms: budget_ms,
+    };
+
+    let (result, trapped) = match outcome {
+        Err(err) => (Err(classify_trap(&err, state, limits, budget_ms)), true),
+        Ok(_) if state.deadline_hit => (Err(deadline), false),
+        Ok(returned) => {
+            let bytes = match &returned {
+                Ok(value) => size(value),
+                Err(message) => message.len(),
+            };
+            let result = if bytes as u64 > limits.max_output_bytes {
+                Err(CallError::OutputTooLarge {
+                    bytes,
+                    max_output_bytes: limits.max_output_bytes,
+                })
+            } else {
+                Ok(returned)
+            };
+            (result, false)
+        }
+    };
+    let result = result.map_err(|call_error| {
+        warn!(module = %state.manifest.name, error = %call_error, "guest call failed");
+        anyhow::Error::new(call_error)
+    });
+    CallReport {
+        result,
+        fuel_consumed,
+        trapped,
+    }
+}
+
+/// Name why a call trapped: fuel, deadline, memory limit, or the guest's own
+/// trap (with the tail of its stderr, where a panic message lands).
+fn classify_trap(
+    err: &wasmtime::Error,
+    state: &ModuleState,
+    limits: &ResourceLimits,
+    budget_ms: u64,
+) -> CallError {
+    match err.downcast_ref::<Trap>() {
+        Some(Trap::OutOfFuel) => CallError::FuelExhausted {
+            max_fuel: limits.max_fuel,
+        },
+        Some(Trap::Interrupt) => CallError::DeadlineExceeded {
+            max_execution_ms: budget_ms,
+        },
+        _ if state.limiter.memory_denied => CallError::MemoryLimit {
+            max_memory_bytes: limits.max_memory_bytes,
+        },
+        _ => {
+            let cause = err.root_cause().to_string();
+            let stderr = state.stderr.text();
+            CallError::GuestTrap(if stderr.is_empty() {
+                cause
+            } else {
+                format!("{cause}; guest stderr: {stderr}")
+            })
+        }
+    }
+}
+
+fn host_panic(message: String) -> anyhow::Error {
+    anyhow::Error::new(CallError::HostPanic(message))
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Output sizes (for the per-call output cap)
+// ---------------------------------------------------------------------------
+
+fn chat_response_size(resp: &ChatResponse) -> usize {
+    resp.content.len()
+        + resp
+            .tool_calls
+            .iter()
+            .map(|c| c.id.len() + c.name.len() + c.arguments.len())
+            .sum::<usize>()
+}
+
+fn tool_definition_size(tool: &ToolDefinition) -> usize {
+    tool.name.len() + tool.description.len() + tool.parameters_schema.len()
+}
+
+fn agent_card_size(card: &AgentCard) -> usize {
+    card.name.len()
+        + card.display_name.len()
+        + card.description.len()
+        + card.version.len()
+        + card
+            .skills
+            .iter()
+            .map(|s| {
+                s.name.len()
+                    + s.description.len()
+                    + s.examples.iter().map(String::len).sum::<usize>()
+            })
+            .sum::<usize>()
+        + card.tools.iter().map(tool_definition_size).sum::<usize>()
 }
 
 // ---------------------------------------------------------------------------

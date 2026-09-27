@@ -241,13 +241,12 @@ async fn s3_08_a2a_message_stream_lifecycle() {
 ///
 /// Decision (the plan says "cancelled or bounded"): **bounded, not
 /// cancelled**, pinned as today's behaviour. The guest call is a synchronous
-/// WASM call on a blocking thread; nothing can stop it from the outside
-/// until the runtime has an interruption point (PL-H1's epoch deadline). So
+/// WASM call on a blocking thread; a client disconnect does not stop it. So
 /// the gateway lets it run to the end, then releases the module: the dropped
 /// call still reaches the model, and the next caller is served as soon as it
 /// returns — no thread or lock is left behind. How long "the end" may be is
-/// the runtime's wall clock, which today does not count host time (F1): that
-/// is S1 row 1.4 (PL-H1), not a gateway defect.
+/// bounded by the runtime's per-call wall clock, host time included (PL-H1's
+/// epoch deadline, S1 rows 1.3/1.4).
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_09_a2a_disconnect_mid_stream_is_bounded() {
     const HOST_DELAY: Duration = Duration::from_secs(2);

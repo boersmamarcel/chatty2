@@ -215,8 +215,8 @@ mcp = true                      # Expose via /mcp/{name}
 a2a = true                      # Expose via /a2a/{name} (required for invoke_agent)
 
 [resources]
-max_memory_mb = 64              # Memory cap (0 = use default: 64 MiB)
-max_execution_ms = 30000        # Timeout (0 = use default: 300s)
+max_memory_mb = 64              # Memory cap (0 = use default: 256 MiB; may only lower)
+max_execution_ms = 30000        # Per-call timeout (0 = use default: 60 s; may only lower)
 ```
 
 `[protocols].a2a = true` is what makes a module invocable as an agent from
@@ -227,15 +227,24 @@ the hive-runner instead.
 
 ### Resource limits
 
-Every module runs inside a sandboxed Wasmtime instance with three enforcement
-mechanisms (`crates/chatty-wasm-runtime/src/limits.rs`), overridable per module via
-`[resources]`:
+Every module runs inside a sandboxed Wasmtime instance
+(`crates/chatty-wasm-runtime/src/limits.rs`). Every limit is **per call**: fuel is
+refilled and the deadline re-armed before each export call. The defaults are the host
+ceilings; a manifest's `[resources]` may only lower them — a larger value is clamped
+down to the ceiling.
 
-| Limit | Default | Purpose |
-|:------|:--------|:--------|
-| **Fuel** | 100,000,000 units | CPU budget (≈1 unit per Wasm instruction) |
-| **Memory** | 64 MiB | Linear memory cap |
-| **Timeout** | 300,000 ms (5 min) | Wall-clock execution limit |
+| Limit | Default = ceiling | Enforcement | Error |
+|:------|:------------------|:------------|:------|
+| **Fuel** | 10⁹ units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
+| **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm::complete`, `file::read-bytes`, billing) stop waiting at the deadline | `deadline exceeded` |
+| **Memory** | 256 MiB | Store memory limiter | `memory limit` |
+| **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
+
+`list-tools` and `get-agent-card` get a 1 s wall-clock budget. A guest trap or panic
+fails the call with `guest trap: <message>` (the panic message is read from the guest's
+stderr) and never takes the host down; the trapped instance is dropped and the module
+re-instantiated on its next call, so guest statics start over. Callers can match the
+kind with `err.downcast_ref::<chatty_wasm_runtime::CallError>()`.
 
 ## Protocol gateway
 

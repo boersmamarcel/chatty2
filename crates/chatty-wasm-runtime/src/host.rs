@@ -1,9 +1,16 @@
+use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, trace, warn};
-use wasmtime_wasi::{IoView, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime::{ResourceLimiter, StoreLimits};
+use wasmtime_wasi::{
+    IoView, OutputStream, Pollable, ResourceTable, StdoutStream, StreamError, WasiCtx,
+    WasiCtxBuilder, WasiView,
+};
 
 use crate::bindings::chatty::module::billing::SessionInfo;
 use crate::bindings::chatty::module::types::{CompletionResponse, Message};
@@ -16,10 +23,11 @@ use crate::limits::ResourceLimits;
 /// Callback interface that the host supplies so WASM modules can call the
 /// chatty LLM back-end.
 ///
-/// The implementation is called synchronously from within the Wasmtime host
-/// function for `llm::complete`.  If the underlying LLM client is async,
-/// wrap the call with [`tokio::runtime::Handle::current().block_on`] or
-/// keep the provider pre-built and cache the result.
+/// The implementation is called synchronously, on a helper thread that has
+/// the caller's Tokio runtime entered (so `Handle::current().block_on` works
+/// for an async client). The host stops waiting when the guest call's
+/// wall-clock deadline passes and hands the guest `Err("deadline exceeded")`;
+/// the helper thread is left to finish on its own.
 pub trait LlmProvider: Send + Sync {
     /// Run a completion against the host-managed model.
     ///
@@ -156,11 +164,18 @@ impl ModuleManifest {
 /// Data stored inside the Wasmtime [`Store`](wasmtime::Store) for each
 /// module instance.
 ///
-/// Holds both the resource limiter (for memory caps) and the runtime
-/// dependencies needed by host imports.
+/// Holds the resource limiter (for memory caps), the current call's
+/// deadline, and the runtime dependencies needed by host imports.
 pub(crate) struct ModuleState {
     /// Wasmtime resource limiter (memory cap).
-    pub(crate) limits: wasmtime::StoreLimits,
+    pub(crate) limiter: GuestLimiter,
+    /// Wall-clock deadline of the guest call in progress, if any. Host
+    /// imports that can block stop waiting at this instant.
+    pub(crate) deadline: Option<Instant>,
+    /// Set when a host import gave up because `deadline` passed.
+    pub(crate) deadline_hit: bool,
+    /// The last few KiB the guest wrote to stderr (e.g. a panic message).
+    pub(crate) stderr: StderrTail,
     /// Static module configuration.
     pub(crate) manifest: ModuleManifest,
     /// Callback for LLM completions.
@@ -183,18 +198,22 @@ impl ModuleState {
         billing_provider: Option<Arc<dyn BillingProvider>>,
         resource_limits: &ResourceLimits,
     ) -> Self {
-        let limits = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(resource_limits.max_memory_bytes as usize)
-            .build();
+        let limiter = GuestLimiter::new(resource_limits.max_memory_bytes);
 
         // Minimal WASI context — no filesystem, no network, no env vars.
         // Modules compiled for wasm32-wasip2 import these interfaces from
         // the host; we satisfy them with a sandboxed no-op implementation.
-        let wasi_ctx = WasiCtxBuilder::new().build();
+        // Only stderr is kept (its tail), so a guest panic message can be
+        // reported with the trap.
+        let stderr = StderrTail::default();
+        let wasi_ctx = WasiCtxBuilder::new().stderr(stderr.clone()).build();
         let table = ResourceTable::new();
 
         Self {
-            limits,
+            limiter,
+            deadline: None,
+            deadline_hit: false,
+            stderr,
             manifest,
             llm_provider,
             billing_provider,
@@ -202,6 +221,169 @@ impl ModuleState {
             table,
             progress_tx: None,
         }
+    }
+
+    /// Run a blocking host operation, giving up when the current call's
+    /// deadline passes.
+    ///
+    /// `f` runs on a helper thread with the caller's Tokio runtime entered.
+    /// On expiry the guest gets `Err("deadline exceeded")` and
+    /// `deadline_hit` is set; the helper thread finishes on its own. A panic
+    /// in `f` becomes an `Err` too, never a host panic.
+    fn before_deadline<T: Send + 'static>(
+        &mut self,
+        what: &str,
+        f: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let Some(deadline) = self.deadline else {
+            return f();
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            self.deadline_hit = true;
+            return Err(DEADLINE_EXCEEDED.to_string());
+        }
+        let (tx, rx) = sync_channel(1);
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        std::thread::Builder::new()
+            .name(format!("wasm-host-{what}"))
+            .spawn(move || {
+                let _entered = runtime.as_ref().map(|h| h.enter());
+                let _ = tx.send(f());
+            })
+            .map_err(|e| format!("{what}: could not start the host call: {e}"))?;
+        match rx.recv_timeout(remaining) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                self.deadline_hit = true;
+                warn!(module = %self.manifest.name, what, "host call ran past the call deadline");
+                Err(DEADLINE_EXCEEDED.to_string())
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(format!("{what}: the host call panicked")),
+        }
+    }
+}
+
+/// What a host import returns to the guest when the call's deadline passed.
+const DEADLINE_EXCEEDED: &str = "deadline exceeded";
+
+// ---------------------------------------------------------------------------
+// GuestLimiter — memory cap that remembers refusing a grow
+// ---------------------------------------------------------------------------
+
+/// [`StoreLimits`] plus a flag set whenever a memory grow is refused, so a
+/// trap that follows can be reported as `memory limit`.
+pub(crate) struct GuestLimiter {
+    inner: StoreLimits,
+    /// A memory grow was refused during the current call.
+    pub(crate) memory_denied: bool,
+}
+
+impl GuestLimiter {
+    fn new(max_memory_bytes: u64) -> Self {
+        let inner = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(usize::try_from(max_memory_bytes).unwrap_or(usize::MAX))
+            .build();
+        Self {
+            inner,
+            memory_denied: false,
+        }
+    }
+}
+
+impl ResourceLimiter for GuestLimiter {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        let allowed = self.inner.memory_growing(current, desired, maximum)?;
+        if !allowed {
+            self.memory_denied = true;
+        }
+        Ok(allowed)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StderrTail — the last few KiB of guest stderr
+// ---------------------------------------------------------------------------
+
+/// Bytes of guest stderr kept for error reports.
+const STDERR_TAIL_BYTES: usize = 4096;
+
+/// A WASI stderr that keeps only its last [`STDERR_TAIL_BYTES`] bytes and
+/// never fails a write, so a chatty guest can't trap itself through stderr.
+#[derive(Clone, Default)]
+pub(crate) struct StderrTail(Arc<Mutex<VecDeque<u8>>>);
+
+impl StderrTail {
+    /// Forget everything written so far.
+    pub(crate) fn clear(&self) {
+        self.0.lock().expect("stderr tail lock").clear();
+    }
+
+    /// What is kept, lossily decoded and trimmed.
+    pub(crate) fn text(&self) -> String {
+        let buf = self.0.lock().expect("stderr tail lock");
+        let (a, b) = buf.as_slices();
+        String::from_utf8_lossy(&[a, b].concat()).trim().to_string()
+    }
+}
+
+impl OutputStream for StderrTail {
+    fn write(&mut self, bytes: bytes::Bytes) -> Result<(), StreamError> {
+        let mut buf = self.0.lock().expect("stderr tail lock");
+        let keep = bytes.len().min(STDERR_TAIL_BYTES);
+        buf.extend(&bytes[bytes.len() - keep..]);
+        let excess = buf.len().saturating_sub(STDERR_TAIL_BYTES);
+        buf.drain(..excess);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), StreamError> {
+        Ok(())
+    }
+
+    fn check_write(&mut self) -> Result<usize, StreamError> {
+        Ok(usize::MAX)
+    }
+}
+
+#[wasmtime_wasi::async_trait]
+impl Pollable for StderrTail {
+    async fn ready(&mut self) {}
+}
+
+impl StdoutStream for StderrTail {
+    fn stream(&self) -> Box<dyn OutputStream> {
+        Box::new(self.clone())
+    }
+
+    fn isatty(&self) -> bool {
+        false
     }
 }
 
@@ -251,7 +433,10 @@ impl crate::bindings::chatty::module::llm::Host for ModuleState {
             has_tools = tools.is_some(),
             "llm::complete called by WASM module"
         );
-        let result = self.llm_provider.complete(&model, messages, tools);
+        let provider = Arc::clone(&self.llm_provider);
+        let result = self.before_deadline("llm-complete", move || {
+            provider.complete(&model, messages, tools)
+        });
         if let Err(ref e) = result {
             warn!(module = %self.manifest.name, error = %e, "llm::complete returned error");
         }
@@ -298,9 +483,11 @@ impl crate::bindings::chatty::module::billing::Host for ModuleState {
             "billing::acquire-session called by WASM module"
         );
 
-        match &self.billing_provider {
+        match self.billing_provider.clone() {
             Some(provider) => {
-                let result = provider.acquire_session(estimated_tokens);
+                let result = self.before_deadline("billing-acquire-session", move || {
+                    provider.acquire_session(estimated_tokens)
+                });
                 if let Err(ref e) = result {
                     warn!(module = %self.manifest.name, error = %e, "billing::acquire-session failed");
                 }
@@ -323,9 +510,11 @@ impl crate::bindings::chatty::module::billing::Host for ModuleState {
             "billing::report-usage called by WASM module"
         );
 
-        match &self.billing_provider {
+        match self.billing_provider.clone() {
             Some(provider) => {
-                let result = provider.report_usage(input_tokens, output_tokens);
+                let result = self.before_deadline("billing-report-usage", move || {
+                    provider.report_usage(input_tokens, output_tokens)
+                });
                 if let Err(ref e) = result {
                     warn!(module = %self.manifest.name, error = %e, "billing::report-usage failed");
                 }
@@ -363,10 +552,14 @@ impl crate::bindings::chatty::module::file::Host for ModuleState {
             "file::read_bytes"
         );
 
-        std::fs::read(&full).map_err(|e| {
+        let result = self.before_deadline("file-read-bytes", {
+            let full = full.clone();
+            move || std::fs::read(&full).map_err(|e| format!("file::read_bytes: {e}"))
+        });
+        if let Err(ref e) = result {
             warn!(module = %self.manifest.name, path = %full.display(), error = %e, "file::read_bytes failed");
-            format!("file::read_bytes: {e}")
-        })
+        }
+        result
     }
 }
 
@@ -482,6 +675,61 @@ mod tests {
         let result = state.complete("gpt-4".to_string(), vec![], None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "provider error");
+    }
+
+    struct SlowProvider(std::time::Duration);
+
+    impl LlmProvider for SlowProvider {
+        fn complete(
+            &self,
+            _model: &str,
+            _messages: Vec<Message>,
+            _tools: Option<String>,
+        ) -> Result<CompletionResponse, String> {
+            std::thread::sleep(self.0);
+            Err("too late to matter".to_string())
+        }
+    }
+
+    struct PanickingProvider;
+
+    impl LlmProvider for PanickingProvider {
+        fn complete(
+            &self,
+            _model: &str,
+            _messages: Vec<Message>,
+            _tools: Option<String>,
+        ) -> Result<CompletionResponse, String> {
+            panic!("provider bug")
+        }
+    }
+
+    #[test]
+    fn llm_host_stops_waiting_at_the_call_deadline() {
+        use crate::bindings::chatty::module::llm::Host;
+        let slow = std::time::Duration::from_secs(5);
+        let mut state = make_state(Arc::new(SlowProvider(slow)));
+        state.deadline = Some(Instant::now() + std::time::Duration::from_millis(100));
+
+        let start = Instant::now();
+        let result = state.complete("m".to_string(), vec![], None);
+        assert_eq!(result.unwrap_err(), DEADLINE_EXCEEDED);
+        assert!(state.deadline_hit);
+        assert!(start.elapsed() < slow, "waited {:?}", start.elapsed());
+
+        // Past the deadline, the host doesn't start the call at all.
+        let result = state.complete("m".to_string(), vec![], None);
+        assert_eq!(result.unwrap_err(), DEADLINE_EXCEEDED);
+    }
+
+    #[test]
+    fn llm_host_maps_a_provider_panic_to_an_error() {
+        use crate::bindings::chatty::module::llm::Host;
+        let mut state = make_state(Arc::new(PanickingProvider));
+        state.deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
+        let err = state.complete("m".to_string(), vec![], None).unwrap_err();
+        assert!(err.contains("panicked"), "{err}");
+        assert!(!state.deadline_hit);
     }
 
     #[test]
