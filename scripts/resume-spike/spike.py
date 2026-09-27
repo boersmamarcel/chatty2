@@ -193,8 +193,9 @@ class OllamaMeter(object):
         body = handler.rfile.read(length) if length else None
         cls = http.client.HTTPSConnection if self.https else http.client.HTTPConnection
         upstream = cls(self.host, self.port, timeout=3600)
-        headers = {k: v for k, v in handler.headers.items()
-                   if k.lower() not in ("host", "connection", "content-length")}
+        headers = {}
+        if handler.headers.get("Content-Type"):
+            headers["Content-Type"] = handler.headers["Content-Type"]
         if body is not None:
             headers["Content-Length"] = str(len(body))
         try:
@@ -204,9 +205,11 @@ class OllamaMeter(object):
             handler.send_error(502, "resume-spike meter: %s" % error)
             return
         handler.send_response(response.status)
-        for key, value in response.getheaders():
-            if key.lower() not in ("transfer-encoding", "content-length", "connection"):
-                handler.send_header(key, value)
+        # Only the content type goes back, stripped of line breaks: the
+        # client reads the body until the connection closes.
+        content_type = re.sub(r"[\r\n]", "", response.getheader("Content-Type") or "")
+        if content_type:
+            handler.send_header("Content-Type", content_type)
         handler.send_header("Connection", "close")
         handler.end_headers()
         handler.close_connection = True
@@ -406,6 +409,8 @@ class Runner(object):
 def verify(task, cwd):
     """The task's verifier on the worktree: (passed, log)."""
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    # The verifier runs the worker's code: it gets no provider key.
+    env.pop("OPENROUTER_API_KEY", None)
     try:
         out = subprocess.run([sys.executable, os.path.join(task["dir"], "verify.py"), cwd],
                              cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
