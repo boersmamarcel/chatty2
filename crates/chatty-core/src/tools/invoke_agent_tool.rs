@@ -42,14 +42,15 @@ pub enum InvokeAgentProgress {
     Finished {
         success: bool,
         result: Option<String>,
-        /// What the agent spent, as reported on its terminal status, with
-        /// `delegated_to` naming the agent (AGE-415). The session folds it
-        /// into the conversation's usage as a delegated line, so the
-        /// leader's totals include what its workers spent. `None` when the
-        /// agent reported nothing — a WASM module, or a task that never
-        /// reached its terminal status.
-        #[serde(default)]
-        usage: Option<TokenUsage>,
+        /// What the agent spent, as reported on its terminal status: one
+        /// line per model, each naming its model, with `delegated_to`
+        /// naming the agent (AGE-415, AGE-682). The session folds them into
+        /// the conversation's usage as delegated lines, so the leader's
+        /// totals include what its workers spent. Empty when the agent
+        /// reported nothing — a WASM module, or a task that never reached
+        /// its terminal status.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        usage: Vec<TokenUsage>,
     },
 }
 
@@ -522,7 +523,7 @@ impl InvokeAgentTool {
                 self.send_progress(InvokeAgentProgress::Finished {
                     success: false,
                     result: Some(err_text),
-                    usage: None,
+                    usage: Vec::new(),
                 });
                 InvokeAgentError::InvocationFailed(format!(
                     "Failed to invoke agent '{}': {}",
@@ -533,7 +534,7 @@ impl InvokeAgentTool {
         let mut response = String::new();
         let mut success = true;
         let mut error_msg = None;
-        let mut usage = None;
+        let mut usage = Vec::new();
         let mut trace = None;
         let mut conversation = None;
 
@@ -548,11 +549,15 @@ impl InvokeAgentTool {
                 }) => {
                     // The worker's spend rides on its terminal status; a
                     // failed task spent its tokens too (AGE-415).
-                    if let Some(reported) = usage_from_status_metadata(metadata.as_ref()) {
-                        usage = Some(TokenUsage {
-                            delegated_to: Some(config.name.clone()),
-                            ..reported
-                        });
+                    let reported = usage_from_status_metadata(metadata.as_ref());
+                    if !reported.is_empty() {
+                        usage = reported
+                            .into_iter()
+                            .map(|line| TokenUsage {
+                                delegated_to: Some(config.name.clone()),
+                                ..line
+                            })
+                            .collect();
                     }
                     if state == "failed" {
                         success = false;

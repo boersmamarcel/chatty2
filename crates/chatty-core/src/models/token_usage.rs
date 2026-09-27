@@ -1,4 +1,18 @@
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
+
+use crate::settings::models::providers_store::ProviderType;
+
+/// The model a usage line was spent on (AGE-682): the provider plus the
+/// model id as it was sent to that provider. A usage line is a fact — tokens,
+/// model, time — and its price is looked up from this when it is read
+/// ([`price`]), never carried with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider: ProviderType,
+    pub model_id: String,
+}
 
 /// Token usage reported by the provider for **one** completion request.
 ///
@@ -13,9 +27,11 @@ use serde::{Deserialize, Serialize};
 /// whether the provider reports cache reads as a subset of its input count
 /// (OpenAI-compatible) or separately from it (Anthropic). The normalisation
 /// happens once, in `llm_service`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ApiCallUsage {
-    /// One-based index of the request within the exchange.
+    /// One-based index of the request within the exchange; 0 for the
+    /// aggregate and for a call outside the model loop (a compaction
+    /// summary, AGE-683).
     pub turn: u32,
     /// Prompt tokens billed at the full input rate (not served from cache).
     pub input_tokens: u32,
@@ -32,6 +48,16 @@ pub struct ApiCallUsage {
     /// from a provider that does not report the field at all.
     #[serde(default)]
     pub reasoning_tokens: u32,
+    /// The model that served the request (AGE-682). `None` on records
+    /// written before it was tracked, which are therefore unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// When the request finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<SystemTime>,
+    /// How long the request took, in milliseconds.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 impl ApiCallUsage {
@@ -61,6 +87,111 @@ pub struct TokenPricing {
     pub output_per_million: f64,
     pub cache_read_per_million: Option<f64>,
     pub cache_write_per_million: Option<f64>,
+}
+
+impl TokenPricing {
+    /// What these token counts cost at these prices.
+    fn cost(&self, input: u32, output: u32, cache_read: u32, cache_write: u32) -> f64 {
+        const M: f64 = 1_000_000.0;
+        let input_cost = (input as f64 / M) * self.input_per_million;
+        let output_cost = (output as f64 / M) * self.output_per_million;
+        let cache_read_cost = (cache_read as f64 / M)
+            * self
+                .cache_read_per_million
+                .unwrap_or(self.input_per_million);
+        let cache_write_cost = (cache_write as f64 / M)
+            * self
+                .cache_write_per_million
+                .unwrap_or(self.input_per_million);
+        input_cost + output_cost + cache_read_cost + cache_write_cost
+    }
+}
+
+/// Where a usage line's price comes from (AGE-682): a lookup from
+/// `(model, at)` to [`TokenPricing`]. Locally it is the model roster's
+/// current prices (`ModelConfig::token_pricing`), so `at` does not change the
+/// answer; it is part of the lookup so a dated price list can answer it.
+#[derive(Debug, Clone, Default)]
+pub struct PriceBook {
+    entries: Vec<(ModelRef, TokenPricing)>,
+}
+
+impl PriceBook {
+    /// Add `model`'s prices, unless the book already prices it.
+    pub fn insert(&mut self, model: ModelRef, pricing: TokenPricing) {
+        if !self.entries.iter().any(|(known, _)| *known == model) {
+            self.entries.push((model, pricing));
+        }
+    }
+
+    /// Price `model` at `pricing`, replacing whatever the book held for it.
+    pub fn set(&mut self, model: ModelRef, pricing: TokenPricing) {
+        self.entries.retain(|(known, _)| *known != model);
+        self.entries.push((model, pricing));
+    }
+
+    /// `model`'s prices at `at`, or `None` when the book does not price it.
+    pub fn pricing(&self, model: &ModelRef, _at: Option<SystemTime>) -> Option<TokenPricing> {
+        self.entries
+            .iter()
+            .find(|(known, _)| known == model)
+            .map(|(_, pricing)| *pricing)
+    }
+}
+
+/// The price of a set of usage lines: what the priced ones cost, and how many
+/// could not be priced (their model is unknown, or has no prices). An
+/// unpriced line adds nothing to `usd` and is counted here instead, so it
+/// reads as unpriced rather than as $0.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Cost {
+    pub usd: f64,
+    pub unpriced_lines: usize,
+}
+
+/// Price usage lines against `book` (AGE-682). This is the one place a
+/// line's cost is computed: `estimated_cost_usd` on a line and the
+/// conversation's total are caches of what this returns.
+///
+/// A line with per-request records is the sum of its requests, each at its
+/// own model (a request without one is the line's model); a line without
+/// them is priced whole at its model. A line any part of which has no model,
+/// or a model the book does not price, is unpriced.
+pub fn price(lines: &[TokenUsage], book: &PriceBook) -> Cost {
+    let mut cost = Cost::default();
+    for line in lines {
+        match line_cost(line, book) {
+            Some(usd) => cost.usd += usd,
+            None => cost.unpriced_lines += 1,
+        }
+    }
+    cost
+}
+
+/// One line's cost; see [`price`].
+fn line_cost(line: &TokenUsage, book: &PriceBook) -> Option<f64> {
+    let pricing_for = |model: Option<&ModelRef>, at| model.and_then(|m| book.pricing(m, at));
+    if line.calls.is_empty() {
+        let pricing = pricing_for(line.model.as_ref(), line.at)?;
+        return Some(pricing.cost(
+            line.input_tokens,
+            line.output_tokens,
+            line.cache_read_tokens,
+            line.cache_write_tokens,
+        ));
+    }
+    line.calls.iter().try_fold(0.0, |total, call| {
+        let pricing = pricing_for(call.model.as_ref().or(line.model.as_ref()), call.at)?;
+        Some(
+            total
+                + pricing.cost(
+                    call.input_tokens,
+                    call.output_tokens,
+                    call.cache_read_tokens,
+                    call.cache_write_tokens,
+                ),
+        )
+    })
 }
 
 /// Token usage for a single message exchange
@@ -104,6 +235,20 @@ pub struct TokenUsage {
     /// turn's own usage, which is every record written before this existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_to: Option<String>,
+
+    /// The model the line was spent on (AGE-682); per-request records carry
+    /// their own, which win. `None` on records written before it was
+    /// tracked, which are therefore unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+
+    /// When the line's last request finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<SystemTime>,
+
+    /// Time spent in the line's requests, in milliseconds.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 fn default_turn_count() -> u32 {
@@ -121,6 +266,9 @@ impl Default for TokenUsage {
             api_turn_count: 1,
             calls: Vec::new(),
             delegated_to: None,
+            model: None,
+            at: None,
+            duration_ms: 0,
         }
     }
 }
@@ -147,8 +295,10 @@ impl TokenUsage {
 
     /// Build the exchange record from its per-request usages.
     ///
-    /// Totals are sums over `calls`; `api_turn_count` is `calls.len()`. An
-    /// empty list yields the default (zero) record with one turn.
+    /// Totals are sums over `calls`; `api_turn_count` is `calls.len()`. The
+    /// line's model is the calls' model when they all share one, `at` is the
+    /// last call's and `duration_ms` the sum. An empty list yields the
+    /// default (zero) record with one turn.
     pub fn from_calls(calls: Vec<ApiCallUsage>) -> Self {
         let mut usage = Self {
             api_turn_count: (calls.len() as u32).max(1),
@@ -163,7 +313,13 @@ impl TokenUsage {
             usage.cache_write_tokens = usage
                 .cache_write_tokens
                 .saturating_add(call.cache_write_tokens);
+            usage.duration_ms = usage.duration_ms.saturating_add(call.duration_ms);
         }
+        let first_model = calls.first().and_then(|c| c.model.as_ref());
+        if calls.iter().all(|c| c.model.as_ref() == first_model) {
+            usage.model = first_model.cloned();
+        }
+        usage.at = calls.last().and_then(|c| c.at);
         usage.calls = calls;
         usage
     }
@@ -188,24 +344,10 @@ impl TokenUsage {
         self.calls.last()
     }
 
-    /// Calculate cost from per-million-token prices.
-    ///
-    /// Cached tokens use the cache rates when configured and the input rate
-    /// otherwise (see [`TokenPricing`]).
-    pub fn calculate_cost(&mut self, pricing: &TokenPricing) {
-        const M: f64 = 1_000_000.0;
-        let input_cost = (self.input_tokens as f64 / M) * pricing.input_per_million;
-        let output_cost = (self.output_tokens as f64 / M) * pricing.output_per_million;
-        let cache_read_cost = (self.cache_read_tokens as f64 / M)
-            * pricing
-                .cache_read_per_million
-                .unwrap_or(pricing.input_per_million);
-        let cache_write_cost = (self.cache_write_tokens as f64 / M)
-            * pricing
-                .cache_write_per_million
-                .unwrap_or(pricing.input_per_million);
-        self.estimated_cost_usd =
-            Some(input_cost + output_cost + cache_read_cost + cache_write_cost);
+    /// Cache this line's cost from `book` in `estimated_cost_usd`: `None`
+    /// when the line is unpriced (see [`price`]).
+    pub fn price(&mut self, book: &PriceBook) {
+        self.estimated_cost_usd = line_cost(self, book);
     }
 }
 
@@ -290,8 +432,28 @@ impl ConversationTokenUsage {
         self.message_usages.last()
     }
 
+    /// Forget the stored cost of every line that names no model (AGE-682):
+    /// such a line is unpriced whatever it was stored with, so a record
+    /// written before lines carried their model loads unpriced, and the
+    /// totals are recomputed without it.
+    pub fn forget_unattributed_costs(&mut self) {
+        let mut forgot = false;
+        for line in &mut self.message_usages {
+            let attributed = if line.calls.is_empty() {
+                line.model.is_some()
+            } else {
+                line.model.is_some() || line.calls.iter().all(|c| c.model.is_some())
+            };
+            if !attributed && line.estimated_cost_usd.take().is_some() {
+                forgot = true;
+            }
+        }
+        if forgot {
+            self.recalculate_totals();
+        }
+    }
+
     /// Recalculate totals from per-message usages
-    #[allow(dead_code)]
     pub fn recalculate_totals(&mut self) {
         self.total_input_tokens = self.message_usages.iter().map(|u| u.input_tokens).sum();
         self.total_output_tokens = self.message_usages.iter().map(|u| u.output_tokens).sum();
@@ -325,6 +487,7 @@ mod tests {
             cache_write_tokens: write,
             output_tokens: output,
             reasoning_tokens: 0,
+            ..Default::default()
         }
     }
 
@@ -360,24 +523,134 @@ mod tests {
         assert_eq!(call(1, 0, 0, 0, 0).cache_hit_rate(), None);
     }
 
+    fn model(id: &str) -> ModelRef {
+        ModelRef {
+            provider: ProviderType::OpenRouter,
+            model_id: id.to_string(),
+        }
+    }
+
+    fn book(entries: &[(&str, f64, f64)]) -> PriceBook {
+        let mut book = PriceBook::default();
+        for (id, input, output) in entries {
+            book.insert(
+                model(id),
+                TokenPricing {
+                    input_per_million: *input,
+                    output_per_million: *output,
+                    ..Default::default()
+                },
+            );
+        }
+        book
+    }
+
     #[test]
     fn cost_uses_cache_rates_when_configured_and_input_rate_otherwise() {
         let mut usage = TokenUsage::from_calls(vec![call(1, 1_000_000, 1_000_000, 1_000_000, 0)]);
-        usage.calculate_cost(&TokenPricing {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-            cache_read_per_million: Some(0.3),
-            cache_write_per_million: Some(3.75),
-        });
+        usage.model = Some(model("m"));
+        let mut cached = PriceBook::default();
+        cached.insert(
+            model("m"),
+            TokenPricing {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                cache_read_per_million: Some(0.3),
+                cache_write_per_million: Some(3.75),
+            },
+        );
+        usage.price(&cached);
         assert!((usage.estimated_cost_usd.unwrap() - (3.0 + 0.3 + 3.75)).abs() < 1e-9);
 
-        usage.calculate_cost(&TokenPricing {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-            cache_read_per_million: None,
-            cache_write_per_million: None,
-        });
+        usage.price(&book(&[("m", 3.0, 15.0)]));
         assert!((usage.estimated_cost_usd.unwrap() - 9.0).abs() < 1e-9);
+    }
+
+    /// A line is a fact; its model is how it is priced. A call on a model
+    /// the book does not know — or a line that names none — is unpriced,
+    /// not free.
+    #[test]
+    fn unknown_model_is_unpriced_not_zero() {
+        let book = book(&[("known", 1.0, 1.0)]);
+        let known = TokenUsage {
+            model: Some(model("known")),
+            ..TokenUsage::new(1_000_000, 0)
+        };
+        let unknown = TokenUsage {
+            model: Some(model("unknown")),
+            ..TokenUsage::new(1_000_000, 0)
+        };
+        let nameless = TokenUsage::new(1_000_000, 0);
+
+        let mut line = unknown.clone();
+        line.price(&book);
+        assert_eq!(line.estimated_cost_usd, None, "unpriced, not $0");
+
+        let cost = price(&[known, unknown, nameless], &book);
+        assert!((cost.usd - 1.0).abs() < 1e-9);
+        assert_eq!(cost.unpriced_lines, 2);
+
+        // A turn whose calls span models is unpriced if any of them is.
+        let mut mixed = TokenUsage::from_calls(vec![
+            ApiCallUsage {
+                model: Some(model("known")),
+                ..call(1, 10, 0, 0, 1)
+            },
+            ApiCallUsage {
+                model: Some(model("unknown")),
+                ..call(2, 10, 0, 0, 1)
+            },
+        ]);
+        mixed.price(&book);
+        assert_eq!(mixed.estimated_cost_usd, None);
+    }
+
+    /// Each call is priced at its own model; a call that names none is the
+    /// line's.
+    #[test]
+    fn calls_are_priced_at_their_own_model() {
+        let book = book(&[("agent", 1.0, 0.0), ("utility", 10.0, 0.0)]);
+        let mut usage = TokenUsage::from_calls(vec![
+            ApiCallUsage {
+                model: Some(model("utility")),
+                duration_ms: 5,
+                ..call(0, 1_000_000, 0, 0, 0)
+            },
+            ApiCallUsage {
+                duration_ms: 7,
+                ..call(1, 1_000_000, 0, 0, 0)
+            },
+        ]);
+        assert_eq!(usage.model, None, "the calls do not share a model");
+        assert_eq!(usage.duration_ms, 12);
+        usage.model = Some(model("agent"));
+        usage.price(&book);
+        assert!((usage.estimated_cost_usd.unwrap() - 11.0).abs() < 1e-9);
+    }
+
+    /// AGE-682: no backward compatibility — a record written before lines
+    /// named their model loads, and whatever cost it was stored with, it is
+    /// unpriced.
+    #[test]
+    fn old_lines_load_unpriced() {
+        let json = r#"{"message_usages":[
+            {"input_tokens":1234,"output_tokens":56,"estimated_cost_usd":0.01},
+            {"input_tokens":10,"output_tokens":5,"estimated_cost_usd":0.02,"api_turn_count":1,
+             "calls":[{"turn":1,"input_tokens":10,"output_tokens":5}]}],
+            "total_input_tokens":1244,"total_output_tokens":61,"total_estimated_cost_usd":0.03}"#;
+        let usage = crate::models::Conversation::deserialize_token_usage(json).unwrap();
+        assert_eq!(usage.message_usages.len(), 2);
+        assert!(usage.message_usages.iter().all(|line| line.model.is_none()));
+        assert!(
+            usage
+                .message_usages
+                .iter()
+                .all(|line| line.estimated_cost_usd.is_none())
+        );
+        assert_eq!(usage.total_estimated_cost_usd, 0.0);
+        assert_eq!(usage.total_input_tokens, 1244, "the tokens are kept");
+        let cost = price(&usage.message_usages, &book(&[("m", 1.0, 1.0)]));
+        assert_eq!(cost.unpriced_lines, 2);
     }
 
     #[test]

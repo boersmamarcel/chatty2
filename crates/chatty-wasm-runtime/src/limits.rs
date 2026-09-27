@@ -25,6 +25,11 @@ pub const MAX_FUEL_CEILING: u64 = 1_000_000_000;
 /// Ceiling on the size of one export's return value: 1 MiB.
 pub const MAX_OUTPUT_BYTES_CEILING: u64 = 1024 * 1024;
 
+/// Ceiling on one `file::read-bytes` call: 256 MiB. A larger file is refused
+/// before it is read. Not a PL-D3 limit (PL-D3 only restricts reads to the
+/// granted root); this cap is the host's own (PL-H3).
+pub const MAX_FILE_READ_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Wall-clock budget for the metadata exports (`list-tools`,
 /// `get-agent-card`): 1 s, or the call limit if that is lower.
 pub const METADATA_CALL_MS: u64 = 1_000;

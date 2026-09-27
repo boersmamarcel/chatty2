@@ -493,13 +493,15 @@ impl ChatEngine {
     pub fn new(config: ChatEngineConfig, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let skill_service =
             chatty_core::services::SkillService::new(config.embedding_service.clone());
-        let session = AgentSession::new(AgentSessionConfig {
+        let mut session = AgentSession::new(AgentSessionConfig {
             execution_settings: config.execution_settings.clone(),
             surface: config.surface,
             // The interactive TUI never ran the loop guard; headless keeps its
             // own over `AppEvent`s until AGE-196 decides whether it folds in.
             loop_guard: false,
         });
+        // Delegated lines are priced at the model they name (AGE-682).
+        session.set_price_book(config.models.price_book());
         Self {
             session,
             hosted: None,
@@ -1923,6 +1925,7 @@ mod tests {
             cache_write_tokens: 900,
             output_tokens: 20,
             reasoning_tokens: 0,
+            ..Default::default()
         };
         let call2 = chatty_core::models::token_usage::ApiCallUsage {
             turn: 2,
@@ -1931,10 +1934,11 @@ mod tests {
             cache_write_tokens: 0,
             output_tokens: 10,
             reasoning_tokens: 0,
+            ..Default::default()
         };
 
         engine.handle_event(AppEvent::TokenUsage(
-            chatty_core::models::token_usage::TokenUsage::from_calls(vec![call1, call2]),
+            chatty_core::models::token_usage::TokenUsage::from_calls(vec![call1, call2.clone()]),
         ));
 
         let usage = engine.last_turn_usage.as_ref().expect("usage recorded");

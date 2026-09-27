@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chatty_core::agent_spec::AgentSpec;
+use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::services::install_progress_channel;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::ModuleSettingsModel;
@@ -397,16 +398,23 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
                 result,
                 usage,
             } => {
-                let usage = usage.as_ref().map_or("none".to_string(), |u| {
+                // The lines' token totals, so one line per model (AGE-682)
+                // reads exactly as the one usage value the goldens recorded.
+                // The wire carries no call count, so each decoded line's is
+                // the default 1: summing it would count lines, not calls.
+                let usage = if usage.is_empty() {
+                    "none".to_string()
+                } else {
+                    let sum = |f: fn(&TokenUsage) -> u32| usage.iter().map(f).sum::<u32>();
                     format!(
                         "input={} output={} cache_read={} cache_write={} calls={}",
-                        u.input_tokens,
-                        u.output_tokens,
-                        u.cache_read_tokens,
-                        u.cache_write_tokens,
-                        u.api_turn_count
+                        sum(|u| u.input_tokens),
+                        sum(|u| u.output_tokens),
+                        sum(|u| u.cache_read_tokens),
+                        sum(|u| u.cache_write_tokens),
+                        usage.iter().map(|u| u.api_turn_count).max().unwrap_or(0)
                     )
-                });
+                };
                 format!(
                     "finished success={success} usage=[{usage}] result={}",
                     result.as_deref().unwrap_or("-")

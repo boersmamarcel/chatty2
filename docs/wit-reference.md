@@ -188,7 +188,13 @@ interface config {
 }
 ```
 
-Read configuration values set by the user for this module. The host manages the key-value store.
+Read the module's configuration: the string → string `[config]` table of its `module.toml`. A non-string value there is a manifest error.
+
+```toml
+[config]
+api-key = "sk-..."
+threshold = "0.8"
+```
 
 **Parameters**:
 - `key` — The configuration key to look up.
@@ -200,6 +206,41 @@ Read configuration values set by the user for this module. The host manages the 
 let api_key = config::get("api-key");       // some("sk-...")
 let threshold = config::get("threshold");    // some("0.8")
 let missing = config::get("nonexistent");    // none
+```
+
+### `file` — Sandboxed File Reads
+
+```wit
+interface file {
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+}
+```
+
+Read a file under the module's **file root**: the directory its `module.toml` grants with
+
+```toml
+[files]
+root = "weights"   # relative to the module directory
+```
+
+The root is host-set (the runtime's `ModuleManifest::with_weights_root`), never a `[config]` key: a config value named `weights_root` grants nothing. A module without `[files]` can read no files. Free modules never need this; ML inference modules use it to load weights once at startup.
+
+**Parameters**:
+- `path` — Relative to the file root. `/` and `\` both separate components.
+
+**Returns**: the file's bytes, or an error when:
+- the module has no file root;
+- `path` is empty, absolute, has a drive letter (`:`), or a `..` component;
+- the path's resolved location (both sides canonicalized, symlinks followed) is outside the root — a symlink that stays inside the root is fine;
+- it is not a regular file, or is over **256 MiB** (`MAX_FILE_READ_BYTES`, checked before reading);
+- the file is missing or unreadable.
+
+Error text never contains host paths. The read counts against the call's wall-clock limit.
+
+**Example** (pseudocode):
+```
+let weights = file::read-bytes("model/weights.bin");   // ok([..])
+let escape = file::read-bytes("../module.toml");       // err("... `..` component rejected ...")
 ```
 
 ### `logging` — Structured Logging
@@ -353,11 +394,13 @@ world module {
     import llm;
     import config;
     import logging;
+    import file;      // optional: ML modules use this to load weights
+    import billing;   // optional: only called by paid modules
     export agent;
 }
 ```
 
-The `module` world is the compilation target for all chatty WASM modules. It wires together the three host imports and the one guest export.
+The `module` world is the compilation target for all chatty WASM modules. It wires together the host imports and the one guest export.
 
 ---
 

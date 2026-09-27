@@ -342,6 +342,7 @@ mod tests {
             cache_write_tokens: write,
             output_tokens: output,
             reasoning_tokens: reasoning,
+            ..Default::default()
         }
     }
 

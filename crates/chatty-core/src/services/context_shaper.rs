@@ -94,6 +94,7 @@ use rig_core::message::UserContent;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
 
+use crate::models::token_usage::ApiCallUsage;
 use crate::services::context_compaction::{
     Summarizer, SummaryInputs, build_summary, task_max_chars,
 };
@@ -250,6 +251,9 @@ struct Inner {
     compaction: Mutex<Option<Compaction>>,
     /// Set by [`ContextShaper::enable_compaction`].
     compaction_enabled: AtomicBool,
+    /// Usage of the summary calls made since the stream last took it
+    /// ([`ContextShaper::take_compaction_usage`], AGE-683).
+    compaction_usage: Mutex<Vec<ApiCallUsage>>,
 }
 
 /// A compaction in force: `history[..covered]` goes out as `summary`.
@@ -311,6 +315,7 @@ impl ContextShaper {
                 workspace: OnceLock::new(),
                 compaction: Mutex::new(None),
                 compaction_enabled: AtomicBool::new(false),
+                compaction_usage: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -332,6 +337,17 @@ impl ContextShaper {
             let _ = self.inner.workspace.set(dir);
         }
         self.inner.compaction_enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// The usage of every compaction summary call made since the last time
+    /// this was asked (AGE-683). The stream folds it into the turn the call
+    /// ran in, so the call is counted and priced like any other.
+    pub fn take_compaction_usage(&self) -> Vec<ApiCallUsage> {
+        self.inner
+            .compaction_usage
+            .lock()
+            .map(|mut usage| std::mem::take(&mut *usage))
+            .unwrap_or_default()
     }
 
     /// Record what every request carries before any history: the preamble
@@ -556,6 +572,11 @@ impl ContextShaper {
             task_max_chars: task_max_chars(budget),
         })
         .await;
+        if let Some(usage) = summary.usage
+            && let Ok(mut pending) = self.inner.compaction_usage.lock()
+        {
+            pending.push(usage);
+        }
         let compaction = Compaction {
             covered: start,
             boundary: history[start - 1].clone(),

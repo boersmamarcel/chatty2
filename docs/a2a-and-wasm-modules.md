@@ -201,8 +201,8 @@ The directory is configurable in **Settings → Modules**. Platform defaults:
 name = "echo-agent"
 version = "0.1.0"
 description = "A simple echo agent for testing"
-wasm = "echo_agent.wasm"        # Relative to this file's directory
-# execution_mode = "local"      # "remote" modules run on the hive-runner; no local .wasm
+wasm = "echo_agent.wasm"        # Plain relative path inside this directory (no `..`, no absolute)
+# execution_mode = "local"      # "local" | "remote" | "remote_only"; remote modules run on the hive-runner
 
 [capabilities]
 tools = ["echo", "reverse"]     # Tool names the module exposes
@@ -217,7 +217,26 @@ a2a = true                      # Expose via /a2a/{name} (required for invoke_ag
 [resources]
 max_memory_mb = 64              # Memory cap (0 = use default: 256 MiB; may only lower)
 max_execution_ms = 30000        # Per-call timeout (0 = use default: 60 s; may only lower)
+
+[config]                        # Optional: string → string values the guest reads via config::get
+greeting = "hello"
+
+[files]                         # Optional: the only directory file::read-bytes may read
+root = "weights"                # Plain relative path inside this directory
 ```
+
+Parsing is strict: an unknown key or table, an `execution_mode` other than
+`local`/`remote`/`remote_only`, a non-string `[config]` value, or a `wasm`/`[files].root`
+path that is absolute or uses `..`, `\` or `:` is a manifest error. A `[resources]` value
+above a host ceiling is clamped to it, with a warning on the manifest
+(`ModuleManifest::warnings`).
+
+`ModuleRegistry::scan_directory` visits module directories in name order and returns a
+`ScanReport { loaded, remote, failed }`: every directory that did not load is in `failed`
+with its reason, and remote modules are listed apart from local loads. Two directories
+declaring the same `name`: the first by directory name wins, the second is a failure (so is
+`load` of a name already registered from another directory). The desktop's installed
+extensions list shows a module's failure reason under its row.
 
 `[protocols].a2a = true` is what makes a module invocable as an agent from
 conversations. Without it the module can still serve tools via MCP or completions via
@@ -398,11 +417,12 @@ The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
 finishes become `working` status messages, assistant text becomes artifact chunks, and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
-no usage concept; usage belongs to the ledger). That number already includes whatever
-the child itself delegated, and the parent's `invoke_agent` folds it into its own
-conversation as one usage line per delegation, marked `delegated_to` and priced at the
-parent's rates in `finish_turn` — so a leader's `total_cost` carries the whole tree
-below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
+no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
+naming its model and carrying tokens and time but no price (AGE-682). The lines already
+include whatever the child itself delegated (merged only with lines on the same model),
+and the parent's `invoke_agent` folds them into its own conversation as usage lines
+marked `delegated_to`, priced in `finish_turn` at the model each names — so a leader's
+`total_cost` carries the whole tree below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
 second, independent key, `trace` (AGE-467): the worker's compacted tool-call trace —
 one `### <tool> (ok|FAILED|no result)` block per call it made, with the call's input and
 output or error, capped and (past 40 calls or 12 000 characters) trimmed from the middle

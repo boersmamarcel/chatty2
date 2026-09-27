@@ -235,7 +235,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 InvokeAgentProgress::Finished {
                     success: true,
                     result: Some("Three releases since 0.3.45.".into()),
-                    usage: None,
+                    usage: Vec::new(),
                 },
             ],
             items: vec![
@@ -265,6 +265,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     cache_write_tokens: 0,
                     output_tokens: 56,
                     reasoning_tokens: 0,
+                    ..Default::default()
                 })),
                 ScriptedItem::Chunk(StreamChunk::TurnUsage(ApiCallUsage {
                     turn: 0,
@@ -273,6 +274,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     cache_write_tokens: 0,
                     output_tokens: 56,
                     reasoning_tokens: 0,
+                    ..Default::default()
                 })),
                 ScriptedItem::Chunk(StreamChunk::Done),
             ],
