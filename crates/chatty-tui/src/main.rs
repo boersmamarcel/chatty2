@@ -8,11 +8,16 @@ mod headless;
 // `#[cfg(unix)]` too.
 #[cfg(unix)]
 mod participant;
+#[cfg(test)]
+mod spec_golden;
 mod ui;
 
 use anyhow::{Context, Result, bail};
 use chatty_core::services::McpService;
 use chatty_core::settings::models::ModelsModel;
+pub(crate) use chatty_core::settings::models::execution_settings::{
+    TOOL_GROUPS as ALL_TOOL_GROUPS, VALID_TOOL_GROUPS, set_tool_group, tool_group_enabled,
+};
 use chatty_core::settings::models::extensions_store::ExtensionsModel;
 use chatty_core::settings::models::models_store::{ModelConfig, resolve_model_query};
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
@@ -201,8 +206,7 @@ struct Cli {
     /// Standing instructions for this process's role, appended to the system
     /// prompt after the base preamble (ADR-0011 C11).
     ///
-    /// Declared as a virtual agent's `preamble` in module settings and
-    /// forwarded here; the broker passes it verbatim.
+    /// Beats the preamble of the agent spec this process runs as.
     ///
     /// Example: --preamble "You are the reviewer. Never edit the tree."
     #[arg(long, value_name = "TEXT")]
@@ -215,11 +219,8 @@ struct Cli {
     /// persisted value: it runs under this flag, else a team's budget, else
     /// no turn cap and a --max-duration budget.
     ///
-    /// Declared as a virtual agent's `max_agent_turns` in module settings
-    /// and forwarded here so a delegated worker can run longer than the
-    /// default without raising the leader's own budget (`--team`'s
-    /// `max_agent_turns`, which this does not change). Applied after
-    /// `--team`, so it wins over a team's persisted budget too.
+    /// Applied after `--team` and the agent spec's own `budget`, so it wins
+    /// over both.
     ///
     /// Example: --max-agent-turns 30
     #[arg(long, value_name = "N")]
@@ -236,7 +237,7 @@ struct Cli {
     /// which has Stop.
     ///
     /// Example: --max-duration 2h
-    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    #[arg(long, value_name = "DURATION", value_parser = chatty_core::services::turn_budget::parse_duration)]
     max_duration: Option<std::time::Duration>,
 
     /// Write what a --headless or --pipe run spent to PATH as one JSON
@@ -360,15 +361,14 @@ struct Cli {
     broker: bool,
 
     /// Run as the leader of a team directory (ADR-0011 C13): `teams/<ID>/`
-    /// holds `team.json` — the roster, the leader's profile and preamble,
+    /// holds `team.json` — the leader's agent spec, the roster's spec names,
     /// the verification command, the skill and the turn budget — and the
-    /// `SKILL.md` beside it.
+    /// `SKILL.md` beside it (AGE-614).
     ///
     /// Implies --broker. The roster replaces module settings'
-    /// `virtual_agents` for this run (nothing is written back), the
-    /// leader's profile and preamble apply unless --tools / --preamble are
-    /// given, its model applies unless --model is, `max_agent_turns`
-    /// replaces the persisted budget, and the first turn opens with
+    /// `virtual_agents` for this run (nothing is written back), this process
+    /// runs as the leader's spec (--model / --tools / --preamble still beat
+    /// it), `max_agent_turns` replaces the persisted budget, and the first turn opens with
     /// "read_skill <skill> and follow it". Searched in
     /// `<workspace>/.chatty/teams/`, then the platform data directory's
     /// `chatty/teams/`, then the presets compiled in: `coder-reviewer`.
@@ -377,6 +377,24 @@ struct Cli {
     /// Example: --team coder-reviewer --headless -m "Fix the overdraft bug."
     #[arg(long, value_name = "ID")]
     team: Option<String>,
+
+    /// Run as an agent spec (AGE-614): `<NAME>.toml` in
+    /// `<workspace>/.chatty/agents/`, then the platform data directory's
+    /// `chatty/agents/`, then the presets compiled in.
+    ///
+    /// The spec gives this process its model, tool profile, disabled tool
+    /// groups, preamble, skills and budgets; --model, --tools, --preamble,
+    /// --max-agent-turns and --max-duration still beat it. Implies nothing
+    /// else — not --broker, not --team.
+    ///
+    /// Example: --agent local-reviewer --headless -m "Review main..HEAD"
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["team", "agent_json"])]
+    agent: Option<String>,
+
+    /// An agent spec as JSON: how a broker hands a delegated worker the spec
+    /// it runs as. Otherwise exactly --agent.
+    #[arg(long, value_name = "JSON", hide = true, conflicts_with = "team")]
+    agent_json: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -480,7 +498,9 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     let mut providers = providers_result.context("Failed to load providers")?;
     let mut models_list = models_result.context("Failed to load models")?;
     let mut execution_settings = exec_settings_result.unwrap_or_default();
-    let module_settings = module_settings_result.unwrap_or_default();
+    // A module settings file in a shape no longer read (agent objects in
+    // `virtual_agents`, AGE-614) is an error to fix, not a default to run.
+    let module_settings = module_settings_result.context("Failed to load module settings")?;
     let extensions = extensions_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
     let module_agents = discover_module_agents(&module_settings, &extensions);
@@ -569,59 +589,20 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     };
     let broker_module_settings = match team.as_ref() {
         Some(team) => {
-            team.apply_turn_budget(&mut execution_settings);
             info!(team = %team.id, source = ?team.source, "Running as a team leader");
             team.run_module_settings(&module_settings)
         }
         None => module_settings.clone(),
     };
-    let leader = team.as_ref().map(|t| &t.file.leader);
-
-    // --max-agent-turns (AGE-440): a delegated worker's own turn budget,
-    // set via its `VirtualAgentConfig`/`extra_args`. Applied after --team
-    // so it wins over a team's persisted (leader) budget too. A run without
-    // a human never takes the persisted cap (see `unattended_run_limits`).
-    let unattended = cli.headless || cli.pipe || cli.participant_socket.is_some();
-    let max_duration = if unattended {
-        let (turns, duration) = unattended_run_limits(
-            cli.max_agent_turns,
-            team.as_ref().and_then(|t| t.file.max_agent_turns),
-            cli.max_duration,
-        );
-        execution_settings.max_agent_turns = turns;
-        duration
-    } else {
-        if let Some(turns) = cli.max_agent_turns {
-            execution_settings.max_agent_turns = turns;
-        }
-        None
-    };
-
-    // Apply CLI tool overrides
-    apply_tool_overrides(&mut execution_settings, &cli.enable, &cli.disable)?;
-    if !cli.only.is_empty() {
-        apply_tool_only(&mut execution_settings, &cli.only)?;
-    }
-    if let Some(tool_loading) = cli.tool_loading {
-        execution_settings.tool_loading = tool_loading;
-    }
-
-    // --tools / --preamble: the role this process runs as (ADR-0011 C11);
-    // a team's leader role fills in whichever flag was not given.
-    let role = resolve_role(
-        cli.tools
-            .as_deref()
-            .or(leader.and_then(|l| l.profile.as_deref())),
-        cli.preamble
-            .as_deref()
-            .or(leader.and_then(|l| l.preamble.as_deref())),
+    // The spec this process runs as (AGE-614): `--agent`, a worker's
+    // `--agent-json`, the team's leader, or a bare one — with the flags
+    // that override it applied.
+    let mut spec = run_spec(
+        &cli,
+        team.as_ref(),
+        execution_settings.workspace_dir.as_deref().map(Path::new),
     )?;
-
-    // Apply auto-approve if requested
-    if cli.auto_approve {
-        use chatty_core::settings::models::execution_settings::ApprovalMode;
-        execution_settings.approval_mode = ApprovalMode::AutoApproveAll;
-    }
+    let max_duration = apply_run_limits(&cli, team.as_ref(), &mut spec, &mut execution_settings)?;
 
     let models = {
         let mut m = ModelsModel::new();
@@ -641,14 +622,9 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         m
     };
 
-    // Resolve which model to use: --model, else the team leader's, else the
-    // roster's default.
-    let mut model_config = resolve_model(
-        cli.model
-            .as_deref()
-            .or(leader.and_then(|l| l.model.as_deref())),
-        &models,
-    )?;
+    // Resolve which model to use: the spec's (--model already applied to
+    // it), else the roster's default.
+    let mut model_config = resolve_model(spec.agent.model.as_deref(), &models)?;
 
     // --think (AGE-455): explicit override of the model's `extra_params.think`
     // switch, so a bare `--openai-compat-url`/`--ollama` session can toggle
@@ -691,6 +667,16 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // actually asks for one.
     // `--team` implies `--broker`: a team is nothing without its workers.
     let run_broker = cli.broker || cli.team.is_some();
+    // The roster's specs: the team's, else the names module settings list.
+    let broker_agents = match team.as_ref() {
+        Some(team) => team.agents.clone(),
+        None if run_broker => chatty_core::agent_spec::load_roster(
+            &module_settings.virtual_agents,
+            execution_settings.workspace_dir.as_deref().map(Path::new),
+        )
+        .context("module settings' virtual_agents could not be loaded")?,
+        None => Vec::new(),
+    };
     #[cfg(unix)]
     let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> =
         run_broker.then(|| {
@@ -698,6 +684,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 models.models().to_vec(),
                 providers.clone(),
                 broker_module_settings.clone(),
+                broker_agents.clone(),
                 execution_settings.workspace_dir.clone(),
                 matches!(
                     execution_settings.approval_mode,
@@ -752,7 +739,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             user_secrets,
             remote_agents,
             module_agents,
-            role,
+            spec: spec.clone(),
             team: None,
             is_sub_agent: false,
             services_loaded: true,
@@ -786,7 +773,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 user_secrets,
                 remote_agents,
                 module_agents: module_agents.clone(),
-                role: role.clone(),
+                spec: spec.clone(),
                 team: team.clone(),
                 is_sub_agent: true,
                 services_loaded: true,
@@ -852,7 +839,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 user_secrets: vec![],
                 remote_agents,
                 module_agents,
-                role,
+                spec,
                 team,
                 is_sub_agent: false,
                 services_loaded: false,
@@ -913,29 +900,91 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     result
 }
 
-/// The role this process runs as, from `--tools` and `--preamble`
-/// (ADR-0011 C11).
+/// The agent spec this process runs as (AGE-614): `--agent <name>`, a
+/// delegated worker's `--agent-json`, a `--team` leader's spec, or a bare
+/// one; then `--model`, `--tools` and `--preamble` over it, as an explicit
+/// flag beats a team's or a spec's value. Turn and time budgets are folded
+/// in by the caller, which weighs them against the team's.
 ///
-/// An unknown profile name is fatal rather than silently full-tooled: a typo
-/// in a declared reviewer would otherwise hand it every tool there is, and a
-/// worker that fails to start is a delegation the leader sees fail.
-fn resolve_role(
-    tools: Option<&str>,
-    preamble: Option<&str>,
-) -> Result<chatty_core::factories::AgentRole> {
-    let profile = match tools {
-        Some(name) => Some(chatty_core::factories::tool_profile(name).with_context(|| {
-            format!(
-                "--tools '{name}' is not a tool profile; valid profiles: {}",
-                chatty_core::factories::tool_profile_names().join(", ")
-            )
-        })?),
-        None => None,
+/// An invalid result is fatal rather than silently full-tooled: a typo in a
+/// declared reviewer's profile would otherwise hand it every tool there is,
+/// and a worker that fails to start is a delegation the leader sees fail.
+fn run_spec(
+    cli: &Cli,
+    team: Option<&chatty_core::services::team::Team>,
+    workspace: Option<&Path>,
+) -> Result<chatty_core::agent_spec::AgentSpec> {
+    use chatty_core::agent_spec::{AgentSpec, load_agent_spec};
+    let mut spec = if let Some(name) = cli.agent.as_deref() {
+        load_agent_spec(name, workspace)
+            .with_context(|| format!("--agent '{name}' could not be loaded"))?
+            .spec
+    } else if let Some(json) = cli.agent_json.as_deref() {
+        AgentSpec::from_json(json).context("--agent-json is not an agent spec")?
+    } else if let Some(team) = team {
+        team.leader.clone()
+    } else {
+        AgentSpec::named("chatty")
     };
-    Ok(chatty_core::factories::AgentRole {
-        preamble: preamble.map(str::to_string),
-        profile,
-    })
+    if let Some(model) = cli.model.as_deref() {
+        spec.agent.model = Some(model.to_string());
+    }
+    if let Some(profile) = cli.tools.as_deref() {
+        spec.tools.profile = Some(profile.to_string());
+    }
+    if let Some(preamble) = cli.preamble.as_deref() {
+        spec.agent.preamble = Some(preamble.to_string());
+    }
+    spec.validate(None)?;
+    Ok(spec)
+}
+
+/// This run's turn and time budgets and tool switches, applied to its spec
+/// and execution settings; returns the wall-clock budget a run without a
+/// human runs under.
+///
+/// `--max-agent-turns` (AGE-440) beats a team's (leader) budget, which beats
+/// the spec's own `budget.max_agent_turns`; a run without a human never
+/// takes the persisted cap (see [`unattended_run_limits`]). The resolved cap
+/// is written back to the spec, since `AgentBuildContext::from_spec` applies
+/// the spec's budget over these settings.
+fn apply_run_limits(
+    cli: &Cli,
+    team: Option<&chatty_core::services::team::Team>,
+    spec: &mut chatty_core::agent_spec::AgentSpec,
+    execution_settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
+) -> Result<Option<std::time::Duration>> {
+    let declared_turns = team
+        .and_then(|t| t.file.max_agent_turns)
+        .or(spec.budget.max_agent_turns);
+    let unattended = cli.headless || cli.pipe || cli.participant_socket.is_some();
+    let (turns, max_duration) = if unattended {
+        let (turns, duration) = unattended_run_limits(
+            cli.max_agent_turns,
+            declared_turns,
+            cli.max_duration.or(spec.max_duration()),
+        );
+        (Some(turns), duration)
+    } else {
+        (cli.max_agent_turns.or(declared_turns), None)
+    };
+    if let Some(turns) = turns {
+        execution_settings.max_agent_turns = turns;
+        spec.budget.max_agent_turns = Some(turns);
+    }
+
+    apply_tool_overrides(execution_settings, &cli.enable, &cli.disable)?;
+    if !cli.only.is_empty() {
+        apply_tool_only(execution_settings, &cli.only)?;
+    }
+    if let Some(tool_loading) = cli.tool_loading {
+        execution_settings.tool_loading = tool_loading;
+    }
+    if cli.auto_approve {
+        use chatty_core::settings::models::execution_settings::ApprovalMode;
+        execution_settings.approval_mode = ApprovalMode::AutoApproveAll;
+    }
+    Ok(max_duration)
 }
 
 /// Load all deferred services concurrently (MCP, memory, user secrets, search settings).
@@ -1130,77 +1179,6 @@ fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfi
     );
 }
 
-/// The tool group names recognized by --enable/--disable/--only.
-const VALID_TOOL_GROUPS: &str =
-    "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user, terminal";
-
-/// Flip one named tool group on `settings`. Shared by --enable, --disable
-/// and --only so the group vocabulary (and its docker-exec/code-exec
-/// coupling) is defined in exactly one place.
-fn set_tool_group(
-    settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
-    name: &str,
-    on: bool,
-) -> Result<()> {
-    let canonical = canonical_tool_group(name);
-    match canonical.as_str() {
-        // A stray empty entry (`--enable shell,`) names nothing.
-        "" => {}
-        "shell" => settings.enabled = on,
-        "fs-read" => settings.filesystem_read_enabled = on,
-        "fs-write" => settings.filesystem_write_enabled = on,
-        "fetch" => settings.fetch_enabled = on,
-        "git" => settings.git_enabled = on,
-        "code-exec" => settings.execute_code_enabled = on,
-        "docker-exec" => {
-            if on {
-                // Docker execution implies code-exec is on too.
-                settings.execute_code_enabled = true;
-            }
-            settings.docker_code_execution_enabled = on;
-        }
-        "ask-user" => settings.ask_user_enabled = on,
-        "terminal" => settings.terminal_access = on,
-        _ => bail!("Unknown tool group '{name}' (valid: {VALID_TOOL_GROUPS})"),
-    }
-    Ok(())
-}
-
-/// Whether the named tool group is on in `settings`, or `None` for a name
-/// that is not a group (an empty one included). For `/tools <name>`.
-fn tool_group_enabled(
-    settings: &chatty_core::settings::models::ExecutionSettingsModel,
-    name: &str,
-) -> Option<bool> {
-    Some(match canonical_tool_group(name).as_str() {
-        "shell" => settings.enabled,
-        "fs-read" => settings.filesystem_read_enabled,
-        "fs-write" => settings.filesystem_write_enabled,
-        "fetch" => settings.fetch_enabled,
-        "git" => settings.git_enabled,
-        "code-exec" => settings.execute_code_enabled,
-        "docker-exec" => settings.docker_code_execution_enabled,
-        "ask-user" => settings.ask_user_enabled,
-        "terminal" => settings.terminal_access,
-        _ => return None,
-    })
-}
-
-/// The group a --enable/--disable/--only entry names. Callers spell groups
-/// several ways — the Harbor benchmark adapter passes `--disable ask_user`
-/// (the tool's own name), and a team file's `disable_tools` may say
-/// `fs_write` — and an unknown name is a hard error, so accept any case,
-/// `_` for `-`, and the name of the one tool a group stands for.
-fn canonical_tool_group(name: &str) -> String {
-    let group = name.trim().to_ascii_lowercase().replace('_', "-");
-    match group.as_str() {
-        "shell-execute" => "shell".to_string(),
-        "execute-code" => "code-exec".to_string(),
-        "terminal-read" => "terminal".to_string(),
-        _ => group,
-    }
-}
-
 fn apply_tool_overrides(
     settings: &mut chatty_core::settings::models::ExecutionSettingsModel,
     enable: &[String],
@@ -1216,19 +1194,6 @@ fn apply_tool_overrides(
     }
     Ok(())
 }
-
-/// All tool groups --only can turn off before turning the named ones back on.
-const ALL_TOOL_GROUPS: &[&str] = &[
-    "shell",
-    "fs-read",
-    "fs-write",
-    "fetch",
-    "git",
-    "code-exec",
-    "docker-exec",
-    "ask-user",
-    "terminal",
-];
 
 /// Strict allow-list: turn every known group off, then turn on exactly the
 /// ones named in `only`. Unlike --enable/--disable, which adjust the
@@ -1648,57 +1613,10 @@ fn unattended_run_limits(
     (turns, duration)
 }
 
-/// `--max-duration`: seconds (`90`), or numbers with `s`/`m`/`h` units
-/// (`45s`, `30m`, `2h`, `1h30m`). Zero is refused.
-fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
-    let text = text.trim();
-    let invalid = || format!("invalid duration '{text}': use seconds or e.g. 90s, 30m, 2h, 1h30m");
-    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
-        let secs: u64 = text.parse().map_err(|_| invalid())?;
-        return match secs {
-            0 => Err(format!(
-                "--max-duration must be more than zero, got '{text}'"
-            )),
-            secs => Ok(std::time::Duration::from_secs(secs)),
-        };
-    }
-    let mut total = 0u64;
-    let mut number = String::new();
-    for c in text.chars() {
-        if c.is_ascii_digit() {
-            number.push(c);
-            continue;
-        }
-        let unit = match c {
-            's' => 1,
-            'm' => 60,
-            'h' => 3600,
-            _ => return Err(invalid()),
-        };
-        let value: u64 = number.parse().map_err(|_| invalid())?;
-        total = value
-            .checked_mul(unit)
-            .and_then(|v| total.checked_add(v))
-            .ok_or_else(invalid)?;
-        number.clear();
-    }
-    // `1h30` has a number with no unit; an empty text has nothing at all.
-    if !number.is_empty() || text.is_empty() {
-        return Err(invalid());
-    }
-    if total == 0 {
-        return Err(format!(
-            "--max-duration must be more than zero, got '{text}'"
-        ));
-    }
-    Ok(std::time::Duration::from_secs(total))
-}
-
 #[cfg(test)]
 mod resolve_model_tests {
-    use super::{
-        Cli, DEFAULT_UNATTENDED_MAX_DURATION, parse_duration, resolve_model, unattended_run_limits,
-    };
+    use super::{Cli, DEFAULT_UNATTENDED_MAX_DURATION, resolve_model, unattended_run_limits};
+    use chatty_core::services::turn_budget::parse_duration;
     use chatty_core::settings::models::ModelsModel;
     use chatty_core::settings::models::models_store::ModelConfig;
     use chatty_core::settings::models::providers_store::ProviderType;

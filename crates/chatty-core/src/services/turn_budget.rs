@@ -78,6 +78,50 @@ const TIME_NOTE_PERCENT: u32 = 85;
 /// a tool; `llm_service` ends such a run normally instead of as an error.
 pub const WRAP_UP_TOOL_CALL_STOP: &str = "turn budget: the tool-free wrap-up call asked for a tool";
 
+/// A wall-clock budget as `--max-duration` and a spec's `budget.max_duration`
+/// write it: seconds (`90`), or numbers with `s`/`m`/`h` units (`45s`, `30m`,
+/// `2h`, `1h30m`). Zero is refused.
+pub fn parse_duration(text: &str) -> Result<Duration, String> {
+    let text = text.trim();
+    let invalid = || format!("invalid duration '{text}': use seconds or e.g. 90s, 30m, 2h, 1h30m");
+    let zero = || format!("a duration must be more than zero, got '{text}'");
+    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+        let secs: u64 = text.parse().map_err(|_| invalid())?;
+        return match secs {
+            0 => Err(zero()),
+            secs => Ok(Duration::from_secs(secs)),
+        };
+    }
+    let mut total = 0u64;
+    let mut number = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return Err(invalid()),
+        };
+        let value: u64 = number.parse().map_err(|_| invalid())?;
+        total = value
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(invalid)?;
+        number.clear();
+    }
+    // `1h30` has a number with no unit; an empty text has nothing at all.
+    if !number.is_empty() || text.is_empty() {
+        return Err(invalid());
+    }
+    if total == 0 {
+        return Err(zero());
+    }
+    Ok(Duration::from_secs(total))
+}
+
 /// A run's wall-clock budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deadline {

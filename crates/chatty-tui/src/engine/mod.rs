@@ -4,9 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
-use chatty_core::factories::agent_factory::{
-    AgentBuildContext, AgentRole, AgentServices, gated_exec_settings,
-};
+use chatty_core::agent_spec::AgentSpec;
+use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
@@ -374,9 +373,10 @@ pub struct ChatEngine {
     /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
     pub remote_agents: Vec<A2aAgentConfig>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
-    /// The role this process runs as (ADR-0011 C11), from `--tools` /
-    /// `--preamble`. Default unless this is a declared worker.
-    pub role: AgentRole,
+    /// The agent spec this process runs as (AGE-614): `--agent`, a
+    /// worker's `--agent-json`, a `--team` leader's, or a bare one, with
+    /// the command line's overrides applied.
+    pub spec: AgentSpec,
     /// The team this process leads under `--team` (AGE-407): its roster is
     /// the broker's, its skill is served by `read_skill`. `None` otherwise.
     team: Option<Team>,
@@ -473,10 +473,10 @@ pub struct ChatEngineConfig {
     pub user_secrets: Vec<(String, String)>,
     pub remote_agents: Vec<A2aAgentConfig>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
-    /// The role this process runs as, from `--tools` / `--preamble`
-    /// (ADR-0011 C11). Default for a leader; a declared virtual agent's
-    /// worker carries what its `VirtualAgentConfig` declared.
-    pub role: AgentRole,
+    /// The agent spec this process runs as (AGE-614), validated at
+    /// start-up: its role, disabled tool groups, skills and budgets reach
+    /// the agent through `AgentBuildContext::from_spec`.
+    pub spec: AgentSpec,
     /// The team directory this process leads under `--team` (ADR-0011 C13,
     /// AGE-407): its skill is served by `read_skill`, and its first-turn
     /// instruction opens the first human turn. `None` for everything else.
@@ -520,7 +520,7 @@ impl ChatEngine {
             user_secrets: config.user_secrets,
             remote_agents: config.remote_agents,
             module_agents: config.module_agents,
-            role: config.role,
+            spec: config.spec,
             pending_first_turn: config.team.as_ref().and_then(Team::first_turn_instruction),
             team: config.team,
             is_sub_agent: config.is_sub_agent,
@@ -652,19 +652,11 @@ impl ChatEngine {
     /// for the background path, must happen inside the spawned task rather
     /// than while still borrowing `&self` (AGE-224).
     fn build_agent_context(&self) -> AgentBuildContext {
-        AgentBuildContext {
-            role: self.role.clone(),
-            team_skill: self.team.as_ref().and_then(Team::skill),
-            // Read off the ungated settings: the gate drops them all when
-            // every tool group is off, `--disable ask-user` included.
-            ask_user_enabled: self.execution_settings.ask_user_enabled,
-            instructions_dir: self
-                .execution_settings
-                .workspace_dir
-                .as_ref()
-                .map(std::path::PathBuf::from),
-            ..AgentBuildContext::from_services(AgentServices {
-                exec_settings: gated_exec_settings(&self.execution_settings),
+        let built = AgentBuildContext::from_spec(
+            &self.spec,
+            AgentServices {
+                // Ungated: `from_spec` narrows them by the spec, then gates.
+                exec_settings: Some(self.execution_settings.clone()),
                 user_secrets: self.user_secrets.clone(),
                 memory_service: self.memory_service.clone(),
                 skill_service: Some(self.skill_service.clone()),
@@ -678,7 +670,12 @@ impl ChatEngine {
                 lazy_broker: self.broker.clone(),
                 local_agents: self.local_agents(),
                 remote_agents: self.remote_agents.clone(),
-            })
+            },
+        )
+        .expect("the run's agent spec was validated at start-up");
+        AgentBuildContext {
+            team_skill: self.team.as_ref().and_then(Team::skill),
+            ..built.context
         }
     }
 
@@ -1476,7 +1473,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
-                role: Default::default(),
+                spec: AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,
                 services_loaded: true,
@@ -1858,7 +1855,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
-                role: Default::default(),
+                spec: AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,
                 services_loaded: true,

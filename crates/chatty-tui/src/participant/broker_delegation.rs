@@ -98,7 +98,7 @@ async fn list_agents_offers_local_agent_once_the_broker_is_started() {
         dir.path().join("participants.sock"),
         worker_executable(),
         module_settings.default_endpoint_budget,
-        resolve_virtual_agents(&[], &[], &module_settings, &[]),
+        resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
         None,
     )
     .await
@@ -132,7 +132,7 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
         dir.path().join("participants.sock"),
         worker_executable(),
         module_settings.default_endpoint_budget,
-        resolve_virtual_agents(&[], &[], &module_settings, &[]),
+        resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
         None,
     )
     .await
@@ -214,7 +214,7 @@ async fn delegate(
         dir.path().join("participants.sock"),
         worker_executable(),
         module_settings.default_endpoint_budget,
-        resolve_virtual_agents(&[], &[], &module_settings, &[]),
+        resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
         None,
     )
     .await

@@ -3,9 +3,8 @@
 //!
 //! The gateway is started by the module-settings controller. This adds the
 //! two things that turn it into a fleet broker: a Unix socket children
-//! register on, and the virtual agents — `local-agent`, or the named team
-//! `module_settings.virtual_agents` declares — that spawn one child per
-//! task.
+//! register on, and the virtual agents — `local-agent`, or the agent specs
+//! `module_settings.virtual_agents` names — that spawn one child per task.
 //!
 //! Nothing here decides *what* a worker does — the child is `chatty-tui` in
 //! participant mode, running the same session the desktop does, and which
