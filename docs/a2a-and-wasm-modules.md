@@ -342,9 +342,9 @@ settings know. API key values are **never exposed** to the LLM — only
 
 The label is a property of the **registration**, not of the card: a participant
 describes itself, and the broker says where it came from, or the label would be worth
-nothing. `AgentOrigin` lives on both sides of the seam — `chatty-protocol-gateway`
-serves it, `chatty-core` reads it — and a test in the gateway (which has `chatty-core`
-as a dev-dependency) pins the two spellings against each other.
+nothing. `AgentOrigin` is defined once, in `chatty-fabric`:
+`chatty-protocol-gateway` serves it and `chatty-core` reads it, and both depend on
+that crate.
 
 Nothing publishes `discovered` yet: chatty has no peer-discovery hop. The label exists
 so that one cannot be added without deciding what it means.

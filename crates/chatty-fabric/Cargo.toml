@@ -1,0 +1,19 @@
+[package]
+name = "chatty-fabric"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The broker's pure state: node directory, task table, edge log and the Transport trait (ADR-0020)"
+
+# Pure on purpose: both chatty-protocol-gateway and chatty-core depend on this
+# crate, so it depends on neither, and never on axum, wasmtime, hive-client,
+# gpui or reqwest. `tests/no_heavy_deps.rs` enforces the list.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -14,8 +14,8 @@ use crate::services::a2a_client::{
 };
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
-use crate::tools::agent_origin::AgentOrigin;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
+use chatty_fabric::AgentOrigin;
 
 /// The agent name the broker publishes for "a chatty agent in its own
 /// process" (ADR-0011 C2).

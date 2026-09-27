@@ -1892,6 +1892,7 @@ dependencies = [
  "bollard",
  "bytes",
  "calamine 0.36.1",
+ "chatty-fabric",
  "chatty-optimize",
  "chatty-terminal",
  "chromiumoxide",
@@ -1945,6 +1946,18 @@ dependencies = [
  "uuid",
  "which 8.0.6",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "chatty-fabric"
+version = "0.4.11"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2047,6 +2060,7 @@ dependencies = [
  "async-stream",
  "axum",
  "chatty-core",
+ "chatty-fabric",
  "chatty-module-registry",
  "chatty-wasm-runtime",
  "futures",
@@ -2091,6 +2105,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chatty-core",
+ "chatty-fabric",
  "chatty-module-registry",
  "chatty-protocol-gateway",
  "chatty-wasm-runtime",

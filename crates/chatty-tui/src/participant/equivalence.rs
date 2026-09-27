@@ -33,10 +33,11 @@ use chatty_core::tools::invoke_agent_tool::{
     InvokeAgentArgs, InvokeAgentProgress, InvokeAgentTool,
 };
 use chatty_core::tools::{LOCAL_AGENT_NAME, progress_text_for_event};
+use chatty_fabric::AgentOrigin;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
-    AgentOrigin, BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
+    BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
 };
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use rig_agent::tool::{Tool, ToolContext};
@@ -734,9 +735,8 @@ pub(super) mod named_virtual_agents {
     use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
     use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
     use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
-    use chatty_protocol_gateway::participant::{
-        AgentOrigin, BrokerFrame, ParticipantCard, ParticipantRegistry,
-    };
+    use chatty_fabric::AgentOrigin;
+    use chatty_protocol_gateway::participant::{BrokerFrame, ParticipantCard, ParticipantRegistry};
     use chatty_protocol_gateway::worker::TaskMapper;
     use clap::Parser;
     use rig_agent::tool::{Tool, ToolContext};
