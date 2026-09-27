@@ -347,10 +347,32 @@ fn map_stream_result(
         Err(e) => {
             let kind = classify_streaming_error(&e);
             (
-                vec![StreamChunk::Error(StreamError::new(kind, e.to_string()))],
+                vec![StreamChunk::Error(StreamError::new(
+                    kind,
+                    describe_streaming_error(&e),
+                ))],
                 true,
             )
         }
+    }
+}
+
+/// rig's wording when a provider's response stream closed before its
+/// end-of-stream marker (`[DONE]`, a `finish_reason`, Ollama's `done: true`).
+const TRUNCATED_STREAM_MARKER: &str = "provider stream ended without a terminal record";
+
+/// The error text shown to the user: rig's own, except for a stream cut
+/// short, whose wording names rig internals rather than what happened.
+fn describe_streaming_error(err: &StreamingError) -> String {
+    let raw = err.to_string();
+    if raw.contains(TRUNCATED_STREAM_MARKER) {
+        format!(
+            "The connection to the model provider closed before the reply finished. \
+             This is usually a network, VPN/proxy or provider-side interruption; try again. \
+             ({raw})"
+        )
+    } else {
+        raw
     }
 }
 
@@ -1043,6 +1065,21 @@ mod tests {
             StreamChunk::Error(e) if e.message.contains("boom") && e.kind == StreamErrorKind::Transport
         ));
         assert!(stop, "a transport error must stop the stream");
+    }
+
+    #[test]
+    fn a_truncated_stream_says_the_connection_closed() {
+        let err = StreamingError::Completion(CompletionError::ResponseError(
+            "provider stream ended without a terminal record; treating the turn as truncated"
+                .into(),
+        ));
+        let (chunks, _) = map_stream_result(Err(err), UsageSemantics::InputIncludesCache);
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Error(e) if e.kind == StreamErrorKind::Transport
+                && e.message.starts_with("The connection to the model provider closed")
+                && e.message.contains("without a terminal record")
+        ));
     }
 
     // -------------------------------------------------------------------
