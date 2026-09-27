@@ -699,6 +699,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> =
         run_broker.then(|| {
             Arc::new(participant::broker::PendingBroker::new(
+                model_config.clone(),
                 models.models().to_vec(),
                 providers.clone(),
                 broker_module_settings.clone(),

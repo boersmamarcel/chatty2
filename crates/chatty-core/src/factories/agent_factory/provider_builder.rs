@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
+use rig_agent::ModelHandle;
 use rig_agent::agent::AgentBuilder;
-use rig_agent::client::AgentClientExt;
 use rig_core::client::CompletionClient;
 use rig_core::providers::azure::AzureOpenAIAuth;
 
@@ -18,7 +18,9 @@ use crate::services::AgentTaskController;
 use crate::services::context_shaper::ContextShaper;
 use crate::services::http_client::llm_client;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
-use crate::settings::models::providers_store::{AzureAuthMethod, ProviderConfig, ProviderType};
+use crate::settings::models::providers_store::{
+    AzureAuthMethod, DEFAULT_OLLAMA_URL, DEFAULT_OPENROUTER_URL, ProviderConfig, ProviderType,
+};
 
 use super::AgentClient;
 use super::azure_auth_http::AzureAuthHttpClient;
@@ -46,7 +48,8 @@ const UTILITY_PREAMBLE: &str = "You are a utility model. Reply only with the req
 /// Build a provider-specific `AgentClient` from pre-collected native tools.
 ///
 /// All tool construction is done before this function — it only handles
-/// provider client creation, builder configuration, and MCP attachment.
+/// provider client creation (via [`completion_model`]), builder
+/// configuration, and MCP attachment.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn build_provider_agent(
     model_config: &ModelConfig,
@@ -58,17 +61,81 @@ pub(super) async fn build_provider_agent(
     task_controller: AgentTaskController,
     tool_loader: Option<ToolLoader>,
 ) -> Result<AgentClient> {
-    let api_key = provider_config.api_key.clone();
-    let base_url = provider_config.base_url.clone();
+    let provider = provider_config.provider_type.clone();
     // The context guard (AGE-504) is a hook on the agent, so it exists before
     // the agent does; the factory calibrates it once the agent is built.
     let context_shaper = ContextShaper::for_model(model_config);
     let request_recorder = RequestRecorder::default();
 
-    match &provider_config.provider_type {
+    let model = completion_model(model_config, provider_config)?;
+    let mut builder = AgentBuilder::from_model_handle(model.clone()).preamble(preamble);
+    if model_config.supports_temperature {
+        builder = builder.temperature(model_config.temperature as f64);
+    }
+    if let Some(max_tokens) = model_config.max_tokens {
+        builder = builder.max_tokens(max_tokens as u64);
+    }
+    if let Some(params) = request_params(model_config, &provider) {
+        builder = builder.additional_params(params);
+    }
+
+    // OpenAI-wire providers reject JSON-schema `format` keywords that
+    // Ollama accepts.
+    let mcp_tools = match provider {
+        ProviderType::Ollama => mcp_tools,
+        ProviderType::OpenRouter | ProviderType::AzureOpenAI => {
+            sanitize_mcp_tools_for_openai(mcp_tools)
+        }
+    };
+    let builder = chat_agent_builder(
+        native_tools,
+        builder,
+        context_shaper.clone(),
+        request_recorder.clone(),
+        tool_loader.clone(),
+    );
+    let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
+
+    // The tool-less utility agent (AGE-227) shares the chat agent's model.
+    let mut utility = AgentBuilder::from_model_handle(model).preamble(UTILITY_PREAMBLE);
+    if let Some(params) = utility_params(model_config, &provider) {
+        utility = utility.additional_params(params);
+    }
+    let utility = utility.build();
+
+    Ok(AgentClient {
+        agent,
+        task_controller,
+        provider,
+        utility,
+        context_shaper,
+        request_recorder,
+        tool_loader,
+        supports_images: model_config.supports_images,
+        model_id: model_config.model_identifier.clone(),
+    })
+}
+
+/// The completion model for `model_config` on `provider_config`: the
+/// provider's client with chatty's HTTP layers (connect retry, prompt
+/// caching on OpenRouter, the per-request Entra token on Azure), erased to a
+/// [`ModelHandle`].
+///
+/// This is the one place a provider client is built. Agents wrap it in an
+/// `AgentBuilder`; a WASM plugin's `llm::complete` sends one request through
+/// it directly (`services::plugin_llm`, PL-H2), so both reach a provider the
+/// same way.
+pub(crate) fn completion_model(
+    model_config: &ModelConfig,
+    provider_config: &ProviderConfig,
+) -> Result<ModelHandle> {
+    let identifier = model_config.model_identifier.as_str();
+    match provider_config.provider_type {
         ProviderType::OpenRouter => {
-            let key =
-                api_key.ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
+            let key = provider_config
+                .api_key
+                .clone()
+                .ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
             // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
             // OpenRouter cache nothing unless the request carries
@@ -78,159 +145,57 @@ pub(super) async fn build_provider_agent(
             // conversation history caches across turns as well. OpenAI-family
             // models ignore the markers and keep caching automatically on the
             // shared prefix.
-            let mut builder = rig_core::providers::openrouter::Client::builder()
+            let client = rig_core::providers::openrouter::Client::builder()
                 .api_key(&key)
-                .http_client(PromptCachingHttpClient::new(llm_client().clone()));
-            if let Some(ref url) = base_url {
-                builder = builder.base_url(url);
-            }
-            let client = builder.build()?;
-
-            let model = client
-                .completion_model(&model_config.model_identifier)
-                .with_prompt_caching();
-            let mut builder = AgentBuilder::new(model).preamble(preamble);
-
-            if model_config.supports_temperature {
-                builder = builder.temperature(model_config.temperature as f64);
-            }
-
-            if let Some(max_tokens) = model_config.max_tokens {
-                builder = builder.max_tokens(max_tokens as u64);
-            }
-
-            if let Some(think) = openai_compat_think(model_config) {
-                builder = builder.additional_params(serde_json::json!({
-                    "chat_template_kwargs": { "enable_thinking": think }
-                }));
-            }
-
-            let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-            let builder = chat_agent_builder(
-                native_tools,
-                builder,
-                context_shaper.clone(),
-                request_recorder.clone(),
-                tool_loader.clone(),
-            );
-            let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
-
-            let utility_model = client
-                .completion_model(&model_config.model_identifier)
-                .with_prompt_caching();
-            let mut utility = AgentBuilder::new(utility_model).preamble(UTILITY_PREAMBLE);
-            if let Some(params) = openai_compat_utility_params(model_config) {
-                utility = utility.additional_params(params);
-            }
-            let utility = utility.build();
-
-            Ok(AgentClient {
-                agent,
-                task_controller,
-                provider: ProviderType::OpenRouter,
-                utility,
-                context_shaper,
-                request_recorder,
-                tool_loader,
-                supports_images: model_config.supports_images,
-                model_id: model_config.model_identifier.clone(),
-            })
+                .http_client(PromptCachingHttpClient::new(llm_client().clone()))
+                .base_url(openrouter_base_url(provider_config))
+                .build()?;
+            Ok(ModelHandle::new(
+                client.completion_model(identifier).with_prompt_caching(),
+            ))
         }
         ProviderType::Ollama => {
-            let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-
             let client = rig_core::providers::ollama::Client::builder()
                 .api_key(rig_core::client::Nothing)
-                .base_url(&url)
+                .base_url(
+                    provider_config
+                        .base_url
+                        .as_deref()
+                        .unwrap_or(DEFAULT_OLLAMA_URL),
+                )
                 .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
                 .build()?;
-
-            let mut builder = client
-                .agent(&model_config.model_identifier)
-                .preamble(preamble);
-
-            if model_config.supports_temperature {
-                builder = builder.temperature(model_config.temperature as f64);
-            }
-
-            if let Some(max_tokens) = model_config.max_tokens {
-                builder = builder.max_tokens(max_tokens as u64);
-            }
-
-            if let Some(think) = ollama_think(model_config) {
-                builder = builder.additional_params(serde_json::json!({ "think": think }));
-            }
-
-            let builder = chat_agent_builder(
-                native_tools,
-                builder,
-                context_shaper.clone(),
-                request_recorder.clone(),
-                tool_loader.clone(),
-            );
-            let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
-
-            let mut utility = client
-                .agent(&model_config.model_identifier)
-                .preamble(UTILITY_PREAMBLE);
-            if let Some(params) = ollama_utility_params(model_config) {
-                utility = utility.additional_params(params);
-            }
-            let utility = utility.build();
-
-            Ok(AgentClient {
-                agent,
-                task_controller,
-                provider: ProviderType::Ollama,
-                utility,
-                context_shaper,
-                request_recorder,
-                tool_loader,
-                supports_images: model_config.supports_images,
-                model_id: model_config.model_identifier.clone(),
-            })
+            Ok(ModelHandle::new(client.completion_model(identifier)))
         }
-        ProviderType::AzureOpenAI => {
-            build_azure_agent(
-                model_config,
-                provider_config,
-                preamble,
-                native_tools,
-                mcp_tools,
-                native_tool_names,
-                task_controller,
-                context_shaper,
-                request_recorder,
-                tool_loader,
-                api_key,
-                base_url,
-            )
-            .await
-        }
+        ProviderType::AzureOpenAI => azure_completion_model(model_config, provider_config),
     }
+}
+
+/// OpenRouter's API root: the provider's `base_url`, else
+/// [`DEFAULT_OPENROUTER_URL`]. Either way it is the root rig appends
+/// `/chat/completions` to, so it already carries the `/v1` segment (F3: the
+/// old plugin client appended a second one).
+pub(crate) fn openrouter_base_url(provider_config: &ProviderConfig) -> &str {
+    provider_config
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(DEFAULT_OPENROUTER_URL)
 }
 
 /// Azure OpenAI has more complex setup (endpoint normalization, Entra ID auth),
 /// so it gets its own function.
-#[allow(clippy::too_many_arguments)]
-async fn build_azure_agent(
+fn azure_completion_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
-    preamble: &str,
-    native_tools: NativeTools,
-    mcp_tools: Option<McpToolSet>,
-    native_tool_names: &HashSet<String>,
-    task_controller: AgentTaskController,
-    context_shaper: ContextShaper,
-    request_recorder: RequestRecorder,
-    tool_loader: Option<ToolLoader>,
-    api_key: Option<String>,
-    base_url: Option<String>,
-) -> Result<AgentClient> {
-    let raw_endpoint =
-        base_url.ok_or_else(|| anyhow!("Endpoint URL not configured for Azure OpenAI provider"))?;
+) -> Result<ModelHandle> {
+    let raw_endpoint = provider_config
+        .base_url
+        .as_deref()
+        .ok_or_else(|| anyhow!("Endpoint URL not configured for Azure OpenAI provider"))?;
 
-    let endpoint = normalize_azure_endpoint(&raw_endpoint);
+    let endpoint = normalize_azure_endpoint(raw_endpoint);
 
     let api_version = model_config
         .extra_params
@@ -261,11 +226,9 @@ async fn build_azure_agent(
         )
     };
 
-    // The two auth methods build differently typed clients; both hand back the
-    // same type-erased `AgentBuilder`. Each also builds its own tool-less
-    // utility agent (AGE-227) from the client it owns: `client` cannot outlive
-    // the arm now that the two arms' client types differ.
-    let (builder, utility) = match provider_config.azure_auth_method() {
+    // The two auth methods build differently typed clients; both erase to
+    // the same `ModelHandle`.
+    match provider_config.azure_auth_method() {
         AzureAuthMethod::EntraId => {
             tracing::info!("Using Entra ID authentication; the token is attached per request");
 
@@ -297,15 +260,15 @@ async fn build_azure_agent(
                 .api_version(api_version)
                 .build()
                 .map_err(client_error)?;
-            let utility = client
-                .agent(&model_config.model_identifier)
-                .preamble(UTILITY_PREAMBLE)
-                .build();
-            (client.agent(&model_config.model_identifier), utility)
+            Ok(ModelHandle::new(
+                client.completion_model(&model_config.model_identifier),
+            ))
         }
         AzureAuthMethod::ApiKey => {
             tracing::info!("Using API Key authentication for Azure OpenAI");
-            let key = api_key
+            let key = provider_config
+                .api_key
+                .clone()
                 .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
 
             let client = rig_core::providers::azure::Client::builder()
@@ -315,45 +278,42 @@ async fn build_azure_agent(
                 .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
                 .build()
                 .map_err(client_error)?;
-            let utility = client
-                .agent(&model_config.model_identifier)
-                .preamble(UTILITY_PREAMBLE)
-                .build();
-            (client.agent(&model_config.model_identifier), utility)
+            Ok(ModelHandle::new(
+                client.completion_model(&model_config.model_identifier),
+            ))
         }
-    };
-
-    let mut builder = builder.preamble(preamble);
-
-    if model_config.supports_temperature {
-        builder = builder.temperature(model_config.temperature as f64);
     }
+}
 
-    if let Some(max_tokens) = model_config.max_tokens {
-        builder = builder.max_tokens(max_tokens as u64);
+/// The provider-specific request fields a chat request for `model_config`
+/// carries: the reasoning switch, in the shape each wire expects. Azure has
+/// none.
+pub(crate) fn request_params(
+    model_config: &ModelConfig,
+    provider: &ProviderType,
+) -> Option<serde_json::Value> {
+    match provider {
+        ProviderType::OpenRouter => openai_compat_think(model_config).map(
+            |think| serde_json::json!({ "chat_template_kwargs": { "enable_thinking": think } }),
+        ),
+        ProviderType::Ollama => {
+            ollama_think(model_config).map(|think| serde_json::json!({ "think": think }))
+        }
+        ProviderType::AzureOpenAI => None,
     }
+}
 
-    let mcp_tools = sanitize_mcp_tools_for_openai(mcp_tools);
-    let builder = chat_agent_builder(
-        native_tools,
-        builder,
-        context_shaper.clone(),
-        request_recorder.clone(),
-        tool_loader.clone(),
-    );
-    let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
-
-    Ok(AgentClient {
-        agent,
-        task_controller,
-        provider: ProviderType::AzureOpenAI,
-        utility,
-        context_shaper,
-        request_recorder,
-        tool_loader,
-        supports_images: model_config.supports_images,
-        model_id: model_config.model_identifier.clone(),
-    })
+/// [`request_params`] for the utility agent: thinking off wherever the
+/// switch is known.
+fn utility_params(
+    model_config: &ModelConfig,
+    provider: &ProviderType,
+) -> Option<serde_json::Value> {
+    match provider {
+        ProviderType::OpenRouter => openai_compat_utility_params(model_config),
+        ProviderType::Ollama => ollama_utility_params(model_config),
+        ProviderType::AzureOpenAI => None,
+    }
 }
 
 /// Normalize Azure endpoint URL:
@@ -487,20 +447,23 @@ mod tests {
     }
 
     /// AGE-227: the utility agent must carry no tools. This mirrors the exact
-    /// builder path used for the Ollama arm's `utility` field — no
+    /// builder path used for the `utility` field — no
     /// `.tool()`/`.rmcp_tools()` calls before `.build()` — without needing the
     /// full `NativeTools` tool-collection setup that `build_provider_agent`
     /// requires.
     #[tokio::test]
     async fn utility_agent_builder_path_has_no_tools() {
-        let client = rig_core::providers::ollama::Client::builder()
-            .api_key(rig_core::client::Nothing)
-            .base_url("http://localhost:11434")
-            .build()
+        let model_config = ModelConfig::new(
+            "test-model".into(),
+            "test-model".into(),
+            ProviderType::Ollama,
+            "test-model".into(),
+        );
+        let provider_config = ProviderConfig::new("ollama".into(), ProviderType::Ollama);
+        let model = completion_model(&model_config, &provider_config)
             .expect("client construction does not make a network call");
 
-        let utility = client
-            .agent("test-model")
+        let utility = AgentBuilder::from_model_handle(model)
             .preamble(UTILITY_PREAMBLE)
             .build();
 

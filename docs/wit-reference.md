@@ -153,14 +153,14 @@ interface llm {
 }
 ```
 
-Call the host's LLM to generate completions. The host manages API keys, rate limiting, and model routing.
+Call the host's LLM to generate completions. The host manages API keys, rate limiting, and model routing: the request goes through the same provider client the calling agent uses (`chatty_core::services::plugin_llm::PluginLlmProvider`), so OpenRouter, Ollama and Azure OpenAI (API key or Entra ID) all work.
 
 **Parameters**:
-- `model` — Model identifier (e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`). Must match a model configured in the host.
+- `model` — Empty (`""`) for the calling agent's model, which is what most modules want. Otherwise a model identifier (e.g. `"claude-sonnet-4-20250514"`) or model id that must match a model configured in the host; any other name is refused with an error and no request is sent.
 - `messages` — Conversation history to send to the LLM.
-- `tools` — Optional JSON-encoded array of tool definitions for the LLM to use. Pass `none` if the module doesn't need tool use in this completion.
+- `tools` — Optional JSON-encoded array of tool definitions for the LLM to use: the flat form (`name`, `description`, `parameters`) or the OpenAI wrapped form (`{"type": "function", "function": {...}}`). Pass `none` if the module doesn't need tool use in this completion.
 
-**Returns**: `result<completion-response, string>` — The completion or an error message.
+**Returns**: `result<completion-response, string>` — The completion or an error message. `usage.input-tokens` is the whole prompt (cached tokens included). The call is bounded by the module's per-call deadline: past it the host stops waiting and returns `deadline exceeded`.
 
 **Example** (pseudocode):
 ```

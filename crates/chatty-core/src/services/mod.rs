@@ -54,6 +54,7 @@ pub mod path_validator;
 pub mod pdf_thumbnail;
 #[cfg(feature = "pdf")]
 pub mod pdfium_utils;
+pub mod plugin_llm;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
 pub mod project_instructions;

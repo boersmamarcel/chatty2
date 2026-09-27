@@ -1895,6 +1895,7 @@ dependencies = [
  "chatty-fabric",
  "chatty-optimize",
  "chatty-terminal",
+ "chatty-wasm-runtime",
  "chromiumoxide",
  "chrono",
  "comemo",
@@ -1946,6 +1947,7 @@ dependencies = [
  "usvg 0.47.0",
  "uuid",
  "which 8.0.6",
+ "wiremock",
  "zip 8.6.0",
 ]
 
@@ -2011,7 +2013,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "winres",
- "wiremock",
 ]
 
 [[package]]
