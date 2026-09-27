@@ -7,12 +7,21 @@
 use std::path::Path;
 
 use chatty_core::services::is_agent_todo_tool;
+use chatty_core::tools::plugin_tool::plugin_tool_display_name;
 
 use crate::engine::{ToolCallInfo, ToolCallState};
 
 /// `Read` / `Reading` / `Failed Read` for a tool the table knows; `None` for
 /// anything else, which keeps its raw `name(args)` header.
 pub fn verb_for(tool_name: &str, state: &ToolCallState) -> Option<String> {
+    // A spec's plugin tool (PL-U2): one generic verb, whatever the plugin.
+    if let Some(plugin_tool) = plugin_tool_display_name(tool_name) {
+        return Some(match state {
+            ToolCallState::Running => format!("Running {plugin_tool}"),
+            ToolCallState::Success => format!("Ran {plugin_tool}"),
+            ToolCallState::Error => format!("Failed to run {plugin_tool}"),
+        });
+    }
     let (running, done) = match tool_name {
         "read_file" | "read_binary" | "read_excel" | "read_skill" => ("Reading", "Read"),
         "list_directory" | "list_agents" | "list_mcp_services" | "list_tools" => {
@@ -113,6 +122,10 @@ pub fn classify_tool(name: &str) -> ToolKind {
     }
     if is_agent_todo_tool(&n) {
         return ToolKind::Explore;
+    }
+    if plugin_tool_display_name(name).is_some() {
+        // A spec's plugin tool (PL-U2) counts as a tool, whatever its name.
+        return ToolKind::External;
     }
     if n.contains("diff") || n.contains("edit") || n.contains("write") || n.contains("apply") {
         ToolKind::Edit
@@ -304,6 +317,25 @@ mod tests {
             Some("Failed Edited")
         );
         assert_eq!(verb_for("run_shell", &ToolCallState::Success), None);
+    }
+
+    /// PL-U2: a spec's plugin tool reads as running `<plugin>.<tool>`,
+    /// whichever plugin, and counts as a tool in the tally.
+    #[test]
+    fn plugin_tools_read_as_ran_plugin_dot_tool() {
+        assert_eq!(
+            verb_for("echo-agent__reverse", &ToolCallState::Running).as_deref(),
+            Some("Running echo-agent.reverse")
+        );
+        assert_eq!(
+            verb_for("echo-agent__reverse", &ToolCallState::Success).as_deref(),
+            Some("Ran echo-agent.reverse")
+        );
+        assert_eq!(
+            verb_for("spin__spin", &ToolCallState::Error).as_deref(),
+            Some("Failed to run spin.spin")
+        );
+        assert_eq!(classify_tool("echo-agent__reverse"), ToolKind::External);
     }
 
     /// Same order as the desktop's `RunTally::phrase_spans`.

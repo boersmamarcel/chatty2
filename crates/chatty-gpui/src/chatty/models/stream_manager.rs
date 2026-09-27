@@ -602,9 +602,10 @@ impl StreamManager {
         }
         match chunk {
             StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta => {}
-            // Folded into the turn's usage by the session (AGE-683); the
-            // desktop never compacts, so it never sees one here.
-            StreamChunk::CompactionUsage(_) => {}
+            // Folded into the turn's usage by the session (AGE-683, PL-U2);
+            // the desktop never compacts and its chats have no plugins, so it
+            // never sees one here.
+            StreamChunk::CompactionUsage(_) | StreamChunk::PluginUsage { .. } => {}
             StreamChunk::Text(text) => {
                 if let Some(state) = self.streams.get_mut(conv_id) {
                     state.pending_text.push_str(&text);
@@ -838,7 +839,9 @@ impl StreamManager {
                 });
             }
             // The conversation's (`AgentSession::apply`), not the manager's.
-            SessionEvent::TurnMessages(_) | SessionEvent::Delegation(_) => {}
+            SessionEvent::TurnMessages(_)
+            | SessionEvent::Delegation(_)
+            | SessionEvent::PluginUsage(_) => {}
             SessionEvent::Error(error) => self.handle_chunk(conv_id, StreamChunk::Error(error), cx),
             // A cancelled turn still ends; `stop_stream` already reported a
             // user-pressed Stop, and a flag-only cancel ends as completed.

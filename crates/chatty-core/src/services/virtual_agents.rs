@@ -282,6 +282,34 @@ mod tests {
         }
     }
 
+    /// PL-U2's desktop path: the desktop runs a spec agent as a
+    /// `chatty-tui` worker (`broker_runner::local_runners` over this
+    /// function), so a plugin reaches the worker only on its argv — module,
+    /// version, grants, config and limits intact — and the worker loads it
+    /// as `plugins_headless` shows.
+    #[test]
+    fn a_workers_plugins_ride_on_its_argv() {
+        let mut auditor = agent("auditor", Some("qwen"));
+        auditor.plugins = vec![crate::agent_spec::PluginSpec {
+            module: "benford-agent".to_string(),
+            version: Some("^0.1".to_string()),
+            grants: vec!["llm".to_string()],
+            config: [("threshold".to_string(), "0.05".to_string())].into(),
+            limits: crate::agent_spec::PluginLimits {
+                max_memory_mb: Some(64),
+                max_execution_ms: Some(2_000),
+            },
+        }];
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            std::slice::from_ref(&auditor),
+            &[],
+        );
+        assert_eq!(spec_in(&specs[0].args).plugins, auditor.plugins);
+    }
+
     /// A spec that delegates in turn is a sub-leader: its child runs a
     /// broker of its own. One that does not, does not.
     #[test]

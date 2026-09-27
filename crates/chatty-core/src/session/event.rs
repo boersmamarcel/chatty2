@@ -83,6 +83,12 @@ pub enum SessionEvent {
     /// provider's aggregate when no per-request record arrived). Arrives
     /// before `TurnEnded`.
     TokenUsage(TokenUsage),
+    /// What one of the agent's plugins spent through `llm::complete` during
+    /// the turn (PL-U2, AGE-616): one line per plugin, named in
+    /// [`TokenUsage::plugin`], each call carrying the model that served it.
+    /// Arrives before `TurnEnded`; `finish_turn` records it beside the turn's
+    /// own line, not in it, so the context fill stays the agent's own.
+    PluginUsage(TokenUsage),
     /// rig's record of the turn's messages, for persisting the tool
     /// round-trips behind the final text (AGE-247).
     TurnMessages(Vec<Message>),

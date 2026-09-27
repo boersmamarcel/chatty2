@@ -200,11 +200,23 @@ fn native_group_of(tool: &str) -> Option<&'static str> {
         .map(|group| group.name)
 }
 
+/// One of the agent's plugins as a tool group (PL-U2): every plugin is a
+/// group of its own, named after it, after the native and MCP groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginGroup {
+    /// The plugin's module name, which is also the group's.
+    pub name: String,
+    /// `[module].description`: what the catalog says the group is for.
+    pub description: String,
+    /// The plugin's tools, as advertised (`<plugin>__<tool>`).
+    pub tools: Vec<String>,
+}
+
 /// A group this agent actually has: the tools of it that are registered.
 #[derive(Debug, Clone)]
 struct Group {
-    name: &'static str,
-    when: &'static str,
+    name: String,
+    when: String,
     tools: Vec<String>,
 }
 
@@ -213,12 +225,14 @@ struct Inner {
     groups: Vec<Group>,
     /// Names of the MCP tools (their group is [`MCP_GROUP`]).
     mcp_tools: BTreeSet<String>,
+    /// Each plugin tool's group: its plugin's name.
+    plugin_tools: BTreeMap<String, String>,
     state: Mutex<State>,
 }
 
 #[derive(Default)]
 struct State {
-    loaded: BTreeSet<&'static str>,
+    loaded: BTreeSet<String>,
     /// Every tool the built agent registered, and its schema's size in
     /// tokens. Empty until [`ToolLoader::calibrate`]: until then nothing is
     /// filtered, since `active_tools` may only name registered tools.
@@ -246,20 +260,24 @@ impl std::fmt::Debug for ToolLoader {
 
 impl ToolLoader {
     /// A loader over the tools the agent is about to be built with
-    /// (`native_tools`, then `mcp_tools`), with `preload` groups loaded
-    /// from the start.
+    /// (`native_tools`, then `mcp_tools`, then one group per plugin in
+    /// `plugins`, in name order), with `preload` groups loaded from the
+    /// start.
     pub fn new<'a>(
         native_tools: impl IntoIterator<Item = &'a str>,
         mcp_tools: impl IntoIterator<Item = String>,
+        plugins: impl IntoIterator<Item = PluginGroup>,
         preload: &[&str],
     ) -> Self {
         let native: BTreeSet<&str> = native_tools.into_iter().collect();
         let mcp_tools: BTreeSet<String> = mcp_tools.into_iter().collect();
+        let mut plugins: Vec<PluginGroup> = plugins.into_iter().collect();
+        plugins.sort_by(|a, b| a.name.cmp(&b.name));
         let mut groups: Vec<Group> = GROUPS
             .iter()
             .map(|spec| Group {
-                name: spec.name,
-                when: spec.when,
+                name: spec.name.to_string(),
+                when: spec.when.to_string(),
                 tools: spec
                     .tools
                     .iter()
@@ -271,20 +289,40 @@ impl ToolLoader {
             .collect();
         if !mcp_tools.is_empty() {
             groups.push(Group {
-                name: MCP_GROUP,
-                when: MCP_WHEN,
+                name: MCP_GROUP.to_string(),
+                when: MCP_WHEN.to_string(),
                 tools: mcp_tools.iter().cloned().collect(),
+            });
+        }
+        let mut plugin_tools = BTreeMap::new();
+        for plugin in plugins.into_iter().filter(|p| !p.tools.is_empty()) {
+            for tool in &plugin.tools {
+                plugin_tools.insert(tool.clone(), plugin.name.clone());
+            }
+            let when = match plugin.description.trim() {
+                "" => format!("to use the `{}` plugin", plugin.name),
+                description => format!(
+                    "to use the `{}` plugin: {}",
+                    plugin.name,
+                    description.trim_end_matches('.')
+                ),
+            };
+            groups.push(Group {
+                name: plugin.name,
+                when,
+                tools: plugin.tools,
             });
         }
         let loaded = groups
             .iter()
-            .map(|group| group.name)
-            .filter(|name| preload.contains(name))
+            .map(|group| group.name.clone())
+            .filter(|name| preload.contains(&name.as_str()))
             .collect();
         Self {
             inner: Arc::new(Inner {
                 groups,
                 mcp_tools,
+                plugin_tools,
                 state: Mutex::new(State {
                     loaded,
                     ..State::default()
@@ -295,16 +333,24 @@ impl ToolLoader {
 
     /// The group `tool` belongs to, or `None` for a core or ungrouped tool
     /// (always advertised).
-    fn group_of(&self, tool: &str) -> Option<&'static str> {
+    fn group_of(&self, tool: &str) -> Option<String> {
         if CORE_TOOLS.contains(&tool) {
             return None;
         }
-        native_group_of(tool).or_else(|| self.inner.mcp_tools.contains(tool).then_some(MCP_GROUP))
+        native_group_of(tool)
+            .map(str::to_string)
+            .or_else(|| {
+                self.inner
+                    .mcp_tools
+                    .contains(tool)
+                    .then(|| MCP_GROUP.to_string())
+            })
+            .or_else(|| self.inner.plugin_tools.get(tool).cloned())
     }
 
-    fn is_active(&self, tool: &str, loaded: &BTreeSet<&'static str>) -> bool {
+    fn is_active(&self, tool: &str, loaded: &BTreeSet<String>) -> bool {
         self.group_of(tool)
-            .is_none_or(|group| loaded.contains(group))
+            .is_none_or(|group| loaded.contains(&group))
     }
 
     /// Whether `tool` is advertised on the first request: the system prompt
@@ -314,13 +360,17 @@ impl ToolLoader {
     }
 
     /// The names of the groups this agent has, catalog order.
-    pub fn group_names(&self) -> Vec<&'static str> {
-        self.inner.groups.iter().map(|group| group.name).collect()
+    pub fn group_names(&self) -> Vec<String> {
+        self.inner
+            .groups
+            .iter()
+            .map(|group| group.name.clone())
+            .collect()
     }
 
     /// The groups loaded so far.
-    pub fn loaded_groups(&self) -> Vec<&'static str> {
-        self.inner.state.lock().loaded.iter().copied().collect()
+    pub fn loaded_groups(&self) -> Vec<String> {
+        self.inner.state.lock().loaded.iter().cloned().collect()
     }
 
     /// The system prompt's catalog: one line per group not loaded yet,
@@ -331,7 +381,7 @@ impl ToolLoader {
             .inner
             .groups
             .iter()
-            .filter(|group| !loaded.contains(group.name))
+            .filter(|group| !loaded.contains(&group.name))
             .map(|group| {
                 format!(
                     "- **{}** — load {} ({})",
@@ -378,9 +428,9 @@ impl ToolLoader {
                 self.group_names().join(", ")
             ));
         };
-        let newly = self.inner.state.lock().loaded.insert(found.name);
+        let newly = self.inner.state.lock().loaded.insert(found.name.clone());
         if newly {
-            tracing::info!(group = found.name, "Tool group loaded");
+            tracing::info!(group = %found.name, "Tool group loaded");
             self.recalibrate();
         }
         Ok(found.tools.clone())
@@ -389,7 +439,7 @@ impl ToolLoader {
     /// Load the group of every tool called in `messages`: a call in the
     /// history is only valid against a request that still advertises it.
     fn load_groups_called_in(&self, messages: &[Message]) {
-        let mut called: Vec<&'static str> = messages
+        let mut called: Vec<String> = messages
             .iter()
             .flat_map(called_tool_names)
             .filter_map(|name| self.group_of(name))
@@ -401,7 +451,7 @@ impl ToolLoader {
             messages
                 .iter()
                 .flat_map(load_tools_groups)
-                .filter_map(|group| self.resolve_group(group).map(|g| g.name)),
+                .filter_map(|group| self.resolve_group(group).map(|g| g.name.clone())),
         );
         if called.is_empty() {
             return;
@@ -469,10 +519,10 @@ impl ToolLoader {
 
     /// The group of `tool` if it is registered here but its group is not
     /// loaded yet.
-    fn unloaded_group_of(&self, tool: &str) -> Option<&'static str> {
+    fn unloaded_group_of(&self, tool: &str) -> Option<String> {
         let group = self.group_of(tool)?;
         let state = self.inner.state.lock();
-        (state.registered.contains_key(tool) && !state.loaded.contains(group)).then_some(group)
+        (state.registered.contains_key(tool) && !state.loaded.contains(&group)).then_some(group)
     }
 }
 
@@ -543,7 +593,7 @@ impl AgentHook for ToolLoader {
             return None;
         }
         let group = self.unloaded_group_of(&event.tool_name)?;
-        self.load(group).ok()?;
+        self.load(&group).ok()?;
         // Skip, not retry: the call is answered with this note and the run
         // goes on to its next model call, which advertises the group. rig
         // allows no invalid-call retries unless a request asks for them.
@@ -651,8 +701,77 @@ mod tests {
                 "some_new_tool",
             ],
             ["mcp_lookup".to_string()],
+            Vec::new(),
             preload,
         )
+    }
+
+    /// PL-U2: each plugin is a group of its own, named after it, after the
+    /// native and MCP groups and in name order whatever order the plugins
+    /// came in, so the catalog (and the `load_tools` enum) is the same on
+    /// every build. Loading it advertises exactly that plugin's tools.
+    #[test]
+    fn each_plugin_is_one_group_in_name_order() {
+        let group = |name: &str, tools: &[&str]| PluginGroup {
+            name: name.to_string(),
+            description: format!("The {name} plugin."),
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+        };
+        let build = |plugins: Vec<PluginGroup>| {
+            let loader = ToolLoader::new(
+                ["shell_execute", "load_tools", "search_web"],
+                ["mcp_lookup".to_string()],
+                plugins,
+                &[],
+            );
+            loader.calibrate(
+                &ContextShaper::new(
+                    Default::default(),
+                    crate::token_budget::counter::TokenCounter::for_model("test"),
+                    Some(32_000),
+                ),
+                0,
+                [
+                    "shell_execute",
+                    "load_tools",
+                    "search_web",
+                    "mcp_lookup",
+                    "zeta__z",
+                    "echo-agent__reverse",
+                    "echo-agent__echo",
+                ]
+                .into_iter()
+                .map(|t| (t.to_string(), 1))
+                .collect(),
+            );
+            loader
+        };
+        let echo = group("echo-agent", &["echo-agent__echo", "echo-agent__reverse"]);
+        let zeta = group("zeta", &["zeta__z"]);
+        let loader = build(vec![zeta.clone(), echo.clone()]);
+        assert_eq!(loader.group_names(), ["web", "mcp", "echo-agent", "zeta"]);
+        assert_eq!(
+            loader.catalog(),
+            build(vec![echo, zeta]).catalog(),
+            "the catalog does not depend on the order plugins came in"
+        );
+        assert!(
+            loader.catalog().contains(
+                "- **echo-agent** — load to use the `echo-agent` plugin: The echo-agent plugin"
+            ),
+            "{}",
+            loader.catalog()
+        );
+        let active = loader.active_tools().unwrap();
+        assert!(!active.iter().any(|t| t.contains("__")), "{active:?}");
+
+        assert_eq!(
+            loader.load("echo-agent").unwrap(),
+            ["echo-agent__echo", "echo-agent__reverse"]
+        );
+        let active = loader.active_tools().unwrap();
+        assert!(active.contains(&"echo-agent__reverse".to_string()));
+        assert!(!active.contains(&"zeta__z".to_string()), "{active:?}");
     }
 
     fn calibrated(preload: &[&str]) -> (ToolLoader, ContextShaper) {
@@ -798,7 +917,7 @@ mod tests {
                 .contains(&"git_diff".to_string())
         );
         loader.load_groups_called_in(&[call("mcp_lookup")]);
-        assert!(loader.loaded_groups().contains(&MCP_GROUP));
+        assert!(loader.loaded_groups().contains(&MCP_GROUP.to_string()));
     }
 
     #[test]
@@ -875,7 +994,7 @@ mod tests {
         turns: Vec<Vec<MockStreamEvent>>,
     ) -> (rig_agent::Agent, MockCompletionModel, ToolLoader) {
         let model = MockCompletionModel::from_stream_turns(turns);
-        let loader = ToolLoader::new(["add", "fetch", "load_tools"], Vec::new(), &[]);
+        let loader = ToolLoader::new(["add", "fetch", "load_tools"], Vec::new(), Vec::new(), &[]);
         let agent = AgentBuilder::new(model.clone())
             .tool(MockAddTool)
             .tool(FakeFetch)
