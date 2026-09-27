@@ -10,27 +10,32 @@ This document describes the WIT (WebAssembly Interface Types) contract between c
 ## Architecture Overview
 
 ```
-┌──────────────────────────────────────────────┐
-│                chatty (host)                 │
-│                                              │
-│  ┌─────────┐  ┌──────────┐  ┌────────────┐  │
-│  │   llm   │  │  config  │  │  logging   │  │
-│  │ import  │  │  import  │  │  import    │  │
-│  └────┬────┘  └────┬─────┘  └─────┬──────┘  │
-│       │            │              │          │
-├───────┼────────────┼──────────────┼──────────┤
-│       ▼            ▼              ▼          │
-│  ┌──────────────────────────────────────┐    │
-│  │          WASM Module (guest)         │    │
-│  │                                      │    │
-│  │  exports: agent                      │    │
-│  │    • chat(req) → response            │    │
-│  │    • invoke-tool(name, args) → result│    │
-│  │    • list-tools() → definitions      │    │
-│  │    • get-agent-card() → card         │    │
-│  └──────────────────────────────────────┘    │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                            chatty (host)                              │
+│                                                                        │
+│  ┌─────────┐  ┌──────────┐  ┌────────────┐  ┌────────┐  ┌──────────┐ │
+│  │   llm   │  │  config  │  │  logging   │  │  file  │  │ billing  │ │
+│  │ import  │  │  import  │  │  import    │  │ import │  │ import   │ │
+│  └────┬────┘  └────┬─────┘  └─────┬──────┘  └───┬────┘  └────┬─────┘ │
+│       │            │              │        (opt) │    (opt) │        │
+├───────┼────────────┼──────────────┼──────────────┼───────────┼───────┤
+│       ▼            ▼              ▼              ▼           ▼       │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │                     WASM Module (guest)                       │   │
+│  │                                                                │   │
+│  │  exports: agent                                                │   │
+│  │    • chat(req) → response                                     │   │
+│  │    • invoke-tool(name, args) → result                         │   │
+│  │    • list-tools() → definitions                                │   │
+│  │    • get-agent-card() → card                                   │   │
+│  └────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
 ```
+
+`llm`, `config` and `logging` are used by every module. `file` and `billing`
+are optional imports — free modules never link `billing`, and only modules
+that read files from a granted root (e.g. ML modules loading weights) use
+`file`.
 
 ---
 
@@ -153,14 +158,14 @@ interface llm {
 }
 ```
 
-Call the host's LLM to generate completions. The host manages API keys, rate limiting, and model routing.
+Call the host's LLM to generate completions. The host manages API keys, rate limiting, and model routing: the request goes through the same provider client the calling agent uses (`chatty_core::services::plugin_llm::PluginLlmProvider`), so OpenRouter, Ollama and Azure OpenAI (API key or Entra ID) all work.
 
 **Parameters**:
-- `model` — Model identifier (e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`). Must match a model configured in the host.
+- `model` — Empty (`""`) for the calling agent's model, which is what most modules want. Otherwise a model identifier (e.g. `"claude-sonnet-4-20250514"`) or model id that must match a model configured in the host; any other name is refused with an error and no request is sent.
 - `messages` — Conversation history to send to the LLM.
-- `tools` — Optional JSON-encoded array of tool definitions for the LLM to use. Pass `none` if the module doesn't need tool use in this completion.
+- `tools` — Optional JSON-encoded array of tool definitions for the LLM to use: the flat form (`name`, `description`, `parameters`) or the OpenAI wrapped form (`{"type": "function", "function": {...}}`). Pass `none` if the module doesn't need tool use in this completion.
 
-**Returns**: `result<completion-response, string>` — The completion or an error message.
+**Returns**: `result<completion-response, string>` — The completion or an error message. `usage.input-tokens` is the whole prompt (cached tokens included). The call is bounded by the module's per-call deadline: past it the host stops waiting and returns `deadline exceeded`.
 
 **Example** (pseudocode):
 ```
@@ -188,7 +193,13 @@ interface config {
 }
 ```
 
-Read configuration values set by the user for this module. The host manages the key-value store.
+Read the module's configuration: the string → string `[config]` table of its `module.toml`. A non-string value there is a manifest error.
+
+```toml
+[config]
+api-key = "sk-..."
+threshold = "0.8"
+```
 
 **Parameters**:
 - `key` — The configuration key to look up.
@@ -200,6 +211,41 @@ Read configuration values set by the user for this module. The host manages the 
 let api_key = config::get("api-key");       // some("sk-...")
 let threshold = config::get("threshold");    // some("0.8")
 let missing = config::get("nonexistent");    // none
+```
+
+### `file` — Sandboxed File Reads
+
+```wit
+interface file {
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+}
+```
+
+Read a file under the module's **file root**: the directory its `module.toml` grants with
+
+```toml
+[files]
+root = "weights"   # relative to the module directory
+```
+
+The root is host-set (the runtime's `ModuleManifest::with_weights_root`), never a `[config]` key: a config value named `weights_root` grants nothing. A module without `[files]` can read no files. Free modules never need this; ML inference modules use it to load weights once at startup.
+
+**Parameters**:
+- `path` — Relative to the file root. `/` and `\` both separate components.
+
+**Returns**: the file's bytes, or an error when:
+- the module has no file root;
+- `path` is empty, absolute, has a drive letter (`:`), or a `..` component;
+- the path's resolved location (both sides canonicalized, symlinks followed) is outside the root — a symlink that stays inside the root is fine;
+- it is not a regular file, or is over **256 MiB** (`MAX_FILE_READ_BYTES`, checked before reading);
+- the file is missing or unreadable.
+
+Error text never contains host paths. The read counts against the call's wall-clock limit.
+
+**Example** (pseudocode):
+```
+let weights = file::read-bytes("model/weights.bin");   // ok([..])
+let escape = file::read-bytes("../module.toml");       // err("... `..` component rejected ...")
 ```
 
 ### `logging` — Structured Logging
@@ -222,6 +268,42 @@ logging::log("info", "Starting code review...");
 logging::log("debug", "Analyzing 42 files");
 logging::log("error", "Failed to parse input: unexpected token");
 ```
+
+### `billing` — Paid Module Sessions (optional)
+
+```wit
+interface billing {
+    record session-info {
+        token: string,
+        balance-tokens: s64,
+        reserved-tokens: s64,
+        pricing-model: string,
+    }
+
+    acquire-session: func(estimated-tokens: s64) -> result<session-info, string>;
+    report-usage: func(input-tokens: s64, output-tokens: s64) -> result<_, string>;
+}
+```
+
+Only paid modules import this; free modules never call it (zero overhead). A
+paid module calls `acquire-session` before doing work — the host asks Hive to
+reserve credits and returns a signed session token — then `report-usage` once
+the work is done, so Hive can settle the reservation against actual usage.
+
+**`session-info.token`** is a Hive-signed JWT. The current `hive-billing-sdk`
+verifies it with **HS256 (HMAC-SHA256) against a shared secret embedded in the
+module at compile time**, not an embedded *public* key: there is no Ed25519
+verification today, only a documented future upgrade path
+(`crates/hive-billing-sdk/src/lib.rs`). HMAC-in-WASM is deterrence, not proof
+— a determined attacker can extract the secret from the compiled module — and
+the crate's own doc comment says so; high-trust billing should run on Hive's
+Firecracker infrastructure, where verification happens server-side instead.
+
+**Parameters** (`acquire-session`):
+- `estimated-tokens` — estimated token usage for this invocation.
+
+**Parameters** (`report-usage`):
+- `input-tokens` / `output-tokens` — actual tokens consumed.
 
 ---
 
@@ -353,11 +435,13 @@ world module {
     import llm;
     import config;
     import logging;
+    import file;      // optional: ML modules use this to load weights
+    import billing;   // optional: only called by paid modules
     export agent;
 }
 ```
 
-The `module` world is the compilation target for all chatty WASM modules. It wires together the three host imports and the one guest export.
+The `module` world is the compilation target for all chatty WASM modules. It wires together the host imports and the one guest export.
 
 ---
 
@@ -380,7 +464,7 @@ The WIT package uses [semantic versioning](https://semver.org/): `chatty:module@
 
 ### Evolution Guidelines
 
-1. **Additive changes only** in minor versions. New optional host imports (`http`, `fs`, `process`) can be added without breaking existing modules since they simply won't import them.
+1. **Additive changes only** in minor versions. New optional host imports (`file` and `billing` are the two shipped so far) can be added without breaking existing modules since a module that does not import them is unaffected. `http`, `fs` and `process` are hypothetical future examples of the same pattern, not imports that exist today.
 
 2. **New record fields** require creating a new record type (e.g. `chat-request-v2`) because WIT records are structurally typed — adding a field changes the ABI. The old type must be kept for backward compatibility.
 
@@ -392,4 +476,4 @@ The WIT package uses [semantic versioning](https://semver.org/): `chatty:module@
 
 ### Current Version: `0.2.0`
 
-Adds the optional `billing` interface over `0.1.0`, which is no longer loadable. The `0.x` series allows breaking changes in minor versions while the interface is being stabilized. Once `1.0.0` is released, the compatibility rules above apply strictly.
+Adds the optional `billing` and `file` interfaces over `0.1.0`, which is no longer loadable. The `0.x` series allows breaking changes in minor versions while the interface is being stabilized. Once `1.0.0` is released, the compatibility rules above apply strictly.

@@ -8,3 +8,6 @@ wasm = "file-reader.wasm"
 tools = []
 chat = true
 agent = true
+
+[files]
+root = "weights"

@@ -13,7 +13,6 @@ hive-client = { path = "../hive-client" }
 chatty-fabric = { path = "../chatty-fabric" }
 
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
 tokio = { workspace = true, features = ["sync", "net"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
@@ -22,7 +21,8 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { workspace = true }
+uuid = { workspace = true }
 
 # Only for the `worker` feature: the participant *side* of the socket needs
 # `SessionEvent` to map a turn onto task frames. Optional, and off by

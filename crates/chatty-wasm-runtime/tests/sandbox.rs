@@ -80,7 +80,10 @@ async fn sandbox_1_1_good_fixtures_all_four_exports() {
             m.last_invocation_metrics().is_some(),
             "last_invocation_metrics must be populated after chat"
         );
-        let out = m.invoke_tool("reverse", "abc").await.expect("invoke_tool");
+        let out = m
+            .invoke_tool("reverse", r#"{"input":"abc"}"#)
+            .await
+            .expect("invoke_tool");
         assert_eq!(out, "cba");
         assert!(m.last_invocation_metrics().is_some());
     }
@@ -160,8 +163,7 @@ async fn sandbox_1_1_good_fixtures_all_four_exports() {
     {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"hello").unwrap();
-        let manifest = ModuleManifest::new("file-reader")
-            .with_config("weights_root", tmp.path().to_str().unwrap());
+        let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
         let mut m = load("file-reader", manifest, ResourceLimits::default());
         let resp = m.chat(user_req("a.bin")).await.expect("chat");
         assert_eq!(resp.content, "5");
@@ -566,87 +568,106 @@ async fn output_cap_enforced() {
 }
 
 // ---------------------------------------------------------------------------
-// 1.8 - `file-reader` with `weights_root` set: only the file inside the root
-// may be read; `..`, absolute paths, and paths that try to escape via
-// mixed separators must all error. Symlinks that point outside the root and
-// files above a size cap are the two known-open gaps (F14 / PL-H3).
+// 1.8 - `file-reader` with a file root granted: only files inside the root
+// may be read; `..`, absolute paths, Windows separators and drive paths,
+// symlinks that leave the root, and files over the 256 MiB read cap all
+// error (F14, fixed by PL-H3).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_8_file_reader_rejects_escapes() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.bin"), b"hello").unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    std::fs::write(tmp.path().join("sub/b.bin"), b"hi").unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret"), b"nope").unwrap();
 
     let read = |path: &'static str, root: std::path::PathBuf| async move {
-        let manifest =
-            ModuleManifest::new("file-reader").with_config("weights_root", root.to_str().unwrap());
+        let manifest = ModuleManifest::new("file-reader").with_weights_root(root);
         let mut m = load("file-reader", manifest, ResourceLimits::default());
         m.chat(user_req(path)).await
     };
 
     let ok = read("a.bin", tmp.path().to_path_buf()).await;
     assert_eq!(ok.expect("in-root file reads").content, "5");
+    // A Windows-style separator names the same in-root file on every host.
+    let ok = read("sub\\b.bin", tmp.path().to_path_buf()).await;
+    assert_eq!(ok.expect("`\\` is a separator").content, "2");
 
-    for path in ["../secret", "/etc/passwd", "sub/../../secret"] {
+    for path in [
+        "../secret",
+        "/etc/passwd",
+        "sub/../../secret",
+        "..\\secret",
+        "sub\\..\\..\\secret",
+        "\\etc\\passwd",
+        "C:\\Windows\\win.ini",
+    ] {
         let result = read(path, tmp.path().to_path_buf()).await;
         assert!(result.is_err(), "`{path}` must be rejected, got {result:?}");
     }
+
+    // A config key named `weights_root` grants nothing: the root comes only
+    // from the host (the registry's `[files] root`).
+    let manifest = ModuleManifest::new("file-reader")
+        .with_config("weights_root", tmp.path().to_str().unwrap());
+    let mut m = load("file-reader", manifest, ResourceLimits::default());
+    let result = m.chat(user_req("a.bin")).await;
+    assert!(
+        result.is_err(),
+        "a `weights_root` config key must not grant file access, got {result:?}"
+    );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H3 (AGE-606) — symlink escapes the weights_root sandbox"]
 async fn sandbox_1_8_file_reader_rejects_symlink_escape() {
     let tmp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret"), b"outside the root").unwrap();
-    #[cfg(unix)]
     std::os::unix::fs::symlink(outside.path().join("secret"), tmp.path().join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), tmp.path().join("dir-link")).unwrap();
 
-    let manifest = ModuleManifest::new("file-reader")
-        .with_config("weights_root", tmp.path().to_str().unwrap());
+    let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
-    let result = m.chat(user_req("link")).await;
-    assert!(
-        result.is_err(),
-        "a symlink pointing outside weights_root must not be followed, got {result:?}"
-    );
+    for path in ["link", "dir-link/secret"] {
+        let result = m.chat(user_req(path)).await;
+        assert!(
+            result.is_err(),
+            "a symlink pointing outside the file root must not be followed (`{path}`), \
+             got {result:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H3 (AGE-606) — file::read_bytes has no size cap"]
 async fn sandbox_1_8_file_reader_rejects_oversized_file() {
-    // A 40 MiB file stands in for the plan's 2 GiB case: the defect (no
-    // cap at any size) is provable without writing 2 GiB to disk. Chosen to
-    // stay comfortably clear of the default 64 MiB *memory* cap (a file
-    // close to or above it would fail for that unrelated reason — see
-    // sandbox_1_6's tight-cap defect — which would make this test pass for
-    // the wrong reason instead of proving there is no *read* size cap).
+    // One byte over the 256 MiB read cap, as a sparse file: `set_len` costs
+    // no disk, and a read that honoured the cap only after reading would
+    // blow the guest's memory instead of failing with the cap's message.
     let tmp = tempfile::tempdir().unwrap();
-    let big = vec![0u8; 40 * 1024 * 1024];
-    std::fs::write(tmp.path().join("big.bin"), &big).unwrap();
+    let big = std::fs::File::create(tmp.path().join("big.bin")).unwrap();
+    big.set_len(chatty_wasm_runtime::MAX_FILE_READ_BYTES + 1)
+        .unwrap();
 
-    let manifest = ModuleManifest::new("file-reader")
-        .with_config("weights_root", tmp.path().to_str().unwrap());
+    let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
     let result = m.chat(user_req("big.bin")).await;
+    let err = result.expect_err("a file above the read cap must be rejected");
     assert!(
-        result.is_err(),
-        "a file above a sane size cap must be rejected before being read fully into memory, \
-         got {result:?}"
+        format!("{err:#}").contains("over the 268435456-byte cap"),
+        "expected the read cap to refuse the file before reading it, got: {err:#}"
     );
 }
 
 // ---------------------------------------------------------------------------
 // 1.9 - `config-reader` with and without config: returns the configured
-// value. NOTE: AGE-597 lists this row as expected red against PL-H3, but at
-// this layer (calling `chatty-wasm-runtime` directly with a `ModuleManifest`
-// built via `.with_config(..)`) it passes — see the comment left on PL-H3
-// (AGE-606) reconciling this with F8, which is about the module *registry*
-// never forwarding a manifest's `[config]` section into the runtime
-// `ModuleManifest` it builds (chatty-module-registry/src/registry.rs), not
-// about this crate's config plumbing.
+// value. At this layer (a `ModuleManifest` built via `.with_config(..)`) it
+// always passed; F8 was the module registry never forwarding `module.toml`'s
+// `[config]` into that manifest. PL-H3 fixed that, and
+// chatty-module-registry's `sandbox_1_9_registry_passes_config_and_files_root`
+// proves it end to end from a `module.toml`.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]

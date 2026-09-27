@@ -102,6 +102,8 @@ chatty-fabric = { path = "../chatty-fabric" }
 
 # Hive registry client
 hive-client = { path = "../hive-client" }
+# The `LlmProvider` a WASM plugin's `llm::complete` calls (services::plugin_llm).
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 # The agent's persistent shell runs on its PTY (services::shell_service).
 chatty-terminal = { path = "../chatty-terminal" }
 
@@ -124,6 +126,9 @@ chatty-optimize = { path = "../chatty-optimize" }
 # Mock completion model + tools for rig-level hook tests (services::turn_budget).
 rig-core = { workspace = true, features = ["test-utils"] }
 rig-agent = { workspace = true, features = ["test-utils"] }
+# services::plugin_llm: the WASM fixtures plus a fake provider endpoint.
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime", features = ["test-support"] }
+wiremock = "0.6"
 
 [build-dependencies]
 # Pdfium library download

@@ -7,14 +7,15 @@
 //! Each asserts the **correct** behaviour from the plan's pass-criterion
 //! column, not today's behaviour; a row that fails today is
 //! `#[ignore = "known defect: <id>"]` so `cargo test -- --ignored` lists
-//! every open defect by name. Nothing here changes `chatty-module-registry`
-//! source (tests only).
+//! every open defect by name. PL-H3 (AGE-606) fixed rows 2.1-2.4 and 2.6 and
+//! added the registry half of row 1.9 (F8) plus the checked-in manifest
+//! checks at the end.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chatty_module_registry::ModuleRegistry;
+use chatty_module_registry::{ModuleManifest, ModuleRegistry, ScanReport};
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 
@@ -54,18 +55,16 @@ fn stage(root: &Path, dir_name: &str, fixture: &str, manifest_toml: &str) -> Pat
 // remote reported distinctly.
 // ---------------------------------------------------------------------------
 
-/// `scan_directory` returns `Result<Vec<String>>` — the names of modules it
-/// managed to load. It has no way to report *why* an entry failed (today it
-/// only `warn!`-logs and skips it), and a successfully "loaded" remote
-/// module (which never touches the WASM runtime — `load_from_dir` returns
-/// `Ok(name)` for it immediately) is indistinguishable in that `Vec<String>`
-/// from a real local module. The plan's pass criterion — failures surfaced
-/// on the return value, remote reported distinctly — cannot be expressed
-/// against this API at all, per PL-E3's Do 4 ("if the API can't express it,
-/// mark red against PL-H3 and say so"); see the comment left on PL-H3
-/// (AGE-606). What *can* be asserted here is today's actual return value.
+/// The directory names of a report's failures, in report order.
+fn failed_dirs(report: &ScanReport) -> Vec<String> {
+    report
+        .failed
+        .iter()
+        .map(|(dir, _)| dir.file_name().unwrap().to_string_lossy().into_owned())
+        .collect()
+}
+
 #[test]
-#[ignore = "known defect: PL-H3 (AGE-606) — scan_directory cannot report failures or distinguish remote on its return value"]
 fn sandbox_2_1_scan_directory_reports_each_failure() {
     let tmp = tempfile::tempdir().unwrap();
 
@@ -103,81 +102,27 @@ fn sandbox_2_1_scan_directory_reports_each_failure() {
     );
 
     let mut reg = registry();
-    let loaded = reg.scan_directory(tmp.path()).expect("scan_directory");
+    let report = reg.scan_directory(tmp.path()).expect("scan_directory");
 
-    // What the plan actually wants: every failure named on the return value,
-    // and "remote" distinguishable from a real local load. Neither is true
-    // today — `loaded` is just `["good", "remote"]` (order notwithstanding),
-    // indistinguishable from each other, with broken-toml and missing-wasm
-    // silently absent instead of reported.
+    assert_eq!(report.loaded_names(), vec!["good"]);
+    assert!(reg.get("good").is_some());
+    // Remote is reported distinctly, and never reaches the WASM runtime.
+    assert_eq!(report.remote_names(), vec!["remote"]);
+    assert!(reg.get("remote").is_none());
+    // Each failure is on the return value, with its reason, in dir order.
+    assert_eq!(failed_dirs(&report), vec!["broken-toml", "missing-wasm"]);
     assert!(
-        loaded
-            .iter()
-            .any(|e| e.contains("broken-toml") && e.contains("error")),
-        "a broken-toml entry's failure should be on the return value, got {loaded:?}"
-    );
-    assert!(
-        loaded
-            .iter()
-            .any(|e| e.contains("missing-wasm") && e.contains("error")),
-        "a missing-wasm entry's failure should be on the return value, got {loaded:?}"
+        report.failed[0].1.contains("invalid TOML"),
+        "{:?}",
+        report.failed
     );
     assert!(
-        loaded
-            .iter()
-            .any(|e| e.contains("remote") && e.contains("skipped")),
-        "a remote module should be reported distinctly from a local load, got {loaded:?}"
+        report.failed[1].1.contains("nope.wasm"),
+        "{:?}",
+        report.failed
     );
-}
-
-/// What today's `scan_directory` actually does, pinned so the row above's
-/// gap is visible against real behaviour: only "good" and "remote" load
-/// (both indistinguishable `String` names); the broken and missing-wasm
-/// directories are silently skipped; the doubly-nested directory is never
-/// visited at all.
-#[test]
-fn sandbox_2_1_scan_directory_todays_actual_return_value() {
-    let tmp = tempfile::tempdir().unwrap();
-    stage(
-        tmp.path(),
-        "good",
-        "tool-args",
-        "[module]\nname = \"good\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n",
-    );
-    std::fs::create_dir_all(tmp.path().join("broken-toml")).unwrap();
-    std::fs::write(
-        tmp.path().join("broken-toml/module.toml"),
-        "not [ valid toml",
-    )
-    .unwrap();
-    std::fs::create_dir_all(tmp.path().join("missing-wasm")).unwrap();
-    std::fs::write(
-        tmp.path().join("missing-wasm/module.toml"),
-        "[module]\nname = \"missing-wasm\"\nversion = \"1.0.0\"\nwasm = \"nope.wasm\"\n",
-    )
-    .unwrap();
-    stage(
-        tmp.path(),
-        "remote",
-        "tool-args",
-        "[module]\nname = \"remote\"\nversion = \"1.0.0\"\nexecution_mode = \"remote\"\n",
-    );
-    stage(
-        &tmp.path().join("not-scanned"),
-        "nested",
-        "tool-args",
-        "[module]\nname = \"nested\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n",
-    );
-
-    let mut reg = registry();
-    let mut loaded = reg.scan_directory(tmp.path()).expect("scan_directory");
-    loaded.sort();
-    assert_eq!(
-        loaded,
-        vec!["good".to_string(), "remote".to_string()],
-        "today: only the two loadable names come back, with no failure detail and no \
-         remote/local distinction; the nested module is never visited"
-    );
+    // The nested module is never visited.
+    assert!(reg.get("nested").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -186,34 +131,50 @@ fn sandbox_2_1_scan_directory_todays_actual_return_value() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "known defect: PL-H3 (AGE-606) — duplicate module names overwrite silently"]
 fn sandbox_2_2_duplicate_names_are_surfaced_as_an_error() {
     let tmp = tempfile::tempdir().unwrap();
-    stage(
-        tmp.path(),
-        "dir-a",
-        "tool-args",
-        "[module]\nname = \"dup\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n",
-    );
+    // Created in reverse order, so a result that followed creation (or
+    // `read_dir`) order instead of name order would show.
     stage(
         tmp.path(),
         "dir-b",
         "echo-agent",
         "[module]\nname = \"dup\"\nversion = \"2.0.0\"\nwasm = \"mod.wasm\"\n",
     );
+    stage(
+        tmp.path(),
+        "dir-a",
+        "tool-args",
+        "[module]\nname = \"dup\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n",
+    );
 
     let mut reg = registry();
-    let result = reg.scan_directory(tmp.path());
+    let report = reg.scan_directory(tmp.path()).expect("scan_directory");
 
-    // Today: `scan_directory` succeeds and just returns `["dup", "dup"]` (or
-    // similar) — the second load silently overwrites the first in the
-    // `HashMap`, with no error and no guarantee about which one wins (a
-    // `std::fs::read_dir` order is not specified by POSIX).
+    // Deterministic: the first directory by name wins, the second fails.
+    assert_eq!(report.loaded_names(), vec!["dup"]);
+    assert_eq!(report.loaded[0].1.version, "1.0.0");
+    assert_eq!(reg.manifest("dup").unwrap().version, "1.0.0");
+    assert_eq!(failed_dirs(&report), vec!["dir-b"]);
     assert!(
-        result.is_err(),
-        "a duplicate module name across two directories must be a surfaced error, \
-         got {result:?}"
+        report.failed[0].1.contains("duplicate module name 'dup'")
+            && report.failed[0].1.contains("dir-a"),
+        "{:?}",
+        report.failed
     );
+
+    // Loading the loser by hand is refused too, and leaves the winner alone.
+    let err = reg.load(tmp.path().join("dir-b")).expect_err("duplicate");
+    assert!(
+        format!("{err:#}").contains("duplicate module name"),
+        "{err:#}"
+    );
+    assert_eq!(reg.manifest("dup").unwrap().version, "1.0.0");
+
+    // A rescan of the same directories reports the same outcome.
+    let again = reg.scan_directory(tmp.path()).expect("rescan");
+    assert_eq!(again.loaded_names(), vec!["dup"]);
+    assert_eq!(failed_dirs(&again), vec!["dir-b"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,10 +182,7 @@ fn sandbox_2_2_duplicate_names_are_surfaced_as_an_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "known defect: PL-H3 (AGE-606) — module.toml's wasm path is never validated"]
 fn sandbox_2_3_wasm_path_escapes_are_rejected() {
-    use chatty_module_registry::ModuleManifest;
-
     let tmp = tempfile::tempdir().unwrap();
     let module_dir = tmp.path().join("victim");
     std::fs::create_dir_all(&module_dir).unwrap();
@@ -249,67 +207,39 @@ fn sandbox_2_3_wasm_path_escapes_are_rejected() {
     );
 }
 
-/// Pins the concrete severity behind 2.3: `Path::join` replaces its base
-/// entirely when the joined component is itself absolute, so
-/// `wasm = "/etc/passwd"` doesn't just escape the module directory — the
-/// manifest's `wasm_path` becomes literally `/etc/passwd`, with no
-/// dependency on `module_dir` at all.
-#[test]
-fn sandbox_2_3_absolute_wasm_path_replaces_the_module_dir_entirely() {
-    use chatty_module_registry::ModuleManifest;
-
-    let manifest = ModuleManifest::from_str(
-        "[module]\nname = \"x\"\nversion = \"1.0.0\"\nwasm = \"/etc/passwd\"\n",
-        Path::new("/some/module/dir/module.toml"),
-    )
-    .expect("today: an absolute wasm path parses without error");
-    assert_eq!(
-        manifest.wasm_path,
-        Some(PathBuf::from("/etc/passwd")),
-        "today: the module directory is silently discarded for an absolute wasm path"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // 2.4 - Unknown keys / a typo'd `execution_mode = "remtoe"`: rejected or
 // warned, not treated as local.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "known defect: PL-H3 (AGE-606) — a typo'd execution_mode silently falls back to local"]
 fn sandbox_2_4_typo_execution_mode_is_rejected_or_warned() {
-    use chatty_module_registry::ModuleManifest;
-
     let manifest = ModuleManifest::from_str(
         "[module]\nname = \"x\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\
          execution_mode = \"remtoe\"\n",
         Path::new("/some/module/dir/module.toml"),
     );
-    // Today this parses fine and `execution_mode` is stored verbatim as
-    // "remtoe", which `matches!(.., "remote" | "remote_only")` doesn't
-    // match — so the module is silently treated as local, with no warning
-    // that the author probably meant "remote".
+    let err = manifest.expect_err("a typo'd execution_mode must be rejected, not run locally");
     assert!(
-        manifest.is_err(),
-        "a typo'd execution_mode must be rejected (or at least clearly not silently \
-         treated as local), got {manifest:?}"
+        format!("{err:#}").contains("remtoe"),
+        "the error should name the bad value: {err:#}"
     );
 }
 
 #[test]
-fn sandbox_2_4_unknown_top_level_keys_are_silently_ignored_today() {
-    use chatty_module_registry::ModuleManifest;
-
-    // `[weird]` is not a section this crate's RawManifest knows about.
-    let manifest = ModuleManifest::from_str(
-        "[module]\nname = \"x\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
-         [weird]\nsurprise = true\n",
-        Path::new("/some/module/dir/module.toml"),
-    );
-    assert!(
-        manifest.is_ok(),
-        "today: an unrecognised top-level table is silently accepted, not rejected or warned"
-    );
+fn sandbox_2_4_unknown_keys_are_rejected() {
+    for extra in [
+        "\n[weird]\nsurprise = true\n",
+        "\n[resources]\nmax_memroy_mb = 32\n",
+        "pricing_model = \"paid\"\n",
+    ] {
+        let manifest = ModuleManifest::from_str(
+            &format!("[module]\nname = \"x\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n{extra}"),
+            Path::new("/some/module/dir/module.toml"),
+        );
+        let err = manifest.expect_err(extra);
+        assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +261,8 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
 
     let mut reg = registry();
     reg.load(&dir).expect("alloc loads");
-    let module = reg.get_mut("alloc").expect("alloc registered");
+    let module = reg.get("alloc").expect("alloc registered");
+    let mut module = module.blocking_lock();
 
     // The fixture grows a Vec 1 MiB at a time, so N MiB needs roughly
     // 2N MiB of linear memory (see chatty-wasm-runtime's sandbox suite, row
@@ -386,7 +317,8 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
     )]));
     let mut reg = ModuleRegistry::new(llm, ResourceLimits::default()).expect("registry");
     reg.load(&dir).expect("slow-host loads");
-    let module = reg.get_mut("slow-host").expect("slow-host registered");
+    let module = reg.get("slow-host").expect("slow-host registered");
+    let mut module = module.blocking_lock();
 
     let req = chatty_wasm_runtime::ChatRequest {
         messages: vec![chatty_wasm_runtime::Message {
@@ -413,22 +345,15 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
 }
 
 // ---------------------------------------------------------------------------
-// 2.6 - `[resources]` absurd values: clamped to a host ceiling. Today they
-// are not clamped at all — a huge `max_memory_mb` overflows the u64
-// multiplication in `limits_from_manifest` and panics (a debug-build
-// finding: in release this would silently wrap to a small/garbage value
-// instead — either way, not the documented "decide a ceiling" policy).
-// See the comment left on PL-H3 (AGE-606) and PL-D3 (AGE-595, the ceiling
-// policy decision this is blocked on).
+// 2.6 - `[resources]` absurd values: clamped to the host ceilings (PL-D3,
+// `chatty_wasm_runtime::MAX_*_CEILING`), with a warning in the scan report.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "known defect: PL-H3 (AGE-606) / PL-D3 (AGE-595) — absurd resource values overflow instead of clamping"]
 fn sandbox_2_6_absurd_memory_mb_overflows_instead_of_clamping() {
     let tmp = tempfile::tempdir().unwrap();
-    // ~8.6 * 10^12 MiB ("1 TiB" scale is already enough to overflow once
-    // multiplied by 1024*1024 twice over inside `limits_from_manifest`).
-    let dir = stage(
+    // 2^53 MiB: overflowed the MiB -> bytes multiplication before PL-H1.
+    stage(
         tmp.path(),
         "huge-mem",
         "tool-args",
@@ -437,37 +362,29 @@ fn sandbox_2_6_absurd_memory_mb_overflows_instead_of_clamping() {
     );
 
     let mut reg = registry();
-    // A synchronous panic (arithmetic overflow), not an async/Tokio one —
-    // `catch_unwind` is sufficient and safe here, unlike the WASI-stdout
-    // reentrancy panics elsewhere in this suite.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reg.load(&dir)));
-    match result {
-        Ok(load_result) => {
-            // The desired outcome: clamped to some sane ceiling, loading
-            // cleanly (or a clean rejection) — either is fine, as long as
-            // it isn't a panic.
-            let _ = load_result;
-        }
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_default();
-            panic!(
-                "an absurd max_memory_mb should be clamped to a host ceiling, not panic: {message}"
-            );
-        }
-    }
+    let report = reg.scan_directory(tmp.path()).expect("scan_directory");
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let (_, manifest) = &report.loaded[0];
+    assert_eq!(
+        manifest.resources.max_memory_mb,
+        chatty_wasm_runtime::MAX_MEMORY_BYTES_CEILING / (1024 * 1024)
+    );
+    assert!(
+        manifest
+            .warnings
+            .iter()
+            .any(|w| w.contains("max_memory_mb") && w.contains("clamped")),
+        "the clamp should be a warning in the report, got {:?}",
+        manifest.warnings
+    );
 }
 
 #[test]
-fn sandbox_2_6_absurd_execution_ms_loads_uncapped_today() {
+fn sandbox_2_6_absurd_execution_ms_is_clamped_with_a_warning() {
     let tmp = tempfile::tempdir().unwrap();
     // i64::MAX ms (~292 million years): the largest value TOML's integer
-    // type can represent; u64::MAX itself fails to parse as TOML (a signed
-    // 64-bit format), which is its own accidental, non-policy rejection.
-    let dir = stage(
+    // type can represent.
+    stage(
         tmp.path(),
         "huge-time",
         "tool-args",
@@ -476,11 +393,20 @@ fn sandbox_2_6_absurd_execution_ms_loads_uncapped_today() {
     );
 
     let mut reg = registry();
-    let result = reg.load(&dir);
+    let report = reg.scan_directory(tmp.path()).expect("scan_directory");
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let (_, manifest) = &report.loaded[0];
+    assert_eq!(
+        manifest.resources.max_execution_ms,
+        chatty_wasm_runtime::MAX_EXECUTION_MS_CEILING
+    );
     assert!(
-        result.is_ok(),
-        "today: no ceiling is applied to max_execution_ms — an absurd value loads \
-         cleanly instead of being clamped, got {result:?}"
+        manifest
+            .warnings
+            .iter()
+            .any(|w| w.contains("max_execution_ms") && w.contains("clamped")),
+        "the clamp should be a warning in the report, got {:?}",
+        manifest.warnings
     );
 }
 
@@ -492,7 +418,7 @@ fn sandbox_2_6_absurd_execution_ms_loads_uncapped_today() {
 /// OPEN QUESTION (pin, not ignored): `ModuleRegistry::reload` removes the
 /// existing entry *before* attempting to load the replacement (see its own
 /// doc comment: "Leave the slot empty rather than reverting"). If a module
-/// author ships a broken update, every caller of `get`/`get_mut` starts
+/// author ships a broken update, every caller of `get` starts
 /// getting `None` where they used to get a working module, with no
 /// automatic rollback. This needs a decision: keep "fail closed" (today),
 /// or revert to the last-good instance so an accidental hot-reload doesn't
@@ -564,5 +490,166 @@ fn sandbox_2_8_watch_fires_on_filesystem_change_but_nothing_consumes_it() {
     assert!(
         reg.get("new-module").is_none(),
         "watch() only forwards raw fs events; nothing wires them to a reload"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1.9 (registry half, F8) - `module.toml`'s `[config]` and `[files].root`
+// reach the guest: `config::get` returns the manifest's value, and
+// `file::read-bytes` reads under the granted root and nowhere else.
+// ---------------------------------------------------------------------------
+
+fn chat_text(module: &mut chatty_wasm_runtime::WasmModule, prompt: &str) -> Result<String, String> {
+    let req = chatty_wasm_runtime::ChatRequest {
+        messages: vec![chatty_wasm_runtime::Message {
+            role: chatty_wasm_runtime::Role::User,
+            content: prompt.to_string(),
+        }],
+        conversation_id: "c".to_string(),
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(module.chat(req))
+        .map(|r| r.content)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[test]
+fn sandbox_1_9_registry_passes_config_and_files_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    stage(
+        tmp.path(),
+        "config-reader",
+        "config-reader",
+        "[module]\nname = \"config-reader\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
+         [config]\ngreeting = \"from module.toml\"\n",
+    );
+    let files = stage(
+        tmp.path(),
+        "file-reader",
+        "file-reader",
+        "[module]\nname = \"file-reader\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
+         [files]\nroot = \"weights\"\n",
+    );
+    std::fs::create_dir(files.join("weights")).unwrap();
+    std::fs::write(files.join("weights/w.bin"), b"weights").unwrap();
+
+    let mut reg = registry();
+    let report = reg.scan_directory(tmp.path()).expect("scan_directory");
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+
+    let config = reg.get("config-reader").expect("config-reader loaded");
+    let mut config = config.blocking_lock();
+    assert_eq!(
+        chat_text(&mut config, "greeting").unwrap(),
+        r#"Some("from module.toml")"#
+    );
+    assert_eq!(chat_text(&mut config, "missing").unwrap(), "None");
+
+    let reader = reg.get("file-reader").expect("file-reader loaded");
+    let mut reader = reader.blocking_lock();
+    assert_eq!(chat_text(&mut reader, "w.bin").unwrap(), "7");
+    // The module's own files (manifest, .wasm) are outside the granted root.
+    let escape = chat_text(&mut reader, "../module.toml");
+    assert!(escape.is_err(), "got {escape:?}");
+}
+
+#[test]
+fn sandbox_1_9_no_files_section_grants_no_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = stage(
+        tmp.path(),
+        "file-reader",
+        "file-reader",
+        "[module]\nname = \"file-reader\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
+         [config]\nweights_root = \"/\"\n",
+    );
+    std::fs::write(dir.join("w.bin"), b"x").unwrap();
+
+    let mut reg = registry();
+    reg.load(&dir).expect("file-reader loads");
+    let reader = reg.get("file-reader").unwrap();
+    let mut reader = reader.blocking_lock();
+    let err = chat_text(&mut reader, "w.bin").expect_err("no [files] section, no reads");
+    assert!(err.contains("no file root"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Checked-in manifests: every `module.toml` under `modules/` and
+// `templates/` parses under the strict format, and the staged fixtures scan
+// with only the deliberately unloadable ones failing.
+// ---------------------------------------------------------------------------
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+
+fn module_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.is_dir() && name != "target" && !name.starts_with('.') {
+            module_tomls(&path, out);
+        } else if name == "module.toml" {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn checked_in_module_tomls_parse_strictly() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    module_tomls(&root.join("modules"), &mut found);
+    module_tomls(&root.join("templates"), &mut found);
+    assert!(
+        found.len() >= 18,
+        "expected every module.toml, found {found:?}"
+    );
+    for path in found {
+        let manifest = ModuleManifest::from_file(&path)
+            .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        assert!(
+            manifest.warnings.is_empty(),
+            "{}: {:?}",
+            path.display(),
+            manifest.warnings
+        );
+    }
+}
+
+#[test]
+fn staged_fixtures_scan_with_only_the_unloadable_ones_failing() {
+    // Any fixture name resolves the staging directory (and panics with the
+    // build instructions when it is missing).
+    let staged = fixture_path("tool-args")
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let mut reg = registry();
+    let report = reg.scan_directory(&staged).expect("scan_directory");
+    // `core-module` is a core module, not a component; `wit-0.1` targets an
+    // older WIT package. Both are staged to be refused.
+    assert_eq!(
+        failed_dirs(&report),
+        vec!["core-module", "wit-0.1"],
+        "{:?}",
+        report.failed
+    );
+    assert!(report.remote.is_empty());
+    assert!(report.loaded_names().contains(&"echo-agent"));
+
+    // The file-reader fixture's `[files] root = "weights"` is staged with it.
+    let reader = reg.get("file-reader").expect("file-reader loaded");
+    let mut reader = reader.blocking_lock();
+    assert_eq!(chat_text(&mut reader, "fixture.bin").unwrap(), "12");
+    let config = reg.get("config-reader").expect("config-reader loaded");
+    let mut config = config.blocking_lock();
+    assert_eq!(
+        chat_text(&mut config, "greeting").unwrap(),
+        r#"Some("hello from module.toml")"#
     );
 }

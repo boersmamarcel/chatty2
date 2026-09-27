@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
+use chatty_core::services::plugin_llm::PluginLlmProvider;
 use chatty_core::services::virtual_agents::{VirtualAgentSpec, resolve_virtual_agents};
 use chatty_core::services::worker_tree;
 use chatty_core::settings::models::ModuleSettingsModel;
@@ -41,22 +42,23 @@ use chatty_protocol_gateway::participant::{
     EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
     WorkspaceFactory,
 };
-use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
+use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-/// `--broker` loads no WASM modules of its own, so nothing ever calls
-/// `llm::complete()` through this registry; it exists only so
-/// `ProtocolGateway::new` has one to serve.
+/// The tests' stand-in for the leader's [`PluginLlmProvider`]: the
+/// registries they build load no module that calls `llm::complete()`.
+#[cfg(test)]
 struct NoopProvider;
 
+#[cfg(test)]
 impl LlmProvider for NoopProvider {
     fn complete(
         &self,
         _model: &str,
-        _messages: Vec<Message>,
+        _messages: Vec<chatty_wasm_runtime::Message>,
         _tools: Option<String>,
-    ) -> std::result::Result<CompletionResponse, String> {
+    ) -> std::result::Result<chatty_wasm_runtime::CompletionResponse, String> {
         Err("chatty-tui --broker runs no WASM modules".to_string())
     }
 }
@@ -83,8 +85,12 @@ impl Broker {
     /// no-human approval policy. `provider_flags` are the leader's own
     /// `--ollama`/`--openai-compat-url`/`--api-key`, forwarded verbatim
     /// (see [`provider_flags`]). `agents` is the roster's specs, already
-    /// loaded; empty is the one default worker.
+    /// loaded; empty is the one default worker. `leader_model` is the model
+    /// this leader runs: what a module's `llm::complete("")` is served by
+    /// (PL-H2, AGE-605).
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
+        leader_model: &ModelConfig,
         models: &[ModelConfig],
         providers: &[ProviderConfig],
         module_settings: &ModuleSettingsModel,
@@ -100,7 +106,14 @@ impl Broker {
         common_args.extend(provider_flags.iter().cloned());
         let specs =
             resolve_virtual_agents(models, providers, module_settings, agents, &common_args);
-        Self::start_at(
+        let llm: Arc<dyn LlmProvider> = Arc::new(PluginLlmProvider::new(
+            leader_model.clone(),
+            models.to_vec(),
+            providers.to_vec(),
+            tokio::runtime::Handle::current(),
+        ));
+        Self::serve(
+            llm,
             socket_path(),
             worker_executable(),
             module_settings.default_endpoint_budget,
@@ -118,6 +131,7 @@ impl Broker {
     /// shares a pid, so [`socket_path`] alone gives them all the same path
     /// — nor write into the user's real runtime directory, and so they can
     /// spawn a stand-in binary that records its argv.
+    #[cfg(test)]
     pub(crate) async fn start_at(
         socket: PathBuf,
         executable: PathBuf,
@@ -125,7 +139,27 @@ impl Broker {
         specs: Vec<VirtualAgentSpec>,
         workspace_dir: Option<String>,
     ) -> Result<Self> {
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        Self::serve(
+            Arc::new(NoopProvider),
+            socket,
+            executable,
+            default_budget,
+            specs,
+            workspace_dir,
+        )
+        .await
+    }
+
+    /// Bind and serve: the gateway over a module registry whose
+    /// `llm::complete()` goes to `provider`.
+    async fn serve(
+        provider: Arc<dyn LlmProvider>,
+        socket: PathBuf,
+        executable: PathBuf,
+        default_budget: usize,
+        specs: Vec<VirtualAgentSpec>,
+        workspace_dir: Option<String>,
+    ) -> Result<Self> {
         let registry = ModuleRegistry::new(provider, ResourceLimits::default())
             .context("failed to build the module registry the broker gateway needs")?;
         let shared = Arc::new(tokio::sync::RwLock::new(registry));
@@ -245,7 +279,9 @@ pub struct PendingBroker {
 }
 
 impl PendingBroker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        leader_model: ModelConfig,
         models: Vec<ModelConfig>,
         providers: Vec<ProviderConfig>,
         module_settings: ModuleSettingsModel,
@@ -255,6 +291,7 @@ impl PendingBroker {
         provider_flags: Vec<String>,
     ) -> Self {
         let start = move || -> StartFuture {
+            let leader_model = leader_model.clone();
             let models = models.clone();
             let providers = providers.clone();
             let module_settings = module_settings.clone();
@@ -263,6 +300,7 @@ impl PendingBroker {
             let provider_flags = provider_flags.clone();
             Box::pin(async move {
                 Broker::start(
+                    &leader_model,
                     &models,
                     &providers,
                     &module_settings,

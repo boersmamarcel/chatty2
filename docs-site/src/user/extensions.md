@@ -50,6 +50,8 @@ The server appears under **Installed** with an **↗ External** badge. The agent
 
 Modules are small programs that run inside Chatty, locally or on the Hive runner. The developer guide [Build a WASM module](../dev/guides/build-wasm-module.md) walks through it, with two worked examples: [echo-agent](../dev/start/tutorial-echo-agent.md) and [benford-agent](../dev/start/tutorial-benford-agent.md).
 
+If a local module fails to load — an invalid `module.toml`, a missing `.wasm` file, or a name that clashes with another installed module — its row under **Installed** shows **Failed to load:** with the reason, instead of failing silently.
+
 ## Next
 
 - [Agents & tools](./agents-and-tools.md)

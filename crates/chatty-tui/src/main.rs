@@ -703,6 +703,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> =
         run_broker.then(|| {
             Arc::new(participant::broker::PendingBroker::new(
+                model_config.clone(),
                 models.models().to_vec(),
                 providers.clone(),
                 broker_module_settings.clone(),
@@ -1151,7 +1152,7 @@ fn discover_module_agents(
                     description: manifest.description,
                     tools: manifest.capabilities.tools,
                     supports_a2a: manifest.protocols.a2a,
-                    execution_mode: manifest.execution_mode,
+                    execution_mode: manifest.execution_mode.to_string(),
                 });
             }
             Ok(_) => {}

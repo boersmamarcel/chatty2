@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -16,7 +17,9 @@ use tracing::info;
 use chatty_module_registry::ModuleRegistry;
 use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 
-use crate::handlers::{a2a, index, mcp, openai};
+use crate::handlers::a2a::{self, Contexts};
+use crate::handlers::mcp::{self, SseSessions};
+use crate::handlers::{index, openai};
 use crate::participant::{ParticipantRegistry, VirtualAgent};
 
 // ---------------------------------------------------------------------------
@@ -43,7 +46,16 @@ pub struct GatewayState {
     /// locally, C8 hosted). Keyed by the name callers address, in name
     /// order so the aggregated card is stable (ADR-0011 C10).
     pub runners: Arc<BTreeMap<String, Arc<dyn VirtualAgent>>>,
+    /// A2A conversation history per `contextId`, so a module's second turn
+    /// sees its first.
+    pub(crate) contexts: Contexts,
+    /// Open `GET /mcp/{m}/sse` streams, by session id.
+    pub(crate) sse_sessions: SseSessions,
 }
+
+/// The largest request body any route reads (10 MiB). A bigger one is a
+/// 413 before the handler runs.
+pub const MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // ProtocolGateway
@@ -203,6 +215,8 @@ impl ProtocolGateway {
             paid_modules: Arc::new(self.paid_modules.clone()),
             participants: self.participants.clone(),
             runners: Arc::new(self.runners.clone()),
+            contexts: Contexts::default(),
+            sse_sessions: SseSessions::default(),
         };
 
         Router::new()
@@ -221,7 +235,10 @@ impl ProtocolGateway {
             )
             // ── MCP endpoints ────────────────────────────────────────────────
             .route("/mcp/{module}", post(mcp::mcp_jsonrpc))
-            .route("/mcp/{module}/sse", get(mcp::mcp_sse))
+            .route(
+                "/mcp/{module}/sse",
+                get(mcp::mcp_sse).post(mcp::mcp_sse_message),
+            )
             // ── A2A endpoints ────────────────────────────────────────────────
             .route(
                 "/a2a/{module}/.well-known/agent.json",
@@ -230,6 +247,9 @@ impl ProtocolGateway {
             .route("/a2a/{module}", post(a2a::a2a_jsonrpc))
             // ── Shared state ─────────────────────────────────────────────────
             .with_state(state)
+            // ── Every route ──────────────────────────────────────────────────
+            .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+            .layer(axum::middleware::from_fn(crate::loopback::loopback_only))
     }
 
     /// Start the HTTP server in the background.
@@ -299,16 +319,7 @@ impl ProtocolGateway {
 // Shared utilities available to handler modules
 // ---------------------------------------------------------------------------
 
-/// Generate a short, unique-ish ID string for tasks / completion IDs.
+/// A fresh random id for tasks, contexts and completions.
 pub(crate) fn new_id() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut h = DefaultHasher::new();
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut h);
-    format!("{:016x}", h.finish())
+    uuid::Uuid::new_v4().simple().to_string()
 }

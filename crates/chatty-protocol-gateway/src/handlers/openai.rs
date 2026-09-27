@@ -4,8 +4,6 @@
 //! - `POST /v1/{module}/chat/completions` — per-module OpenAI chat completion
 //! - `POST /v1/chat/completions` — model-routed via `model: "module:{name}"`
 
-use std::sync::Arc;
-
 use axum::{
     Json,
     extract::{Path, State},
@@ -14,9 +12,11 @@ use axum::{
 };
 use chatty_wasm_runtime::{ChatRequest, Message, Role};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
+
+use super::module_call::{self, Protocol};
 
 // ---------------------------------------------------------------------------
 // OpenAI request / response shapes
@@ -24,9 +24,11 @@ use crate::gateway::GatewayState;
 
 /// OpenAI chat completion request body.
 ///
-/// The `temperature`, `max_tokens`, and `stream` fields are accepted for
-/// API compatibility but are not forwarded to the WASM module, which owns
-/// its own model configuration.
+/// `temperature` and `max_tokens` are accepted for API compatibility but not
+/// forwarded: the WASM module owns its own model configuration. `stream:
+/// true` is refused with a 400 (PL-D1 option B: a module's OpenAI route is
+/// exposure only, and non-streaming). `user` becomes the guest's
+/// `conversation_id`.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ChatCompletionRequest {
@@ -36,14 +38,19 @@ pub(crate) struct ChatCompletionRequest {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
+/// One request message. `content` is a string, an array of content parts
+/// (whose `text` parts are joined), or null.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct OaiMessage {
     pub role: String,
-    pub content: String,
+    #[serde(default)]
+    pub content: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,20 +87,55 @@ pub(crate) struct UsageStats {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
+/// The request's messages as the guest's, every role kept. The WIT has
+/// `system`, `user` and `assistant`; `developer` is OpenAI's newer name for
+/// `system`. Any other role (`tool`, `function`) has no guest equivalent and
+/// is refused rather than passed off as something it is not.
+fn convert_messages(oai_messages: &[OaiMessage]) -> Result<Vec<Message>, String> {
     oai_messages
         .iter()
         .map(|m| {
             let role = match m.role.as_str() {
+                "system" | "developer" => Role::System,
+                "user" => Role::User,
                 "assistant" => Role::Assistant,
-                _ => Role::User,
+                other => return Err(format!("unsupported message role '{other}'")),
             };
-            Message {
+            Ok(Message {
                 role,
-                content: m.content.clone(),
-            }
+                content: content_text(&m.content)?,
+            })
         })
         .collect()
+}
+
+/// The text of a message's `content`: the string itself, or every `text`
+/// part of a content-part array joined by newlines.
+fn content_text(content: &Value) -> Result<String, String> {
+    match content {
+        Value::Null => Ok(String::new()),
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(parts) => Ok(parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        _ => Err("message content must be a string or an array of parts".to_string()),
+    }
+}
+
+/// An OpenAI-shaped error body with `status`.
+fn openai_error(
+    status: StatusCode,
+    kind: &str,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    (
+        status,
+        Json(json!({ "error": { "message": message.into(), "type": kind } })),
+    )
+        .into_response()
 }
 
 fn build_response(
@@ -153,16 +195,11 @@ pub(crate) async fn chat_completions_routed(
     let module_name = match body.model.strip_prefix("module:") {
         Some(name) => name.to_string(),
         None => {
-            return (
+            return openai_error(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "model must be in format 'module:{name}' for this endpoint",
-                        "type": "invalid_request_error",
-                    }
-                })),
-            )
-                .into_response();
+                "invalid_request_error",
+                "model must be in format 'module:{name}' for this endpoint",
+            );
         }
     };
 
@@ -227,22 +264,28 @@ async fn run_chat(
     body: &ChatCompletionRequest,
     state: GatewayState,
 ) -> axum::response::Response {
+    if body.stream == Some(true) {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "streaming not supported: a module's OpenAI route answers `stream: false` only",
+        );
+    }
+
     // Check if we should route to remote execution
     let should_execute_remotely = should_route_remotely(module_name, &state).await;
 
     // If remote execution is required, delegate to runner
     if should_execute_remotely {
         if state.runner_url.is_none() {
-            return (
+            return openai_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": {
-                        "message": format!("Module '{}' requires remote execution but runner URL is not configured", module_name),
-                        "type": "configuration_error",
-                    }
-                })),
-            )
-                .into_response();
+                "configuration_error",
+                format!(
+                    "Module '{}' requires remote execution but runner URL is not configured",
+                    module_name
+                ),
+            );
         }
 
         return match execute_remotely(module_name, body, &state).await {
@@ -251,88 +294,45 @@ async fn run_chat(
                 Json(serde_json::to_value(response).unwrap_or_default()),
             )
                 .into_response(),
-            Err(e) => (
+            Err(e) => openai_error(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "error": {
-                        "message": format!("Remote execution failed: {}", e),
-                        "type": "remote_execution_error",
-                    }
-                })),
-            )
-                .into_response(),
+                "remote_execution_error",
+                format!("Remote execution failed: {}", e),
+            ),
         };
     }
 
     // Otherwise, proceed with local execution
-    let messages = convert_messages(&body.messages);
+    let messages = match convert_messages(&body.messages) {
+        Ok(messages) => messages,
+        Err(e) => return openai_error(StatusCode::BAD_REQUEST, "invalid_request_error", e),
+    };
     let req = ChatRequest {
         messages,
-        conversation_id: String::new(),
+        conversation_id: body.user.clone().unwrap_or_default(),
     };
 
-    let mut reg = state.registry.write().await;
-    let module = match reg.get_mut(module_name) {
-        Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": {
-                        "message": format!("module '{}' not found", module_name),
-                        "type": "invalid_request_error",
-                    }
-                })),
-            )
-                .into_response();
-        }
+    let Some(module) = module_call::module_for(&state, module_name, Protocol::OpenAi).await else {
+        return openai_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            format!("module '{}' not found", module_name),
+        );
     };
 
     // Pre-invocation credit check for paid modules only
-    if let Some(ref guard) = state.credit_guard
-        && state.paid_modules.contains(module_name)
-        && let Err(e) = guard.has_credits(module_name).await
-    {
-        drop(reg);
-        return (
-            StatusCode::PAYMENT_REQUIRED,
-            Json(json!({
-                "error": {
-                    "message": e.to_string(),
-                    "type": "insufficient_credits",
-                }
-            })),
-        )
-            .into_response();
+    if let Err(e) = module_call::check_credits(&state, module_name).await {
+        return openai_error(StatusCode::PAYMENT_REQUIRED, "insufficient_credits", e);
     }
 
-    match module.chat(req).await {
-        Ok(resp) => {
-            let metrics = module.last_invocation_metrics();
-            drop(reg);
+    let mut module = module.lock().await;
+    let result = module.chat(req).await;
+    let metrics = module.last_invocation_metrics();
+    drop(module);
 
-            if let Some(ref usage) = state.usage {
-                tokio::spawn({
-                    let usage = Arc::clone(usage);
-                    let name = module_name.to_string();
-                    async move {
-                        usage
-                            .record_invocation(
-                                &name,
-                                "latest",
-                                metrics
-                                    .as_ref()
-                                    .and_then(|m| m.input_tokens.map(|t| t as i32)),
-                                metrics
-                                    .as_ref()
-                                    .and_then(|m| m.output_tokens.map(|t| t as i32)),
-                                metrics.as_ref().map(|m| m.fuel_consumed),
-                                metrics.as_ref().map(|m| m.execution_ms),
-                            )
-                            .await;
-                    }
-                });
-            }
+    match result {
+        Ok(resp) => {
+            module_call::record_usage(&state, module_name, metrics);
 
             let (prompt_tokens, completion_tokens) = resp
                 .usage
@@ -353,16 +353,11 @@ async fn run_chat(
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {
-                    "message": e.to_string(),
-                    "type": "server_error",
-                }
-            })),
-        )
-            .into_response(),
+        Err(e) => openai_error(
+            module_call::failure_status(&e),
+            "server_error",
+            format!("{e:#}"),
+        ),
     }
 }
 

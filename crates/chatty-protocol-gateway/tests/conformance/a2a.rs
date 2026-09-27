@@ -42,7 +42,6 @@ fn message_send(parts: Value, context_id: &str, message_id: &str) -> Value {
 /// the guest, not only `parts[0]` (F11). echo-agent forwards its request to
 /// the fake provider ("use llm"), so the provider sees what the guest saw.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_07_a2a_message_send_all_parts_reach_guest() {
     let gw = Gateway::start(
         vec![Module::shipped("echo-agent")],
@@ -76,10 +75,9 @@ async fn s3_07_a2a_message_send_all_parts_reach_guest() {
 }
 
 /// 3.7 — history: a second `message/send` in the same `contextId` reaches the
-/// guest with the first turn in front of it. Today every message is a fresh
-/// one-message conversation.
+/// guest with the first turn in front of it (before PL-H4 every message was
+/// a fresh one-message conversation).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_07_a2a_message_send_history_reaches_guest() {
     let gw = Gateway::start(
         vec![Module::shipped("echo-agent")],
