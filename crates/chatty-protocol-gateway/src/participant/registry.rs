@@ -5,6 +5,15 @@
 //! place for local participants. Nothing here is persisted — a participant is
 //! a live connection, so an entry that outlived its socket would be a lie.
 //!
+//! # Names (ADR-0020)
+//!
+//! A participant does not choose its name. The broker admits a node into its
+//! [`Directory`] — which names it `<spec>-<n>`, never reusing a name — makes
+//! the connection for it, and registers that connection under the admitted
+//! name when the worker says `hello`. Nothing else can register: there is no
+//! entry point that takes a name from the caller, so no process can squat on
+//! a name the broker is about to route a task to.
+//!
 //! # Locking
 //!
 //! One `Mutex` over the whole map, held only for map surgery — never across
@@ -26,7 +35,13 @@ use super::protocol::{
     BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
     TaskState,
 };
-use chatty_fabric::AgentOrigin;
+use chatty_fabric::{
+    AgentOrigin, ConversationScope, Directory, DirectoryError, NodeId, NodeName, NodeState,
+};
+
+/// The conversation scope every node this broker admits works for, until
+/// the spawn request carries the caller's own (BI-5, AGE-637).
+pub const ROOT_SCOPE: &str = "root";
 
 /// One update on an open task, as the HTTP side consumes it.
 ///
@@ -67,13 +82,35 @@ pub enum AnswerError {
     ParticipantGone(String),
 }
 
-/// Why a registration was refused.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum RegisterError {
-    #[error("a participant card must carry a name")]
-    MissingName,
-    #[error("participant '{0}' is already registered")]
-    DuplicateName(String),
+/// A node the broker admitted for a connection it is making.
+///
+/// Held by whoever serves that connection and consumed when the worker's
+/// `hello` registers it ([`ParticipantRegistry::register`]) or when the
+/// connection closes first ([`ParticipantRegistry::abandon`]). Not `Clone`:
+/// one admission is one connection.
+#[derive(Debug)]
+pub struct AdmittedNode {
+    id: NodeId,
+    name: NodeName,
+    scope: ConversationScope,
+    owner: Option<NodeName>,
+    origin: AgentOrigin,
+}
+
+impl AdmittedNode {
+    /// The name callers will address the node by.
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// The `welcome` frame that tells the worker who it is.
+    pub fn welcome(&self) -> BrokerFrame {
+        BrokerFrame::Welcome {
+            name: self.name.clone(),
+            scope: self.scope.clone(),
+            owner: self.owner.clone(),
+        }
+    }
 }
 
 /// A registered agent as the broker serves it: what it says about itself,
@@ -85,6 +122,8 @@ pub struct RegisteredAgent {
 }
 
 struct Participant {
+    /// The node this connection was admitted as.
+    node: NodeId,
     card: ParticipantCard,
     /// Where this registration arrived from. The participant does not get a
     /// say — see [`AgentOrigin`].
@@ -98,6 +137,9 @@ struct Participant {
 #[derive(Default)]
 struct Inner {
     participants: HashMap<String, Participant>,
+    /// Every node this broker admitted, connected or not, ended ones
+    /// included — which is what keeps a name from being issued twice.
+    directory: Directory,
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -113,46 +155,70 @@ impl ParticipantRegistry {
         Self::default()
     }
 
-    /// Take a connection's card and its outbound queue.
+    /// Admit a node started as `spec` and name it, before its connection
+    /// exists. `origin` is the transport's, not the participant's: a
+    /// socket pair on this machine is [`AgentOrigin::Local`], a leased
+    /// microVM's vsock [`AgentOrigin::Fleet`].
     ///
-    /// `origin` is the transport's, not the participant's: a Unix socket on
-    /// this machine registers [`AgentOrigin::Local`], a leased microVM's vsock
-    /// registers [`AgentOrigin::Fleet`].
-    ///
-    /// The name is claimed until [`deregister`](Self::deregister); a second
-    /// participant offering the same one is refused rather than replacing it,
-    /// because replacing would silently strand the first one's open tasks.
-    pub fn register(
-        &self,
-        card: ParticipantCard,
-        origin: AgentOrigin,
-        outbound: mpsc::UnboundedSender<BrokerFrame>,
-    ) -> Result<String, RegisterError> {
-        let name = card.name.trim().to_string();
-        if name.is_empty() {
-            return Err(RegisterError::MissingName);
-        }
+    /// Every node is the root's for now: which node asked for a worker is
+    /// known once calls travel over the worker's connection (BI-4/BI-5).
+    pub fn admit(&self, spec: &str, origin: AgentOrigin) -> Result<AdmittedNode, DirectoryError> {
+        let scope = ConversationScope::new(ROOT_SCOPE);
+        let node = self.lock().directory.admit(spec, None, scope)?;
+        debug!(node = %node.name(), spec, "Admitted a node");
+        Ok(AdmittedNode {
+            id: node.id(),
+            name: node.name().clone(),
+            scope: node.scope().clone(),
+            owner: None,
+            origin,
+        })
+    }
 
-        let mut inner = self.lock();
-        if inner.participants.contains_key(&name) {
-            return Err(RegisterError::DuplicateName(name));
+    /// Register `node`'s connection: its worker said `hello` with `card`,
+    /// and frames for it go to `outbound`. Returns the name it is served
+    /// under, which is the admitted one whatever the card says.
+    ///
+    /// Crate-private on purpose: the only caller is the connection loop, so
+    /// nothing can register a name without the broker having made the
+    /// connection for it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn register(
+        &self,
+        node: AdmittedNode,
+        card: ParticipantCard,
+        outbound: mpsc::UnboundedSender<BrokerFrame>,
+    ) -> String {
+        let name = node.name.as_str().to_string();
+        if card.name != name && !card.name.is_empty() {
+            debug!(participant = %name, claimed = %card.name, "Ignoring the name a card claims");
         }
+        let mut inner = self.lock();
+        let _ = inner.directory.set_state(node.id, NodeState::Idle);
         inner.participants.insert(
             name.clone(),
             Participant {
+                node: node.id,
                 card: ParticipantCard {
                     name: name.clone(),
                     ..card
                 },
-                origin,
+                origin: node.origin,
                 outbound,
                 tasks: HashMap::new(),
             },
         );
         drop(inner);
 
-        info!(participant = %name, %origin, "Participant registered");
-        Ok(name)
+        info!(participant = %name, origin = %node.origin, "Participant registered");
+        name
+    }
+
+    /// `node`'s connection closed before it registered. Its name stays
+    /// spent.
+    pub fn abandon(&self, node: AdmittedNode) {
+        let _ = self.lock().directory.end(node.id);
+        debug!(node = %node.name, "A node's connection closed before it said hello");
     }
 
     /// Drop a participant and fail everything it still owed.
@@ -161,8 +227,13 @@ impl ParticipantRegistry {
     /// crash are the same event from here, which is the point: liveness is
     /// the connection, not a heartbeat the participant could lie about.
     pub fn deregister(&self, name: &str) {
-        let Some(participant) = self.lock().participants.remove(name) else {
-            return;
+        let participant = {
+            let mut inner = self.lock();
+            let Some(participant) = inner.participants.remove(name) else {
+                return;
+            };
+            let _ = inner.directory.end(participant.node);
+            participant
         };
 
         let open = participant.tasks.len();
@@ -317,13 +388,13 @@ impl ParticipantRegistry {
     /// killing the connection: the caller may simply have hung up first, and
     /// a participant is not required to notice before its next frame.
     ///
-    /// [`ParticipantFrame::Register`] is handled by the connection loop
+    /// [`ParticipantFrame::Hello`] is handled by the connection loop
     /// before any task traffic; a second one arriving here is a protocol
     /// error and is reported as `false`.
     pub fn on_frame(&self, name: &str, frame: ParticipantFrame) -> bool {
         let (task_id, update, terminal) = match frame {
-            ParticipantFrame::Register { .. } => {
-                warn!(participant = %name, "Ignoring a second register frame on one connection");
+            ParticipantFrame::Hello { .. } => {
+                warn!(participant = %name, "A second hello on one connection");
                 return false;
             }
             ParticipantFrame::Status {
@@ -408,71 +479,70 @@ mod tests {
         }
     }
 
-    /// Register `name` and keep its outbound receiver alive for the caller.
-    fn register(reg: &ParticipantRegistry, name: &str) -> mpsc::UnboundedReceiver<BrokerFrame> {
-        register_from(reg, name, AgentOrigin::Local)
+    /// Admit a node as `spec`, register it, and return its name with the
+    /// outbound receiver kept alive for the caller.
+    fn register(
+        reg: &ParticipantRegistry,
+        spec: &str,
+    ) -> (String, mpsc::UnboundedReceiver<BrokerFrame>) {
+        register_from(reg, spec, AgentOrigin::Local)
     }
 
     fn register_from(
         reg: &ParticipantRegistry,
-        name: &str,
+        spec: &str,
         origin: AgentOrigin,
-    ) -> mpsc::UnboundedReceiver<BrokerFrame> {
+    ) -> (String, mpsc::UnboundedReceiver<BrokerFrame>) {
+        let node = reg.admit(spec, origin).expect("a root node is admitted");
         let (tx, rx) = mpsc::unbounded_channel();
-        reg.register(card(name), origin, tx)
-            .expect("registration succeeds");
-        rx
+        (reg.register(node, card(spec), tx), rx)
     }
 
     #[test]
-    fn a_registered_participant_is_addressable_by_name() {
+    fn a_registered_participant_is_addressable_by_its_admitted_name() {
         let reg = ParticipantRegistry::new();
-        let _outbound = register(&reg, "worker-1");
+        let (w, _outbound) = register(&reg, "worker");
 
-        assert!(reg.is_registered("worker-1"));
-        assert_eq!(reg.names(), vec!["worker-1".to_string()]);
-        assert_eq!(
-            reg.card("worker-1").unwrap().description,
-            "a test participant"
-        );
+        assert_eq!(w, "worker-0", "the broker names the node <spec>-<n>");
+        assert!(reg.is_registered(&w));
+        assert_eq!(reg.names(), vec![w.clone()]);
+        assert_eq!(reg.card(&w).unwrap().description, "a test participant");
         assert!(reg.card("nobody").is_none());
     }
 
     #[test]
-    fn a_nameless_card_is_refused() {
+    fn the_cards_name_is_replaced_by_the_admitted_one() {
         let reg = ParticipantRegistry::new();
+        let node = reg.admit("local-coder", AgentOrigin::Local).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        assert_eq!(
-            reg.register(card("   "), AgentOrigin::Local, tx)
-                .unwrap_err(),
-            RegisterError::MissingName
-        );
+        let name = reg.register(node, card("evil"), tx);
+
+        assert_eq!(name, "local-coder-0");
+        assert_eq!(reg.card(&name).unwrap().name, "local-coder-0");
+        assert!(!reg.is_registered("evil"));
     }
 
     #[test]
-    fn a_duplicate_name_is_refused_rather_than_replacing_the_first() {
+    fn names_are_never_issued_twice_even_after_a_node_ends() {
         let reg = ParticipantRegistry::new();
-        let first = register(&reg, "worker-1");
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (first, _outbound) = register(&reg, "worker");
+        reg.deregister(&first);
+        let abandoned = reg.admit("worker", AgentOrigin::Local).unwrap();
+        assert_eq!(abandoned.name(), "worker-1");
+        reg.abandon(abandoned);
 
-        assert_eq!(
-            reg.register(card("worker-1"), AgentOrigin::Local, tx)
-                .unwrap_err(),
-            RegisterError::DuplicateName("worker-1".into())
-        );
-        // The first participant still owns the name and its queue.
-        assert!(!first.is_closed());
-        assert!(reg.is_registered("worker-1"));
+        let (third, _outbound) = register(&reg, "worker");
+        assert_eq!(third, "worker-2");
     }
 
     #[tokio::test]
     async fn a_task_reaches_the_participant_and_its_updates_come_back() {
         let reg = ParticipantRegistry::new();
-        let mut outbound = register(&reg, "worker-1");
+        let (w, mut outbound) = register(&reg, "worker");
 
         let (task_id, mut updates) = reg
             .submit_task(
-                "worker-1",
+                &w,
                 DelegatedTask::new("summarise foo.rs").with_bearer(Some(TaskBearer::new("tok"))),
             )
             .expect("the participant is registered");
@@ -491,10 +561,10 @@ mod tests {
         // The caller's bearer rides the frame to the worker (AGE-371).
         assert_eq!(bearer, Some(TaskBearer::new("tok")));
         assert!(!capture_conversation, "not asked for, so off by default");
-        assert_eq!(reg.open_task_count("worker-1"), 1);
+        assert_eq!(reg.open_task_count(&w), 1);
 
         reg.on_frame(
-            "worker-1",
+            &w,
             ParticipantFrame::Status {
                 task_id: task_id.clone(),
                 state: TaskState::Working,
@@ -504,7 +574,7 @@ mod tests {
             },
         );
         reg.on_frame(
-            "worker-1",
+            &w,
             ParticipantFrame::Artifact {
                 task_id: task_id.clone(),
                 text: "foo.rs defines Foo".into(),
@@ -512,7 +582,7 @@ mod tests {
             },
         );
         reg.on_frame(
-            "worker-1",
+            &w,
             ParticipantFrame::Status {
                 task_id: task_id.clone(),
                 state: TaskState::Completed,
@@ -542,7 +612,7 @@ mod tests {
             "a terminal status ends the stream"
         );
         assert_eq!(
-            reg.open_task_count("worker-1"),
+            reg.open_task_count(&w),
             0,
             "a completed task is no longer open"
         );
@@ -551,16 +621,12 @@ mod tests {
     #[tokio::test]
     async fn a_disconnect_fails_every_open_task() {
         let reg = ParticipantRegistry::new();
-        let _outbound = register(&reg, "worker-1");
+        let (w, _outbound) = register(&reg, "worker");
 
-        let (_a, mut first) = reg
-            .submit_task("worker-1", DelegatedTask::new("a"))
-            .unwrap();
-        let (_b, mut second) = reg
-            .submit_task("worker-1", DelegatedTask::new("b"))
-            .unwrap();
+        let (_a, mut first) = reg.submit_task(&w, DelegatedTask::new("a")).unwrap();
+        let (_b, mut second) = reg.submit_task(&w, DelegatedTask::new("b")).unwrap();
 
-        reg.deregister("worker-1");
+        reg.deregister(&w);
 
         for stream in [&mut first, &mut second] {
             let update = stream
@@ -574,7 +640,7 @@ mod tests {
             ));
             assert!(stream.recv().await.is_none(), "then the stream ends");
         }
-        assert!(!reg.is_registered("worker-1"));
+        assert!(!reg.is_registered(&w));
         assert!(reg.names().is_empty());
     }
 
@@ -590,24 +656,22 @@ mod tests {
     #[tokio::test]
     async fn cancelling_forgets_the_task_and_tells_the_participant() {
         let reg = ParticipantRegistry::new();
-        let mut outbound = register(&reg, "worker-1");
-        let (task_id, mut updates) = reg
-            .submit_task("worker-1", DelegatedTask::new("a"))
-            .unwrap();
+        let (w, mut outbound) = register(&reg, "worker");
+        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).unwrap();
         let _ = outbound.recv().await;
 
-        reg.cancel_task("worker-1", &task_id);
+        reg.cancel_task(&w, &task_id);
 
         assert!(matches!(
             outbound.recv().await,
             Some(BrokerFrame::Cancel { task_id: t }) if t == task_id
         ));
-        assert_eq!(reg.open_task_count("worker-1"), 0);
+        assert_eq!(reg.open_task_count(&w), 0);
         assert!(updates.recv().await.is_none());
 
         // A late frame for the cancelled task is dropped, not fatal.
         assert!(reg.on_frame(
-            "worker-1",
+            &w,
             ParticipantFrame::Status {
                 task_id,
                 state: TaskState::Completed,
@@ -623,15 +687,13 @@ mod tests {
         use super::super::protocol::{InputAnswer, InputQuestion};
 
         let reg = ParticipantRegistry::new();
-        let mut outbound = register(&reg, "worker-1");
-        let (task_id, mut updates) = reg
-            .submit_task("worker-1", DelegatedTask::new("a"))
-            .unwrap();
+        let (w, mut outbound) = register(&reg, "worker");
+        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).unwrap();
         let _ = outbound.recv().await;
 
         // The worker parks the task and says what it is waiting for.
         reg.on_frame(
-            "worker-1",
+            &w,
             ParticipantFrame::Status {
                 task_id: task_id.clone(),
                 state: TaskState::InputRequired,
@@ -673,7 +735,7 @@ mod tests {
             Some(BrokerFrame::Input { task_id: t, input: i }) if t == task_id && i == input
         ));
         assert_eq!(
-            reg.open_task_count("worker-1"),
+            reg.open_task_count(&w),
             1,
             "answering does not close the task"
         );
@@ -686,12 +748,12 @@ mod tests {
     }
 
     #[test]
-    fn a_second_register_frame_is_a_protocol_error() {
+    fn a_second_hello_frame_is_a_protocol_error() {
         let reg = ParticipantRegistry::new();
-        let _outbound = register(&reg, "worker-1");
+        let (w, _outbound) = register(&reg, "worker");
         assert!(!reg.on_frame(
-            "worker-1",
-            ParticipantFrame::Register {
+            &w,
+            ParticipantFrame::Hello {
                 card: card("other")
             }
         ));
@@ -707,7 +769,10 @@ mod tests {
             .into_iter()
             .map(|agent| agent.card.name)
             .collect();
-        assert_eq!(names, vec!["a-worker".to_string(), "b-worker".to_string()]);
+        assert_eq!(
+            names,
+            vec!["a-worker-0".to_string(), "b-worker-0".to_string()]
+        );
     }
 
     /// The origin is the transport's answer, and it survives to the listing —
@@ -716,11 +781,11 @@ mod tests {
     #[test]
     fn each_registration_keeps_the_origin_its_transport_gave_it() {
         let reg = ParticipantRegistry::new();
-        let _local = register_from(&reg, "child", AgentOrigin::Local);
-        let _hosted = register_from(&reg, "leased-vm", AgentOrigin::Fleet);
+        let (child, _local) = register_from(&reg, "child", AgentOrigin::Local);
+        let (vm, _hosted) = register_from(&reg, "leased-vm", AgentOrigin::Fleet);
 
-        assert_eq!(reg.origin("child"), Some(AgentOrigin::Local));
-        assert_eq!(reg.origin("leased-vm"), Some(AgentOrigin::Fleet));
+        assert_eq!(reg.origin(&child), Some(AgentOrigin::Local));
+        assert_eq!(reg.origin(&vm), Some(AgentOrigin::Fleet));
         assert_eq!(reg.origin("nobody"), None);
 
         let listed: Vec<(String, AgentOrigin)> = reg
@@ -731,8 +796,8 @@ mod tests {
         assert_eq!(
             listed,
             vec![
-                ("child".to_string(), AgentOrigin::Local),
-                ("leased-vm".to_string(), AgentOrigin::Fleet),
+                ("child-0".to_string(), AgentOrigin::Local),
+                ("leased-vm-0".to_string(), AgentOrigin::Fleet),
             ]
         );
     }

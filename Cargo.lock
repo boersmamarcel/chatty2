@@ -2075,6 +2075,7 @@ dependencies = [
  "criterion",
  "futures",
  "hive-client",
+ "libc",
  "reqwest 0.13.2",
  "rig-core",
  "rmcp",

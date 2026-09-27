@@ -1,8 +1,8 @@
-//! Register, run one delegated task, report, return.
+//! Say hello, run one delegated task, report, return.
 //!
 //! This is `chatty-tui`'s AGE-301 participant loop with the agent lifted out
 //! of it. What is left is everything the wire contract owns — the
-//! registration, the frame ordering, the single terminal status — and a hole
+//! `hello`/`welcome` exchange, the frame ordering, the single terminal status — and a hole
 //! where the turn goes. The desktop fills the hole with `run_headless`; a
 //! microVM's `chatty-server` fills it with `AgentSession::begin_turn`
 //! (AGE-307). Neither of them gets to decide what the parent sees.
@@ -56,11 +56,13 @@ pub type EventSink = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
 /// Deliberately thin. A worker's skills are its tool set, which depends on
 /// settings the broker already knows, and re-advertising them here would let
 /// the two disagree. Live discovery is AGE-304's. `version` is the worker
-/// binary's, so a broker log says which build answered.
-pub fn worker_card(name: &str, version: &str) -> ParticipantCard {
+/// binary's, so a broker log says which build answered. There is no name:
+/// the broker assigns it with the connection (ADR-0020), so the card leaves
+/// it empty.
+pub fn worker_card(version: &str) -> ParticipantCard {
     ParticipantCard {
-        name: name.to_string(),
-        display_name: Some(format!("chatty worker {name}")),
+        name: String::new(),
+        display_name: Some("chatty worker".to_string()),
         description: "A chatty agent delegated a task by the broker.".to_string(),
         version: version.to_string(),
         skills: vec![ParticipantSkill {
@@ -71,12 +73,13 @@ pub fn worker_card(name: &str, version: &str) -> ParticipantCard {
     }
 }
 
-/// Register over `stream`, run the first task that arrives through `run`, and
-/// report its outcome.
+/// Say hello over `stream`, run the first task that arrives through `run`,
+/// and report its outcome.
 ///
-/// `stream` is already connected to the broker: a Unix socket on the desktop,
-/// a vsock stream from inside a microVM (AGE-307). Which one it is changes
-/// nothing below this line, which is the property C8 is built on.
+/// `stream` is the connection the broker made for this worker: the worker's
+/// end of a socket pair on the desktop, a vsock stream from inside a
+/// microVM (AGE-307, HS-4). Which one it is changes nothing below this line,
+/// which is the property C8 is built on.
 ///
 /// `run` is handed the task — its prompt and, when the caller presented one,
 /// their bearer (AGE-371) — the sink its turn's events must go to, and the
@@ -92,13 +95,10 @@ where
     F: FnOnce(DelegatedTask, EventSink, InputReceiver) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let mut connection = ParticipantConnection::register_over(stream, card)
+    let mut connection = ParticipantConnection::hello_over(stream, card)
         .await
-        .context("failed to register with the broker")?;
-    info!(
-        participant = connection.name(),
-        "Registered with the broker"
-    );
+        .context("the broker did not welcome this worker")?;
+    info!(participant = connection.name(), "Welcomed by the broker");
 
     let (task_id, task) = match next_task(&mut connection).await? {
         Some(task) => task,

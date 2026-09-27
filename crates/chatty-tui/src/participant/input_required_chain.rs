@@ -2,9 +2,9 @@
 //! — surfaces the grandchild's question in the parent's popover and
 //! delivers the answer back down.
 //!
-//! Every hop is the real thing: a `ProtocolGateway` on a real port with a
-//! real participant socket, the real one-task worker loop over that socket
-//! at both worker levels, and the real `invoke_agent` tool at both caller
+//! Every hop is the real thing: a `ProtocolGateway` on a real port, a
+//! broker-made connection per worker (ADR-0020), the real one-task worker
+//! loop over it at both worker levels, and the real `invoke_agent` tool at both caller
 //! levels. Only the LLM turn is a closure, because that is the one thing
 //! the chain must not depend on: the grandchild's turn calls `ask_user`'s
 //! own `request_clarification`, the child's turn calls `invoke_agent`, and
@@ -29,7 +29,7 @@ use chatty_core::tools::invoke_agent_tool::{
 };
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_protocol_gateway::participant::ParticipantRegistry;
+use chatty_protocol_gateway::participant::{ParticipantRegistry, open_connection};
 use chatty_protocol_gateway::worker::{
     EventSink, InputReceiver, answer_clarifications, serve_one_task, worker_card,
 };
@@ -38,6 +38,8 @@ use rig_agent::tool::{Tool, ToolContext};
 use tokio::net::UnixStream;
 use tokio::sync::{RwLock, mpsc};
 
+/// The specs the two workers are admitted as; the broker names them
+/// `grandchild-0` and `child-0`.
 const GRANDCHILD: &str = "grandchild";
 const CHILD: &str = "child";
 
@@ -57,32 +59,20 @@ impl LlmProvider for NoopProvider {
     }
 }
 
-/// A gateway on an ephemeral port with a participant socket in a temp dir.
+/// A gateway on an ephemeral port.
 struct Broker {
     port: u16,
-    socket: std::path::PathBuf,
     participants: ParticipantRegistry,
-    _dir: tempfile::TempDir,
 }
 
 impl Broker {
     async fn start() -> Self {
-        let dir = tempfile::tempdir().expect("a temp dir for the socket");
-        let socket = dir.path().join("participants.sock");
-
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
             ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
         ));
-        let gateway = ProtocolGateway::new(modules, 0).with_participant_socket(&socket);
+        let gateway = ProtocolGateway::new(modules, 0);
         let participants = gateway.participants();
-
-        let listener =
-            chatty_protocol_gateway::participant::bind(&socket).expect("the socket binds");
-        tokio::spawn(chatty_protocol_gateway::participant::serve(
-            listener,
-            participants.clone(),
-        ));
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = tcp.local_addr().unwrap().port();
@@ -91,12 +81,18 @@ impl Broker {
             axum::serve(tcp, router).await.ok();
         });
 
-        Self {
-            port,
-            socket,
-            participants,
-            _dir: dir,
-        }
+        Self { port, participants }
+    }
+
+    /// The worker's end of a connection this broker made for a node
+    /// admitted as `spec`, and the name it was given.
+    fn connect(&self, spec: &str) -> (UnixStream, String) {
+        let connection = open_connection(&self.participants, spec).expect("a connection");
+        connection.worker_end.set_nonblocking(true).unwrap();
+        (
+            UnixStream::from_std(connection.worker_end).unwrap(),
+            connection.name,
+        )
     }
 
     /// The `invoke_agent` a level of the chain holds, addressing `agent`
@@ -166,10 +162,10 @@ fn the_question() -> ClarifyingQuestion {
 }
 
 /// The grandchild: a worker whose turn asks the user one question and
-/// answers with whatever it is told.
-async fn grandchild(broker: &Broker) {
-    let stream = UnixStream::connect(&broker.socket).await.unwrap();
-    let card = worker_card(GRANDCHILD, "test");
+/// answers with whatever it is told. Returns its name.
+async fn grandchild(broker: &Broker) -> String {
+    let (stream, name) = broker.connect(GRANDCHILD);
+    let card = worker_card("test");
     tokio::spawn(serve_one_task(
         stream,
         card,
@@ -189,14 +185,16 @@ async fn grandchild(broker: &Broker) {
             Ok(())
         },
     ));
-    broker.await_registration(GRANDCHILD).await;
+    broker.await_registration(&name).await;
+    name
 }
 
 /// The child: a worker with no human, whose turn delegates to the
-/// grandchild and repeats its answer.
-async fn child(broker: &Broker) {
-    let stream = UnixStream::connect(&broker.socket).await.unwrap();
-    let card = worker_card(CHILD, "test");
+/// grandchild — `grandchild`, by name — and repeats its answer. Returns its
+/// name.
+async fn child(broker: &Broker, grandchild: String) -> String {
+    let (stream, name) = broker.connect(CHILD);
+    let card = worker_card("test");
     let port = broker.port;
     tokio::spawn(serve_one_task(
         stream,
@@ -204,7 +202,7 @@ async fn child(broker: &Broker) {
         move |task, sink, inputs| async move {
             let store = scripted_session(&sink, inputs);
             let tool = InvokeAgentTool::new(vec![], vec![], Some(port))
-                .with_local_agents([GRANDCHILD])
+                .with_local_agents([grandchild.as_str()])
                 .with_clarifications(store.get_pending_clarifications());
             sink(&SessionEvent::TurnStarted);
             tool_started(&sink, "invoke_agent");
@@ -212,7 +210,7 @@ async fn child(broker: &Broker) {
                 .call(
                     &mut ToolContext::new(),
                     InvokeAgentArgs {
-                        agent: GRANDCHILD.to_string(),
+                        agent: grandchild.clone(),
                         prompt: task.text,
                         include_trace: false,
                     },
@@ -224,7 +222,8 @@ async fn child(broker: &Broker) {
             Ok(())
         },
     ));
-    broker.await_registration(CHILD).await;
+    broker.await_registration(&name).await;
+    name
 }
 
 /// The issue's "Verify": parent → child → grandchild, the grandchild's
@@ -232,27 +231,30 @@ async fn child(broker: &Broker) {
 #[tokio::test]
 async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes_back() {
     let broker = Broker::start().await;
-    grandchild(&broker).await;
-    child(&broker).await;
+    let grandchild = grandchild(&broker).await;
+    let child = child(&broker, grandchild.clone()).await;
 
     // The parent: the level facing a human. Its store's notifier is the
     // popover — that is exactly what a frontend listens on.
     let mut parent_store = ClarificationStore::new();
     let (popover_tx, mut popover) = mpsc::unbounded_channel();
     parent_store.set_notifier(popover_tx);
-    let tool = broker.invoke_agent(CHILD, Some(&parent_store));
+    let tool = broker.invoke_agent(&child, Some(&parent_store));
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
-    let delegation = tokio::spawn(async move {
-        tool.call(
-            &mut ToolContext::new(),
-            InvokeAgentArgs {
-                agent: CHILD.to_string(),
-                prompt: "Set up the database.".to_string(),
-                include_trace: false,
-            },
-        )
-        .await
+    let delegation = tokio::spawn({
+        let child = child.clone();
+        async move {
+            tool.call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: child,
+                    prompt: "Set up the database.".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+        }
     });
 
     // The grandchild's question, two levels down, arrives in the parent's
@@ -301,8 +303,8 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
     );
 
     // Nothing is left parked: the tasks closed with their terminal status.
-    assert_eq!(broker.participants.open_task_count(CHILD), 0);
-    assert_eq!(broker.participants.open_task_count(GRANDCHILD), 0);
+    assert_eq!(broker.participants.open_task_count(&child), 0);
+    assert_eq!(broker.participants.open_task_count(&grandchild), 0);
 }
 
 /// Escalate-to-human is the only policy (the issue's "Policy"): a level
@@ -310,15 +312,15 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
 #[tokio::test]
 async fn a_question_nobody_can_answer_ends_the_delegation() {
     let broker = Broker::start().await;
-    grandchild(&broker).await;
+    let grandchild = grandchild(&broker).await;
 
-    let tool = broker.invoke_agent(GRANDCHILD, None);
+    let tool = broker.invoke_agent(&grandchild, None);
     let err = tokio::time::timeout(
         DEADLINE,
         tool.call(
             &mut ToolContext::new(),
             InvokeAgentArgs {
-                agent: GRANDCHILD.to_string(),
+                agent: grandchild.clone(),
                 prompt: "Set up the database.".to_string(),
                 include_trace: false,
             },

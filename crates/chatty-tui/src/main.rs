@@ -266,14 +266,14 @@ struct Cli {
     /// Used by the resume spike (`scripts/resume-spike/`, AGE-650).
     ///
     /// Example: --restore /tmp/first/conversation.json
-    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_socket"])]
+    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_fd"])]
     restore: Option<std::path::PathBuf>,
 
     /// Write a --headless run's whole conversation to PATH when it ends, as
     /// the JSON array of messages --restore reads.
     ///
     /// Example: --save-conversation /tmp/first/conversation.json
-    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_socket"])]
+    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_fd"])]
     save_conversation: Option<std::path::PathBuf>,
 
     /// Auto-approve all tool executions without prompting.
@@ -346,24 +346,22 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     workspace: Option<String>,
 
-    /// Run as a participant of the broker listening on this Unix socket.
+    /// Run as a worker of the broker that spawned this process, over the
+    /// connection it handed over on this inherited descriptor.
     ///
-    /// The process registers, waits for one delegated task, runs it, and
-    /// reports its progress and result over the socket rather than on
-    /// stderr (ADR-0011 / AGE-301). Implies the
-    /// headless turn loop; `--message` is not used, the prompt arrives from
-    /// the broker.
+    /// The broker made the connection (a socket pair), so it already knows
+    /// who is on it: the process says hello, learns its name from the
+    /// broker's welcome, waits for one delegated task, runs it, and reports
+    /// its progress and result over the connection rather than on stderr
+    /// (ADR-0011 / AGE-301, ADR-0020). Implies the headless turn loop;
+    /// `--message` is not used, the prompt arrives from the broker. The
+    /// descriptor is made close-on-exec before anything else runs, so no
+    /// shell or tool this worker starts inherits it. Unix only; set by the
+    /// broker, not by hand.
     ///
-    /// Example: --participant-socket ~/.local/state/chatty/participants.sock
-    #[arg(long, value_name = "PATH")]
-    participant_socket: Option<std::path::PathBuf>,
-
-    /// The name to register under, which is how callers address this worker.
-    ///
-    /// Required with --participant-socket: the broker allocated it before
-    /// spawning this process and is already routing a task to it.
-    #[arg(long, value_name = "NAME", requires = "participant_socket")]
-    participant_name: Option<String>,
+    /// Example: --participant-fd 3
+    #[arg(long, value_name = "FD", hide = true)]
+    participant_fd: Option<i32>,
 
     /// Run this leader's own broker, so it can delegate to `local-agent`.
     ///
@@ -432,9 +430,15 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // First, before anything can start a process (ADR-0020 invariant 2):
+    // the broker's connection must not leak into a shell or tool.
+    #[cfg(unix)]
+    let sealed = participant::seal_participant_fd(std::env::args_os());
     let cli = Cli::parse();
+    #[cfg(unix)]
+    sealed?;
     let usage = match cli.usage_file.clone() {
-        Some(_) if !(cli.headless || cli.pipe) || cli.participant_socket.is_some() => {
+        Some(_) if !(cli.headless || cli.pipe) || cli.participant_fd.is_some() => {
             bail!("--usage-file needs --headless or --pipe");
         }
         path => {
@@ -452,8 +456,8 @@ async fn main() -> Result<()> {
 
 async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()> {
     let acp_mode = cli.command == Some(Command::Acp);
-    if acp_mode && (cli.headless || cli.pipe || cli.participant_socket.is_some()) {
-        bail!("acp cannot be combined with --headless, --pipe or --participant-socket");
+    if acp_mode && (cli.headless || cli.pipe || cli.participant_fd.is_some()) {
+        bail!("acp cannot be combined with --headless, --pipe or --participant-fd");
     }
     if acp_mode && cli.team.is_some() {
         bail!("acp does not support --team yet");
@@ -471,7 +475,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             .with_writer(std::io::stderr)
             .with_ansi(false)
             .init();
-    } else if cli.headless || cli.pipe || cli.participant_socket.is_some() {
+    } else if cli.headless || cli.pipe || cli.participant_fd.is_some() {
         // Headless/pipe: suppress all logging to keep stdout clean
     } else {
         // Interactive TUI: log to file to avoid corrupting the terminal
@@ -735,7 +739,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // Route based on mode — headless/pipe load all services eagerly (latency
     // doesn't matter for non-interactive use), while the interactive TUI defers
     // heavy services to a background task so the UI appears instantly.
-    let participant_mode = cli.participant_socket.is_some();
+    let participant_mode = cli.participant_fd.is_some();
     let result = if acp_mode {
         // ── ACP: load everything, then serve sessions until stdin closes ──
         let (user_secrets, mcp_service, memory_service, search_settings) =
@@ -817,22 +821,18 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             None => engine.init_conversation().await?,
         }
         engine.set_save_conversation(cli.save_conversation.clone());
-        if let Some(socket) = cli.participant_socket.as_deref() {
+        if let Some(fd) = cli.participant_fd {
             #[cfg(unix)]
             {
-                let name = cli
-                    .participant_name
-                    .as_deref()
-                    .context("--participant-name is required with --participant-socket")?;
-                participant::run_participant(engine, event_rx, socket, name).await
+                participant::run_participant(engine, event_rx, fd).await
             }
             #[cfg(not(unix))]
             {
                 // `bail!` would return from `main` and skip the shutdown below;
                 // this branch has to hand back an `Err` like every other arm.
-                let _ = (socket, event_rx, engine);
+                let _ = (fd, event_rx, engine);
                 Err(anyhow::anyhow!(
-                    "--participant-socket needs a Unix socket, which this platform has not got"
+                    "--participant-fd needs a Unix socket, which this platform has not got"
                 ))
             }
         } else if cli.pipe {
@@ -980,7 +980,7 @@ fn apply_run_limits(
     let declared_turns = team
         .and_then(|t| t.file.max_agent_turns)
         .or(spec.budget.max_agent_turns);
-    let unattended = cli.headless || cli.pipe || cli.participant_socket.is_some();
+    let unattended = cli.headless || cli.pipe || cli.participant_fd.is_some();
     let (turns, max_duration) = if unattended {
         let (turns, duration) = unattended_run_limits(
             cli.max_agent_turns,
