@@ -1,0 +1,10 @@
+[module]
+name = "padded"
+version = "0.1.0"
+description = "Adversarial test fixture: padded (~5 MiB binary, for cold-load measurement)"
+wasm = "padded.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true
