@@ -16,6 +16,13 @@
 //! Every subdirectory that contains a `module.toml` file is treated as a
 //! module.  The registry uses the `[module].name` field from the manifest
 //! (not the directory name) as the lookup key.
+//!
+//! # Concurrency
+//!
+//! Each module sits behind its own [`ModuleHandle`] (an async mutex), so a
+//! caller holds the registry only long enough to look a module up and clone
+//! its handle, then calls the guest under that module's lock alone. A slow
+//! call to one module never holds up a call to another (PL-H4, AGE-607).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,7 +30,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use chatty_wasm_runtime::ModuleManifest as RuntimeManifest;
@@ -35,12 +42,17 @@ use crate::manifest::ModuleManifest;
 // LoadedModule
 // ---------------------------------------------------------------------------
 
+/// A shared handle to one loaded module. Lock it for the length of one guest
+/// call; calls to the same module queue on it, calls to different modules
+/// do not contend.
+pub type ModuleHandle = Arc<Mutex<WasmModule>>;
+
 /// An entry in the registry: the parsed manifest plus the live module.
 struct LoadedModule {
     manifest: ModuleManifest,
     /// Directory that the module was loaded from (needed for reload).
     module_dir: PathBuf,
-    wasm: WasmModule,
+    wasm: ModuleHandle,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,16 +222,14 @@ impl ModuleRegistry {
     // Accessors
     // -----------------------------------------------------------------------
 
-    /// Return an immutable reference to the loaded [`WasmModule`] with the
-    /// given name, or `None` if it is not registered.
-    pub fn get(&self, name: &str) -> Option<&WasmModule> {
-        self.modules.get(name).map(|m| &m.wasm)
-    }
-
-    /// Return a mutable reference to the loaded [`WasmModule`] with the
-    /// given name, or `None` if it is not registered.
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut WasmModule> {
-        self.modules.get_mut(name).map(|m| &mut m.wasm)
+    /// The [`ModuleHandle`] of the module with the given name, or `None` if
+    /// it is not registered.
+    ///
+    /// The handle outlives the registry borrow: clone it out, release the
+    /// registry, then lock the module for the call. A module unloaded or
+    /// reloaded meanwhile finishes the call on the instance it started with.
+    pub fn get(&self, name: &str) -> Option<ModuleHandle> {
+        self.modules.get(name).map(|m| Arc::clone(&m.wasm))
     }
 
     /// Return the parsed [`ModuleManifest`] for a registered module.
@@ -358,7 +368,7 @@ impl ModuleRegistry {
             LoadedModule {
                 manifest,
                 module_dir: module_dir.to_path_buf(),
-                wasm,
+                wasm: Arc::new(Mutex::new(wasm)),
             },
         );
 

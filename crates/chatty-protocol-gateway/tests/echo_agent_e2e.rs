@@ -194,8 +194,9 @@ async fn step_02_echo_agent_is_discovered_and_loaded() {
 async fn step_03_list_tools_returns_three_tools() {
     require_echo_agent!(module_dir);
 
-    let mut registry = registry_with_echo_agent(&module_dir);
-    let module = registry.get_mut("echo-agent").unwrap();
+    let registry = registry_with_echo_agent(&module_dir);
+    let module = registry.get("echo-agent").unwrap();
+    let mut module = module.lock().await;
 
     let tools = module.list_tools().expect("list_tools failed");
     assert_eq!(tools.len(), 3, "expected 3 tools, got: {tools:?}");
@@ -207,32 +208,40 @@ async fn step_03_list_tools_returns_three_tools() {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — invoke_tool("echo", "hello") returns "hello"
+// Step 4 — invoke_tool("echo", {"input":"hello"}) returns "hello"
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn step_04_invoke_echo_returns_input_unchanged() {
     require_echo_agent!(module_dir);
 
-    let mut registry = registry_with_echo_agent(&module_dir);
-    let module = registry.get_mut("echo-agent").unwrap();
+    let registry = registry_with_echo_agent(&module_dir);
+    let module = registry.get("echo-agent").unwrap();
+    let mut module = module.lock().await;
 
-    let result = module.invoke_tool("echo", "hello").await.unwrap();
+    let result = module
+        .invoke_tool("echo", r#"{"input":"hello"}"#)
+        .await
+        .unwrap();
     assert_eq!(result, "hello");
 }
 
 // ---------------------------------------------------------------------------
-// Step 5 — invoke_tool("reverse", "hello") returns "olleh"
+// Step 5 — invoke_tool("reverse", {"input":"hello"}) returns "olleh"
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn step_05_invoke_reverse_returns_reversed() {
     require_echo_agent!(module_dir);
 
-    let mut registry = registry_with_echo_agent(&module_dir);
-    let module = registry.get_mut("echo-agent").unwrap();
+    let registry = registry_with_echo_agent(&module_dir);
+    let module = registry.get("echo-agent").unwrap();
+    let mut module = module.lock().await;
 
-    let result = module.invoke_tool("reverse", "hello").await.unwrap();
+    let result = module
+        .invoke_tool("reverse", r#"{"input":"hello"}"#)
+        .await
+        .unwrap();
     assert_eq!(result, "olleh");
 }
 
@@ -244,8 +253,9 @@ async fn step_05_invoke_reverse_returns_reversed() {
 async fn step_06_chat_returns_echo_response() {
     require_echo_agent!(module_dir);
 
-    let mut registry = registry_with_echo_agent(&module_dir);
-    let module = registry.get_mut("echo-agent").unwrap();
+    let registry = registry_with_echo_agent(&module_dir);
+    let module = registry.get("echo-agent").unwrap();
+    let mut module = module.lock().await;
 
     let req = ChatRequest {
         messages: vec![Message {
@@ -268,8 +278,9 @@ async fn step_06_chat_returns_echo_response() {
 async fn step_07_agent_card_has_correct_name_and_skills() {
     require_echo_agent!(module_dir);
 
-    let mut registry = registry_with_echo_agent(&module_dir);
-    let module = registry.get_mut("echo-agent").unwrap();
+    let registry = registry_with_echo_agent(&module_dir);
+    let module = registry.get("echo-agent").unwrap();
+    let mut module = module.lock().await;
 
     let card = module.agent_card().expect("agent_card failed");
     assert_eq!(card.name, "echo-agent");

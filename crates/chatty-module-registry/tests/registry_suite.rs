@@ -331,7 +331,8 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
 
     let mut reg = registry();
     reg.load(&dir).expect("alloc loads");
-    let module = reg.get_mut("alloc").expect("alloc registered");
+    let module = reg.get("alloc").expect("alloc registered");
+    let mut module = module.blocking_lock();
 
     // The fixture grows a Vec 1 MiB at a time, so N MiB needs roughly
     // 2N MiB of linear memory (see chatty-wasm-runtime's sandbox suite, row
@@ -386,7 +387,8 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
     )]));
     let mut reg = ModuleRegistry::new(llm, ResourceLimits::default()).expect("registry");
     reg.load(&dir).expect("slow-host loads");
-    let module = reg.get_mut("slow-host").expect("slow-host registered");
+    let module = reg.get("slow-host").expect("slow-host registered");
+    let mut module = module.blocking_lock();
 
     let req = chatty_wasm_runtime::ChatRequest {
         messages: vec![chatty_wasm_runtime::Message {
@@ -492,7 +494,7 @@ fn sandbox_2_6_absurd_execution_ms_loads_uncapped_today() {
 /// OPEN QUESTION (pin, not ignored): `ModuleRegistry::reload` removes the
 /// existing entry *before* attempting to load the replacement (see its own
 /// doc comment: "Leave the slot empty rather than reverting"). If a module
-/// author ships a broken update, every caller of `get`/`get_mut` starts
+/// author ships a broken update, every caller of `get` starts
 /// getting `None` where they used to get a working module, with no
 /// automatic rollback. This needs a decision: keep "fail closed" (today),
 /// or revert to the last-good instance so an accidental hot-reload doesn't
