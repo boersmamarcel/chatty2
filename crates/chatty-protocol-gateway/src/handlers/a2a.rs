@@ -7,7 +7,8 @@
 //!   parked in `input-required` answers it instead of starting a new one
 //! - `GET  /.well-known/agent.json` — aggregated gateway agent card
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json,
@@ -19,7 +20,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use chatty_wasm_runtime::AgentCard;
+use chatty_wasm_runtime::{AgentCard, ChatRequest, Message, Role};
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
@@ -31,6 +32,7 @@ use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
 };
+use super::module_call::{self, Protocol};
 use super::openai::should_route_remotely;
 
 // ---------------------------------------------------------------------------
@@ -53,19 +55,15 @@ pub(crate) async fn module_agent_card(
             .into_response();
     }
 
-    let mut reg = state.registry.write().await;
-    let module = match reg.get_mut(&module_name) {
-        Some(m) => m,
-        None => {
-            return module_not_found_json(&module_name);
-        }
+    let Some(module) = module_call::module_for(&state, &module_name, Protocol::A2a).await else {
+        return module_not_found_json(&module_name);
     };
 
-    match module.agent_card() {
+    match module_call::blocking(module, |m| m.agent_card()).await {
         Ok(card) => (StatusCode::OK, Json(agent_card_to_json(&card))).into_response(),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
+            module_call::failure_status(&e),
+            Json(json!({ "error": format!("{e:#}") })),
         )
             .into_response(),
     }
@@ -76,9 +74,13 @@ pub(crate) async fn module_agent_card(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> impl IntoResponse {
-    let names: Vec<String> = {
+    // Only the modules served over A2A are agents of this gateway.
+    let modules: Vec<_> = {
         let reg = state.registry.read().await;
-        reg.module_names().map(str::to_string).collect()
+        reg.module_names()
+            .filter(|name| reg.manifest(name).is_some_and(|m| m.protocols.a2a))
+            .filter_map(|name| reg.get(name))
+            .collect()
     };
 
     let mut agents: Vec<Value> = Vec::new();
@@ -86,11 +88,8 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
     // Every agent on this card says where it came from (ADR-0011 C5): a
     // caller cannot tell a child process from a third-party URL by name
     // alone, and the broker is the only thing that knows.
-    for name in &names {
-        let mut reg = state.registry.write().await;
-        if let Some(module) = reg.get_mut(name)
-            && let Ok(card) = module.agent_card()
-        {
+    for module in modules {
+        if let Ok(card) = module_call::blocking(module, |m| m.agent_card()).await {
             agents.push(with_origin(agent_card_to_json(&card), AgentOrigin::Local));
         }
     }
@@ -261,8 +260,6 @@ async fn handle_message_send(
     caller: Option<String>,
     state: &GatewayState,
 ) -> axum::response::Response {
-    use chatty_wasm_runtime::{ChatRequest, Message, Role};
-
     let params = match params {
         Some(p) => p,
         None => {
@@ -309,14 +306,6 @@ async fn handle_message_send(
         return a2a_participant::runner_message_send(runner.as_ref(), id, task).await;
     }
 
-    let req = ChatRequest {
-        messages: vec![Message {
-            role: Role::User,
-            content: content.clone(),
-        }],
-        conversation_id: String::new(),
-    };
-
     // Remote routing: if the registry says this module is `remote`/`remote_only`,
     // forward to the hive-runner's A2A endpoint so the remote execution keeps
     // the same JSON-RPC shape as local module execution.
@@ -347,56 +336,32 @@ async fn handle_message_send(
         };
     }
 
-    let mut reg = state.registry.write().await;
-    let module = match reg.get_mut(module_name) {
-        Some(m) => m,
-        None => {
-            return module_not_found(id, module_name);
-        }
+    let Some(module) = module_call::module_for(state, module_name, Protocol::A2a).await else {
+        return module_not_found(id, module_name);
     };
 
     // Pre-invocation credit check
-    if let Some(ref guard) = state.credit_guard
-        && state.paid_modules.contains(module_name)
-        && let Err(e) = guard.has_credits(module_name).await
-    {
-        drop(reg);
-        return json_rpc_error(StatusCode::OK, id, -32000, e.to_string());
+    if let Err(e) = module_call::check_credits(state, module_name).await {
+        return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
 
-    match module.chat(req).await {
+    let turn = Turn::new(module_name, &params, content, &state.contexts);
+    let mut module = module.lock().await;
+    let result = module.chat(turn.request()).await;
+    let metrics = module.last_invocation_metrics();
+    drop(module);
+
+    match result {
         Ok(resp) => {
-            let metrics = module.last_invocation_metrics();
-            drop(reg);
+            module_call::record_usage(state, module_name, metrics);
+            let context_id = turn.context_id.clone();
+            turn.record(&resp.content);
 
-            if let Some(ref usage) = state.usage {
-                tokio::spawn({
-                    let usage = Arc::clone(usage);
-                    let name = module_name.to_string();
-                    async move {
-                        usage
-                            .record_invocation(
-                                &name,
-                                "latest",
-                                metrics
-                                    .as_ref()
-                                    .and_then(|m| m.input_tokens.map(|t| t as i32)),
-                                metrics
-                                    .as_ref()
-                                    .and_then(|m| m.output_tokens.map(|t| t as i32)),
-                                metrics.as_ref().map(|m| m.fuel_consumed),
-                                metrics.as_ref().map(|m| m.execution_ms),
-                            )
-                            .await;
-                    }
-                });
-            }
-
-            let task_id = format!("task-{}", crate::gateway::new_id());
             json_rpc_ok(
                 id,
                 json!({
-                    "id": task_id,
+                    "id": format!("task-{}", crate::gateway::new_id()),
+                    "contextId": context_id,
                     "status": { "state": "completed" },
                     "artifacts": [{
                         "parts": [{ "type": "text", "text": resp.content }]
@@ -405,10 +370,10 @@ async fn handle_message_send(
             )
         }
         Err(e) => json_rpc_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            module_call::failure_status(&e),
             id,
             INTERNAL_ERROR,
-            e.to_string(),
+            format!("{e:#}"),
         ),
     }
 }
@@ -425,8 +390,6 @@ async fn handle_message_stream(
     caller: Option<String>,
     state: &GatewayState,
 ) -> axum::response::Response {
-    use chatty_wasm_runtime::{ChatRequest, Message, Role};
-
     let params = match params {
         Some(p) => p,
         None => {
@@ -502,215 +465,210 @@ async fn handle_message_stream(
         };
     }
 
-    // Verify the module exists in the local registry before starting the stream.
-    {
-        let reg = state.registry.read().await;
-        if reg.get(&module_name).is_none() {
-            return module_not_found(id.clone(), &module_name);
-        }
+    let Some(module) = module_call::module_for(state, &module_name, Protocol::A2a).await else {
+        return module_not_found(id, &module_name);
+    };
+    if let Err(e) = module_call::check_credits(state, &module_name).await {
+        return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
 
-    let req = ChatRequest {
-        messages: vec![Message {
-            role: Role::User,
-            content,
-        }],
-        conversation_id: String::new(),
-    };
+    let turn = Turn::new(&module_name, &params, content, &state.contexts);
+    let context_id = turn.context_id.clone();
 
-    // Create a progress channel for real-time streaming of module log messages.
+    // Module log lines, forwarded as `working` progress while the call runs.
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    let registry = Arc::clone(&state.registry);
-    let usage = state.usage.clone();
+    // The call runs in a task of its own, so a caller that disconnects does
+    // not cancel it: it runs to its end (bounded by the per-call deadline),
+    // records its turn, and releases the module (S3 row 3.9).
+    let mut chat_handle = tokio::spawn({
+        let state = state.clone();
+        let module_name = module_name.clone();
+        async move {
+            let mut module = module.lock_owned().await;
+            module.set_progress_sender(progress_tx);
+            let result = module.chat(turn.request()).await;
+            let metrics = module.last_invocation_metrics();
+            drop(module);
+            if let Ok(resp) = &result {
+                module_call::record_usage(&state, &module_name, metrics);
+                turn.record(&resp.content);
+            }
+            result
+        }
+    });
 
-    // Build an SSE stream that interleaves progress events with the chat result.
+    let event = move |result: Value| {
+        let mut result = result;
+        if let Some(object) = result.as_object_mut() {
+            object.insert("id".into(), json!(task_id));
+            object.insert("contextId".into(), json!(context_id));
+        }
+        let frame = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        Ok::<_, std::convert::Infallible>(Event::default().data(frame.to_string()))
+    };
+    let working = |message: Option<&str>| match message {
+        None => json!({ "status": { "state": "working" }, "final": false }),
+        Some(text) => json!({
+            "status": {
+                "state": "working",
+                "message": { "parts": [{ "type": "text", "text": text }] }
+            },
+            "final": false
+        }),
+    };
+    let failed = |text: String| {
+        json!({
+            "status": {
+                "state": "failed",
+                "message": { "parts": [{ "type": "text", "text": text }] }
+            },
+            "final": true
+        })
+    };
+
     let stream = async_stream::stream! {
-        // 1. "working" status
-        let working = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "id": task_id,
-                "status": { "state": "working" },
-                "final": false
-            }
-        });
-        yield Ok::<_, std::convert::Infallible>(Event::default().data(working.to_string()));
+        yield event(working(None));
 
-        // 2. Spawn chat in a separate task, install progress sender
-        let mut chat_handle = tokio::task::spawn_blocking({
-            let registry = registry.clone();
-            let module_name = module_name.clone();
-            let req = req;
-            let progress_tx = progress_tx;
-            let usage = usage.clone();
-            move || {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    let mut reg = registry.write().await;
-                    if let Some(m) = reg.get_mut(&module_name) {
-                        m.set_progress_sender(progress_tx);
-                        let result = m.chat(req).await;
-
-                        // Capture metrics before dropping the lock
-                        let metrics = m.last_invocation_metrics();
-                        drop(reg);
-
-                        if result.is_ok() && let Some(ref usage) = usage {
-                            let usage = Arc::clone(usage);
-                            let name = module_name.clone();
-                            tokio::spawn(async move {
-                                usage.record_invocation(
-                                    &name,
-                                    "latest",
-                                    metrics.as_ref().and_then(|m| m.input_tokens.map(|t| t as i32)),
-                                    metrics.as_ref().and_then(|m| m.output_tokens.map(|t| t as i32)),
-                                    metrics.as_ref().map(|m| m.fuel_consumed),
-                                    metrics.as_ref().map(|m| m.execution_ms),
-                                ).await;
-                            });
-                        }
-
-                        result
-                    } else {
-                        Err(anyhow::anyhow!("module '{}' not found", module_name))
-                    }
-                })
-            }
-        });
-
-        // 3. Interleave progress events with chat completion
-        let mut chat_done = false;
-        let mut chat_result = None;
-
-        loop {
-            if chat_done {
-                break;
-            }
-
+        // Progress first (biased), until the call returns.
+        let joined = loop {
             tokio::select! {
                 biased;
-                // Check for progress messages first
-                Some(msg) = progress_rx.recv() => {
-                    let progress = json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "id": task_id,
-                            "status": {
-                                "state": "working",
-                                "message": { "parts": [{ "type": "text", "text": msg }] }
-                            },
-                            "final": false
-                        }
-                    });
-                    yield Ok(Event::default().data(progress.to_string()));
-                }
-                // Chat task completed
-                result = &mut chat_handle => {
-                    chat_done = true;
-                    chat_result = Some(result);
-                }
+                Some(line) = progress_rx.recv() => yield event(working(Some(&line))),
+                joined = &mut chat_handle => break joined,
             }
+        };
+        while let Ok(line) = progress_rx.try_recv() {
+            yield event(working(Some(&line)));
         }
 
-        // Drain any remaining progress
-        while let Ok(msg) = progress_rx.try_recv() {
-            let progress = json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "id": task_id,
-                    "status": {
-                        "state": "working",
-                        "message": { "parts": [{ "type": "text", "text": msg }] }
-                    },
-                    "final": false
-                }
-            });
-            yield Ok(Event::default().data(progress.to_string()));
-        }
-
-        // 4. Emit final result
-        match chat_result {
-            Some(Ok(Ok(resp))) => {
-                let artifact = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "id": task_id,
-                        "artifact": {
-                            "parts": [{ "type": "text", "text": resp.content }],
-                            "index": 0,
-                            "lastChunk": true
-                        }
+        match joined {
+            Ok(Ok(resp)) => {
+                yield event(json!({
+                    "artifact": {
+                        "parts": [{ "type": "text", "text": resp.content }],
+                        "index": 0,
+                        "lastChunk": true
                     }
-                });
-                yield Ok(Event::default().data(artifact.to_string()));
-
-                let completed = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "id": task_id,
-                        "status": { "state": "completed" },
-                        "final": true
-                    }
-                });
-                yield Ok(Event::default().data(completed.to_string()));
+                }));
+                yield event(json!({ "status": { "state": "completed" }, "final": true }));
             }
-            Some(Ok(Err(e))) => {
-                let failed = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "id": task_id,
-                        "status": {
-                            "state": "failed",
-                            "message": { "parts": [{ "type": "text", "text": e.to_string() }] }
-                        },
-                        "final": true
-                    }
-                });
-                yield Ok(Event::default().data(failed.to_string()));
-            }
-            Some(Err(e)) => {
-                let failed = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "id": task_id,
-                        "status": {
-                            "state": "failed",
-                            "message": { "parts": [{ "type": "text", "text": format!("Task panicked: {e}") }] }
-                        },
-                        "final": true
-                    }
-                });
-                yield Ok(Event::default().data(failed.to_string()));
-            }
-            None => {
-                let failed = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "id": task_id,
-                        "status": {
-                            "state": "failed",
-                            "message": { "parts": [{ "type": "text", "text": "No result received" }] }
-                        },
-                        "final": true
-                    }
-                });
-                yield Ok(Event::default().data(failed.to_string()));
-            }
+            Ok(Err(e)) => yield event(failed(format!("{e:#}"))),
+            Err(e) => yield event(failed(format!("Task panicked: {e}"))),
         }
     };
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Conversation history per A2A context
+// ---------------------------------------------------------------------------
+
+/// How many contexts the gateway remembers; the oldest is forgotten first.
+const MAX_CONTEXTS: usize = 1024;
+/// How many messages one context keeps; the oldest are dropped first.
+const MAX_CONTEXT_MESSAGES: usize = 256;
+
+/// A2A conversation history, per module and `contextId`: what a module has
+/// been told and answered in a context, replayed in front of the context's
+/// next message. Bounded in contexts and in messages per context.
+#[derive(Clone, Default)]
+pub(crate) struct Contexts(Arc<Mutex<ContextMap>>);
+
+#[derive(Default)]
+struct ContextMap {
+    turns: HashMap<(String, String), Vec<Message>>,
+    /// Keys in first-seen order, for eviction.
+    order: VecDeque<(String, String)>,
+}
+
+impl Contexts {
+    fn history(&self, module: &str, context_id: &str) -> Vec<Message> {
+        self.lock()
+            .turns
+            .get(&(module.to_string(), context_id.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn record(&self, module: &str, context_id: &str, user: Message, reply: &str) {
+        let key = (module.to_string(), context_id.to_string());
+        let mut map = self.lock();
+        if !map.turns.contains_key(&key) {
+            map.order.push_back(key.clone());
+            while map.order.len() > MAX_CONTEXTS {
+                if let Some(oldest) = map.order.pop_front() {
+                    map.turns.remove(&oldest);
+                }
+            }
+        }
+        let messages = map.turns.entry(key).or_default();
+        messages.push(user);
+        messages.push(Message {
+            role: Role::Assistant,
+            content: reply.to_string(),
+        });
+        let excess = messages.len().saturating_sub(MAX_CONTEXT_MESSAGES);
+        messages.drain(..excess);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ContextMap> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// One A2A turn against a module: the context it belongs to, the new user
+/// message, and the history in front of it.
+struct Turn {
+    module: String,
+    context_id: String,
+    user: Message,
+    history: Vec<Message>,
+    contexts: Contexts,
+}
+
+impl Turn {
+    /// The turn for `params`. A message without a `contextId` starts a new
+    /// context, whose id the answer carries so the caller can continue it.
+    fn new(module: &str, params: &Value, content: String, contexts: &Contexts) -> Self {
+        let context_id = params
+            .pointer("/message/contextId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(crate::gateway::new_id);
+        Self {
+            module: module.to_string(),
+            history: contexts.history(module, &context_id),
+            context_id,
+            user: Message {
+                role: Role::User,
+                content,
+            },
+            contexts: contexts.clone(),
+        }
+    }
+
+    /// The guest's request: the context's history, then this message.
+    fn request(&self) -> ChatRequest {
+        let mut messages = self.history.clone();
+        messages.push(self.user.clone());
+        ChatRequest {
+            messages,
+            conversation_id: self.context_id.clone(),
+        }
+    }
+
+    /// Remember this turn and the module's reply in the context.
+    fn record(self, reply: &str) {
+        self.contexts
+            .record(&self.module, &self.context_id, self.user, reply);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -758,13 +716,26 @@ fn caller_bearer(headers: &HeaderMap) -> Option<TaskBearer> {
 // Helper: the prompt out of A2A `message/send` / `message/stream` params
 // ---------------------------------------------------------------------------
 
-/// Support both `message.parts[0].text` (the A2A shape) and a plain
+/// Every text part of `message.parts`, joined by newlines (a part is text
+/// when its `kind` or `type` says so, or it has only a `text`); or a plain
 /// `message.text`, which several clients send.
 fn prompt_text(params: &Value) -> String {
+    if let Some(parts) = params.pointer("/message/parts").and_then(Value::as_array) {
+        let texts: Vec<&str> = parts
+            .iter()
+            .filter(|part| {
+                let kind = part.get("kind").or_else(|| part.get("type"));
+                kind.is_none_or(|kind| kind == "text")
+            })
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect();
+        if !texts.is_empty() {
+            return texts.join("\n");
+        }
+    }
     params
-        .pointer("/message/parts/0/text")
-        .or_else(|| params.pointer("/message/text"))
-        .and_then(|v| v.as_str())
+        .pointer("/message/text")
+        .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
 }

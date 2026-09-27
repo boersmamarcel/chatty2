@@ -261,7 +261,8 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
 
     let mut reg = registry();
     reg.load(&dir).expect("alloc loads");
-    let module = reg.get_mut("alloc").expect("alloc registered");
+    let module = reg.get("alloc").expect("alloc registered");
+    let mut module = module.blocking_lock();
 
     // The fixture grows a Vec 1 MiB at a time, so N MiB needs roughly
     // 2N MiB of linear memory (see chatty-wasm-runtime's sandbox suite, row
@@ -316,7 +317,8 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
     )]));
     let mut reg = ModuleRegistry::new(llm, ResourceLimits::default()).expect("registry");
     reg.load(&dir).expect("slow-host loads");
-    let module = reg.get_mut("slow-host").expect("slow-host registered");
+    let module = reg.get("slow-host").expect("slow-host registered");
+    let mut module = module.blocking_lock();
 
     let req = chatty_wasm_runtime::ChatRequest {
         messages: vec![chatty_wasm_runtime::Message {
@@ -416,7 +418,7 @@ fn sandbox_2_6_absurd_execution_ms_is_clamped_with_a_warning() {
 /// OPEN QUESTION (pin, not ignored): `ModuleRegistry::reload` removes the
 /// existing entry *before* attempting to load the replacement (see its own
 /// doc comment: "Leave the slot empty rather than reverting"). If a module
-/// author ships a broken update, every caller of `get`/`get_mut` starts
+/// author ships a broken update, every caller of `get` starts
 /// getting `None` where they used to get a working module, with no
 /// automatic rollback. This needs a decision: keep "fail closed" (today),
 /// or revert to the last-good instance so an accidental hot-reload doesn't
@@ -535,17 +537,19 @@ fn sandbox_1_9_registry_passes_config_and_files_root() {
     let report = reg.scan_directory(tmp.path()).expect("scan_directory");
     assert!(report.failed.is_empty(), "{:?}", report.failed);
 
-    let config = reg.get_mut("config-reader").expect("config-reader loaded");
+    let config = reg.get("config-reader").expect("config-reader loaded");
+    let mut config = config.blocking_lock();
     assert_eq!(
-        chat_text(config, "greeting").unwrap(),
+        chat_text(&mut config, "greeting").unwrap(),
         r#"Some("from module.toml")"#
     );
-    assert_eq!(chat_text(config, "missing").unwrap(), "None");
+    assert_eq!(chat_text(&mut config, "missing").unwrap(), "None");
 
-    let reader = reg.get_mut("file-reader").expect("file-reader loaded");
-    assert_eq!(chat_text(reader, "w.bin").unwrap(), "7");
+    let reader = reg.get("file-reader").expect("file-reader loaded");
+    let mut reader = reader.blocking_lock();
+    assert_eq!(chat_text(&mut reader, "w.bin").unwrap(), "7");
     // The module's own files (manifest, .wasm) are outside the granted root.
-    let escape = chat_text(reader, "../module.toml");
+    let escape = chat_text(&mut reader, "../module.toml");
     assert!(escape.is_err(), "got {escape:?}");
 }
 
@@ -563,8 +567,9 @@ fn sandbox_1_9_no_files_section_grants_no_files() {
 
     let mut reg = registry();
     reg.load(&dir).expect("file-reader loads");
-    let reader = reg.get_mut("file-reader").unwrap();
-    let err = chat_text(reader, "w.bin").expect_err("no [files] section, no reads");
+    let reader = reg.get("file-reader").unwrap();
+    let mut reader = reader.blocking_lock();
+    let err = chat_text(&mut reader, "w.bin").expect_err("no [files] section, no reads");
     assert!(err.contains("no file root"), "{err}");
 }
 
@@ -638,11 +643,13 @@ fn staged_fixtures_scan_with_only_the_unloadable_ones_failing() {
     assert!(report.loaded_names().contains(&"echo-agent"));
 
     // The file-reader fixture's `[files] root = "weights"` is staged with it.
-    let reader = reg.get_mut("file-reader").expect("file-reader loaded");
-    assert_eq!(chat_text(reader, "fixture.bin").unwrap(), "12");
-    let config = reg.get_mut("config-reader").expect("config-reader loaded");
+    let reader = reg.get("file-reader").expect("file-reader loaded");
+    let mut reader = reader.blocking_lock();
+    assert_eq!(chat_text(&mut reader, "fixture.bin").unwrap(), "12");
+    let config = reg.get("config-reader").expect("config-reader loaded");
+    let mut config = config.blocking_lock();
     assert_eq!(
-        chat_text(config, "greeting").unwrap(),
+        chat_text(&mut config, "greeting").unwrap(),
         r#"Some("hello from module.toml")"#
     );
 }

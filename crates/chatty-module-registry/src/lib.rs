@@ -34,4 +34,4 @@ mod registry;
 pub use manifest::{
     ExecutionMode, ModuleCapabilities, ModuleManifest, ModuleProtocols, ModuleResourceLimits,
 };
-pub use registry::{ModuleRegistry, ScanReport};
+pub use registry::{ModuleHandle, ModuleRegistry, ScanReport};

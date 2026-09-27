@@ -22,9 +22,9 @@ fn history() -> Value {
 }
 
 /// 3.1 — `/v1/{m}/chat/completions` with system + user + assistant history:
-/// every role reaches the guest as sent (F11: `system` arrives as `user`).
+/// every role reaches the guest as sent (F11: `system` used to arrive as
+/// `user`).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_01_openai_module_route_preserves_roles() {
     let gw = Gateway::start(
         vec![Module::shipped("echo-agent")],
@@ -112,10 +112,9 @@ async fn s3_02_openai_model_routed_matches_module_route() {
 /// Decision (the plan leaves "SSE or 400" open): **400**. PL-D1 was answered
 /// option B, so a module's OpenAI route is exposure only and stays
 /// non-streaming; PL-H4 (Do 5) implements the 400. What must never happen is
-/// what happens today: the flag is ignored and a plain JSON body comes back,
+/// what happened before it: the flag ignored and a plain JSON body back,
 /// which a streaming client reads as an empty or broken stream.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_03_openai_stream_true_is_rejected_not_ignored() {
     let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
 

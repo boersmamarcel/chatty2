@@ -18,11 +18,32 @@ the one thing here that is not HTTP; see [Local participants](#local-participant
 | OpenAI completions | `POST /v1/{module}/chat/completions` | `application/json` |
 | MCP JSON-RPC | `POST /mcp/{module}` | `application/json` |
 | MCP SSE stream | `GET /mcp/{module}/sse` | `text/event-stream` |
+| MCP SSE message | `POST /mcp/{module}/sse?sessionId=…` | `application/json` |
 | A2A JSON-RPC | `POST /a2a/{module}` | `application/json` |
 | A2A streaming | `POST /a2a/{module}` (method: `message/stream`) | `text/event-stream` |
 | Agent card (per module) | `GET /a2a/{module}/.well-known/agent.json` | `application/json` |
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
 | Participant registration | Unix socket (`with_participant_socket`) | newline-delimited JSON |
+
+### What every route enforces
+
+- **Loopback callers only.** A request whose `Host` is not a loopback name
+  (`localhost`, `127.0.0.0/8`, `[::1]`), or whose `Origin` is present and not
+  loopback (`null` included), gets **403**. Binding to 127.0.0.1 does not stop
+  DNS rebinding: a browser page that re-resolves its own name to 127.0.0.1
+  reaches the socket, and from there every module's `llm::complete` and every
+  virtual agent. A request without `Host` (not a browser's) is served.
+- **Request bodies up to 10 MiB** (`MAX_REQUEST_BYTES`); a larger one is a
+  **413** before any handler runs.
+- **`[protocols]`.** A module is served only on the protocols its manifest
+  enables; on the others it answers **404**, as if it were not loaded, and it
+  is left off the aggregated agent card when `a2a = false`.
+- **One lock per module.** The registry is locked only to look a module up;
+  the guest call runs under that module's own lock (`ModuleHandle`), on the
+  blocking pool. Calls to one module queue; calls to different modules do
+  not wait on each other. Credit checks happen before the module lock.
+- **Guest output is capped** at 1 MiB per call by the runtime (PL-D3); a
+  reply over the cap is a **502** with a short error body, never relayed.
 
 ## Protocol summary
 
@@ -32,13 +53,31 @@ Speaks the OpenAI `POST /v1/chat/completions` shape. The full agentic loop
 (LLM ↔ tools) runs inside the WASM module. The caller receives a finished
 response in `choices[0].message.content` — intermediate tool calls are hidden.
 
+Every message reaches the guest with its role (`system`/`developer` →
+`system`, `user`, `assistant`; any other role is a 400), and a content-part
+array reaches it as its text parts joined. The request's `user` becomes the
+guest's `conversation_id`. The route does not stream: `stream: true` is a
+**400** ("streaming not supported"), not a JSON body a streaming client would
+misread.
+
 ### 2 · MCP (Model Context Protocol)
 
 Speaks JSON-RPC 2.0 (`tools/list`, `tools/call`). There is **no** agentic
 loop on the gateway side — each call is a direct pass-through to the module's
 `list_tools` or `invoke_tool` WIT exports. The caller (an orchestrator or
 another LLM) decides when to call each tool and how to interpret the raw JSON
-output.
+output. `tools/call` hands the guest its `arguments` object JSON-encoded once,
+which is what the WIT's `args` is and what the tool's `inputSchema` describes.
+
+Two transports, one dispatcher:
+
+- **Streamable HTTP** — `POST /mcp/{module}`, each message answered in its
+  response (what chatty's own rmcp client uses).
+- **HTTP+SSE** (MCP 2024-11-05) — `GET /mcp/{module}/sse` opens a stream whose
+  first event is `endpoint` (`/mcp/{module}/sse?sessionId=…`). The client POSTs
+  each message there, gets `202 Accepted`, and the answer arrives on the stream
+  as a `message` event. The stream stays open (keep-alives) until the client
+  disconnects, which ends the session.
 
 ### 3 · A2A (Agent-to-Agent)
 
@@ -46,21 +85,28 @@ Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `message/stream`,
 `tasks/get`). Like the Completion API, the agentic loop runs behind the
 gateway — inside the WASM module, or inside the participant process.
 
+Every text part of `message.parts` reaches the agent, joined by newlines. For
+a module, the gateway keeps the conversation per `contextId` (bounded: 1024
+contexts, 256 messages each): the next message in a context reaches the guest
+with the earlier turns in front of it, and `contextId` is the guest's
+`conversation_id`. A message without one starts a new context; the answer's
+`contextId` continues it. Task and context ids are random UUIDs.
+
 **`message/send`** returns a complete JSON-RPC response:
 
 ```json
-{ "result": { "id": "task-…", "status": { "state": "completed" }, "artifacts": [{ "parts": [{ "type": "text", "text": "…" }] }] } }
+{ "result": { "id": "task-…", "contextId": "…", "status": { "state": "completed" }, "artifacts": [{ "parts": [{ "type": "text", "text": "…" }] }] } }
 ```
 
 **`message/stream`** returns an SSE stream (`text/event-stream`) with
 incremental updates per the [A2A streaming spec](https://a2a-protocol.org/latest/topics/streaming-and-async/):
 
 ```
-data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","status":{"state":"working"},"final":false}}
+data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","contextId":"…","status":{"state":"working"},"final":false}}
 
-data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","artifact":{"parts":[{"type":"text","text":"…"}],"index":0,"lastChunk":true}}}
+data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","contextId":"…","artifact":{"parts":[{"type":"text","text":"…"}],"index":0,"lastChunk":true}}}
 
-data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","status":{"state":"completed"},"final":true}}
+data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","contextId":"…","status":{"state":"completed"},"final":true}}
 ```
 
 The agent card advertises `"capabilities": { "streaming": true }` so clients
@@ -90,8 +136,9 @@ GET  /.well-known/…  ────►│ a2a.rs handler               │
                                                           child processes
 ```
 
-The gateway holds a single `ModuleRegistry` (behind an `Arc<RwLock<…>>`) and
-a single `ParticipantRegistry`. The module handlers call the WIT exports:
+The gateway holds a single `ModuleRegistry` (behind an `Arc<RwLock<…>>`, read
+only to look a module up) whose modules each sit behind their own lock, and a
+single `ParticipantRegistry`. The module handlers call the WIT exports:
 
 | Handler | WIT export called |
 |---------|-------------------|
@@ -213,11 +260,16 @@ silently running the worker unisolated.
 
 ## Running
 
-```sh
-cargo run -p chatty-protocol-gateway -- --modules-dir ~/.local/share/chatty/modules
-```
+This crate is a library, not a binary — it has no `[[bin]]` target and no
+`--modules-dir` CLI. An embedder constructs a `ModuleRegistry`, calls
+`scan_directory`, and passes it to `ProtocolGateway::new(registry, port)`.
+The desktop (`chatty-gpui`) and `chatty-tui --broker` both do this; see their
+module-settings / broker wiring for a worked example, or
+`crates/chatty-protocol-gateway/tests/` for a minimal one.
 
-The server binds to `http://0.0.0.0:8420` by default.
+The gateway binds to `127.0.0.1:<port>` — never `0.0.0.0` — on whatever port
+the embedder passes to `ProtocolGateway::new`; the desktop defaults that port
+to `8420`.
 
 ## Being a worker (`worker` feature)
 

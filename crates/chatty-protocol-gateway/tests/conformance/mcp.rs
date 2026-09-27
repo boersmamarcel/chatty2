@@ -39,14 +39,12 @@ fn call_text(body: &Value) -> &str {
 /// 3.5 — `initialize` → `tools/list` → `tools/call echo {"input":"hi"}`
 /// answers `hi`, as echo's own schema (`{input: string}`) promises.
 ///
-/// Red today, but not because the gateway mangles the arguments: it hands
-/// the guest the `arguments` object serialized once, which is what the WIT
-/// contract says `args` is ("JSON-encoded arguments") and what
-/// `s3_05_mcp_tool_args_receive_the_arguments_json` pins. echo-agent's
-/// `invoke_tool` returns that JSON verbatim instead of reading `input` from
-/// it, so the fix belongs in `modules/echo-agent`, not the gateway.
+/// The gateway hands the guest the `arguments` object serialized once, which
+/// is what the WIT contract says `args` is ("JSON-encoded arguments") and
+/// what `s3_05_mcp_tool_args_receive_the_arguments_json` pins; echo-agent
+/// reads `input` out of it. (This row was red because echo-agent returned
+/// that JSON verbatim; PL-H4 fixed the module, not the gateway.)
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_05_mcp_session_echo_returns_input() {
     let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
 
@@ -194,9 +192,8 @@ async fn s3_06_mcp_rmcp_client_streamable_http() {
 }
 
 /// 3.6 — `/mcp/{m}/sse` is a transport, so it stays open after announcing
-/// its endpoint (today it sends the `endpoint` event and closes).
+/// its endpoint (before PL-H4 it sent the `endpoint` event and closed).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_06_mcp_sse_stream_stays_open() {
     let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
 
@@ -340,7 +337,6 @@ async fn s3_06_mcp_inspector_cli_streamable_http() {
 
 /// 3.6 — the MCP Inspector CLI over the SSE transport (`GET /mcp/{m}/sse`).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_06_mcp_inspector_cli_sse() {
     inspector_lists_and_calls("3.6 s3_06_mcp_inspector_cli_sse", "sse", "/sse").await;
 }

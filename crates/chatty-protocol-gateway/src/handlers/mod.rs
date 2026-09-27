@@ -3,4 +3,5 @@ pub(crate) mod a2a_participant;
 pub(crate) mod index;
 pub(crate) mod jsonrpc;
 pub(crate) mod mcp;
+pub(crate) mod module_call;
 pub(crate) mod openai;

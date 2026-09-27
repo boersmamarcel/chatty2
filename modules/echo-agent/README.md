@@ -8,8 +8,10 @@ Reference chatty WASM module — the canonical quickstart for module authors.
 This module is both:
 
 * **Reference implementation** — shows every SDK feature in ~130 lines.
-* **End-to-end integration test** — the CI builds and runs the full
-  protocol-gateway test suite against it.
+* **End-to-end integration test** — CI's whole-workspace `cargo test
+  --all-features` run (after `scripts/build-wasm-fixtures.sh` builds this
+  module) includes `chatty-protocol-gateway`'s `echo_agent_e2e` suite against
+  it; there is no separate protocol-gateway-only CI job.
 
 ---
 
@@ -141,15 +143,18 @@ After building the WASM (see [Build](#build)):
 
 ```sh
 # From the workspace root
-cargo test -p chatty-protocol-gateway echo_agent
+cargo test -p chatty-protocol-gateway --test echo_agent_e2e
 ```
 
-The test suite covers all 12 integration steps:
+Do not add a name filter like `echo_agent`: most of `echo_agent_e2e.rs`'s
+step names don't contain that literal substring, so a filtered run silently
+covers only a couple of steps instead of the whole suite. The unfiltered
+`--test echo_agent_e2e` runs all 10 integration steps:
 
 1. Module registry discovers and loads echo-agent
 2. `list_tools()` returns 3 tools
-3. `invoke_tool("echo", "hello")` → `"hello"`
-4. `invoke_tool("reverse", "hello")` → `"olleh"`
+3. `invoke_tool("echo", r#"{"input":"hello"}"#)` → `"hello"`
+4. `invoke_tool("reverse", r#"{"input":"hello"}"#)` → `"olleh"`
 5. `chat(messages)` → `"Echo: …"`
 6. `agent_card()` → name + skills verified
 7. `GET /.well-known/agent.json` → echo-agent listed

@@ -9,6 +9,11 @@ and optionally delegate to the host LLM.
 [`modules/echo-agent/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/modules/echo-agent/README.md)
 for build commands and integration-test checklist.
 
+**Prerequisites:** the `wasm32-wasip2` target — `make setup`, or
+`rustup target add wasm32-wasip2` — before the "Build and load" step below;
+without it `cargo build --target wasm32-wasip2` fails with "the wasm32-wasip2
+target may not be installed".
+
 ## What it demonstrates
 
 | Feature | Behaviour |
@@ -84,23 +89,28 @@ let content = if last_user_msg.contains("use llm") {
 };
 ```
 
-Try in Chatty after loading the module:
-
-```text
-/agent echo-agent use llm to explain what WASM component model is in one sentence
-```
+Try in Chatty after loading the module — ask the assistant to use it (e.g.
+"use echo-agent to explain what the WASM component model is in one sentence,
+using the llm"), which makes the assistant call `invoke_agent` after
+discovering `echo-agent` via `list_agents`. (The `/agent` slash command does
+not dispatch to a WASM module by name — see [Build a WASM
+plugin](../guides/build-wasm-module.md#common-mistakes).)
 
 ## Step 3 — Define tools
 
 `list_tools` advertises JSON-schema parameters. `invoke_tool` executes them
 locally (pure Rust, no network):
 
+`args` is the tool's arguments as one JSON object, shaped by the schema the
+tool declared; each tool here reads its `input` string from it:
+
 ```rust
 fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
+    let input = input_argument(&args)?; // args = {"input": "..."}
     match name.as_str() {
-        "echo" => Ok(args),
-        "reverse" => Ok(args.chars().rev().collect()),
-        "count_words" => Ok(args.split_whitespace().count().to_string()),
+        "echo" => Ok(input),
+        "reverse" => Ok(input.chars().rev().collect()),
+        "count_words" => Ok(input.split_whitespace().count().to_string()),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -145,7 +155,11 @@ cp target/wasm32-wasip2/release/echo_agent.wasm .
 cp -r . ~/.local/share/chatty/modules/echo-agent/
 ```
 
-Enable **Settings → Modules**, then verify:
+Enable the module in **Settings → Extensions** (there is no separate
+"Modules" page). That starts the gateway on the desktop. In a headless or
+containerized environment with no GUI, run `chatty-tui --broker` instead — it
+serves the same gateway and a `local-agent` in-process, without a display.
+Then verify:
 
 ```sh
 # MCP tools
@@ -166,11 +180,15 @@ From the repo root:
 
 ```sh
 make wasm-modules
-cargo test -p chatty-protocol-gateway echo_agent
+cargo test -p chatty-protocol-gateway --test echo_agent_e2e
 ```
 
-The suite covers registry load, tool invocation, chat echo, agent card, and
-all three gateway protocols.
+Do not filter by name with `echo_agent`: `echo_agent_e2e.rs`'s step names
+mostly don't contain that literal substring, so a name filter silently runs
+only a couple of the suite's steps instead of all of them. The unfiltered
+`--test echo_agent_e2e` is what actually runs the whole suite — registry
+load, tool invocation, chat echo, agent card, and all three gateway
+protocols.
 
 ## Next steps
 

@@ -63,11 +63,16 @@ Risk thresholds (df = 8):
 
 ## Usage
 
-### Via chatty `/agent` command (local module)
+### From a conversation (local module, via `invoke_agent`)
 
-```text
-/agent benford-agent Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789
-```
+Ask the assistant to use it — e.g. "use benford-agent to analyze these
+invoice amounts: 1234 4521 891 2340 567 8901 234 456 789" — which makes the
+assistant call `invoke_agent { "agent": "benford-agent", "prompt": "..." }`
+after discovering it via `list_agents`. This is not the `/agent` slash
+command: that only dispatches by name to a *remote* agent already registered
+in Settings → A2A Agents (see the next section) — for a plain installed WASM
+module it just starts a generic local sub-agent with the whole line as its
+prompt.
 
 ### Via A2A HTTP (when loaded in the protocol gateway)
 
@@ -385,11 +390,14 @@ cp target/wasm32-wasip2/release/benford_agent.wasm .
 ### Run unit tests (on host)
 
 The pure-Rust tool implementations have full unit test coverage and can be run
-on the host without the WASM target:
+on the host without the WASM target. This crate's own `.cargo/config.toml`
+defaults the build target to `wasm32-wasip2`, so a bare `cargo test` tries to
+*execute* the compiled `.wasm` as a native binary and fails with a permission
+error — pass the host target explicitly:
 
 ```sh
 cd modules/benford-agent
-cargo test
+cargo test --target x86_64-unknown-linux-gnu   # or your host's triple
 ```
 
 ### Load into chatty
@@ -400,7 +408,8 @@ Copy the compiled directory into your chatty modules folder:
 cp -r modules/benford-agent ~/.local/share/chatty/modules/
 ```
 
-Then go to **Settings → Modules** and enable `benford-agent`.
+Then go to **Settings → Extensions** and enable `benford-agent` (there is no
+separate "Modules" settings page).
 
 ---
 
