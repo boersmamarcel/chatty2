@@ -37,7 +37,7 @@ The first tab, with the robot icon, is always **Agent**: the shell the agent run
 - **Its ×** hides the dock; the Agent tab can't be closed, and the shell keeps running.
 - **Which lines were the agent's:** a small blue bar in the left margin marks each command the agent ran. Commands you typed have none.
 - **Status:** next to its name the tab says what the shell is doing: *idle*, *agent running `cargo test`*, *you typing*, or *you running …*.
-- **Sandbox:** when the agent's shell runs in the sandbox, the tab says *sandboxed* (or *sandboxed · no network* with network isolation on). What you type there runs in the same sandbox.
+- **Sandbox:** when the agent's shell runs in the sandbox, the tab says *sandboxed* (or *sandboxed · no network* with network isolation on). What you type there runs in the same sandbox. When the sandbox can't run on this machine, the tab says *not sandboxed*; hover it to see why.
 
 **Sharing the keyboard.** You can type at any time. While the agent's command runs, what you type goes to that program: answer its prompt, or press Ctrl+C to stop it (the agent then gets the interrupted output and exit code 130). While you have a half-typed line at the prompt, the agent's next command waits for you: the tab turns amber and says **Agent waiting for you** with the command it wants to run. Press Enter or clear the line (Ctrl+U) and it goes ahead. If you don't within two seconds, the agent is told the terminal is busy and can try again.
 

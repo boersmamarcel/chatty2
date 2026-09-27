@@ -8,7 +8,7 @@ File, shell and git tools are confined to the **Workspace Directory** you set in
 
 ## Shell sandbox
 
-On Linux and macOS, shell commands run in an isolated process that sees the workspace but not sensitive folders such as `.ssh`, `.aws` and `.gnupg`. On Linux the sandbox needs the `bubblewrap` package from your distribution; if it is missing, commands still run but count as unsandboxed. Windows has no shell sandbox, so commands there are always unsandboxed — which matters for the approval modes below.
+On Linux and macOS, shell commands run in an isolated process that sees the workspace but not sensitive folders such as `.ssh`, `.aws` and `.gnupg`. On Linux the sandbox needs the `bubblewrap` package from your distribution; if it is missing, or cannot create the user namespaces it needs (Ubuntu 24.04's default AppArmor setting blocks them), commands still run but count as unsandboxed, and the terminal dock's Agent tab says *not sandboxed*. Windows has no shell sandbox, so commands there are always unsandboxed — which matters for the approval modes below.
 
 Two more switches on the same page: **Network Isolation** stops sandboxed commands from reaching the network at all, and **Timeout** / **Max Output** cap how long a command may run and how much output it may return.
 

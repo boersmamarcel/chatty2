@@ -156,6 +156,8 @@ struct AgentTab {
     /// The agent command waiting for the human to finish their line.
     waiting: Option<String>,
     sandboxed: Option<bool>,
+    /// Why the running shell is not sandboxed although it should be.
+    unsandboxed_reason: Option<String>,
     /// "Start shell" was clicked and the shell is not up yet.
     starting: bool,
     /// A one-off message in the tab ("Show in terminal" found nothing, the
@@ -774,13 +776,16 @@ impl TerminalDock {
         let activity = session.map(|s| s.activity());
         let waiting = session.and_then(|s| s.waiting_command());
         let sandboxed = session.and_then(|s| s.running_sandboxed());
+        let unsandboxed_reason = session.and_then(|s| s.sandbox_unavailable_reason());
         if activity != self.agent.activity
             || waiting != self.agent.waiting
             || sandboxed != self.agent.sandboxed
+            || unsandboxed_reason != self.agent.unsandboxed_reason
         {
             self.agent.activity = activity;
             self.agent.waiting = waiting;
             self.agent.sandboxed = sandboxed;
+            self.agent.unsandboxed_reason = unsandboxed_reason;
             changed = true;
         }
         if self.agent.starting && self.agent.view.is_some() {
@@ -1241,6 +1246,7 @@ impl TerminalDock {
                 .session
                 .as_ref()
                 .is_some_and(|s| s.network_isolation()),
+            self.agent.unsandboxed_reason.as_deref(),
         );
         let read_now = flashed.is_some() && flashed == self.agent.registry_id.as_deref();
         h_flex()
@@ -1301,15 +1307,26 @@ impl TerminalDock {
                     .when(waiting, |this| this.font_weight(gpui::FontWeight::SEMIBOLD))
                     .child(status.text()),
             )
-            .when_some(sandbox, |this, label| {
+            .when_some(sandbox, |this, (label, reason)| {
                 this.child(
                     div()
+                        .id("terminal-agent-sandbox-label")
                         .flex_none()
                         .px_1()
                         .rounded_sm()
                         .border_1()
                         .border_color(theme.border)
                         .text_color(theme.muted_foreground)
+                        .when_some(reason, |this, reason| {
+                            let tooltip: SharedString =
+                                format!("Commands here run without the sandbox: {reason}").into();
+                            this.border_color(theme.warning)
+                                .text_color(theme.warning)
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tooltip.clone())
+                                        .build(window, cx)
+                                })
+                        })
                         .child(label),
                 )
             })
@@ -1518,12 +1535,19 @@ pub fn agent_status(activity: Option<&ShellActivity>, waiting: Option<&str>) -> 
 }
 
 /// The Agent tab's sandbox label: what the human types there runs in the
-/// same sandbox as the agent's commands, so the tab says so. `None` when
-/// the shell is not sandboxed or not running.
-pub fn sandbox_label(sandboxed: Option<bool>, network_isolation: bool) -> Option<&'static str> {
-    match (sandboxed, network_isolation) {
-        (Some(true), true) => Some("sandboxed · no network"),
-        (Some(true), false) => Some("sandboxed"),
+/// same sandbox as the agent's commands, so the tab says so; and when a
+/// sandbox was wanted but couldn't run, "not sandboxed" with why (for its
+/// tooltip). `None` when the shell is not running, or is unsandboxed on a
+/// platform without a sandbox.
+pub fn sandbox_label(
+    sandboxed: Option<bool>,
+    network_isolation: bool,
+    unsandboxed_reason: Option<&str>,
+) -> Option<(&'static str, Option<String>)> {
+    match (sandboxed, network_isolation, unsandboxed_reason) {
+        (Some(true), true, _) => Some(("sandboxed · no network", None)),
+        (Some(true), false, _) => Some(("sandboxed", None)),
+        (Some(false), _, Some(reason)) => Some(("not sandboxed", Some(reason.to_string()))),
         _ => None,
     }
 }
@@ -1936,12 +1960,26 @@ mod tests {
     #[test]
     fn sandbox_label_names_the_sandbox_and_the_network() {
         assert_eq!(
-            sandbox_label(Some(true), true),
-            Some("sandboxed · no network")
+            sandbox_label(Some(true), true, None),
+            Some(("sandboxed · no network", None))
         );
-        assert_eq!(sandbox_label(Some(true), false), Some("sandboxed"));
-        assert_eq!(sandbox_label(Some(false), true), None);
-        assert_eq!(sandbox_label(None, true), None);
+        assert_eq!(
+            sandbox_label(Some(true), false, None),
+            Some(("sandboxed", None))
+        );
+        assert_eq!(sandbox_label(Some(false), true, None), None);
+        assert_eq!(sandbox_label(None, true, None), None);
+    }
+
+    /// AGE-687: a sandbox that was wanted but couldn't run says so, with why.
+    #[test]
+    fn sandbox_label_says_not_sandboxed_with_the_reason() {
+        let reason = "bwrap can't create a user namespace on this system (AppArmor)";
+        assert_eq!(
+            sandbox_label(Some(false), false, Some(reason)),
+            Some(("not sandboxed", Some(reason.to_string())))
+        );
+        assert_eq!(sandbox_label(None, false, Some(reason)), None);
     }
 
     /// The settings default and the terminal crate's default agree.

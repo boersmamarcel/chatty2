@@ -413,6 +413,7 @@ fn test_can_sandbox() {
 async fn test_sandboxed_session_persistence() {
     // Verify that sandboxed sessions still maintain state
     if !ShellSession::can_sandbox() {
+        eprintln!("skipped: no working sandbox here (ShellSession::can_sandbox() is false)");
         return;
     }
 
@@ -437,6 +438,7 @@ async fn test_sandboxed_session_persistence() {
 #[tokio::test]
 async fn test_sandboxed_session_with_workspace() {
     if !ShellSession::can_sandbox() {
+        eprintln!("skipped: no working sandbox here (ShellSession::can_sandbox() is false)");
         return;
     }
 
@@ -1195,22 +1197,19 @@ async fn ctrl_c_interrupts_the_running_command() {
 }
 
 /// The bubblewrap path, run for real where bubblewrap works (it needs user
-/// namespaces; not every machine allows them).
+/// namespaces; not every machine allows them, and `can_sandbox()` runs it
+/// to find out).
 #[tokio::test]
 async fn sandboxed_shell_runs_on_the_pty() {
     if !ShellSession::can_sandbox() {
+        eprintln!("skipped: no working sandbox here (ShellSession::can_sandbox() is false)");
         return;
     }
     let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
-    let output = match session
+    let output = session
         .execute("test -t 0 && echo tty; test -e /home || echo no-home")
         .await
-    {
-        Ok(output) => output,
-        // bubblewrap is installed but can't create its namespaces here.
-        Err(e) if e.to_string().contains("bwrap:") => return,
-        Err(e) => panic!("{e}"),
-    };
+        .unwrap();
     assert!(session.is_sandboxed().await);
     assert_eq!(output.stdout, "tty\nno-home", "{output:?}");
 }
@@ -1798,4 +1797,128 @@ async fn a_shell_that_spawns_unsandboxed_asks_for_its_first_command() {
     assert!(!request.is_sandboxed);
     store.resolve(&request.id, ApprovalDecision::Denied);
     assert!(!waiter.await.unwrap().unwrap());
+}
+
+// ── AGE-687: probe the sandbox for real, fall back when it can't run ─────────
+
+/// Write `script` as an executable fake `bwrap` in a fresh directory. Waits
+/// until it can be run: another test's fork may briefly hold the write
+/// descriptor (`ETXTBSY`).
+#[cfg(target_os = "linux")]
+fn fake_bwrap(script: &str) -> (tempfile::TempDir, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bwrap");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..200 {
+        match std::process::Command::new(&path)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .status()
+        {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => break,
+        }
+    }
+    let path = path.to_string_lossy().into_owned();
+    (dir, path)
+}
+
+/// This workstation before AGE-687: bwrap 0.9.0 installed, `--version`
+/// works, anything that needs a user namespace exits 1.
+#[cfg(target_os = "linux")]
+const BWRAP_WITHOUT_USERNS: &str = r#"#!/bin/sh
+if [ "$1" = --version ]; then echo "bubblewrap 0.9.0"; exit 0; fi
+echo "bwrap: setting up uid map: Permission denied" >&2
+exit 1
+"#;
+
+/// A bwrap that works: skips its own options and runs the command, in the
+/// `--chdir` directory.
+#[cfg(target_os = "linux")]
+const BWRAP_PASSTHROUGH: &str = r#"#!/bin/sh
+if [ "$1" = --version ]; then echo "bubblewrap 0.9.0"; exit 0; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ro-bind|--bind) shift 3 ;;
+    --tmpfs|--proc|--dev) shift 2 ;;
+    --chdir) cd "$2" || exit 1; shift 2 ;;
+    --*) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+"#;
+
+/// bwrap installed but unable to create a user namespace: not available,
+/// and the session runs unsandboxed instead of failing every command, and
+/// says why.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn bwrap_without_user_namespaces_falls_back_to_an_unsandboxed_shell() {
+    let (_dir, bwrap) = fake_bwrap(BWRAP_WITHOUT_USERNS);
+    for network_isolation in [false, true] {
+        let reason = ShellSession::sandbox_check(&bwrap, network_isolation).unwrap_err();
+        assert!(reason.contains("setting up uid map"), "{reason}");
+
+        let mut session = ShellSession::with_secrets(None, 30, 51200, network_isolation, vec![]);
+        session.test_bwrap = Some(bwrap.clone());
+        let output = session.execute("echo ok").await.unwrap();
+        assert_eq!(output.stdout, "ok");
+        assert_eq!(output.exit_code, 0);
+        assert!(!session.is_sandboxed().await);
+        assert_eq!(session.running_sandboxed(), Some(false));
+        let reason = session.sandbox_unavailable_reason().expect("a reason");
+        assert!(reason.contains("setting up uid map"), "{reason}");
+    }
+}
+
+/// A bwrap that works keeps the sandboxed path, with no reason.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_working_bwrap_keeps_the_sandboxed_shell() {
+    let (_dir, bwrap) = fake_bwrap(BWRAP_PASSTHROUGH);
+    assert_eq!(ShellSession::sandbox_check(&bwrap, false), Ok(()));
+
+    let mut session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.test_bwrap = Some(bwrap);
+    let output = session.execute("echo ok").await.unwrap();
+    assert_eq!(output.stdout, "ok");
+    assert!(session.is_sandboxed().await);
+    assert_eq!(session.sandbox_unavailable_reason(), None);
+}
+
+/// A sandboxed shell that passes the probe but dies before its first
+/// prompt (a race, a workspace bind that fails) is replaced by an
+/// unsandboxed one: once, not in a loop.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_sandboxed_shell_that_dies_before_its_prompt_falls_back_once() {
+    let log = tempfile::tempdir().unwrap();
+    let starts = log.path().join("starts");
+    let (_dir, bwrap) = fake_bwrap(&format!(
+        "#!/bin/sh\n\
+         case \" $* \" in *\" -i \"*)\n\
+           echo x >> '{}'\n\
+           echo 'bwrap: setting up uid map: Permission denied' >&2; exit 1 ;;\n\
+         esac\n{}",
+        starts.display(),
+        BWRAP_PASSTHROUGH.trim_start_matches("#!/bin/sh\n")
+    ));
+    assert_eq!(ShellSession::sandbox_check(&bwrap, false), Ok(()));
+
+    let mut session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.test_bwrap = Some(bwrap);
+    let output = session.execute("echo ok").await.unwrap();
+    assert_eq!(output.stdout, "ok");
+    assert!(!session.is_sandboxed().await);
+    let reason = session.sandbox_unavailable_reason().expect("a reason");
+    assert!(reason.contains("before its first prompt"), "{reason}");
+    // With the login profile, then without it (the profile could have been
+    // what ended it), then unsandboxed: two sandboxed starts, no more.
+    let started = std::fs::read_to_string(&starts).unwrap();
+    assert_eq!(started.lines().count(), 2, "{started}");
 }
