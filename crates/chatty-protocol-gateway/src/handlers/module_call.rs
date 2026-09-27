@@ -51,6 +51,21 @@ pub(crate) async fn check_credits(state: &GatewayState, name: &str) -> Result<()
     }
 }
 
+/// The pre-invocation usage-reporting check for a paid module (PL-H9,
+/// AGE-612): a paid module's usage reporting is `ReportingPolicy::Required`,
+/// so a call that cannot be queued for reporting must not run unreported —
+/// refuse it here rather than run it and silently fail to report it after.
+/// Free (unpaid) modules are unaffected: no usage collector just means no
+/// analytics, which is the existing opt-out behaviour.
+pub(crate) fn check_usage_reporting(state: &GatewayState, name: &str) -> Result<(), String> {
+    if state.paid_modules.contains(name) && state.usage.is_none() {
+        return Err(format!(
+            "usage reporting is required for paid module '{name}' but no usage collector is configured"
+        ));
+    }
+    Ok(())
+}
+
 /// Run a synchronous export (`list_tools`, `agent_card`) under the module's
 /// lock on the blocking pool, so neither the wait for the guest nor the
 /// guest itself occupies a Tokio worker.
@@ -64,19 +79,30 @@ pub(crate) async fn blocking<T: Send + 'static>(
         .map_err(|e| anyhow::anyhow!("module call panicked: {e}"))?
 }
 
-/// Report one successful invocation to the usage collector, if any.
+/// Report one successful invocation to the usage collector, if any, tagged
+/// with the version of the manifest that actually ran (PL-H9, AGE-612) —
+/// not a hardcoded `"latest"`, which would misattribute usage to whichever
+/// version happens to be newest by the time this reads, not the one that
+/// answered the call.
 pub(crate) fn record_usage(state: &GatewayState, name: &str, metrics: Option<InvocationMetrics>) {
     let Some(usage) = state.usage.as_ref() else {
         return;
     };
     let usage = Arc::clone(usage);
+    let registry = Arc::clone(&state.registry);
     let name = name.to_string();
     tokio::spawn(async move {
+        let version = registry
+            .read()
+            .await
+            .manifest(&name)
+            .map(|m| m.version.clone())
+            .unwrap_or_else(|| "unknown".to_string());
         let metrics = metrics.as_ref();
         usage
             .record_invocation(
                 &name,
-                "latest",
+                &version,
                 metrics.and_then(|m| m.input_tokens.map(|t| t as i32)),
                 metrics.and_then(|m| m.output_tokens.map(|t| t as i32)),
                 metrics.map(|m| m.fuel_consumed),
