@@ -81,15 +81,19 @@ goes green. Stale CI runs on the same PR are cancelled on the next push.
 ```bash
 make setup            # one-time: install Linux deps + wasm32-wasip2 target
 make build            # cargo build (debug)
-make test             # cargo test --all-features  (matches CI)
+make test             # cargo test --all-features -- --test-threads=1  (matches CI)
 make test-fast        # cargo test -p chatty-core --lib  (quick inner loop)
 make test-tui         # cargo test -p chatty-tui          (TUI changes only)
 make test-gpui        # cargo test -p chatty-gpui         (GPUI changes only)
 make test-gateway     # cargo test -p chatty-protocol-gateway  (gateway changes only)
-make lint             # cargo clippy --all-features -- -D warnings (CI also passes --all-targets, see below)
+make lint             # cargo clippy --all-features --all-targets -- -D warnings  (matches CI)
 make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
-make wasm-modules     # build the echo-agent WASM module (needed by tests)
+make wasm-modules     # build every WASM module and test fixture (needed by tests)
+make wasm-template    # cargo-generate a module from templates/module and build it (needs cargo-generate)
+make test-benford     # benford-agent's own unit tests, on the host target
+make lint-module-sdk  # clippy chatty-module-sdk for wasm32-wasip2
+make test-billing-sdk # hive-billing-sdk's tests, on the host target
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
@@ -112,18 +116,22 @@ cargo fmt --check
 cargo clippy --all-features --all-targets -- -D warnings
 ```
 
-### Test-thread footgun (fixed, AGE-176)
+### Test-thread footgun (pdfium fixed, AGE-176; CI/`make test` still serialize, AGE-600)
 
-Tests run in parallel again. CI used to pass `--test-threads=1` because
-`chatty-core` tests intermittently died with SIGTRAP; the cause was pdfium,
-which is not thread-safe, being driven from several test threads at once
+`chatty-core` tests used to intermittently die with SIGTRAP because pdfium,
+which is not thread-safe, was driven from several test threads at once
 (concurrent `FPDF_InitLibrary` hits a Chromium `CHECK` = `int3` = SIGTRAP;
 concurrent rendering corrupts its heap). `create_pdfium()` now returns a
 `PdfiumHandle` that holds a process-wide lock for as long as the caller uses
 pdfium (`crates/chatty-core/src/services/pdfium_utils.rs`), so never take a
-second handle while holding one on the same thread. If a SIGTRAP, SIGSEGV or
-SIGABRT ever comes back under `cargo test`, look for a new pdfium call that
-bypasses `create_pdfium()` before reaching for `--test-threads=1`.
+second handle while holding one on the same thread — that SIGTRAP is fixed.
+Despite that fix, `ci.yml`'s "Run tests" step still passes `--test-threads=1`
+(GitHub-hosted runners have shown other, unrelated intermittent SIGTRAPs
+under parallel `cargo test`), and `make test` was brought back in line with
+it for the same reason (AGE-600) — don't remove `--test-threads=1` from
+either as if it were a leftover pdfium workaround. If a SIGTRAP, SIGSEGV or
+SIGABRT comes back, look for a new pdfium call that bypasses
+`create_pdfium()` first.
 
 ### Windows footgun
 
@@ -249,8 +257,10 @@ examples.
    `scripts/check-no-core-reexports.sh` (in CI) fails the build if they
    come back.
 
-2. **Test parallelism.** See "Test-thread footgun" above; it is fixed, so
-   do not add `--test-threads=1` back.
+2. **Test parallelism.** See "Test-thread footgun" above: the pdfium
+   SIGTRAP is fixed, but CI and `make test` intentionally still pass
+   `--test-threads=1` for an unrelated runner flake — that isn't a
+   regression to "fix".
 
 3. **WASM module prebuild.** The `echo_agent_e2e` tests fail immediately,
    naming the missing path and `make wasm-modules`, if you haven't built
@@ -260,9 +270,16 @@ examples.
    packages. Run `make setup` (or `scripts/setup-linux.sh`) on a fresh
    machine.
 
-5. **Two Cargo lockfiles.** `crates/hive-billing-sdk/` has its own
-   `Cargo.lock` (intentional — it's a standalone SDK). When bumping its
-   deps, do so in that lockfile too.
+5. **Standalone crates, own lockfiles, wasm32 by default.**
+   `crates/hive-billing-sdk/`, `modules/benford-agent/` and
+   `crates/chatty-module-sdk/` each declare their own `[workspace]` and
+   `Cargo.lock` (intentional) — bump their deps in that lockfile, not the
+   root one. `hive-billing-sdk` and `benford-agent` also default to
+   `wasm32-wasip2` via their own `.cargo/config.toml`, which has no libtest
+   runner, so `cargo test` there needs an explicit host target:
+   `cargo test --manifest-path <crate>/Cargo.toml --target x86_64-unknown-linux-gnu`
+   (`make test-billing-sdk` / `make test-benford` do this; CI runs the same,
+   AGE-600).
 
 6. **The `gpui-globals` feature.** chatty-core types implement
    `gpui::Global` only when this feature is enabled. chatty-gpui enables
@@ -373,9 +390,8 @@ These are only the non-obvious caveats of a headless cloud build VM.
   passes (AGE-174). CI added `--all-targets` so tests/benches/examples are
   linted too — without it, lints inside `tests/` go unreported (a finding sat
   unnoticed in `chatty-protocol-gateway`'s e2e test until this was added).
-  `make lint`/`make ci` still invoke the pre-`--all-targets` command, so a
-  clean `make lint` no longer guarantees a clean CI clippy; pass
-  `--all-targets` yourself to match CI exactly.
+  `make lint`/`make ci` now pass `--all-targets` too (AGE-600), so a clean
+  `make lint` matches CI's clippy invocation exactly.
 
 - **Local rustc lints strictly less than CI's.** This VM's default toolchain
   (1.94.1) can be behind the `stable` CI uses (e.g. 1.98.1) — clippy findings
