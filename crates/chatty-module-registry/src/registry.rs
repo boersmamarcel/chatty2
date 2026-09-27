@@ -15,7 +15,8 @@
 //!
 //! Every subdirectory that contains a `module.toml` file is treated as a
 //! module.  The registry uses the `[module].name` field from the manifest
-//! (not the directory name) as the lookup key.
+//! (not the directory name) as the lookup key; a name may be registered from
+//! one directory only.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,44 @@ struct LoadedModule {
 }
 
 // ---------------------------------------------------------------------------
+// ScanReport
+// ---------------------------------------------------------------------------
+
+/// What [`ModuleRegistry::scan_directory`] did with each module directory.
+///
+/// Every list is in directory-name order.
+#[derive(Debug, Default)]
+pub struct ScanReport {
+    /// Local modules now loaded into the registry: (module dir, manifest).
+    /// A manifest's [`warnings`](ModuleManifest::warnings) (e.g. a clamped
+    /// `[resources]` value) are reported here.
+    pub loaded: Vec<(PathBuf, ModuleManifest)>,
+    /// Remote modules: the manifest is valid, but they run on the
+    /// hive-runner, so nothing was loaded into the WASM runtime.
+    pub remote: Vec<(PathBuf, ModuleManifest)>,
+    /// Directories that did not load, with the reason (an invalid manifest,
+    /// a missing or broken `.wasm`, a duplicate module name, ...).
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+impl ScanReport {
+    /// The names of the loaded local modules.
+    pub fn loaded_names(&self) -> Vec<&str> {
+        self.loaded.iter().map(|(_, m)| m.name.as_str()).collect()
+    }
+
+    /// The names of the remote modules.
+    pub fn remote_names(&self) -> Vec<&str> {
+        self.remote.iter().map(|(_, m)| m.name.as_str()).collect()
+    }
+
+    fn fail(&mut self, module_dir: PathBuf, error: anyhow::Error) {
+        warn!(dir = %module_dir.display(), error = %format!("{error:#}"), "failed to load module — skipping");
+        self.failed.push((module_dir, format!("{error:#}")));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ModuleRegistry
 // ---------------------------------------------------------------------------
 
@@ -64,7 +103,10 @@ struct LoadedModule {
 /// # async fn run() -> anyhow::Result<()> {
 /// let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
 /// let mut registry = ModuleRegistry::new(provider, ResourceLimits::default())?;
-/// registry.scan_directory(".chatty/modules")?;
+/// let report = registry.scan_directory(".chatty/modules")?;
+/// for (dir, reason) in &report.failed {
+///     eprintln!("{}: {reason}", dir.display());
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -99,55 +141,83 @@ impl ModuleRegistry {
     /// Scan `root_dir` for module sub-directories and load each one.
     ///
     /// A sub-directory is a module if it contains a `module.toml` file.
-    /// Directories that fail to load are logged as warnings and skipped;
-    /// they do **not** cause this call to return an error.
+    /// Directories are visited in name order. One that fails to load is
+    /// reported in [`ScanReport::failed`] and skipped; it does **not** make
+    /// this call return an error (only an unreadable `root_dir` does).
     ///
-    /// Returns the names of all successfully loaded modules.
-    pub fn scan_directory(&mut self, root_dir: impl AsRef<Path>) -> Result<Vec<String>> {
+    /// Two directories declaring the same module name: the first in name
+    /// order wins and the second is a failure. So is a name already loaded
+    /// into this registry from a different directory.
+    pub fn scan_directory(&mut self, root_dir: impl AsRef<Path>) -> Result<ScanReport> {
         let root_dir = root_dir.as_ref();
         info!(dir = %root_dir.display(), "scanning for WASM modules");
 
         let entries = std::fs::read_dir(root_dir)
             .with_context(|| format!("failed to read module directory {}", root_dir.display()))?;
 
-        let mut loaded = Vec::new();
-
+        let mut module_dirs = Vec::new();
         for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
+            match entry {
+                Ok(entry) => {
+                    let module_dir = entry.path();
+                    if !module_dir.is_dir() {
+                        continue;
+                    }
+                    if !module_dir.join("module.toml").exists() {
+                        debug!(dir = %module_dir.display(), "skipping: no module.toml");
+                        continue;
+                    }
+                    module_dirs.push(module_dir);
+                }
+                Err(e) => warn!(error = %e, "error reading directory entry"),
+            }
+        }
+        module_dirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+        let mut report = ScanReport::default();
+        // Module name → the directory that declared it first in this scan.
+        let mut claimed: HashMap<String, PathBuf> = HashMap::new();
+
+        for module_dir in module_dirs {
+            let manifest = match ModuleManifest::from_file(&module_dir.join("module.toml")) {
+                Ok(manifest) => manifest,
                 Err(e) => {
-                    warn!(error = %e, "error reading directory entry");
+                    report.fail(module_dir, e);
                     continue;
                 }
             };
+            if let Some(first) = claimed.get(&manifest.name) {
+                let reason = anyhow::anyhow!(
+                    "duplicate module name '{}': already declared by {}",
+                    manifest.name,
+                    first.display()
+                );
+                report.fail(module_dir, reason);
+                continue;
+            }
+            claimed.insert(manifest.name.clone(), module_dir.clone());
+            for warning in &manifest.warnings {
+                warn!(module = %manifest.name, dir = %module_dir.display(), %warning, "module manifest");
+            }
 
-            let module_dir = entry.path();
-            if !module_dir.is_dir() {
+            // Remote modules have no local WASM binary — they execute on the
+            // hive-runner, and the gateway routes them there.
+            if manifest.execution_mode.is_remote() {
+                debug!(module = %manifest.name, "remote module: not loaded into the WASM runtime");
+                report.remote.push((module_dir, manifest));
                 continue;
             }
 
-            let manifest_path = module_dir.join("module.toml");
-            if !manifest_path.exists() {
-                debug!(dir = %module_dir.display(), "skipping: no module.toml");
-                continue;
-            }
-
-            match self.load_from_dir(&module_dir) {
-                Ok(name) => {
-                    info!(module = %name, dir = %module_dir.display(), "loaded module");
-                    loaded.push(name);
+            match self.insert_local(&module_dir, manifest.clone()) {
+                Ok(()) => {
+                    info!(module = %manifest.name, dir = %module_dir.display(), "loaded module");
+                    report.loaded.push((module_dir, manifest));
                 }
-                Err(e) => {
-                    warn!(
-                        dir = %module_dir.display(),
-                        error = %e,
-                        "failed to load module — skipping"
-                    );
-                }
+                Err(e) => report.fail(module_dir, e),
             }
         }
 
-        Ok(loaded)
+        Ok(report)
     }
 
     // -----------------------------------------------------------------------
@@ -307,34 +377,57 @@ impl ModuleRegistry {
     // -----------------------------------------------------------------------
 
     fn load_from_dir(&mut self, module_dir: &Path) -> Result<String> {
-        let manifest_path = module_dir.join("module.toml");
-
-        let manifest = ModuleManifest::from_file(&manifest_path)?;
+        let manifest = ModuleManifest::from_file(&module_dir.join("module.toml"))?;
+        let name = manifest.name.clone();
 
         // Remote modules have no local WASM binary — they execute on the
-        // hive-runner.  Skip them silently; the gateway routes them via the
-        // runner's OpenAI-compat endpoint instead.
-        if matches!(manifest.execution_mode.as_str(), "remote" | "remote_only") {
-            debug!(
-                module = %manifest.name,
-                "skipping remote module during WASM registry scan"
+        // hive-runner.  Skip them; the gateway routes them via the runner's
+        // OpenAI-compat endpoint instead.
+        if manifest.execution_mode.is_remote() {
+            debug!(module = %name, "remote module: not loaded into the WASM runtime");
+            return Ok(name);
+        }
+
+        self.insert_local(module_dir, manifest)?;
+        Ok(name)
+    }
+
+    /// Load a local module's `.wasm` and register it under its name.
+    ///
+    /// Refuses a name already registered from a different directory; the
+    /// same directory is a reload and replaces the old instance.
+    fn insert_local(&mut self, module_dir: &Path, manifest: ModuleManifest) -> Result<()> {
+        if let Some(existing) = self.modules.get(&manifest.name)
+            && existing.module_dir != module_dir
+        {
+            anyhow::bail!(
+                "duplicate module name '{}': already loaded from {}",
+                manifest.name,
+                existing.module_dir.display()
             );
-            return Ok(manifest.name);
         }
 
         let wasm_path = manifest.wasm_path.as_ref().with_context(|| {
             format!(
-                "manifest {} declares local execution but has no wasm path",
-                manifest_path.display()
+                "manifest in {} declares local execution but has no wasm path",
+                module_dir.display()
             )
         })?;
 
         // Build resource limits from manifest, falling back to defaults.
         let limits = self.limits_from_manifest(&manifest);
 
-        // Build a RuntimeManifest (the chatty-wasm-runtime type) from our
-        // parsed manifest so we can pass it to WasmModule::from_file.
-        let runtime_manifest = RuntimeManifest::new(&manifest.name);
+        // The runtime's manifest carries what the guest sees: `[config]`
+        // through `config::get`, `[files].root` through `file::read-bytes`.
+        let mut runtime_manifest = manifest
+            .config
+            .iter()
+            .fold(RuntimeManifest::new(&manifest.name), |m, (key, value)| {
+                m.with_config(key, value)
+            });
+        if let Some(root) = &manifest.files_root {
+            runtime_manifest = runtime_manifest.with_weights_root(root);
+        }
 
         let wasm = WasmModule::from_file(
             &self.engine,
@@ -351,10 +444,8 @@ impl ModuleRegistry {
             )
         })?;
 
-        let name = manifest.name.clone();
-
         self.modules.insert(
-            name.clone(),
+            manifest.name.clone(),
             LoadedModule {
                 manifest,
                 module_dir: module_dir.to_path_buf(),
@@ -362,13 +453,14 @@ impl ModuleRegistry {
             },
         );
 
-        Ok(name)
+        Ok(())
     }
 
     /// The registry's limits, lowered by the manifest's `[resources]`.
     ///
     /// A manifest may only lower a limit (0 means "not set"), and the result
-    /// never exceeds the host ceilings (PL-D3).
+    /// never exceeds the host ceilings (PL-D3; the manifest's values are
+    /// already clamped to them at parse time).
     fn limits_from_manifest(&self, manifest: &ModuleManifest) -> ResourceLimits {
         let mut limits = self.default_limits.clone();
 
@@ -448,8 +540,8 @@ mod tests {
     fn scan_empty_directory_returns_empty_list() {
         let tmp = tempfile::tempdir().unwrap();
         let mut reg = noop_registry();
-        let names = reg.scan_directory(tmp.path()).unwrap();
-        assert!(names.is_empty());
+        let report = reg.scan_directory(tmp.path()).unwrap();
+        assert!(report.loaded.is_empty() && report.remote.is_empty() && report.failed.is_empty());
     }
 
     #[test]
@@ -457,8 +549,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("not-a-module")).unwrap();
         let mut reg = noop_registry();
-        let names = reg.scan_directory(tmp.path()).unwrap();
-        assert!(names.is_empty());
+        let report = reg.scan_directory(tmp.path()).unwrap();
+        assert!(report.loaded.is_empty() && report.remote.is_empty() && report.failed.is_empty());
     }
 
     #[test]

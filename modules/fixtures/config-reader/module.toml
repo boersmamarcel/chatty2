@@ -8,3 +8,6 @@ wasm = "config-reader.wasm"
 tools = []
 chat = true
 agent = true
+
+[config]
+greeting = "hello from module.toml"
