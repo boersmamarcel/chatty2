@@ -34,129 +34,23 @@
 //! [`the_context_guard_shapes_inside_the_tool_loop`]'s subject.
 
 use std::cell::RefCell;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use parking_lot::Mutex;
 use similar::TextDiff;
 
 use super::*;
 use crate::factories::agent_factory::{AgentBuildContext, AgentServices};
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+use crate::testing::fake_model::{FakeDaemon, sse_stream};
 
 // ── Fake provider daemons ────────────────────────────────────────────────────
-
-/// A localhost daemon that records request bodies and replays canned
-/// responses, one per connection, in order.
-///
-/// Blocking, on its own OS thread: the workspace's tokio does not carry the
-/// `net` feature, and a socket server is not what this test is about. The
-/// same daemon plays Ollama (`/api/chat`, NDJSON) and an OpenAI-compatible
-/// endpoint (`/chat/completions`, SSE): rig only reads the body, so the
-/// content type is the whole difference.
-struct FakeDaemon {
-    port: u16,
-    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl FakeDaemon {
-    /// Serve `responses` in order, one per request, as `content_type`.
-    fn start(content_type: &'static str, responses: Vec<String>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port is available");
-        let port = listener.local_addr().expect("bound address").port();
-        let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
-        let sink = bodies.clone();
-
-        std::thread::spawn(move || {
-            for (connection, response) in listener.incoming().zip(responses) {
-                let Ok(mut connection) = connection else {
-                    break;
-                };
-                match read_request_body(&mut connection) {
-                    Some(body) => sink.lock().push(body),
-                    None => break,
-                }
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n",
-                    response.len()
-                );
-                let _ = connection.write_all(head.as_bytes());
-                let _ = connection.write_all(response.as_bytes());
-                let _ = connection.flush();
-            }
-        });
-
-        Self { port, bodies }
-    }
-
-    /// An Ollama daemon: one NDJSON record per `POST /api/chat`.
-    fn ollama(responses: Vec<String>) -> Self {
-        Self::start("application/x-ndjson", responses)
-    }
-
-    /// An OpenAI-compatible daemon, as OpenRouter's client sees it: one SSE
-    /// stream per `POST /chat/completions`.
-    fn openai_compatible(responses: Vec<String>) -> Self {
-        Self::start("text/event-stream", responses)
-    }
-
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
-    /// The recorded bodies, in the order the daemon received them.
-    fn bodies(&self) -> Vec<Vec<u8>> {
-        self.bodies.lock().clone()
-    }
-}
-
-/// Read one HTTP request and return its body, or `None` if the peer hung up.
-fn read_request_body(connection: &mut TcpStream) -> Option<Vec<u8>> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut headers_end: Option<usize> = None;
-    let mut content_length = 0usize;
-
-    loop {
-        if headers_end.is_none()
-            && let Some(position) = find(&buffer, b"\r\n\r\n")
-        {
-            content_length = content_length_of(&buffer[..position])
-                .expect("rig sends a Content-Length body, not a chunked one");
-            headers_end = Some(position + 4);
-        }
-        if let Some(start) = headers_end
-            && buffer.len() >= start + content_length
-        {
-            return Some(buffer[start..start + content_length].to_vec());
-        }
-        match connection.read(&mut chunk) {
-            Ok(0) | Err(_) => return None,
-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-        }
-    }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn content_length_of(headers: &[u8]) -> Option<usize> {
-    String::from_utf8_lossy(headers)
-        .lines()
-        .find_map(|line| {
-            line.split_once(':')
-                .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-        })
-        .and_then(|(_, value)| value.trim().parse().ok())
-}
+//
+// `FakeDaemon` (`testing::fake_model`, AGE-632) plays both providers: Ollama
+// (`/api/chat`, NDJSON) and an OpenAI-compatible endpoint (`/chat/completions`,
+// SSE), replaying the canned responses below in order and recording every
+// body exactly as rig serialized it.
 
 /// One `/api/chat` NDJSON record whose assistant message calls `list_directory`.
 fn tool_call_response(path: &str) -> String {
@@ -192,16 +86,6 @@ fn text_response(text: &str) -> String {
     })
     .to_string()
         + "\n"
-}
-
-/// The SSE frames rig's OpenAI-compatible decoder reads, one `data:` event
-/// per line plus the `[DONE]` sentinel.
-fn sse_stream(frames: &[serde_json::Value]) -> String {
-    frames
-        .iter()
-        .map(|frame| format!("data: {frame}\n\n"))
-        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
-        .collect()
 }
 
 fn sse_usage() -> serde_json::Value {

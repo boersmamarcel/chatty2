@@ -1,0 +1,4 @@
+started kit-worker: do the delegated task
+progress Hello, world
+finished success=true usage=[input=10 output=5 cache_read=0 cache_write=0 calls=1] result=Hello, world
+answer success=true: Hello, world

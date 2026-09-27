@@ -1,0 +1,8 @@
+started kit-worker: do the delegated task
+progress read_file
+progress ✓ read_file
+progress list_directory
+progress ✓ list_directory
+progress Still investigating.
+finished success=true usage=[input=30 output=15 cache_read=0 cache_write=0 calls=1] result=Still investigating.
+answer success=true: Still investigating.

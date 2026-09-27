@@ -1,0 +1,5 @@
+started kit-worker: do the delegated task
+progress error: CompletionError: HttpError: Invalid status code 401 Unauthorized with message: {"error":{"message":"scripted error 401"}}
+progress error: CompletionError: HttpError: Invalid status code 401 Unauthorized with message: {"error":{"message":"scripted error 401"}}
+finished success=false usage=[none] result=⚠️ the turn ended with an unrecovered stream error: CompletionError: HttpError: Invalid status code 401 Unauthorized with message: {"error":{"message":"scripted error 401"}}
+error: Invocation failed: Agent 'kit-worker' reported failure: the turn ended with an unrecovered stream error: CompletionError: HttpError: Invalid status code 401 Unauthorized with message: {"error":{"message":"scripted error 401"}}
