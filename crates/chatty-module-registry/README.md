@@ -10,14 +10,16 @@ and adds:
   `module.toml` manifests
 - **Manifest parsing** — typed `ModuleManifest` with capabilities,
   protocols, and resource limits
-- **Hot-reload** — `notify`-based filesystem watcher that re-loads
-  changed modules
-- **Lifecycle** — start, stop, enumerate currently loaded modules
+- **A `notify`-based filesystem watcher** (`watch`) that can re-load changed
+  modules — implemented and tested, but not called by any production code
+  today; nothing hot-reloads a module yet
+- **Lifecycle** — load, unload, reload, enumerate currently loaded modules
 
 ## Public surface
 
 - [`ModuleRegistry`] — owns all loaded modules, exposes
-  `scan_directory`, `start_watcher`, `list`, `get`
+  `scan_directory`, `load`, `unload`, `reload`, `get`, `get_mut`, `manifest`,
+  `module_names`, `len`, `is_empty`, and `watch`
 - [`ModuleManifest`] + [`ModuleCapabilities`], [`ModuleProtocols`],
   [`ModuleResourceLimits`]
 
@@ -25,8 +27,13 @@ See the rustdoc on [`ModuleRegistry`] for the canonical usage example.
 
 ## Where modules live by default
 
-`~/.chatty/modules/` (override via `ChattyApp` settings). Each subdirectory
-is one module: a `.wasm` plus a `module.toml`.
+Platform-native app-data directories, not a single fixed path:
+`~/Library/Application Support/chatty/modules/` on macOS,
+`~/.local/share/chatty/modules/` (or `$XDG_DATA_HOME/chatty/modules/`) on
+Linux, `%APPDATA%\chatty\modules\` on Windows — overridable in module
+settings. `.chatty/modules` (relative to the working directory) is only a
+last-resort fallback when the platform data directory can't be determined.
+Each subdirectory is one module: a `.wasm` plus a `module.toml`.
 
 See [`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md)
 for the end-to-end module flow.
