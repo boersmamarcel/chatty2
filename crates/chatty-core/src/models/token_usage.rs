@@ -236,6 +236,14 @@ pub struct TokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_to: Option<String>,
 
+    /// The plugin whose `llm::complete` calls this line is, when it is a
+    /// plugin's line rather than the turn's own requests (PL-U2, AGE-616):
+    /// a spec's WASM plugin runs inside the agent's turn, on the agent's
+    /// provider client, and its spend is folded into the turn under its own
+    /// name. `None` for every other line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+
     /// The model the line was spent on (AGE-682); per-request records carry
     /// their own, which win. `None` on records written before it was
     /// tracked, which are therefore unpriced.
@@ -266,6 +274,7 @@ impl Default for TokenUsage {
             api_turn_count: 1,
             calls: Vec::new(),
             delegated_to: None,
+            plugin: None,
             model: None,
             at: None,
             duration_ms: 0,

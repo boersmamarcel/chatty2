@@ -151,6 +151,9 @@ pub(super) struct NativeTools {
     /// `load_tools`, under dynamic tool loading. Registered whatever the
     /// profile says: it is how the agent reaches the rest of its tools.
     pub load_tools_tool: Option<LoadToolsTool>,
+    /// The spec's plugin tools (PL-U2), plugins sorted by name. The spec is
+    /// their allow-list, so the profile does not filter them.
+    pub plugin_tools: Vec<rig_agent::tool::DynamicTool>,
 }
 
 /// Register `tool` unless the profile leaves its name out (ADR-0011 C11).
@@ -326,6 +329,7 @@ impl NativeTools {
         if let Some(t) = self.terminal_run_tool {
             b = add(b, profile, t);
         }
+        b = b.dynamic_tools(self.plugin_tools);
         if let Some(t) = self.load_tools_tool {
             b = b.tool(t);
         }
@@ -380,7 +384,8 @@ macro_rules! native_tools {
         ask_user_tool: $ask_user_tool:expr,
         terminal_read_tool: $terminal_read_tool:expr,
         terminal_run_tool: $terminal_run_tool:expr,
-        load_tools_tool: $load_tools_tool:expr $(,)?
+        load_tools_tool: $load_tools_tool:expr,
+        plugin_tools: $plugin_tools:expr $(,)?
     ) => {
         NativeTools {
             tool_profile: $tool_profile,
@@ -437,6 +442,7 @@ macro_rules! native_tools {
             terminal_read_tool: $terminal_read_tool,
             terminal_run_tool: $terminal_run_tool,
             load_tools_tool: $load_tools_tool,
+            plugin_tools: $plugin_tools,
         }
     };
 }

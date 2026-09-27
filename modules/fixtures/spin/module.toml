@@ -5,6 +5,6 @@ description = "Adversarial test fixture: spin"
 wasm = "spin.wasm"
 
 [capabilities]
-tools = []
+tools = ["spin"]
 chat = true
 agent = true

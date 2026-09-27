@@ -775,6 +775,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `GLOBAL_WRITE_APPROVAL_MODE` | `tools/filesystem_write_tool.rs` | `OnceLock<Mutex<ApprovalMode>>` | Write-tool approval without coupling to UI |
 | `REGISTRY` | `services/browser/registry.rs` | `LazyLock<Mutex<HashMap<String, Arc<BrowserManager>>>>` | `conversation_id → BrowserManager` so the transcript can dock a live browser panel |
 | `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
+| `PLUGIN_ENGINE` | `tools/plugin_tool.rs` | `OnceLock<wasmtime::Engine>` | One Wasmtime engine for every spec plugin instance (PL-U2); limits are per store |
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `WRITE_SLOTS` | `settings/repositories/generic_json_repository.rs` | `LazyLock<Mutex<HashMap<PathBuf, WriteSlot>>>` | Per settings file, the last save written behind an async lock, so overlapping saves of one file never interleave and an older save never lands over a newer one (AGE-562) |
