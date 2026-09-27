@@ -573,6 +573,7 @@ mod empty_completion {
             cache_write_tokens: 0,
             output_tokens,
             reasoning_tokens: 0,
+            ..Default::default()
         })
     }
 
@@ -889,8 +890,9 @@ async fn a_hosted_turn_is_recorded_by_the_local_session() {
 
 mod totals_and_pricing {
     use super::*;
-    use crate::models::token_usage::ApiCallUsage;
+    use crate::models::token_usage::{ApiCallUsage, price};
     use crate::repositories::{ConversationRepository, ConversationSqliteRepository};
+    use crate::settings::models::ModelsModel;
 
     /// A priced model, with the cache rates set so all four prices are
     /// exercised: $3/M input, $15/M output, $0.30/M cache read, $3.75/M
@@ -912,6 +914,7 @@ mod totals_and_pricing {
             cache_write_tokens: write,
             output_tokens: output,
             reasoning_tokens: 0,
+            ..Default::default()
         }
     }
 
@@ -943,6 +946,7 @@ mod totals_and_pricing {
             cache_write_tokens: aggregate.cache_write_tokens,
             output_tokens: aggregate.output_tokens,
             reasoning_tokens: 0,
+            ..Default::default()
         })));
         items.push(ScriptedItem::Chunk(StreamChunk::Done));
         Scenario {
@@ -1019,7 +1023,7 @@ mod totals_and_pricing {
 
     /// The numbers chatty-gpui's `price_usage` produced for this usage on
     /// this model before pricing moved into the session — hand-computed from
-    /// the same formula it applied (`TokenUsage::calculate_cost` with the
+    /// the same formula it applied (what `token_usage::price` computes with the
     /// model's four prices): 1_200 input × $3/M + 500 output × $15/M +
     /// 2_000 cache read × $0.30/M + 2_000 cache write × $3.75/M.
     const GPUI_COST_FOR_FIXED_USAGE: f64 = 0.0036 + 0.0075 + 0.0006 + 0.0075;
@@ -1050,9 +1054,9 @@ mod totals_and_pricing {
 
     /// AGE-415: what a delegated worker reported on its terminal status is
     /// one line on the leader's conversation, named for the worker and
-    /// priced at the leader's rates, ahead of the turn's own usage — so
-    /// `total_cost` carries the delegation while `last_usage` and the
-    /// context fill stay the leader's own.
+    /// priced at the model it names — here the leader's own — ahead of the
+    /// turn's own usage, so `total_cost` carries the delegation while
+    /// `last_usage` and the context fill stay the leader's own.
     #[tokio::test]
     async fn a_delegated_workers_usage_is_a_priced_line_on_the_leaders_conversation() {
         let mut session = session_with_model(&priced_model()).await;
@@ -1069,10 +1073,11 @@ mod totals_and_pricing {
             InvokeAgentProgress::Finished {
                 success: true,
                 result: Some("fixed".into()),
-                usage: Some(TokenUsage {
+                usage: vec![TokenUsage {
                     delegated_to: Some("local-coder".into()),
+                    model: Some(priced_model().model_ref()),
                     ..TokenUsage::new(1_000, 100)
-                }),
+                }],
             },
         ];
         complete_turn(&mut session, scenario).await;
@@ -1090,7 +1095,7 @@ mod totals_and_pricing {
             (delegated.input_tokens, delegated.output_tokens),
             (1_000, 100)
         );
-        // 1_000 input × $3/M + 100 output × $15/M, at the leader's prices.
+        // 1_000 input × $3/M + 100 output × $15/M, at its model's prices.
         let delegated_cost = delegated.estimated_cost_usd.expect("priced");
         assert!((delegated_cost - (0.003 + 0.0015)).abs() < 1e-12);
 
@@ -1118,6 +1123,135 @@ mod totals_and_pricing {
         let usage = session.conversation().unwrap().token_usage();
         assert_eq!(usage.message_usages.len(), 3);
         assert_eq!(usage.total_input_tokens, 1_200 + 1_000 + 10);
+    }
+
+    /// A worker on another model than the leader's.
+    fn worker_model() -> ModelConfig {
+        let mut model = unpriced_model();
+        model.id = "worker".to_string();
+        model.model_identifier = "worker-model".to_string();
+        model.cost_per_million_input_tokens = Some(15.0);
+        model.cost_per_million_output_tokens = Some(75.0);
+        model
+    }
+
+    /// A leader on a $1/M model.
+    fn leader_model() -> ModelConfig {
+        let mut model = unpriced_model();
+        model.cost_per_million_input_tokens = Some(1.0);
+        model.cost_per_million_output_tokens = Some(5.0);
+        model
+    }
+
+    fn delegation(usage: Vec<TokenUsage>) -> Vec<InvokeAgentProgress> {
+        vec![
+            InvokeAgentProgress::Started {
+                agent_name: "reviewer".into(),
+                prompt: "review it".into(),
+                source: crate::models::message_types::ToolSource::Local,
+            },
+            InvokeAgentProgress::Finished {
+                success: true,
+                result: Some("looks good".into()),
+                usage,
+            },
+        ]
+    }
+
+    /// AGE-682: a delegated line is priced at the model it was spent on, not
+    /// at the leader's rates. Leader $1/M, worker $15/M, 1M input tokens:
+    /// the delegated line costs $15.
+    #[tokio::test]
+    async fn delegated_usage_is_priced_at_worker_model() {
+        let mut session = session_with_model(&leader_model()).await;
+        let mut roster = ModelsModel::new();
+        roster.add_model(leader_model());
+        roster.add_model(worker_model());
+        session.set_price_book(roster.price_book());
+
+        let mut scenario = tool_turn(1, vec![call(1, 10, 0, 0, 0)]);
+        scenario.progress = delegation(vec![TokenUsage {
+            delegated_to: Some("reviewer".into()),
+            model: Some(worker_model().model_ref()),
+            ..TokenUsage::new(1_000_000, 0)
+        }]);
+        complete_turn(&mut session, scenario).await;
+
+        let usage = session.conversation().unwrap().token_usage();
+        let delegated = &usage.message_usages[0];
+        assert_eq!(delegated.delegated_to.as_deref(), Some("reviewer"));
+        let cost = delegated
+            .estimated_cost_usd
+            .expect("the worker's model is priced");
+        assert!(
+            (cost - 15.0).abs() < 1e-9,
+            "priced at the worker's $15/M: {cost}"
+        );
+        let own = usage.last_usage().unwrap();
+        assert_eq!(own.model, Some(leader_model().model_ref()));
+        assert!((own.estimated_cost_usd.unwrap() - 10.0 / 1_000_000.0).abs() < 1e-12);
+    }
+
+    /// AGE-682: a delegated line on a model the leader cannot price — or
+    /// one that names no model at all — is unpriced, not charged at the
+    /// leader's rates and not $0.
+    #[tokio::test]
+    async fn a_delegated_line_on_an_unknown_model_is_unpriced() {
+        let mut session = session_with_model(&leader_model()).await;
+        let mut scenario = tool_turn(1, vec![call(1, 10, 0, 0, 0)]);
+        scenario.progress = delegation(vec![
+            TokenUsage {
+                model: Some(worker_model().model_ref()),
+                ..TokenUsage::new(1_000_000, 0)
+            },
+            TokenUsage::new(1_000_000, 0),
+        ]);
+        complete_turn(&mut session, scenario).await;
+
+        let usage = session.conversation().unwrap().token_usage();
+        assert_eq!(usage.message_usages[0].estimated_cost_usd, None);
+        assert_eq!(usage.message_usages[1].estimated_cost_usd, None);
+        assert!((usage.total_estimated_cost_usd - 10.0 / 1_000_000.0).abs() < 1e-12);
+    }
+
+    /// AGE-682: cost is a view. Pricing a conversation's persisted lines
+    /// with the price book reproduces its stored total exactly.
+    #[tokio::test]
+    async fn cost_is_recomputable() {
+        let mut session = session_with_model(&priced_model()).await;
+        let mut roster = ModelsModel::new();
+        roster.add_model(priced_model());
+        roster.add_model(worker_model());
+        session.set_price_book(roster.price_book());
+
+        let mut scenario = tool_turn(
+            1,
+            vec![call(1, 1_000, 0, 2_000, 100), call(2, 200, 2_000, 0, 400)],
+        );
+        scenario.progress = delegation(vec![
+            TokenUsage {
+                model: Some(worker_model().model_ref()),
+                ..TokenUsage::new(123_456, 789)
+            },
+            TokenUsage {
+                model: Some(priced_model().model_ref()),
+                ..TokenUsage::new(4_321, 98)
+            },
+        ]);
+        complete_turn(&mut session, scenario).await;
+        three_turns_four_tool_calls(&mut session).await;
+
+        let conversation = session.conversation().unwrap();
+        let json = conversation.serialize_token_usage().unwrap();
+        let persisted = Conversation::deserialize_token_usage(&json).unwrap();
+        let cost = price(&persisted.message_usages, &roster.price_book());
+        assert_eq!(cost.unpriced_lines, 0);
+        assert!(conversation.token_usage().total_estimated_cost_usd > 0.0);
+        assert_eq!(
+            cost.usd,
+            conversation.token_usage().total_estimated_cost_usd
+        );
+        assert_eq!(cost.usd, persisted.total_estimated_cost_usd);
     }
 
     #[tokio::test]

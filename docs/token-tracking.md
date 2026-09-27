@@ -79,6 +79,37 @@ snapshot in place, setting `actual_input_tokens` and `actual_output_tokens`. The
 watcher sees the change and triggers another re-render, so the popover shows actual
 counts next to the estimate.
 
+## Usage lines and cost (AGE-682)
+
+A usage record holds facts, not prices. Every per-request `ApiCallUsage`, and every
+`TokenUsage` line built from them, carries its token counts plus:
+
+- `model: Option<ModelRef { provider, model_id }>` — the provider and the model id as
+  sent to it, stamped by `llm_service::stream_prompt` from `AgentClient::model_ref()`;
+- `at` — when the request (or the line's last request) finished;
+- `duration_ms` — how long it took.
+
+Cost is computed when the lines are read, by one function:
+`token_usage::price(lines, &PriceBook) -> Cost`. `PriceBook` looks up `(model, at)`
+and returns a `TokenPricing`; locally it is `ModelsModel::price_book()`, the roster's
+current `ModelConfig::token_pricing()`. A line with per-request records is the sum of
+its requests, each priced at its own model. A line whose model is unknown or has no
+prices is **unpriced**: its `estimated_cost_usd` is `None` and `Cost::unpriced_lines`
+counts it; it is never shown as $0.
+
+`AgentSession::finish_turn` prices every line of the turn with the session's book (set
+by the owner with `set_price_book`) plus the conversation's bound model, and caches the
+result in `estimated_cost_usd`; `ConversationTokenUsage::total_estimated_cost_usd` is
+the sum of those caches, so pricing the persisted lines with the same book reproduces
+it exactly. Nothing on the A2A wire carries a price: `metadata.usage` holds the token
+totals and `lines`, each with its model, tokens, `at` (unix ms) and `durationMs`.
+
+There is no backward compatibility: a line persisted before AGE-682 loads with
+`model: None`, its stored cost is dropped on load, and it shows as unpriced.
+
+A context compaction's summary call (AGE-683) is counted with the turn it ran in, as its
+own `ApiCallUsage` naming the utility model that served it.
+
 ## Research connection (GEPA / ACE)
 
 Context headroom and token cost feed optimizer economics ([cost model](research/cost-model.md))
@@ -196,9 +227,11 @@ enforcement is a `SpendGate` (`services/spend_gate.rs`) that hive implements and
 With no gate — the desktop, chatty-tui — there is no check.
 
 A delegation's spend is part of the conversation's total: `invoke_agent` reads the
-worker's `metadata.usage` off the terminal status and `AgentSession` prices it at the
-leader's rates as a `TokenUsage` line marked `delegated_to`, rolled up through nested
-leaders (AGE-415). `context_tokens` and `last_usage` stay the leader's own. Details in
+worker's `metadata.usage` lines off the terminal status and `AgentSession` records each
+as a `TokenUsage` line marked `delegated_to`, priced at the model the line names
+(AGE-415, AGE-682). Nested leaders forward their workers' lines with their own, merging
+only lines on the same model. `context_tokens` and `last_usage` stay the leader's own.
+Details in
 [a2a-and-wasm-modules.md](a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
 
 **Read by:**

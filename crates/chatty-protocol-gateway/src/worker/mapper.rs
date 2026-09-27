@@ -62,19 +62,21 @@
 //!
 //! Token usage. A2A has no notion of it, and inventing a frame would put
 //! accounting into the task protocol. It rides in the terminal status's
-//! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it. What
-//! this worker's own delegations spent is folded into that number before
-//! it goes (AGE-415), so a parent sees one number per delegation however
-//! deep the tree below it, and the root's line carries the whole tree.
+//! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it. It goes
+//! as lines, one per model, each naming its model and carrying tokens and
+//! time but never a price (AGE-682): whoever reads a line prices it. What
+//! this worker's own delegations spent is forwarded with it (AGE-415), and
+//! lines merge only when they share a model, so the root sees one line per
+//! model however deep the tree below it, and its lines carry the whole tree.
 
 use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::token_usage::TokenUsage;
-use chatty_core::services::a2a_client::TRACE_METADATA_KEY;
+use chatty_core::services::a2a_client::{TRACE_METADATA_KEY, USAGE_METADATA_KEY, usage_metadata};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -239,9 +241,9 @@ pub struct TaskMapper {
     tool_names: HashMap<String, String>,
     state: TaskState,
     failure: Option<String>,
-    usage: Option<TokenUsage>,
-    /// What this worker's own delegations spent, summed (AGE-415).
-    delegated_usage: Option<TokenUsage>,
+    /// What this task spent, its own turns and everything its delegations
+    /// reported (AGE-415), one line per model (AGE-682).
+    usage: Vec<TokenUsage>,
     /// This task's tool calls, in the order they started (AGE-467).
     trace: Vec<TraceStep>,
     /// Tool call id → index into `trace`, for a call still waiting on its
@@ -258,8 +260,7 @@ impl TaskMapper {
             // events that mean otherwise say so explicitly.
             state: TaskState::Completed,
             failure: None,
-            usage: None,
-            delegated_usage: None,
+            usage: Vec::new(),
             trace: Vec::new(),
             open_calls: HashMap::new(),
         }
@@ -336,17 +337,29 @@ impl TaskMapper {
                 })
             }
 
-            // Usage is held rather than sent: see the module docs.
+            // Usage is held rather than sent: see the module docs. A turn's
+            // requests can name more than one model (a compaction's summary
+            // call, AGE-683), so each goes on at its own.
             SessionEvent::TokenUsage(usage) => {
-                self.usage = Some(usage.clone());
+                if usage.calls.is_empty() {
+                    merge_line(&mut self.usage, usage.clone());
+                } else {
+                    for call in &usage.calls {
+                        let mut line = TokenUsage::from_calls(vec![call.clone()]);
+                        line.model = call.model.clone().or_else(|| usage.model.clone());
+                        line.calls.clear();
+                        merge_line(&mut self.usage, line);
+                    }
+                }
                 None
             }
-            // A grandchild's spend rolls up into this task's number.
-            SessionEvent::Delegation(InvokeAgentProgress::Finished {
-                usage: Some(usage), ..
-            }) => {
-                let total = self.delegated_usage.get_or_insert_with(TokenUsage::default);
-                add_tokens(total, usage);
+            // A grandchild's spend is forwarded with this task's.
+            SessionEvent::Delegation(InvokeAgentProgress::Finished { usage, .. })
+                if !usage.is_empty() =>
+            {
+                for line in usage {
+                    merge_line(&mut self.usage, line.clone());
+                }
                 None
             }
 
@@ -387,35 +400,19 @@ impl TaskMapper {
     /// tool calls, the compacted trace under [`TRACE_METADATA_KEY`]
     /// (AGE-467). `None` when neither has anything to report.
     fn terminal_metadata(&self) -> Option<Value> {
-        let usage = self.reported_usage();
         let trace = compact_trace(&self.trace);
-        if usage.is_none() && trace.is_none() {
+        if self.usage.is_empty() && trace.is_none() {
             return None;
         }
 
-        let mut metadata = match usage.as_ref().map(usage_metadata) {
-            Some(Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
-        };
+        let mut metadata = serde_json::Map::new();
+        if !self.usage.is_empty() {
+            metadata.insert(USAGE_METADATA_KEY.to_string(), usage_metadata(&self.usage));
+        }
         if let Some(trace) = trace {
             metadata.insert(TRACE_METADATA_KEY.to_string(), Value::String(trace));
         }
         Some(Value::Object(metadata))
-    }
-
-    /// The task's usage as the parent is told it: this worker's own turn
-    /// plus everything it delegated, or `None` when neither reported any.
-    fn reported_usage(&self) -> Option<TokenUsage> {
-        match (&self.usage, &self.delegated_usage) {
-            (None, None) => None,
-            (Some(own), None) => Some(own.clone()),
-            (None, Some(delegated)) => Some(delegated.clone()),
-            (Some(own), Some(delegated)) => {
-                let mut total = own.clone();
-                add_tokens(&mut total, delegated);
-                Some(total)
-            }
-        }
     }
 
     fn status(&self, state: TaskState, message: Option<String>) -> ParticipantFrame {
@@ -429,34 +426,38 @@ impl TaskMapper {
     }
 }
 
-/// Add `usage`'s four token buckets onto `total`.
-fn add_tokens(total: &mut TokenUsage, usage: &TokenUsage) {
-    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
-    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+/// Fold `line` into `lines`: onto the line with the same model when there
+/// is one, as a line of its own otherwise (AGE-682). Which agent spent it is
+/// not kept: a parent is told what was spent on which model.
+fn merge_line(lines: &mut Vec<TokenUsage>, line: TokenUsage) {
+    let Some(total) = lines.iter_mut().find(|known| known.model == line.model) else {
+        lines.push(TokenUsage {
+            delegated_to: None,
+            calls: Vec::new(),
+            estimated_cost_usd: None,
+            ..line
+        });
+        return;
+    };
+    total.input_tokens = total.input_tokens.saturating_add(line.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(line.output_tokens);
     total.cache_read_tokens = total
         .cache_read_tokens
-        .saturating_add(usage.cache_read_tokens);
+        .saturating_add(line.cache_read_tokens);
     total.cache_write_tokens = total
         .cache_write_tokens
-        .saturating_add(usage.cache_write_tokens);
-}
-
-/// The turn's usage, for the terminal status's `metadata`.
-fn usage_metadata(usage: &TokenUsage) -> Value {
-    json!({
-        "usage": {
-            "inputTokens": usage.input_tokens,
-            "outputTokens": usage.output_tokens,
-            "cacheReadTokens": usage.cache_read_tokens,
-            "cacheWriteTokens": usage.cache_write_tokens,
-        }
-    })
+        .saturating_add(line.cache_write_tokens);
+    total.api_turn_count = total.api_turn_count.saturating_add(line.api_turn_count);
+    total.duration_ms = total.duration_ms.saturating_add(line.duration_ms);
+    total.at = total.at.max(line.at);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chatty_core::models::token_usage::{ApiCallUsage, ModelRef};
     use chatty_core::services::{StreamError, StreamErrorKind};
+    use chatty_core::settings::models::providers_store::ProviderType;
 
     /// How the task would end if its turns stopped now.
     fn outcome(mapper: &TaskMapper) -> TaskState {
@@ -593,86 +594,158 @@ mod tests {
         assert_eq!(outcome(&mapper), TaskState::Canceled);
     }
 
-    #[test]
-    fn usage_rides_in_the_terminal_status_metadata() {
-        let mut mapper = TaskMapper::new("task-1");
-        let usage = TokenUsage {
-            input_tokens: 120,
-            output_tokens: 34,
-            ..Default::default()
-        };
-        assert!(
-            mapper.map(&SessionEvent::TokenUsage(usage)).is_none(),
-            "usage is not a task event"
-        );
+    fn model(id: &str) -> ModelRef {
+        ModelRef {
+            provider: ProviderType::OpenRouter,
+            model_id: id.to_string(),
+        }
+    }
 
+    /// A turn's usage as the session reports it: one call on `model`.
+    fn turn_on(id: &str, input: u32, output: u32) -> TokenUsage {
+        TokenUsage::from_calls(vec![ApiCallUsage {
+            turn: 1,
+            input_tokens: input,
+            output_tokens: output,
+            model: Some(model(id)),
+            ..Default::default()
+        }])
+    }
+
+    fn finished(usage: Vec<TokenUsage>) -> SessionEvent {
+        SessionEvent::Delegation(InvokeAgentProgress::Finished {
+            success: true,
+            result: None,
+            usage,
+        })
+    }
+
+    fn terminal_metadata(mapper: &TaskMapper) -> Value {
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        let metadata = metadata.expect("usage is attached to the terminal status");
+        metadata.expect("usage is attached to the terminal status")
+    }
+
+    #[test]
+    fn usage_rides_in_the_terminal_status_metadata() {
+        let mut mapper = TaskMapper::new("task-1");
+        assert!(
+            mapper
+                .map(&SessionEvent::TokenUsage(turn_on("worker", 120, 34)))
+                .is_none(),
+            "usage is not a task event"
+        );
+
+        let metadata = terminal_metadata(&mapper);
         assert_eq!(metadata["usage"]["inputTokens"], 120);
         assert_eq!(metadata["usage"]["outputTokens"], 34);
         // The leader reads it back with core's reader (AGE-415): the two
         // spellings are pinned to each other here.
-        let read = chatty_core::services::a2a_client::usage_from_status_metadata(Some(&metadata))
-            .expect("the leader can read what the mapper wrote");
-        assert_eq!((read.input_tokens, read.output_tokens), (120, 34));
+        let read = chatty_core::services::a2a_client::usage_from_status_metadata(Some(&metadata));
+        assert_eq!(read.len(), 1);
+        assert_eq!((read[0].input_tokens, read[0].output_tokens), (120, 34));
+        assert_eq!(read[0].model, Some(model("worker")));
     }
 
-    /// AGE-415: a sub-leader's terminal usage already includes what its own
-    /// workers spent, so its parent sees one number for the whole subtree.
+    /// AGE-682: nothing on the wire is a price. Each line names its model
+    /// and carries its tokens; whoever reads it prices it.
     #[test]
-    fn a_workers_delegations_roll_up_into_its_terminal_usage() {
+    fn wire_usage_has_no_price() {
         let mut mapper = TaskMapper::new("task-1");
-        let worker = |input: u32, output: u32| TokenUsage {
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: 10,
-            cache_write_tokens: 1,
-            delegated_to: Some("local-coder".to_string()),
-            ..Default::default()
+        let mut own = turn_on("worker", 1_000_000, 0);
+        // Even a line that was priced somewhere does not send its price.
+        own.estimated_cost_usd = Some(15.0);
+        mapper.map(&SessionEvent::TokenUsage(own));
+
+        let usage = &terminal_metadata(&mapper)["usage"];
+        let lines = usage["lines"].as_array().expect("lines");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["model"]["model_id"], "worker");
+        assert_eq!(lines[0]["model"]["provider"], "open_router");
+        assert_eq!(lines[0]["inputTokens"], 1_000_000);
+        let text = usage.to_string().to_lowercase();
+        for priced in ["cost", "price", "usd"] {
+            assert!(!text.contains(priced), "{priced} on the wire: {usage}");
+        }
+    }
+
+    /// AGE-682: a three-level run on three models. Every level forwards
+    /// lines rather than a pre-priced number, and lines merge only when they
+    /// share a model, so the root has one line per model and its total is
+    /// each line priced at its own model.
+    #[test]
+    fn nested_lines_keep_their_model() {
+        use chatty_core::models::token_usage::{PriceBook, TokenPricing, price};
+        use chatty_core::services::a2a_client::usage_from_status_metadata;
+
+        // Level 3: two workers on model C (one also ran a compaction on B).
+        let leaf = |input: u32| {
+            let mut mapper = TaskMapper::new("leaf");
+            let mut usage = TokenUsage::from_calls(vec![
+                ApiCallUsage {
+                    input_tokens: 10,
+                    model: Some(model("b")),
+                    ..Default::default()
+                },
+                ApiCallUsage {
+                    turn: 1,
+                    input_tokens: input,
+                    model: Some(model("c")),
+                    ..Default::default()
+                },
+            ]);
+            usage.model = Some(model("c"));
+            mapper.map(&SessionEvent::TokenUsage(usage));
+            usage_from_status_metadata(Some(&terminal_metadata(&mapper)))
         };
-        for usage in [worker(1_000, 100), worker(2_000, 200)] {
-            assert!(
-                mapper
-                    .map(&SessionEvent::Delegation(InvokeAgentProgress::Finished {
-                        success: true,
-                        result: None,
-                        usage: Some(usage),
-                    }))
-                    .is_none(),
-                "a delegation's usage is not a progress line"
+        let (first, second) = (leaf(1_000), leaf(2_000));
+        assert_eq!(first.len(), 2, "one line per model: {first:?}");
+
+        // Level 2: a sub-leader on model B, over both leaves, across two
+        // of its own turns.
+        let mut sub = TaskMapper::new("sub");
+        sub.map(&finished(first));
+        sub.map(&finished(second));
+        sub.map(&SessionEvent::TokenUsage(turn_on("b", 100, 0)));
+        sub.map(&SessionEvent::TokenUsage(turn_on("b", 200, 0)));
+        let reported = usage_from_status_metadata(Some(&terminal_metadata(&sub)));
+
+        // Level 1: the root on model A.
+        let mut root = reported;
+        root.push(turn_on("a", 5, 0));
+
+        let models: Vec<&str> = root
+            .iter()
+            .map(|line| line.model.as_ref().unwrap().model_id.as_str())
+            .collect();
+        assert_eq!(models, ["b", "c", "a"], "one line per model");
+        let tokens = |id: &str| {
+            root.iter()
+                .find(|l| l.model.as_ref().unwrap().model_id == id)
+                .unwrap()
+                .input_tokens
+        };
+        assert_eq!(tokens("c"), 3_000);
+        assert_eq!(tokens("b"), 10 + 10 + 100 + 200);
+
+        let mut book = PriceBook::default();
+        for (id, rate) in [("a", 1.0), ("b", 3.0), ("c", 15.0)] {
+            book.insert(
+                model(id),
+                TokenPricing {
+                    input_per_million: rate,
+                    ..Default::default()
+                },
             );
         }
-        // One delegation reported nothing (a WASM module, say).
+        let cost = price(&root, &book);
+        assert_eq!(cost.unpriced_lines, 0);
+        let expected = (5.0 * 1.0 + 320.0 * 3.0 + 3_000.0 * 15.0) / 1_000_000.0;
         assert!(
-            mapper
-                .map(&SessionEvent::Delegation(InvokeAgentProgress::Finished {
-                    success: true,
-                    result: None,
-                    usage: None,
-                }))
-                .is_none()
-        );
-        mapper.map(&SessionEvent::TokenUsage(TokenUsage {
-            input_tokens: 120,
-            output_tokens: 34,
-            cache_read_tokens: 5,
-            cache_write_tokens: 2,
-            ..Default::default()
-        }));
-
-        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
-            panic!("expected a status frame");
-        };
-        let metadata = metadata.expect("usage is attached to the terminal status");
-        assert_eq!(metadata["usage"]["inputTokens"], 120 + 1_000 + 2_000);
-        assert_eq!(metadata["usage"]["outputTokens"], 34 + 100 + 200);
-        assert_eq!(metadata["usage"]["cacheReadTokens"], 5 + 10 + 10);
-        assert_eq!(metadata["usage"]["cacheWriteTokens"], 2 + 1 + 1);
-        assert!(
-            metadata["usage"].get("delegatedTo").is_none(),
-            "the wire's shape is unchanged: {metadata}"
+            (cost.usd - expected).abs() < 1e-12,
+            "{} vs {expected}",
+            cost.usd
         );
     }
 
@@ -684,14 +757,26 @@ mod tests {
         mapper.map(&SessionEvent::Delegation(InvokeAgentProgress::Finished {
             success: false,
             result: None,
-            usage: Some(TokenUsage::new(7, 3)),
+            usage: vec![TokenUsage {
+                model: Some(model("worker")),
+                ..TokenUsage::new(7, 3)
+            }],
         }));
+        let metadata = terminal_metadata(&mapper);
+        assert_eq!(metadata["usage"]["inputTokens"], 7);
+        assert_eq!(metadata["usage"]["outputTokens"], 3);
+    }
+
+    /// A delegation that reported nothing (a WASM module, say) is still a
+    /// progress line, and adds no usage.
+    #[test]
+    fn a_delegation_without_usage_adds_none() {
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.map(&finished(Vec::new()));
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        let metadata = metadata.expect("the delegated spend is attached");
-        assert_eq!(metadata["usage"]["inputTokens"], 7);
-        assert_eq!(metadata["usage"]["outputTokens"], 3);
+        assert!(metadata.is_none(), "{metadata:?}");
     }
 
     #[test]

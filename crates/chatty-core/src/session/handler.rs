@@ -133,6 +133,10 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// One record per completed provider request; folded into the turn's
     /// `TokenUsage` when the aggregate arrives.
     calls: Vec<ApiCallUsage>,
+    /// Calls the turn made outside the model loop (a compaction's summary,
+    /// AGE-683): counted with the turn, but not part of what the provider's
+    /// aggregate covers.
+    compaction_calls: Vec<ApiCallUsage>,
     /// The prompt to emit as `FollowUp` once the turn has ended. First one
     /// queued wins, except that a loop-guard pivot always replaces it: the
     /// pivot cancels the turn, so whatever was queued before is moot.
@@ -168,6 +172,7 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             pending_tool_args: HashMap::new(),
             loop_guard_pivot: None,
             calls: Vec::new(),
+            compaction_calls: Vec::new(),
             pending_follow_up: None,
             text_overflow: false,
             output_in_call: false,
@@ -228,25 +233,41 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
 
     /// Fold the turn's per-request records into its usage. The records are
     /// the source of truth (cache hit rate is per request); the provider's
-    /// aggregate only stands in when none arrived.
+    /// aggregate only stands in when none arrived. A compaction's summary
+    /// calls go in ahead of the model's own (AGE-683), so the last call is
+    /// still the one whose prompt is the context fill, and the line names
+    /// the turn's model even when the calls name more than one.
     fn fold_usage(&mut self, aggregate: ApiCallUsage) -> TokenUsage {
-        if self.calls.is_empty() {
+        let compaction = std::mem::take(&mut self.compaction_calls);
+        if self.calls.is_empty() && compaction.is_empty() {
             let mut usage = TokenUsage::new(aggregate.input_tokens, aggregate.output_tokens);
             usage.cache_read_tokens = aggregate.cache_read_tokens;
             usage.cache_write_tokens = aggregate.cache_write_tokens;
+            usage.model = aggregate.model;
+            usage.at = aggregate.at;
+            usage.duration_ms = aggregate.duration_ms;
             return usage;
         }
-        let usage = TokenUsage::from_calls(std::mem::take(&mut self.calls));
-        if usage.input_tokens != aggregate.input_tokens
-            || usage.output_tokens != aggregate.output_tokens
-        {
-            tracing::warn!(
-                summed_input = usage.input_tokens,
-                reported_input = aggregate.input_tokens,
-                summed_output = usage.output_tokens,
-                reported_output = aggregate.output_tokens,
-                "Per-call usage does not sum to the provider's aggregate"
-            );
+        let own = std::mem::take(&mut self.calls);
+        if !own.is_empty() {
+            let summed = TokenUsage::from_calls(own.clone());
+            if summed.input_tokens != aggregate.input_tokens
+                || summed.output_tokens != aggregate.output_tokens
+            {
+                tracing::warn!(
+                    summed_input = summed.input_tokens,
+                    reported_input = aggregate.input_tokens,
+                    summed_output = summed.output_tokens,
+                    reported_output = aggregate.output_tokens,
+                    "Per-call usage does not sum to the provider's aggregate"
+                );
+            }
+        }
+        let turn_model = aggregate.model.clone();
+        let own = if own.is_empty() { vec![aggregate] } else { own };
+        let mut usage = TokenUsage::from_calls(compaction.into_iter().chain(own).collect());
+        if usage.model.is_none() {
+            usage.model = turn_model;
         }
         usage
     }
@@ -382,7 +403,11 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             StreamChunk::ApiCallUsage(call) => {
                 self.last_call_empty = !self.output_in_call;
                 self.output_in_call = false;
-                self.calls.push(call);
+                self.calls.push(call.clone());
+                (self.emit)(SessionEvent::ApiCallUsage(call));
+            }
+            StreamChunk::CompactionUsage(call) => {
+                self.compaction_calls.push(call.clone());
                 (self.emit)(SessionEvent::ApiCallUsage(call));
             }
             StreamChunk::TurnUsage(aggregate) => {

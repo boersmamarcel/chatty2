@@ -162,7 +162,7 @@ struct BrokerRun {
     succeeded: bool,
     /// What the worker reported spending, as the tool's `Finished` carries
     /// it to the parent's session (AGE-415).
-    usage: Option<TokenUsage>,
+    usage: Vec<TokenUsage>,
 }
 
 /// Delegate one task through the real `invoke_agent` tool and record what the
@@ -187,7 +187,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
         .await;
 
     let mut progress = Vec::new();
-    let mut usage = None;
+    let mut usage = Vec::new();
     while let Ok(event) = progress_rx.try_recv() {
         match event {
             InvokeAgentProgress::Text(text) => progress.push(text),
@@ -325,11 +325,11 @@ async fn a_dropped_tool_event_would_be_caught() {
 // ---------------------------------------------------------------------------
 
 mod delegated_usage {
-    //! What a worker spent reaches its leader as one usage line named for
-    //! the worker, and a sub-leader's line already carries its own workers,
-    //! so the root of a tree sees one number per delegation. The session
-    //! side — that line priced onto the leader's conversation — is pinned
-    //! in chatty-core's session tests; this is the hop.
+    //! What a worker spent reaches its leader as usage lines named for the
+    //! worker, one per model, and a sub-leader's lines already carry its own
+    //! workers' (AGE-682). The session side — those lines priced onto the
+    //! leader's conversation — is pinned in chatty-core's session tests;
+    //! this is the hop.
 
     use super::*;
 
@@ -358,7 +358,9 @@ mod delegated_usage {
         let run = broker_run(worker_turn(usage(1_200, 80, 900, 40))).await;
 
         assert!(run.succeeded);
-        let reported = run.usage.expect("the worker's usage reaches the leader");
+        let [reported] = run.usage.as_slice() else {
+            panic!("the worker's usage reaches the leader: {:?}", run.usage);
+        };
         assert_eq!(reported.delegated_to.as_deref(), Some(LOCAL_AGENT_NAME));
         assert_eq!(reported.input_tokens, 1_200);
         assert_eq!(reported.output_tokens, 80);
@@ -366,8 +368,9 @@ mod delegated_usage {
         assert_eq!(reported.cache_write_tokens, 40);
     }
 
-    /// A sub-leader's own delegations are already in the number it reports,
-    /// so the root sees the tree's spend as one line, not a flat list.
+    /// A sub-leader forwards its own delegations with its own usage, and
+    /// lines on the same model merge (AGE-682) — here none names one — so
+    /// the root sees the tree's spend as one line, not a flat list.
     #[tokio::test]
     async fn a_sub_leaders_line_includes_its_own_workers() {
         let mut events = vec![SessionEvent::TurnStarted];
@@ -378,10 +381,10 @@ mod delegated_usage {
             events.push(SessionEvent::Delegation(InvokeAgentProgress::Finished {
                 success: true,
                 result: Some("ok".into()),
-                usage: Some(TokenUsage {
+                usage: vec![TokenUsage {
                     delegated_to: Some(name.into()),
                     ..spent
-                }),
+                }],
             }));
         }
         events.extend(worker_turn(usage(300, 30, 0, 10)).into_iter().skip(1));
@@ -389,7 +392,9 @@ mod delegated_usage {
         let run = broker_run(events).await;
 
         assert!(run.succeeded);
-        let reported = run.usage.expect("the sub-leader's usage reaches the root");
+        let [reported] = run.usage.as_slice() else {
+            panic!("the sub-leader's usage reaches the root: {:?}", run.usage);
+        };
         assert_eq!(
             reported.delegated_to.as_deref(),
             Some(LOCAL_AGENT_NAME),
@@ -411,7 +416,7 @@ mod delegated_usage {
         ])
         .await;
         assert!(run.succeeded);
-        assert!(run.usage.is_none());
+        assert!(run.usage.is_empty());
     }
 }
 
