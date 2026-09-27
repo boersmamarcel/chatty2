@@ -476,6 +476,11 @@ get numbers by computing them with a tool, not in your head. For a web page as i
 date, read the raw revision (MediaWiki `action=raw`) or an archived copy: an old revision rendered \
 today uses today's templates.\n\
 \n\
+**Rules as code**: When a question over data files depends on rules or definitions written in \
+accompanying documentation (a manual, a README, a schema description), first write those rules as \
+one small function, including what an empty, null or missing field means, check it on one case you \
+can verify by hand, and then compute the answer with it rather than re-applying the rules by hand.\n\
+\n\
 **Commit on evidence**: Once checked evidence answers the question, act on it immediately. \
 Do not continue exploring past that point.\n\
 \n\
@@ -1271,6 +1276,7 @@ mod tests {
             "verifiably done",
             "primary source or tool output",
             "not in your head",
+            "write those rules as one small function, including what an empty, null or missing field means",
             "rather than stopping",
             "Reproduce the problem first",
             "root cause",
