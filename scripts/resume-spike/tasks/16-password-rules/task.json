@@ -1,0 +1,6 @@
+{
+  "title": "Password rules",
+  "kind": "requirement-change",
+  "task": "Implement validate(password) in password.py, returning the list of rule names the password breaks, in this order: 'length' (fewer than 8 characters), 'upper' (no uppercase letter), 'lower' (no lowercase letter), 'digit' (no digit). An empty list means the password is valid. Add tests.",
+  "follow_up": "Requirement change from the security review: the minimum length is now 12, and a new rule 'space' (the password contains any whitespace) is checked after 'digit'. Update the tests."
+}

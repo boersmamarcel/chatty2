@@ -1,0 +1,6 @@
+{
+  "title": "Interval merge",
+  "kind": "review-finding",
+  "task": "Implement merge_intervals(intervals) in intervals.py: intervals is a list of [start, end] pairs sorted by start; return the list of merged, non-overlapping intervals. Add tests.",
+  "follow_up": "Review finding: callers pass unsorted input, and touching intervals such as [1, 2] and [2, 3] are left apart when they must merge into [1, 3]. Accept input in any order without modifying it, and raise ValueError for an interval whose start is greater than its end. Add tests."
+}
