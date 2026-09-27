@@ -40,14 +40,31 @@ pub fn progress_text_for_event(
     }
 }
 
-/// The `chatty-tui` binary a delegated task runs in: next to the current
-/// binary if it is there, otherwise whatever is on `PATH`.
+/// Names the `chatty-tui` binary a worker runs, overriding the lookup
+/// below (AGE-632): for a test harness, or a host that installs the binary
+/// somewhere else.
+pub const WORKER_EXE_ENV: &str = "CHATTY_WORKER_EXE";
+
+/// The `chatty-tui` binary a delegated task runs in: `$CHATTY_WORKER_EXE`
+/// when set, else next to the current binary if it is there, otherwise
+/// whatever is on `PATH`.
 ///
 /// Used by the broker's local runner (AGE-301), which spawns the worker.
 pub fn worker_executable() -> PathBuf {
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
+    resolve_worker_executable(
+        std::env::var_os(WORKER_EXE_ENV),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn resolve_worker_executable(
+    env_override: Option<std::ffi::OsString>,
+    current_exe: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(exe) = env_override.filter(|v| !v.is_empty()) {
+        return PathBuf::from(exe);
+    }
+    let dir = current_exe.and_then(|p| p.parent().map(Path::to_path_buf));
     dir.iter()
         .map(|d| d.join("chatty-tui"))
         // A test binary runs from `target/<profile>/deps`, one level below
@@ -69,6 +86,20 @@ pub fn worker_executable() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_executable_honours_env_override() {
+        let exe = std::env::current_exe().ok();
+        assert_eq!(
+            resolve_worker_executable(Some("/opt/chatty/bin/chatty-tui".into()), exe.clone()),
+            PathBuf::from("/opt/chatty/bin/chatty-tui")
+        );
+        // Unset or empty falls back to the lookup, which never returns "".
+        assert_eq!(
+            resolve_worker_executable(Some("".into()), exe.clone()),
+            resolve_worker_executable(None, exe)
+        );
+    }
 
     #[test]
     fn progress_text_names_the_tool_and_its_outcome() {
