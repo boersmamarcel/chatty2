@@ -20,6 +20,9 @@ pub struct MarketplaceState {
     /// Per-module download progress: module name → 0.0 … 1.0.
     /// Only present while a download is in flight.
     pub downloading: HashMap<String, f32>,
+    /// The registry rejected the refresh token, so the Hive session ended
+    /// without the user signing out. Cleared by the next sign-in.
+    pub signed_out_of_hive: bool,
 }
 
 impl MarketplaceState {
