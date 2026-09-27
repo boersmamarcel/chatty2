@@ -142,9 +142,12 @@ enum Mode {
     /// that must tell requests apart by content rather than by route.
     Callback {
         content_type: &'static str,
-        respond: Box<dyn FnMut(&[u8]) -> Option<String> + Send>,
+        respond: Responder,
     },
 }
+
+/// Computes a response body from a request's raw bytes (`Mode::Callback`).
+type Responder = Box<dyn FnMut(&[u8]) -> Option<String> + Send>;
 
 #[derive(Default)]
 struct Log {
