@@ -38,6 +38,7 @@ fn hive_account_group() -> SettingGroup {
             let is_logged_in = settings.token.is_some();
             let username = settings.username.clone().unwrap_or_default();
             let registry_url = settings.registry_url.clone();
+            let signed_out_of_hive = cx.global::<MarketplaceState>().signed_out_of_hive;
 
             if is_logged_in {
                 h_flex()
@@ -74,7 +75,11 @@ fn hive_account_group() -> SettingGroup {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Not signed in"),
+                            .child(if signed_out_of_hive {
+                                "Signed out of Hive — sign in again"
+                            } else {
+                                "Not signed in"
+                            }),
                     )
                     .child(Button::new("hive-login").small().label("Sign In").on_click(
                         |_, window, cx| {
