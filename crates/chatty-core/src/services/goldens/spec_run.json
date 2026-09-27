@@ -1,0 +1,24 @@
+{
+  "answer": "The workspace holds one file, README.md.",
+  "trace": {
+    "active_tool_index": null,
+    "items": [
+      {
+        "ToolCall": {
+          "display_name": "Listing directory",
+          "duration": null,
+          "execution_engine": null,
+          "id": "<call-id>",
+          "input": "{\"path\":\".\"}",
+          "output": "{\"entries\":[{\"name\":\"README.md\",\"entry_type\":\"file\",\"size\":9}],\"path\":\".\",\"count\":1}",
+          "output_preview": null,
+          "source": "Local",
+          "state": "Success",
+          "text_before": "",
+          "tool_name": "list_directory"
+        }
+      }
+    ],
+    "total_duration": null
+  }
+}

@@ -60,6 +60,11 @@ pub mod project_instructions;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
+/// The spec-run golden hive's HS-1 replays (AGE-690): a small `AgentSpec`
+/// run against a scripted fake model, with its answer and trace recorded.
+/// Test-only: enable `chatty-core/test-support` from a dev-dependency.
+#[cfg(any(test, feature = "test-support"))]
+pub mod spec_goldens;
 /// The hosted per-user spend cap `invoke_agent` asks before delegating
 /// (AGE-416 / ADR-0010). chatty2 ships the trait; hive implements it.
 pub mod spend_gate;
