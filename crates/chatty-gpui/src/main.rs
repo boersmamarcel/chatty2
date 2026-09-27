@@ -734,7 +734,7 @@ fn main() {
                         info!("Models loaded");
 
                         // Refresh the module runtime so the gateway gets a real
-                        // HostLlmProvider now that models/providers are available.
+                        // PluginLlmProvider now that models/providers are available.
                         // The initial refresh_runtime() call at startup runs before
                         // providers finish loading asynchronously, which causes the
                         // gateway to use the noop provider.

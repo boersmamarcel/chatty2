@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 #[cfg(unix)]
 use chatty_core::agent_spec::load_roster;
 use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
+use chatty_core::services::plugin_llm::PluginLlmProvider;
 #[cfg(unix)]
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
@@ -18,309 +19,50 @@ use chatty_core::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel,
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
-use chatty_core::settings::models::models_store::ModelsModel;
-use chatty_core::settings::models::providers_store::{ProviderModel, ProviderType};
+use chatty_core::settings::models::models_store::{ModelsModel, resolve_model_query};
+use chatty_core::settings::models::providers_store::ProviderModel;
 use chatty_module_registry::{ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_wasm_runtime::{
-    CompletionResponse, LlmProvider, Message, ResourceLimits, Role, TokenUsage, ToolCall,
-};
+use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use gpui::{App, AsyncApp};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
-// ---------------------------------------------------------------------------
-// HostLlmProvider — bridges WASM module llm::complete() to real LLM APIs
-// ---------------------------------------------------------------------------
-
-/// Configuration captured from GPUI globals for the LLM provider.
-#[derive(Clone, Debug)]
-struct LlmConfig {
-    provider_type: ProviderType,
-    api_key: Option<String>,
-    base_url: Option<String>,
-    model_identifier: String,
-    temperature: f32,
-    max_tokens: Option<i32>,
-}
-
-struct HostLlmProvider {
-    config: LlmConfig,
-    client: reqwest::Client,
-}
-
-impl HostLlmProvider {
-    fn new(config: LlmConfig) -> Self {
-        let client = chatty_core::services::http_client::default_client(120);
-        Self { config, client }
-    }
-
-    fn effective_model(&self, model: &str) -> String {
-        if model.is_empty() {
-            self.config.model_identifier.clone()
-        } else {
-            model.to_string()
-        }
-    }
-
-    fn role_str(role: &Role) -> &'static str {
-        match role {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        }
-    }
-
-    /// Normalize a JSON tools blob from a WASM module into a canonical list
-    /// of `{name, description, parameters}` records.
-    ///
-    /// Accepts either:
-    /// - OpenAI wrapped form: `[{"type":"function","function":{name,description,parameters}}]`
-    /// - Flat form: `[{name, description, parameters}]` (or `parameters_schema`)
-    /// - A single object instead of an array
-    ///
-    /// Tools missing a `name` are dropped.
-    fn normalize_tools(tools_json: &str) -> Vec<serde_json::Value> {
-        let parsed: serde_json::Value = match serde_json::from_str(tools_json) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-        let arr: Vec<serde_json::Value> = match parsed {
-            serde_json::Value::Array(a) => a,
-            v @ serde_json::Value::Object(_) => vec![v],
-            _ => return Vec::new(),
-        };
-        arr.into_iter()
-            .filter_map(|t| {
-                let inner = t.get("function").cloned().unwrap_or(t);
-                let name = inner.get("name")?.as_str()?.to_string();
-                let description = inner
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let parameters = inner
-                    .get("parameters")
-                    .or_else(|| inner.get("parameters_schema"))
-                    .or_else(|| inner.get("input_schema"))
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
-                Some(serde_json::json!({
-                    "name": name,
-                    "description": description,
-                    "parameters": parameters,
-                }))
-            })
-            .collect()
-    }
-
-    /// Build the (unsent) request for one `llm::complete` call: the URL,
-    /// headers and JSON body that `complete_openai` would send. Split out
-    /// so PL-E7's row 4.1 (AGE-602) can inspect the built `reqwest::Request`
-    /// (`.build()`) instead of sending it — no test may reach the internet,
-    /// and the "OpenRouter default" and bare "Ollama" cases hit a hardcoded
-    /// host with no override.
-    fn build_request(
-        &self,
-        model: &str,
-        messages: &[Message],
-        tools: &Option<String>,
-    ) -> reqwest::RequestBuilder {
-        let base = self
-            .config
-            .base_url
-            .as_deref()
-            .unwrap_or(match self.config.provider_type {
-                ProviderType::Ollama => "http://localhost:11434",
-                _ => "https://openrouter.ai/api/v1",
-            });
-        let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
-
-        let msgs: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": Self::role_str(&m.role),
-                    "content": &m.content,
-                })
-            })
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": msgs,
-            "temperature": self.config.temperature,
-        });
-
-        if let Some(max) = self.config.max_tokens {
-            body["max_tokens"] = serde_json::json!(max);
-        }
-
-        if let Some(tools_json) = tools {
-            let normalized = Self::normalize_tools(tools_json);
-            if !normalized.is_empty() {
-                let openai_tools: Vec<serde_json::Value> = normalized
-                    .iter()
-                    .map(|t| serde_json::json!({"type": "function", "function": t}))
-                    .collect();
-                body["tools"] = serde_json::json!(openai_tools);
-            }
-        }
-
-        let mut req = self.client.post(&url);
-        if let Some(ref key) = self.config.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
-        req = req.header("Content-Type", "application/json");
-        req.json(&body)
-    }
-
-    async fn complete_openai(
-        &self,
-        model: &str,
-        messages: Vec<Message>,
-        tools: Option<String>,
-    ) -> Result<CompletionResponse, String> {
-        let req = self.build_request(model, &messages, &tools);
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("LLM API returned {status}: {text}"));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-        Self::parse_openai_response(&data)
-    }
-
-    fn parse_openai_response(data: &serde_json::Value) -> Result<CompletionResponse, String> {
-        let choice = data
-            .pointer("/choices/0/message")
-            .ok_or("No choices in response")?;
-
-        let content = choice
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let tool_calls = choice
-            .get("tool_calls")
-            .and_then(|tc| tc.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|tc| {
-                        let func = tc.get("function")?;
-                        Some(ToolCall {
-                            id: tc
-                                .get("id")
-                                .and_then(|i| i.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            name: func
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            arguments: func
-                                .get("arguments")
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("{}")
-                                .to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let usage = data.get("usage").map(|u| TokenUsage {
-            input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            output_tokens: u
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-        });
-
-        Ok(CompletionResponse {
-            content,
-            tool_calls,
-            usage,
-        })
-    }
-}
-
-impl LlmProvider for HostLlmProvider {
-    fn complete(
-        &self,
-        model: &str,
-        messages: Vec<Message>,
-        tools: Option<String>,
-    ) -> Result<CompletionResponse, String> {
-        let effective_model = self.effective_model(model);
-        debug!(
-            provider = ?self.config.provider_type,
-            model = %effective_model,
-            message_count = messages.len(),
-            has_tools = tools.is_some(),
-            "HostLlmProvider::complete"
-        );
-
-        // The LlmProvider trait is synchronous but we need async HTTP.
-        // Use block_in_place + block_on as recommended in the trait docs.
-        tokio::task::block_in_place(|| {
-            let handle = tokio::runtime::Handle::current();
-            handle.block_on(async {
-                // All providers (OpenRouter, Ollama, AzureOpenAI) use OpenAI-compatible API
-                self.complete_openai(&effective_model, messages, tools)
-                    .await
-            })
-        })
-    }
-}
-
-/// Build the LLM provider from the current GPUI globals.
-///
-/// Picks the first configured model and its provider to serve as the host
-/// LLM for WASM modules. Returns `None` if no models/providers are configured.
+/// The provider a WASM module's `llm::complete()` reaches, built from the
+/// current GPUI globals: chatty-core's [`PluginLlmProvider`], over the same
+/// provider clients agents use (PL-H2, AGE-605). The module registry is
+/// shared by every conversation, so the calling agent's model is the one
+/// conversations start with (`resolve_model_query` with no query: the
+/// default model, else the roster's first). Returns `None` if no model or no
+/// matching provider is configured, or no Tokio runtime is entered to drive
+/// the requests.
 fn build_llm_provider(cx: &App) -> Option<Arc<dyn LlmProvider>> {
-    use crate::settings::models::{ModelsModel, ProviderModel};
+    let models = cx.try_global::<ModelsModel>()?.models();
+    let providers = cx.try_global::<ProviderModel>()?.providers();
 
-    let models = cx.try_global::<ModelsModel>()?;
-    let providers = cx.try_global::<ProviderModel>()?;
-
-    let model_config = models.models().first()?;
-    let provider_config = providers
-        .providers()
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    let calling_model = resolve_model_query(models, None)?;
+    if !providers
         .iter()
-        .find(|p| p.provider_type == model_config.provider_type)?;
+        .any(|p| p.provider_type == calling_model.provider_type)
+    {
+        return None;
+    }
 
     info!(
-        provider = ?provider_config.provider_type,
-        model = %model_config.model_identifier,
-        "Building HostLlmProvider for WASM modules"
+        provider = ?calling_model.provider_type,
+        model = %calling_model.model_identifier,
+        "Building the plugin LLM provider for WASM modules"
     );
 
-    let config = LlmConfig {
-        provider_type: provider_config.provider_type.clone(),
-        api_key: provider_config.api_key.clone(),
-        base_url: provider_config.base_url.clone(),
-        model_identifier: model_config.model_identifier.clone(),
-        temperature: model_config.temperature,
-        max_tokens: model_config.max_tokens,
-    };
-
-    Some(Arc::new(HostLlmProvider::new(config)))
+    Some(Arc::new(PluginLlmProvider::new(
+        calling_model.clone(),
+        models.to_vec(),
+        providers.to_vec(),
+        runtime,
+    )))
 }
 
 #[derive(Default)]
@@ -890,173 +632,6 @@ pub fn refresh_runtime(cx: &mut App) {
         }
     })
     .detach();
-}
-
-// ---------------------------------------------------------------------------
-// PL-E7 (AGE-602), evaluation-plan S4 rows 4.1-4.4.
-//
-// Rows marked `#[ignore = "known defect: PL-H2 (AGE-605)"]` or
-// `#[ignore = "known defect: PL-H9 (AGE-612)"]` fail on today's code for the
-// reason named in the evaluation plan's F3/F13 findings; `-- --ignored`
-// lists them. Nothing here is fixed — tests only.
-// ---------------------------------------------------------------------------
-#[cfg(test)]
-mod host_llm_provider_tests {
-    use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn config(
-        provider_type: ProviderType,
-        api_key: Option<&str>,
-        base_url: Option<&str>,
-    ) -> LlmConfig {
-        LlmConfig {
-            provider_type,
-            api_key: api_key.map(str::to_string),
-            base_url: base_url.map(str::to_string),
-            model_identifier: "test-model".to_string(),
-            temperature: 0.0,
-            max_tokens: None,
-        }
-    }
-
-    fn one_message() -> Vec<Message> {
-        vec![Message {
-            role: Role::User,
-            content: "hi".to_string(),
-        }]
-    }
-
-    fn ok_body() -> serde_json::Value {
-        serde_json::json!({
-            "choices": [{"message": {"content": "hi", "role": "assistant"}}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        })
-    }
-
-    // -- 4.1: URL + auth header per provider -------------------------------
-
-    /// OpenRouter with no base URL override: the code hardcodes
-    /// `https://openrouter.ai/api/v1` then appends `/v1/chat/completions`,
-    /// doubling the `/v1` segment (F3). Inspecting the *built* (unsent)
-    /// request proves the doubling without a real network call.
-    #[test]
-    #[ignore = "known defect: PL-H2 (AGE-605)"]
-    fn row_4_1_openrouter_default_base_url_is_not_doubled() {
-        let provider =
-            HostLlmProvider::new(config(ProviderType::OpenRouter, Some("sk-test"), None));
-        let req = provider
-            .build_request("test-model", &one_message(), &None)
-            .build()
-            .expect("request should build");
-        assert_eq!(
-            req.url().as_str(),
-            "https://openrouter.ai/api/v1/chat/completions",
-            "the default OpenRouter base already ends in /v1; appending \
-             /v1/chat/completions must not double it (today it builds {})",
-            req.url()
-        );
-    }
-
-    /// Ollama with no base URL override resolves to the documented default
-    /// port and is not affected by F3 (no `/v1` in the hardcoded base).
-    #[test]
-    fn row_4_1_ollama_default_base_url() {
-        let provider = HostLlmProvider::new(config(ProviderType::Ollama, None, None));
-        let req = provider
-            .build_request("test-model", &one_message(), &None)
-            .build()
-            .expect("request should build");
-        assert_eq!(
-            req.url().as_str(),
-            "http://localhost:11434/v1/chat/completions"
-        );
-        assert!(
-            req.headers().get("Authorization").is_none(),
-            "no api key configured, so no bearer header should be sent"
-        );
-    }
-
-    /// A custom base URL (no trailing `/v1`) round-trips correctly against a
-    /// real (fake) OpenAI-compatible endpoint, with a bearer auth header.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn row_4_1_custom_base_url_and_bearer_header() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .and(header("Authorization", "Bearer sk-custom"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let provider = HostLlmProvider::new(config(
-            ProviderType::OpenRouter,
-            Some("sk-custom"),
-            Some(&server.uri()),
-        ));
-        let resp = provider
-            .complete_openai("test-model", one_message(), None)
-            .await
-            .expect("wiremock should answer 200");
-        assert_eq!(resp.content, "hi");
-    }
-
-    /// Azure OpenAI is not handled at all (F3): it should authenticate with
-    /// an `api-key` header (and its own URL shape), but `HostLlmProvider`
-    /// sends the same `Authorization: Bearer` header it sends everyone else.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "known defect: PL-H2 (AGE-605)"]
-    async fn row_4_1_azure_uses_api_key_header_not_bearer() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(header("api-key", "sk-azure"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let provider = HostLlmProvider::new(config(
-            ProviderType::AzureOpenAI,
-            Some("sk-azure"),
-            Some(&server.uri()),
-        ));
-        // Today: sends `Authorization: Bearer sk-azure` instead, so the
-        // mock above (which requires `api-key`) never matches and this
-        // errors out (wiremock reports the unmatched request on verify).
-        provider
-            .complete_openai("test-model", one_message(), None)
-            .await
-            .expect("Azure should authenticate with api-key, not bearer");
-    }
-
-    // -- 4.2: current-thread runtime -----------------------------------
-
-    /// `block_in_place` panics unconditionally on a `current_thread`
-    /// runtime (tokio's own contract). `HostLlmProvider::complete` is the
-    /// synchronous `LlmProvider` entry point a WASM guest's `llm::complete`
-    /// import calls into; today it always panics there instead of erroring
-    /// or being unreachable on that runtime flavor.
-    #[test]
-    #[ignore = "known defect: PL-H2 (AGE-605)"]
-    fn row_4_2_current_thread_runtime_does_not_panic() {
-        let provider = HostLlmProvider::new(config(ProviderType::Ollama, None, None));
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("current-thread runtime should build");
-        let result = rt.block_on(async {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                LlmProvider::complete(&provider, "test-model", one_message(), None)
-            }))
-        });
-        assert!(
-            result.is_ok(),
-            "HostLlmProvider::complete panicked on a current-thread runtime \
-             (block_in_place always panics there)"
-        );
-    }
 }
 
 #[cfg(test)]

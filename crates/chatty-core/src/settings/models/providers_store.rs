@@ -69,8 +69,8 @@ impl ProviderType {
 /// `provider_builder` falls back to when it builds the client.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
-/// OpenRouter's endpoint, which is not configurable per provider today but
-/// still needs a stable key to meter (ADR-0011 C6).
+/// OpenRouter's API root when a provider names none: the root rig appends
+/// `/chat/completions` to, and the endpoint key the broker meters (ADR-0011 C6).
 pub const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
