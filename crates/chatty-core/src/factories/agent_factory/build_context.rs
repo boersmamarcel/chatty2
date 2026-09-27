@@ -14,21 +14,31 @@
 //! Adding a field to `AgentBuildContext` therefore fails to compile in
 //! `from_services` and nowhere else, which is the point: a host cannot
 //! silently drop it.
+//!
+//! [`AgentBuildContext::from_spec`] is the other way in: an [`AgentSpec`]
+//! (PL-D2) laid over the same services, which is how every agent that is
+//! declared rather than configured — a `--team` leader, a delegated worker,
+//! `chatty-tui --agent` — gets its role, tools and budgets.
 
-use super::tool_profile::ToolProfile;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::tool_profile::{ToolProfile, tool_profile};
+use crate::agent_spec::{AgentSpec, SpecErrors};
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::services::skill_service::SkillService;
-use crate::services::spend_gate::SpendGate;
+use crate::services::spend_gate::{SpendGate, TaskSpendGate};
 use crate::services::team::TeamSkill;
 use crate::services::terminal::TerminalSource;
 use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
+use crate::settings::models::execution_settings::set_tool_group;
 use crate::settings::models::search_settings::SearchSettingsModel;
 use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
-use std::sync::Arc;
 
 /// Contextual dependencies for building an agent.
 ///
@@ -258,6 +268,88 @@ impl AgentBuildContext {
     }
 }
 
+/// What running as a spec means for a host: the context the agent is built
+/// with, plus what a context does not carry because the host decides it
+/// outside the agent — which model to run, the run's wall-clock budget, and
+/// the handle the host reports the task's spend to.
+pub struct SpecBuild {
+    pub context: AgentBuildContext,
+    /// `agent.model`, for the host to resolve as it resolves `--model`.
+    pub model: Option<String>,
+    /// `budget.max_duration`: the `Deadline` the host's runner starts.
+    pub max_duration: Option<Duration>,
+    /// `budget.cap_usd`'s gate, also installed as the context's
+    /// `spend_gate`.
+    pub task_spend: Option<TaskSpendGate>,
+}
+
+impl AgentBuildContext {
+    /// The context `spec` implies over a host's services — the one place a
+    /// spec becomes an agent (AGE-614).
+    ///
+    /// `services.exec_settings` is the host's *ungated* settings: the spec's
+    /// `budget.max_agent_turns` and `tools.disable` are applied to them and
+    /// only then is [`gated_exec_settings`] asked, so a spec that disables
+    /// the last group builds an agent with no execution tools, and
+    /// `ask_user_enabled` / `instructions_dir` read the narrowed settings as
+    /// every host does. `tools.profile` and `agent.preamble` become the
+    /// role, `tools.skills` a line of the preamble, `budget.cap_usd` the
+    /// spend gate. Plugins are carried by the spec, not loaded (PL-U2).
+    pub fn from_spec(spec: &AgentSpec, services: AgentServices) -> Result<SpecBuild, SpecErrors> {
+        spec.validate(None)?;
+        let mut services = services;
+        let settings = services.exec_settings.take().map(|mut settings| {
+            if let Some(turns) = spec.budget.max_agent_turns {
+                settings.max_agent_turns = turns;
+            }
+            for group in &spec.tools.disable {
+                set_tool_group(&mut settings, group, false).expect("validated as a tool group");
+            }
+            settings
+        });
+        let task_spend = spec.budget.cap_usd.map(TaskSpendGate::new);
+        let context = Self {
+            role: AgentRole {
+                preamble: role_preamble(spec),
+                profile: spec.tools.profile.as_deref().and_then(tool_profile),
+            },
+            spend_gate: task_spend
+                .clone()
+                .map(|gate| Arc::new(gate) as Arc<dyn SpendGate>),
+            ask_user_enabled: settings.as_ref().is_none_or(|s| s.ask_user_enabled),
+            instructions_dir: settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref())
+                .map(PathBuf::from),
+            ..Self::from_services(AgentServices {
+                exec_settings: settings.as_ref().and_then(gated_exec_settings),
+                ..services
+            })
+        };
+        Ok(SpecBuild {
+            context,
+            model: spec.agent.model.clone(),
+            max_duration: spec.max_duration(),
+            task_spend,
+        })
+    }
+}
+
+/// The role's preamble: the spec's own, then the skills it names.
+fn role_preamble(spec: &AgentSpec) -> Option<String> {
+    if spec.tools.skills.is_empty() {
+        return spec.agent.preamble.clone();
+    }
+    let skills = format!(
+        "Before you start, read these skills with read_skill and follow them: {}.",
+        spec.tools.skills.join(", ")
+    );
+    Some(match spec.agent.preamble.as_deref() {
+        Some(preamble) => format!("{preamble}\n\n{skills}"),
+        None => skills,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +471,71 @@ mod tests {
         assert!(ctx.conversation_id.is_none());
         assert_eq!(ctx.role, AgentRole::default());
         assert!(ctx.spend_gate.is_none());
+    }
+
+    #[test]
+    fn a_spec_narrows_the_hosts_settings_and_names_the_role() {
+        let spec = AgentSpec::from_toml(
+            r#"
+[agent]
+name = "local-reviewer"
+model = "qwen3:4b"
+preamble = "Review."
+
+[tools]
+profile = "reviewer"
+disable = ["fs_write", "ask-user"]
+skills = ["coder-reviewer"]
+
+[budget]
+max_agent_turns = 30
+max_duration = "1h"
+cap_usd = 2.5
+"#,
+        )
+        .unwrap();
+        let host = ExecutionSettingsModel {
+            filesystem_write_enabled: true,
+            workspace_dir: Some("/ws".to_string()),
+            ..ExecutionSettingsModel::default()
+        };
+        let built = AgentBuildContext::from_spec(
+            &spec,
+            AgentServices {
+                exec_settings: Some(host),
+                local_agents: vec!["local-agent".to_string()],
+                ..AgentServices::default()
+            },
+        )
+        .unwrap();
+        let ctx = &built.context;
+        let settings = ctx
+            .exec_settings
+            .as_ref()
+            .expect("fs-read keeps the gate open");
+        assert!(!settings.filesystem_write_enabled);
+        assert_eq!(settings.max_agent_turns, 30);
+        assert!(!ctx.ask_user_enabled);
+        assert_eq!(ctx.instructions_dir, Some(PathBuf::from("/ws")));
+        assert_eq!(ctx.role.profile.map(|p| p.name()), Some("reviewer"));
+        assert_eq!(
+            ctx.role.preamble.as_deref(),
+            Some(
+                "Review.\n\nBefore you start, read these skills with read_skill and follow them: \
+                 coder-reviewer."
+            )
+        );
+        assert!(ctx.spend_gate.is_some());
+        assert_eq!(built.task_spend.unwrap().cap_usd(), 2.5);
+        assert_eq!(built.model.as_deref(), Some("qwen3:4b"));
+        assert_eq!(built.max_duration, Some(Duration::from_secs(3600)));
+        assert_eq!(ctx.local_agents, vec!["local-agent".to_string()]);
+    }
+
+    #[test]
+    fn an_invalid_spec_builds_nothing() {
+        let mut spec = AgentSpec::named("x");
+        spec.tools.profile = Some("wizard".to_string());
+        assert!(AgentBuildContext::from_spec(&spec, AgentServices::default()).is_err());
     }
 }

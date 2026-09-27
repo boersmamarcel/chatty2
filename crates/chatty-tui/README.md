@@ -98,6 +98,14 @@ object, rewritten after every model call and written last when the run ends.
 Fields and semantics: the user guide, *Terminal interface → Usage file*;
 the schema lives in `src/headless/usage_file.rs`.
 
+#### Saved conversations
+
+`--save-conversation <PATH>` writes the run's whole conversation to `PATH` when
+it ends, as the JSON array of messages a worker's captured conversation carries
+(RC-0). `--restore <PATH>` starts the run from such a file instead of an empty
+conversation, so `--message` is the next turn on that history. Both are
+`--headless` only; the resume spike (`scripts/resume-spike/`) is what uses them.
+
 ### Pipe mode
 
 Read from stdin, send as a message, print the response:

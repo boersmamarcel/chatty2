@@ -1,0 +1,6 @@
+{
+  "title": "Shopping cart",
+  "kind": "requirement-change",
+  "task": "Implement Cart in cart.py: add(sku, price, qty=1) adds qty of an item at a unit price (adding a known sku increases its quantity and keeps its first price), remove(sku) drops it (KeyError if absent), and total() returns the sum rounded to 2 decimals. Raise ValueError for a negative price or a qty below 1. Add tests.",
+  "follow_up": "Requirement change: add apply_code(code). 'SAVE10' takes 10 % off the total; 'FLAT5' takes 5.00 off but never below 0. One code at a time: a new code replaces the previous one. An unknown code raises ValueError and leaves the current code in place. total() applies the code and still rounds to 2 decimals. Add tests."
+}

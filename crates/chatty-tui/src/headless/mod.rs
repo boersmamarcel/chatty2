@@ -864,6 +864,11 @@ pub async fn run_headless(
         }
     }
 
+    // `--save-conversation` (AGE-650): a failed run's history is kept too.
+    if let Err(error) = engine.save_conversation() {
+        eprintln!("{error:#}");
+    }
+
     engine.finish_usage(if unrecovered_error.is_some() {
         RunExit::Error
     } else if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {

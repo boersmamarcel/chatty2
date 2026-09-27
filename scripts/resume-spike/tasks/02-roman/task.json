@@ -1,0 +1,6 @@
+{
+  "title": "Roman numerals",
+  "kind": "requirement-change",
+  "task": "Implement to_roman(n) in roman.py for 1 <= n <= 3999 using standard subtractive notation (4 is IV, 90 is XC). Raise ValueError outside that range. Add tests.",
+  "follow_up": "Requirement change: we also need the reverse. Add from_roman(s) to roman.py that parses a numeral back to an int and raises ValueError for anything that is not the canonical numeral of a value in 1..3999 (for example 'IIII', 'VX', 'IC', '' or 'ABC'). Round-trip every value 1..3999 in a test."
+}
