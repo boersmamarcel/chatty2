@@ -1,0 +1,33 @@
+# Override for hive's docker/docker-compose.yml (PL-E6, AGE-601): run the
+# registry and the runner from binaries built on the host by
+# `scripts/hive-e2e.sh build` — hive `main` with chatty-wasm-runtime patched
+# to this chatty2 checkout — instead of building hive's images, whose
+# Dockerfiles only see the hive repo and so can only build hive's pinned
+# chatty2 rev. Also drops Postgres' and MinIO's host ports: nothing on the
+# host talks to them, and they collide with other stacks.
+#
+# Relative paths in an override resolve against the *first* compose file's
+# directory, so the binary directory comes in absolute, as
+# HIVE_E2E_BIN_DIR. The image matches the ubuntu-24.04 runner and host the
+# binaries are built on (glibc).
+services:
+  postgres:
+    ports: !reset []
+  minio:
+    ports: !reset []
+  registry:
+    build: !reset null
+    image: ubuntu:24.04
+    entrypoint: ["/hive-bin/hive-registry"]
+    volumes:
+      - ${HIVE_E2E_BIN_DIR:?set HIVE_E2E_BIN_DIR to the directory holding hive-registry and hive-runner}:/hive-bin:ro
+      # The AWS SDK (registry) panics without native roots; the bare
+      # ubuntu image has none, so borrow the host's.
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+  runner:
+    build: !reset null
+    image: ubuntu:24.04
+    entrypoint: ["/hive-bin/hive-runner"]
+    volumes:
+      - ${HIVE_E2E_BIN_DIR:?set HIVE_E2E_BIN_DIR to the directory holding hive-registry and hive-runner}:/hive-bin:ro
+      - /etc/ssl/certs:/etc/ssl/certs:ro

@@ -2124,6 +2124,7 @@ dependencies = [
  "rig-core",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "tracing",
@@ -2140,6 +2141,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "wasmtime",
@@ -5493,6 +5495,34 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "hive-e2e"
+version = "0.4.11"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chatty-core",
+ "chatty-module-registry",
+ "chatty-protocol-gateway",
+ "chatty-wasm-runtime",
+ "chrono",
+ "ed25519-dalek 3.0.0",
+ "futures-util",
+ "hex",
+ "hive-client",
+ "hmac 0.13.0",
+ "percent-encoding",
+ "reqwest 0.13.2",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "uuid",
  "wiremock",
 ]

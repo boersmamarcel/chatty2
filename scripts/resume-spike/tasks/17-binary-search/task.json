@@ -1,0 +1,6 @@
+{
+  "title": "Binary search",
+  "kind": "requirement-change",
+  "task": "Implement find_first(items, target) in search.py: items is sorted ascending and may contain duplicates; return the index of the first occurrence of target, or -1. Use binary search, so it is O(log n). Add tests.",
+  "follow_up": "Requirement change: add find_last(items, target), the index of the last occurrence or -1, and count(items, target), built on the two; both must stay O(log n). Add tests."
+}

@@ -1,0 +1,8 @@
+{
+  "headers": [
+    "x-publisher-public-key",
+    "x-signature",
+    "x-trust-level",
+    "x-wasm-sha256"
+  ]
+}

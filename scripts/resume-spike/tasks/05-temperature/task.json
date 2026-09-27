@@ -1,0 +1,6 @@
+{
+  "title": "Temperature conversion",
+  "kind": "requirement-change",
+  "task": "Implement convert(value, from_unit, to_unit) in temperature.py for the units 'C' and 'F'. Converting a unit to itself returns the value unchanged; an unknown unit raises ValueError. Add tests.",
+  "follow_up": "Requirement change: support 'K' (Kelvin) too, in every direction, and raise ValueError for any input below absolute zero (-273.15 C, -459.67 F, 0 K). Add tests."
+}

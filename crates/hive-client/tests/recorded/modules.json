@@ -1,0 +1,407 @@
+{
+  "items": [
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.522937Z",
+      "description": "e2e fixture module: echo-agent",
+      "display_name": "echo-agent",
+      "downloads": 4,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "echo-agent",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.522937Z"
+    },
+    {
+      "author": {
+        "id": "1808465b-327b-4e5f-860c-e4478284ec5d",
+        "username": "e2e-b618a0ef"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:32:59.467362Z",
+      "description": "PL-E6 e2e module caps-e2e-9ab22ca2",
+      "display_name": "caps-e2e-9ab22ca2",
+      "downloads": 1,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "1.0.0",
+      "license": "MIT",
+      "name": "caps-e2e-9ab22ca2",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:32:59.467362Z"
+    },
+    {
+      "author": {
+        "id": "cbd07bce-9fdd-4cb4-9602-8ef58551a75d",
+        "username": "e2e-8975f5dd"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:33:07.901910Z",
+      "description": "PL-E6 e2e module remote-e2e-b52fd0d9",
+      "display_name": "remote-e2e-b52fd0d9",
+      "downloads": 1,
+      "execution_mode": "remote",
+      "homepage": null,
+      "latest_version": "1.0.0",
+      "license": "MIT",
+      "name": "remote-e2e-b52fd0d9",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:33:07.901910Z"
+    },
+    {
+      "author": {
+        "id": "836626d3-4cd7-4fb4-9077-3ac587034442",
+        "username": "e2e-c37f03d1"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:33:01.124955Z",
+      "description": "PL-E6 e2e module pin-e2e-36f1875c",
+      "display_name": "pin-e2e-36f1875c",
+      "downloads": 1,
+      "execution_mode": "remote",
+      "homepage": null,
+      "latest_version": "2.0.0",
+      "license": "MIT",
+      "name": "pin-e2e-36f1875c",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:33:01.649480Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.597464Z",
+      "description": "e2e fixture module: file-reader",
+      "display_name": "file-reader",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "file-reader",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.597464Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.665292Z",
+      "description": "e2e fixture module: fuel-meter",
+      "display_name": "fuel-meter",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "fuel-meter",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.665292Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.735431Z",
+      "description": "e2e fixture module: huge-output",
+      "display_name": "huge-output",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "huge-output",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.735431Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.804420Z",
+      "description": "e2e fixture module: log-flood",
+      "display_name": "log-flood",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "log-flood",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.804420Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.877056Z",
+      "description": "e2e fixture module: panic",
+      "display_name": "panic",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "panic",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.877056Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:02.946479Z",
+      "description": "e2e fixture module: slow-host",
+      "display_name": "slow-host",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "slow-host",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:02.946479Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:03.007687Z",
+      "description": "e2e fixture module: spin",
+      "display_name": "spin",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "spin",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:03.007687Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:03.066331Z",
+      "description": "e2e fixture module: stateful",
+      "display_name": "stateful",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "stateful",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:03.066331Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:03.143150Z",
+      "description": "e2e fixture module: threads",
+      "display_name": "threads",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "threads",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:03.143150Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:03.207128Z",
+      "description": "e2e fixture module: tool-args",
+      "display_name": "tool-args",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "tool-args",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:03.207128Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:03.271759Z",
+      "description": "e2e fixture module: trap",
+      "display_name": "trap",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "trap",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:03.271759Z"
+    },
+    {
+      "author": {
+        "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+        "username": "e2e-seed-user"
+      },
+      "category": "utility",
+      "created_at": "2026-09-27T14:30:03.340402Z",
+      "description": "e2e fixture module: wit-0-1",
+      "display_name": "wit-0-1",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "0.1.0",
+      "license": "MIT",
+      "name": "wit-0-1",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:30:03.340402Z"
+    },
+    {
+      "author": {
+        "id": "7fd60abc-cc91-45a6-ac8e-8a5f440b66cd",
+        "username": "e2e-5388af66"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:32:56.290608Z",
+      "description": "PL-E6 e2e module paid-e2e-83c589c2",
+      "display_name": "paid-e2e-83c589c2",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "1.0.0",
+      "license": "MIT",
+      "name": "paid-e2e-83c589c2",
+      "pricing_model": "paid",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:32:56.302200Z"
+    },
+    {
+      "author": {
+        "id": "96874fbb-d0b7-48e9-8395-a3f945654a9b",
+        "username": "e2e-e12a2155"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:32:58.150249Z",
+      "description": "PL-E6 e2e module paid-e2e-b0a1debf",
+      "display_name": "paid-e2e-b0a1debf",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "1.0.0",
+      "license": "MIT",
+      "name": "paid-e2e-b0a1debf",
+      "pricing_model": "paid",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:32:58.160079Z"
+    },
+    {
+      "author": {
+        "id": "e96f332d-aa0a-4604-a7d4-d3b24ad6647c",
+        "username": "e2e-440bdb8e"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:33:04.395249Z",
+      "description": "PL-E6 e2e module immut-e2e-b546d628",
+      "display_name": "immut-e2e-b546d628",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "1.0.0",
+      "license": "MIT",
+      "name": "immut-e2e-b546d628",
+      "pricing_model": "free",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:33:05.012623Z"
+    },
+    {
+      "author": {
+        "id": "ce426999-d120-4875-b13f-53889f9734a4",
+        "username": "e2e-f24172c1"
+      },
+      "category": "developer-tools",
+      "created_at": "2026-09-27T14:33:05.515492Z",
+      "description": "PL-E6 e2e module paid-e2e-f2e2b46d",
+      "display_name": "paid-e2e-f2e2b46d",
+      "downloads": 0,
+      "execution_mode": "local",
+      "homepage": null,
+      "latest_version": "1.0.0",
+      "license": "MIT",
+      "name": "paid-e2e-f2e2b46d",
+      "pricing_model": "paid",
+      "support_email": null,
+      "tags": [],
+      "updated_at": "2026-09-27T14:33:05.522532Z"
+    }
+  ],
+  "page": 1,
+  "per_page": 20,
+  "total": 27
+}

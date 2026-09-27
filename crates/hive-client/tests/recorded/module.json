@@ -1,0 +1,20 @@
+{
+  "author": {
+    "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+    "username": "e2e-seed-user"
+  },
+  "category": "utility",
+  "created_at": "2026-09-27T14:30:02.522937Z",
+  "description": "e2e fixture module: echo-agent",
+  "display_name": "echo-agent",
+  "downloads": 4,
+  "execution_mode": "local",
+  "homepage": null,
+  "latest_version": "0.1.0",
+  "license": "MIT",
+  "name": "echo-agent",
+  "pricing_model": "free",
+  "support_email": null,
+  "tags": [],
+  "updated_at": "2026-09-27T14:30:02.522937Z"
+}

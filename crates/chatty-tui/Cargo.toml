@@ -63,6 +63,8 @@ chatty-fabric = { path = "../chatty-fabric" }
 parking_lot.workspace = true
 # AGE-306's chain test puts the participant socket in a temp dir.
 tempfile.workspace = true
+# The resume spike's frozen template is pinned by its hash (AGE-650).
+sha2.workspace = true
 
 [features]
 default = ["mcp"]
