@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use crate::chatty::services::broker_runner;
+use crate::chatty::services::lazy_gateway_broker::LazyGatewayBroker;
 use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::{
@@ -688,7 +689,7 @@ pub fn refresh_runtime(cx: &mut App) {
             // `request_rx.recv()` until then, or exits with nothing bound if
             // settings change again first (dropping the sender).
             let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
-            let broker = Arc::new(broker_runner::LazyGatewayBroker::new(request_tx));
+            let broker = Arc::new(LazyGatewayBroker::new(request_tx));
             let published = cx
                 .update(|cx| {
                     let state = cx.global_mut::<DiscoveredModulesModel>();
