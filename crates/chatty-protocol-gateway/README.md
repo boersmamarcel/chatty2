@@ -205,6 +205,27 @@ broker      → {"v":2,"type":"input","taskId":"task-…","input":{"requestId":"
 participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 ```
 
+**Calls over the connection (ADR-0020, BI-4).** A worker's `invoke_agent` and
+`list_agents` reach local roles and the directory over the same connection,
+not over loopback HTTP. Each is a `call` with the worker's own `id`; the
+broker runs it as the node the connection names and answers under that `id`,
+so several calls can be in flight and finish in any order. Closing the
+connection cancels every call still in flight on it, which reaps the workers
+those calls started.
+
+```
+participant → {"v":2,"type":"call","id":1,"method":"invoke_agent","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
+participant → {"v":2,"type":"call","id":2,"method":"list_agents"}
+broker      → {"v":2,"type":"call_result","id":2,"result":[{"name":"local-reviewer","origin":"local",…}]}
+broker      → {"v":2,"type":"call_progress","id":1,"event":{"Step":"read_file"}}
+broker      → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
+```
+
+A call that cannot run ends with `call_error` (`{"kind":"unknown_agent","message":…}`);
+a callee whose task failed ends with a `call_result` whose `success` is false.
+The in-process root uses `ProtocolGateway::transport()`, the same calls with no
+socket.
+
 `invoke_agent` is the caller: it re-asks the question on its own agent's
 `ask_user` store, so a human behind it sees the ordinary popover, and an agent
 that is itself a worker parks its own task the same way — the question climbs
