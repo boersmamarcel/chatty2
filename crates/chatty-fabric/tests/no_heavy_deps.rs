@@ -22,14 +22,13 @@ fn is_forbidden(name: &str) -> bool {
 #[test]
 fn fabric_has_no_heavy_deps() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    // No --offline: `cargo metadata` resolves the full graph across every
+    // platform in Cargo.lock, including platform-gated deps (e.g. Android's
+    // `android_system_properties` via `iana-time-zone`) that a normal build
+    // for this host never fetches, so an offline run fails whenever the
+    // local registry cache happens not to have them already.
     let out = Command::new(cargo)
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--offline",
-            "--manifest-path",
-        ])
+        .args(["metadata", "--format-version", "1", "--manifest-path"])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .output()
         .expect("run cargo metadata");
