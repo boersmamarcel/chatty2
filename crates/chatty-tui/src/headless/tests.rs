@@ -70,7 +70,7 @@ fn logs_a_delegation_with_its_input_and_output() {
         &InvokeAgentProgress::Finished {
             success: false,
             result: Some("⚠️ Agent 'local-coder' reported failure".to_string()),
-            usage: None,
+            usage: Vec::new(),
         },
         &mut agent,
     );
@@ -2006,6 +2006,7 @@ mod runner {
             cache_write_tokens: 0,
             output_tokens: output,
             reasoning_tokens: reasoning,
+            ..Default::default()
         }))
     }
 

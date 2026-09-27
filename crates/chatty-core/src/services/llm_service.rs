@@ -7,6 +7,7 @@ use rig_agent::streaming::StreamingPrompt;
 use rig_core::completion::{CompletionError, Message};
 use rig_core::message::{Text, ToolResultContent, UserContent};
 use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -14,7 +15,7 @@ use crate::factories::AgentClient;
 use crate::factories::agent_factory::RequestRecorder;
 use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
-use crate::models::token_usage::ApiCallUsage;
+use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
 
@@ -66,6 +67,11 @@ pub enum StreamChunk {
     /// Usage for one completed provider request within the turn. Emitted once
     /// per request, so a turn with two tool calls yields three of these.
     ApiCallUsage(ApiCallUsage),
+    /// Usage for a call the turn made outside the model loop: a context
+    /// compaction's summary call (AGE-683), on the model that served it.
+    /// Counted with the turn, but not one of the requests the provider's
+    /// aggregate covers.
+    CompactionUsage(ApiCallUsage),
     /// Usage aggregated over every request in the turn, from the provider's
     /// final response. Arrives after the per-call chunks. `turn` is always 0
     /// (see [`normalize_usage`]'s aggregate convention).
@@ -124,6 +130,53 @@ pub fn normalize_usage(
         cache_write_tokens: clamp(cache_write),
         output_tokens: clamp(usage.output_tokens),
         reasoning_tokens: clamp(usage.reasoning_tokens),
+        ..Default::default()
+    }
+}
+
+/// Stamps the stream's usage records with the facts only the stream knows
+/// (AGE-682): the model that served them, when they finished and how long
+/// they took.
+struct UsageClock {
+    model: ModelRef,
+    stream_started: Instant,
+    call_started: Instant,
+}
+
+impl UsageClock {
+    fn new(model: ModelRef) -> Self {
+        let now = Instant::now();
+        Self {
+            model,
+            stream_started: now,
+            call_started: now,
+        }
+    }
+
+    fn stamp(&mut self, chunk: &mut StreamChunk) {
+        let (usage, started) = match chunk {
+            StreamChunk::ApiCallUsage(call) => (call, self.call_started),
+            StreamChunk::TurnUsage(aggregate) => (aggregate, self.stream_started),
+            // The next request goes out once the tool results are in.
+            StreamChunk::ToolCallResult { .. } | StreamChunk::ToolCallError { .. } => {
+                self.call_started = Instant::now();
+                return;
+            }
+            _ => return,
+        };
+        usage.model = Some(self.model.clone());
+        usage.at = Some(SystemTime::now());
+        usage.duration_ms = started.elapsed().as_millis() as u64;
+        if usage.turn > 0 {
+            self.call_started = Instant::now();
+        }
+    }
+
+    /// A compaction's summary call ran inside the next model call's window
+    /// and is timed on its own record, so that window starts after it.
+    fn exclude(&mut self, compaction: &ApiCallUsage) {
+        let shifted = self.call_started + Duration::from_millis(compaction.duration_ms);
+        self.call_started = shifted.min(Instant::now());
     }
 }
 
@@ -536,6 +589,8 @@ pub async fn stream_prompt(
     let (history, contents) = strip_unsupported_images(history, contents, agent.supports_images());
     let user_message = Message::User { content: contents };
     let semantics = agent.provider().usage_semantics();
+    let model = agent.model_ref();
+    let context_shaper = agent.context_shaper().clone();
     let history_len = history.len();
     let request_recorder = agent.request_recorder().clone();
     request_recorder.clear();
@@ -556,9 +611,17 @@ pub async fn stream_prompt(
     let stream: ResponseStream = Box::pin(async_stream::stream! {
         // Whether the model call in flight has said anything yet.
         let mut text_in_last_call = false;
+        let mut clock = UsageClock::new(model);
         loop {
             tokio::select! {
                 item = agent_stream.next() => {
+                    // A compaction runs in the hook ahead of a model call, so
+                    // its summary call has finished by the time anything that
+                    // call produces arrives (AGE-683).
+                    for call in context_shaper.take_compaction_usage() {
+                        clock.exclude(&call);
+                        yield Ok(StreamChunk::CompactionUsage(call));
+                    }
                     match item {
                         Some(result) => {
                             if let Err(e) = &result
@@ -575,7 +638,8 @@ pub async fn stream_prompt(
                                 yield Ok(chunk);
                             }
                             let (chunks, stop) = map_stream_result(result, semantics);
-                            for chunk in chunks {
+                            for mut chunk in chunks {
+                                clock.stamp(&mut chunk);
                                 match &chunk {
                                     StreamChunk::Text(text) if !text.trim().is_empty() => {
                                         text_in_last_call = true;
@@ -659,7 +723,7 @@ mod tests {
     use super::{
         BUDGET_SPENT_NOTE, IMAGE_UNSUPPORTED_NOTE, Message, MultiTurnStreamItem, PromptError,
         RequestRecorder, StreamChunk, StreamErrorKind, StreamedAssistantContent,
-        StreamedUserContent, StreamingError, UsageSemantics, WRAP_UP_TOOL_CALL_STOP,
+        StreamedUserContent, StreamingError, UsageClock, UsageSemantics, WRAP_UP_TOOL_CALL_STOP,
         budget_spent_end, classify_completion_error, classify_streaming_error, failed_run_messages,
         map_item, map_stream_result, normalize_usage, streamed_tool_result_to_text,
         strip_unsupported_images, tool_result_looks_like_error,
@@ -1292,5 +1356,38 @@ mod tests {
             reason: "stop".into(),
         }));
         assert!(failed_run_messages(&cancelled, &recorder, 1).is_none());
+    }
+
+    /// AGE-683: a compaction's summary call is timed on its own record, so
+    /// the model call whose window it ran in is not charged for it too.
+    #[test]
+    fn a_compaction_is_not_counted_inside_the_next_call() {
+        use crate::models::token_usage::{ApiCallUsage, ModelRef};
+        use crate::settings::models::providers_store::ProviderType;
+        use std::time::{Duration, Instant};
+
+        let mut clock = UsageClock::new(ModelRef {
+            provider: ProviderType::Ollama,
+            model_id: "m".into(),
+        });
+        clock.call_started = Instant::now() - Duration::from_millis(200);
+        clock.exclude(&ApiCallUsage {
+            duration_ms: 150,
+            ..ApiCallUsage::default()
+        });
+
+        let mut chunk = StreamChunk::ApiCallUsage(ApiCallUsage {
+            turn: 1,
+            ..ApiCallUsage::default()
+        });
+        clock.stamp(&mut chunk);
+        let StreamChunk::ApiCallUsage(call) = chunk else {
+            unreachable!()
+        };
+        assert!(
+            (50..150).contains(&call.duration_ms),
+            "the model call keeps only its own ~50ms: {}",
+            call.duration_ms
+        );
     }
 }

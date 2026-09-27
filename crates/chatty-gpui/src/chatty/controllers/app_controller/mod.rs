@@ -220,6 +220,17 @@ pub(super) fn desktop_session_config(cx: &App) -> AgentSessionConfig {
     }
 }
 
+/// A desktop session: [`desktop_session_config`], pricing usage lines at
+/// the model roster's current prices (AGE-682), so a delegated worker on
+/// another model is priced at that model's rates.
+pub(super) fn desktop_session(cx: &App) -> AgentSession {
+    let mut session = AgentSession::new(desktop_session_config(cx));
+    if let Some(models) = cx.try_global::<ModelsModel>() {
+        session.set_price_book(models.price_book());
+    }
+    session
+}
+
 async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyhow::Result<()> {
     let conv_id = conv_id.to_string();
 

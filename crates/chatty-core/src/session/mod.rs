@@ -65,7 +65,7 @@ use crate::models::message_types::{
     ToolCallState, TraceItem, classify_initial_execution_engine, classify_tool_source,
     detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
 };
-use crate::models::token_usage::TokenUsage;
+use crate::models::token_usage::{PriceBook, TokenUsage};
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::repositories::ConversationData;
 use crate::services::turn_budget::TurnBudget;
@@ -191,9 +191,13 @@ pub struct AgentSession {
     pending_tool_names: HashMap<String, String>,
     /// Usage of the most recent turn that reported any.
     last_turn_usage: Option<TokenUsage>,
-    /// What this turn's delegated agents spent, one line per delegation
-    /// (AGE-415), recorded on the conversation by `finish_turn`.
+    /// What this turn's delegated agents spent, one line per model per
+    /// delegation (AGE-415, AGE-682), recorded on the conversation by
+    /// `finish_turn`.
     delegated_usages: Vec<TokenUsage>,
+    /// What `finish_turn` prices usage lines with (AGE-682), besides the
+    /// conversation's own bound model. Empty until the owner sets it.
+    price_book: PriceBook,
     /// Stream-error recovery attempts per kind across the turns of one task;
     /// reset by a human turn (AGE-273).
     recovery_attempts: HashMap<StreamErrorKind, usize>,
@@ -214,8 +218,18 @@ impl AgentSession {
             pending_tool_names: HashMap::new(),
             last_turn_usage: None,
             delegated_usages: Vec::new(),
+            price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
         }
+    }
+
+    /// Price the usage lines this session records with `book` (AGE-682):
+    /// the owner's model roster, so a delegated line on another model is
+    /// priced at that model's rates. The conversation's bound model is
+    /// priced whether or not the book has it. Prices are fixed when this is
+    /// called, like the bound model's.
+    pub fn set_price_book(&mut self, book: PriceBook) {
+        self.price_book = book;
     }
 
     pub fn config(&self) -> &AgentSessionConfig {
@@ -768,10 +782,9 @@ impl AgentSession {
             } => {
                 conversation.finalize_delegation_progress(*success, result.clone());
                 // The bill follows the bearer (AGE-415): what the worker
-                // spent is this conversation's spend, priced with the turn.
-                if let Some(usage) = usage {
-                    self.delegated_usages.push(usage.clone());
-                }
+                // spent is this conversation's spend, priced at the models
+                // it was spent on (AGE-682).
+                self.delegated_usages.extend(usage.iter().cloned());
             }
         }
     }
@@ -808,14 +821,15 @@ impl AgentSession {
     /// turn's events, when it has anything in it (AGE-274).
     ///
     /// This is also the turn barrier for the conversation's totals (AGE-351):
-    /// the turn's usage is costed at the bound model's prices — here and
-    /// nowhere else, so every frontend gets the same `estimated_cost_usd` —
-    /// and its tool calls, counted from the trace the session recorded, go
-    /// onto the lifetime total. A model without prices leaves the turn's
-    /// cost `None` and the conversation's total unchanged. What the turn's
-    /// delegated agents spent goes on ahead of the turn's own usage, one
-    /// line per delegation at the same prices (AGE-415), so the totals
-    /// carry the whole tree while `last_usage` stays this agent's own.
+    /// every usage line is priced at the model it names, from the session's
+    /// price book plus the bound model (AGE-682) — here and nowhere else,
+    /// so every frontend gets the same `estimated_cost_usd` — and the turn's
+    /// tool calls, counted from the trace the session recorded, go onto the
+    /// lifetime total. A line whose model has no prices is unpriced: its
+    /// cost stays `None` and the conversation's total unchanged. What the
+    /// turn's delegated agents spent goes on ahead of the turn's own usage,
+    /// one line per model they reported (AGE-415), so the totals carry the
+    /// whole tree while `last_usage` stays this agent's own.
     ///
     /// Returns `None` when there is no conversation or no turn to finish: a
     /// second call for the same turn is a no-op, so an owner that finalizes
@@ -861,16 +875,23 @@ impl AgentSession {
         conversation.set_streaming_delegation_trace(None);
 
         conversation.add_tool_calls(tool_calls);
+        // The conversation's bound price is newer than the book's snapshot
+        // of the same model, so it replaces that entry rather than losing to it.
+        let mut book = self.price_book.clone();
+        if let Some(pricing) = conversation.pricing() {
+            book.set(conversation.model_ref().clone(), *pricing);
+        }
         for mut usage in std::mem::take(&mut self.delegated_usages) {
-            if let Some(pricing) = conversation.pricing() {
-                usage.calculate_cost(pricing);
-            }
+            usage.price(&book);
             conversation.add_delegated_usage(usage);
         }
         if let Some(mut usage) = self.last_turn_usage.take() {
-            if let Some(pricing) = conversation.pricing() {
-                usage.calculate_cost(pricing);
+            // The turn ran on the bound model: a line that does not say so
+            // itself (a hosted or scripted stream) is that model's.
+            if usage.model.is_none() {
+                usage.model = Some(conversation.model_ref().clone());
             }
+            usage.price(&book);
             conversation.add_token_usage(usage);
         }
 

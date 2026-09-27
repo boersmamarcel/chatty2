@@ -417,11 +417,12 @@ The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
 finishes become `working` status messages, assistant text becomes artifact chunks, and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
-no usage concept; usage belongs to the ledger). That number already includes whatever
-the child itself delegated, and the parent's `invoke_agent` folds it into its own
-conversation as one usage line per delegation, marked `delegated_to` and priced at the
-parent's rates in `finish_turn` — so a leader's `total_cost` carries the whole tree
-below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
+no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
+naming its model and carrying tokens and time but no price (AGE-682). The lines already
+include whatever the child itself delegated (merged only with lines on the same model),
+and the parent's `invoke_agent` folds them into its own conversation as usage lines
+marked `delegated_to`, priced in `finish_turn` at the model each names — so a leader's
+`total_cost` carries the whole tree below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
 second, independent key, `trace` (AGE-467): the worker's compacted tool-call trace —
 one `### <tool> (ok|FAILED|no result)` block per call it made, with the call's input and
 output or error, capped and (past 40 calls or 12 000 characters) trimmed from the middle

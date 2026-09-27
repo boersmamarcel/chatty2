@@ -1,7 +1,7 @@
 //! A localhost model server that answers from a script and records every
 //! request (AGE-632).
 //!
-//! Two modes share one daemon:
+//! Three modes share one daemon:
 //!
 //! - **Canned** ([`FakeDaemon::ollama`], [`FakeDaemon::openai_compatible`]):
 //!   raw response bodies served in arrival order, whatever the request. This
@@ -15,6 +15,10 @@
 //!   route matches, or whose route has run dry, gets HTTP 500 with a body
 //!   naming the key, so a missing script fails the test loudly instead of
 //!   hanging it.
+//! - **Callback** ([`FakeDaemon::start_with`]): a closure computes the
+//!   response body from each request's raw bytes, for a test that must tell
+//!   requests apart by content — e.g. a compaction summary call — rather than
+//!   by route.
 //!
 //! Replies go out as OpenAI-compatible SSE on `…/chat/completions` and as
 //! Ollama NDJSON on `/api/chat`: rig only reads the body, so the content type
@@ -134,7 +138,16 @@ enum Mode {
         responses: VecDeque<String>,
     },
     Scripted(Script),
+    /// A response body is computed from each request's own bytes, for a test
+    /// that must tell requests apart by content rather than by route.
+    Callback {
+        content_type: &'static str,
+        respond: Responder,
+    },
 }
+
+/// Computes a response body from a request's raw bytes (`Mode::Callback`).
+type Responder = Box<dyn FnMut(&[u8]) -> Option<String> + Send>;
 
 #[derive(Default)]
 struct Log {
@@ -177,6 +190,19 @@ impl FakeDaemon {
     /// A daemon that answers from `script`.
     pub fn scripted(script: Script) -> Self {
         Self::start(Mode::Scripted(script))
+    }
+
+    /// A daemon that answers each request with what `respond` makes of its
+    /// raw body, as `content_type`; a request `respond` has nothing to say to
+    /// gets a 500 naming the daemon, same as an exhausted canned queue.
+    pub fn start_with(
+        content_type: &'static str,
+        respond: impl FnMut(&[u8]) -> Option<String> + Send + 'static,
+    ) -> Self {
+        Self::start(Mode::Callback {
+            content_type,
+            respond: Box::new(respond),
+        })
     }
 
     fn start(mode: Mode) -> Self {
@@ -270,6 +296,19 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                 return match responses.pop_front() {
                     Some(body) => http(200, content_type, &body),
                     None => http(500, "text/plain", "fake model: no canned response left"),
+                };
+            }
+            Mode::Callback {
+                content_type,
+                respond,
+            } => {
+                return match respond(&request.body) {
+                    Some(body) => http(200, content_type, &body),
+                    None => http(
+                        500,
+                        "text/plain",
+                        "fake model: callback had no response left",
+                    ),
                 };
             }
             Mode::Scripted(script) => {
