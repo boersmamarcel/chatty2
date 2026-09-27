@@ -234,6 +234,7 @@ impl ParticipantRegistry {
                 task_id: task_id.clone(),
                 text: task.text,
                 bearer: task.bearer,
+                capture_conversation: task.capture_conversation,
             })
             .is_err()
         {
@@ -480,6 +481,7 @@ mod tests {
             task_id: sent,
             text,
             bearer,
+            capture_conversation,
         } = outbound.recv().await.unwrap()
         else {
             panic!("expected a task frame");
@@ -488,6 +490,7 @@ mod tests {
         assert_eq!(text, "summarise foo.rs");
         // The caller's bearer rides the frame to the worker (AGE-371).
         assert_eq!(bearer, Some(TaskBearer::new("tok")));
+        assert!(!capture_conversation, "not asked for, so off by default");
         assert_eq!(reg.open_task_count("worker-1"), 1);
 
         reg.on_frame(
