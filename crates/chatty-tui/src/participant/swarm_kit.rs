@@ -385,7 +385,7 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
                 result,
                 usage,
             } => {
-                let usage = usage.as_ref().map_or("none".to_string(), |u| {
+                let usage = usage.first().map_or("none".to_string(), |u| {
                     format!(
                         "input={} output={} cache_read={} cache_write={} calls={}",
                         u.input_tokens,
