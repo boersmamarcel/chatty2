@@ -36,6 +36,9 @@ pub mod filesystem_service;
 pub mod git_service;
 pub mod github_pr_service;
 pub mod http_client;
+/// A local broker/gateway a host has not necessarily started yet (BI-2 /
+/// AGE-634): `list_agents`/`invoke_agent` start it lazily, on first use.
+pub mod lazy_broker;
 pub mod llm_service;
 #[cfg(feature = "math-render")]
 pub mod math_renderer_service;
@@ -95,6 +98,7 @@ pub use agent_task_controller::{
 pub use context_shaper::{ContextShaper, ContextShaperSettings, ContextShaperStage, ShapedContext};
 pub use embedding_service::EmbeddingService;
 pub use error_collector_layer::ErrorCollectorLayer;
+pub use lazy_broker::LazyBroker;
 pub use llm_service::{StreamChunk, stream_prompt};
 #[cfg(feature = "math-render")]
 pub use math_renderer_service::MathRendererService;

@@ -12,11 +12,13 @@
 //! server.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
+use crate::services::lazy_broker::LazyBroker;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
 use chatty_fabric::AgentOrigin;
@@ -115,6 +117,9 @@ pub struct ListAgentsTool {
     /// Where to read the broker's live participant table, when the gateway is
     /// running (ADR-0011 C5).
     gateway_base_url: Option<String>,
+    /// A broker that has not necessarily started yet (BI-2, AGE-634).
+    /// Consulted only when `gateway_base_url` is `None`.
+    lazy_broker: Option<Arc<dyn LazyBroker>>,
     http: reqwest::Client,
 }
 
@@ -125,6 +130,7 @@ impl ListAgentsTool {
             module_agents: Vec::new(),
             local_workers: Vec::new(),
             gateway_base_url: None,
+            lazy_broker: None,
             http: reqwest::Client::new(),
         }
     }
@@ -139,6 +145,7 @@ impl ListAgentsTool {
             module_agents,
             local_workers: Vec::new(),
             gateway_base_url: None,
+            lazy_broker: None,
             http: reqwest::Client::new(),
         }
     }
@@ -148,6 +155,31 @@ impl ListAgentsTool {
     pub fn with_gateway_port(mut self, port: u16) -> Self {
         self.gateway_base_url = Some(format!("http://localhost:{port}"));
         self
+    }
+
+    /// Start the broker itself on first use instead of expecting it already
+    /// running (BI-2, AGE-634). Ignored when a `gateway_port` was already
+    /// given: that path is for tests and hosts that already know a live
+    /// port.
+    pub fn with_lazy_broker(mut self, broker: Arc<dyn LazyBroker>) -> Self {
+        self.lazy_broker = Some(broker);
+        self
+    }
+
+    /// The gateway's base URL, resolving a [`LazyBroker`] on first use if
+    /// that is all this tool has.
+    async fn gateway_base_url(&self) -> Option<String> {
+        if let Some(url) = &self.gateway_base_url {
+            return Some(url.clone());
+        }
+        let broker = self.lazy_broker.as_ref()?;
+        match broker.ensure_started().await {
+            Ok(url) => Some(url),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to start the broker for list_agents");
+                None
+            }
+        }
     }
 
     /// Advertise the broker's local workers: chatty agents in their own
@@ -275,7 +307,7 @@ impl Tool for ListAgentsTool {
         let agents: Vec<AgentListing> = listings.into_values().collect();
         tracing::info!(
             agent_count = agents.len(),
-            live_read = self.gateway_base_url.is_some(),
+            live_read = self.gateway_base_url.is_some() || self.lazy_broker.is_some(),
             "list_agents called"
         );
 
@@ -312,7 +344,7 @@ impl ListAgentsTool {
     /// Failure is not an error: the gateway may be off, and this tool's job is
     /// to say what can be addressed, which is then nothing but settings.
     async fn live_agents(&self) -> Vec<AgentListing> {
-        let Some(base) = self.gateway_base_url.as_ref() else {
+        let Some(base) = self.gateway_base_url().await else {
             return Vec::new();
         };
         let url = format!("{base}/.well-known/agent.json");
