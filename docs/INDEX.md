@@ -94,6 +94,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/modules/m3-gepa.md`](research/modules/m3-gepa.md) | chatty-optimize | GEPA prompt evolution |
 | [`research/modules/m4-ace.md`](research/modules/m4-ace.md) | chatty-playbook | ACE playbook deltas |
 | [`research/modules/m6-retrieval.md`](research/modules/m6-retrieval.md) | chatty-core, chatty-optimize | Retrieval pipeline: open web + memory |
+| [`research/age-602-host-walkthrough/README.md`](research/age-602-host-walkthrough/README.md) | PL-E7 host walkthrough evidence | GPUI/TUI screenshots and transcript backing the evaluation plan's S4 results table (AGE-602) |
 
 ## Crate READMEs (`crates/*/README.md`, synced to the site under Reference)
 

@@ -502,6 +502,8 @@ let conv_id = task.await?;
 
 **Gotcha**: In `AsyncApp` context, you must use `cx.update()` to access UI state. Direct access is not allowed.
 
+**Gotcha (tests)**: `#[gpui::test]`'s `TestAppContext` is not a Tokio runtime. A `cx.spawn`/`App::spawn` task that does real async I/O (e.g. `tokio::fs` through a settings repository) panics with "there is no reactor running" the moment it's polled — including during the test macro's own teardown, which drives any still-pending task on the *same OS thread* **after** your test function has already returned, so a plain `Runtime::new().enter()` guard (dropped at function end) is gone before that happens. Fix by leaking a `'static` runtime and forgetting its enter guard for that one test thread: `let rt: &'static _ = Box::leak(Box::new(tokio::runtime::Runtime::new()?)); std::mem::forget(rt.enter());` at the top of the test (see `module_settings_controller.rs`'s `row_4_3_add_rename_remove_and_manual_clash`, AGE-602).
+
 ### 4. Entity/Model Patterns
 
 **Models**: Simple data containers implementing `Global` for shared state.
