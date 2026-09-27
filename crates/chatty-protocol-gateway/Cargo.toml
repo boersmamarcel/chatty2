@@ -30,6 +30,11 @@ reqwest = { version = "0.12", features = ["json"] }
 # chatty-core does not depend on this crate, so the edge stays acyclic.
 chatty-core = { path = "../chatty-core", optional = true, default-features = false }
 
+# `dup2`/`fcntl` between fork and exec: the runner hands a worker its end of
+# the socket pair at a fixed descriptor (ADR-0020).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The participant socket is verified against the client the rest of the app
 # already uses (`A2aClient`), not a stub of it: ADR-0011's first kill

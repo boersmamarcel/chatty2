@@ -4,9 +4,10 @@
 //! — the way the desktop's module-settings controller does for the GPUI
 //! app (AGE-376).
 //!
-//! This is the same wiring as chatty-gpui's `broker_runner.rs` — a Unix
-//! socket children register on, and one virtual agent per resolved
-//! [`VirtualAgentSpec`] that spawns a child per delegated task — minus the
+//! This is the same wiring as chatty-gpui's `broker_runner.rs` — one
+//! virtual agent per resolved [`VirtualAgentSpec`] that spawns a child per
+//! delegated task on a connection the broker makes for it, and the shared
+//! participant socket that refuses every registration (ADR-0020) — minus the
 //! WASM module registry the desktop's gateway also serves: `--broker`
 //! exists to make the workers reachable, not to load modules, so the
 //! registry behind it is empty. Module agents chatty-tui already knows
@@ -133,14 +134,11 @@ impl Broker {
         let participants = gateway.participants();
         let listener = chatty_protocol_gateway::participant::bind(&socket)
             .with_context(|| format!("failed to bind participant socket {}", socket.display()))?;
-        let participant_listener = tokio::spawn(chatty_protocol_gateway::participant::serve(
-            listener,
-            participants.clone(),
-        ));
+        let participant_listener =
+            tokio::spawn(chatty_protocol_gateway::participant::serve(listener));
 
         for runner in local_runners(
             executable,
-            socket.clone(),
             participants.clone(),
             default_budget,
             specs,
@@ -175,8 +173,7 @@ impl Broker {
         })
     }
 
-    /// The live participant registry, so a test can register a scripted
-    /// worker the same way `LocalRunner` would register a real one.
+    /// The live participant registry, so a test can see who is connected.
     /// Nothing in `main.rs` needs this: the runners already hold their own
     /// clone (ADR-0011 C2), which is why this is test-only rather than
     /// `pub`.
@@ -336,7 +333,6 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
 /// are `chatty_core::services::virtual_agents`', made once for both.
 fn local_runners(
     executable: PathBuf,
-    socket: PathBuf,
     registry: ParticipantRegistry,
     default_budget: usize,
     specs: Vec<VirtualAgentSpec>,
@@ -350,7 +346,7 @@ fn local_runners(
     specs
         .into_iter()
         .map(|spec| {
-            let mut runner = LocalRunner::new(executable.clone(), socket.clone(), registry.clone())
+            let mut runner = LocalRunner::new(executable.clone(), registry.clone())
                 .with_agent_name(spec.name)
                 .with_description(spec.description)
                 .with_args(spec.args);
@@ -366,8 +362,9 @@ fn local_runners(
         .collect()
 }
 
-/// Where children register: the runtime directory when there is one,
-/// otherwise the temp directory (mirrors chatty-gpui's `broker_runner::
+/// Where the shared participant socket is bound, refusing every
+/// registration: the runtime directory when there is one, otherwise the
+/// temp directory (mirrors chatty-gpui's `broker_runner::
 /// socket_path`), suffixed with this process's pid so two `--broker`
 /// leaders on one host never share a socket.
 fn socket_path() -> PathBuf {

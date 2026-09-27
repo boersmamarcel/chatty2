@@ -2067,6 +2067,7 @@ dependencies = [
  "chatty-wasm-runtime",
  "futures",
  "hive-client",
+ "libc",
  "reqwest 0.12.28",
  "rig-core",
  "rmcp",

@@ -334,18 +334,18 @@ async fn s3_13_loopback_host_is_served() {
     }
 }
 
-/// 3.14 — a participant registered under a module's name. The documented
-/// precedence (`docs/a2a-and-wasm-modules.md`, gateway README): on the A2A
-/// routes a live participant is looked up first and shadows the module;
-/// participants speak only A2A, so the OpenAI and MCP routes still reach the
-/// module; and once the participant disconnects the module answers A2A
-/// again.
+/// 3.14 — a participant claiming a module's name. Since ADR-0020 the name
+/// is not the participant's to claim: the broker names it `<spec>-<n>` and
+/// ignores the card's, so a participant whose card says `echo-agent` is
+/// served as `echo-agent-0` and the module keeps its own name on every
+/// protocol. (Were the two ever to coincide, a live participant is looked
+/// up first on the A2A routes — `docs/a2a-and-wasm-modules.md`.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn s3_14_participant_shadows_module_on_a2a_only() {
+async fn s3_14_participant_cannot_take_a_modules_name() {
     use chatty_core::services::a2a_client::A2aClient;
     use chatty_protocol_gateway::participant::{
-        BrokerFrame, ParticipantCard, ParticipantConnection, TaskState,
+        BrokerFrame, ParticipantCard, ParticipantConnection, TaskState, open_connection,
     };
 
     let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
@@ -355,9 +355,13 @@ async fn s3_14_participant_shadows_module_on_a2a_only() {
         version: "0.1.0".into(),
         ..Default::default()
     };
-    let mut conn = ParticipantConnection::register(&gw.socket, card)
+    let connection = open_connection(&gw.participants, "echo-agent").unwrap();
+    connection.worker_end.set_nonblocking(true).unwrap();
+    let stream = tokio::net::UnixStream::from_std(connection.worker_end).unwrap();
+    let mut conn = ParticipantConnection::hello_over(stream, card)
         .await
-        .expect("a participant may take a module's name");
+        .expect("the broker welcomes the participant");
+    assert_eq!(conn.name(), "echo-agent-0", "the card's name is ignored");
     let participant = tokio::spawn(async move {
         let Some(BrokerFrame::Task { task_id, text, .. }) = conn.next_frame().await.unwrap() else {
             panic!("expected a task");
@@ -368,11 +372,22 @@ async fn s3_14_participant_shadows_module_on_a2a_only() {
         conn.finish(&task_id, TaskState::Completed, None, None)
             .await
             .unwrap();
-        conn // dropped by the caller, which deregisters it
+        conn
     });
 
     let client = A2aClient::new();
-    let agent = gw.a2a_agent("echo-agent");
+    let answer = client
+        .send_message(&gw.a2a_agent("echo-agent-0"), "hi")
+        .await
+        .unwrap();
+    assert_eq!(
+        answer, "participant got: hi",
+        "A2A reaches the participant by its own name"
+    );
+    let participant = participant.await.unwrap();
+
+    // While the participant is connected, `echo-agent` is still the module
+    // on every protocol.
     let card = gw
         .http
         .get(gw.url("/a2a/echo-agent/.well-known/agent.json"))
@@ -382,10 +397,12 @@ async fn s3_14_participant_shadows_module_on_a2a_only() {
         .json::<Value>()
         .await
         .unwrap();
-    assert_eq!(card["description"], "the participant, not the module");
-    let answer = client.send_message(&agent, "hi").await.unwrap();
-    assert_eq!(answer, "participant got: hi", "A2A reaches the participant");
-
+    assert_ne!(card["description"], "the participant, not the module");
+    let answer = client
+        .send_message(&gw.a2a_agent("echo-agent"), "hi")
+        .await
+        .unwrap();
+    assert_eq!(answer, "Echo: hi", "A2A still reaches the module");
     let (status, body) = gw
         .post("/v1/echo-agent/chat/completions", &chat("hi"))
         .await;
@@ -402,20 +419,5 @@ async fn s3_14_participant_shadows_module_on_a2a_only() {
             .is_some_and(|t| t.iter().any(|t| t["name"] == "echo")),
         "MCP still reaches the module: {body}"
     );
-
-    drop(participant.await.unwrap());
-    let mut answer = String::new();
-    for _ in 0..100 {
-        match client.send_message(&agent, "hi").await {
-            Ok(text) if text == "Echo: hi" => {
-                answer = text;
-                break;
-            }
-            _ => tokio::time::sleep(Duration::from_millis(20)).await,
-        }
-    }
-    assert_eq!(
-        answer, "Echo: hi",
-        "the module answers A2A once the participant is gone"
-    );
+    drop(participant);
 }

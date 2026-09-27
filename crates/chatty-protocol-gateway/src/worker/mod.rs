@@ -8,7 +8,7 @@
 //!
 //! # Why it lives in this crate
 //!
-//! Two processes can be a worker: `chatty-tui --participant-socket` on the
+//! Two processes can be a worker: `chatty-tui --participant-fd` on the
 //! desktop (ADR-0011 C2) and hive's `chatty-server` inside a microVM
 //! (AGE-307, C8). The sequence of frames a parent renders has to be the same
 //! from both — ADR-0011's first kill criterion is measured by diffing exactly

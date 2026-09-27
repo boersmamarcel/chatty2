@@ -4,25 +4,22 @@
 //!
 //! What `--team` does in `main.rs` is `load_team`, the team's specs as the
 //! roster and `Team::run_module_settings` on this run's module settings, then the exact `--broker` wiring of before; this
-//! runs that same sequence over the real gateway and socket, with the
-//! stand-in worker binary `equivalence.rs` uses (it records its argv and
-//! waits) and a scripted participant answering the task. The leader's own
-//! model is not what this pins — the roster and the argv are.
+//! runs that same sequence over the real gateway, with the stand-in worker
+//! binary `equivalence.rs` uses (`stand_in.rs`: it records its argv and
+//! answers the task on the connection the runner made for it). The
+//! leader's own model is not what this pins — the roster and the argv are.
 
 use chatty_core::agent_spec::AgentSpec;
 use chatty_core::services::team::{TeamSource, load_team};
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
-use chatty_core::services::{StreamSurface, scenarios};
-use chatty_core::session::{TurnPolicy, replay_scenario};
 use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
 use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
 use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
 use rig_agent::tool::{Tool, ToolContext};
 
 use super::broker::Broker;
-use super::equivalence::named_virtual_agents::{
-    recorded_argv, spawn_argv_gated_worker, stand_in_binary,
-};
+use super::equivalence::named_virtual_agents::{child_argv, completed_turn};
+use super::stand_in::{recorded_argv, scripted_worker_binary};
 
 const CODER: &str = "local-coder";
 const REVIEWER: &str = "local-reviewer";
@@ -64,7 +61,7 @@ async fn start_team_broker(
     );
     Broker::start_at(
         dir.join("participants.sock"),
-        stand_in_binary(dir),
+        scripted_worker_binary(dir, &completed_turn().await),
         module_settings.default_endpoint_budget,
         specs,
         None,
@@ -124,26 +121,6 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
         "the team file replaces module settings' roster for the run"
     );
 
-    let events = replay_scenario(
-        scenarios()
-            .into_iter()
-            .find(|s| s.name == "tool_call_then_result")
-            .expect("the scenario exists"),
-        TurnPolicy {
-            surface: StreamSurface::Headless,
-            max_agent_turns: 10,
-            loop_guard: false,
-            already_asked_to_retry: false,
-            think_disabled: false,
-        },
-    )
-    .await;
-    spawn_argv_gated_worker(
-        &broker.participants(),
-        &format!("{CODER}-0"),
-        dir.path().join("argv.log"),
-        events,
-    );
     InvokeAgentTool::new(vec![], vec![], Some(broker.port))
         .with_local_agents([CODER, REVIEWER])
         .call(
@@ -158,10 +135,7 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
         .unwrap_or_else(|e| panic!("delegating to the coder succeeds: {e:#}"));
 
     let argv = recorded_argv(dir.path(), 1).await;
-    let coder = argv
-        .iter()
-        .find(|line| line.contains("--participant-name local-coder-0"))
-        .unwrap_or_else(|| panic!("no coder child spawned: {argv:?}"));
+    let coder = child_argv(&argv, CODER);
     assert!(coder.contains(r#""profile":"coder""#), "{coder}");
     assert!(
         coder.contains(r#""preamble":"You are the coder on this team."#),
