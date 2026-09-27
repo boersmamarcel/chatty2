@@ -6,7 +6,7 @@
 //! Each test asserts the **correct** behaviour from the plan's pass-criterion
 //! column, not today's behaviour. A row that is known to fail today is
 //! `#[ignore = "known defect: <id>"]` so `cargo test -- --ignored` lists
-//! every open defect by name; nothing here is fixed (tests only).
+//! every open defect by name.
 //!
 //! Timing assertions use 2x the plan's floor (200 ms -> 400 ms) as the
 //! tolerance, per the runbook, and record the measured value in the panic
@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
-use chatty_wasm_runtime::{ChatRequest, Message, ModuleManifest, ResourceLimits, Role, WasmModule};
+use chatty_wasm_runtime::{
+    CallError, ChatRequest, Message, ModuleManifest, ResourceLimits, Role, WasmModule,
+};
 
 /// 2x the plan's floor tolerance for timing assertions (plan: +/- 200 ms).
 const TOLERANCE: Duration = Duration::from_millis(400);
@@ -41,6 +43,12 @@ fn load(name: &str, manifest: ModuleManifest, limits: ResourceLimits) -> WasmMod
         limits,
     )
     .unwrap_or_else(|e| panic!("fixture `{name}` failed to load: {e:#}"))
+}
+
+/// The [`CallError`] behind a failed guest call.
+fn call_error(err: &anyhow::Error) -> &CallError {
+    err.downcast_ref::<CallError>()
+        .unwrap_or_else(|| panic!("expected a CallError, got: {err:#}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -200,11 +208,14 @@ async fn sandbox_1_2_spin_default_limits_traps_on_fuel() {
     let result = m.chat(user_req("x")).await;
     let elapsed = start.elapsed();
 
-    assert!(result.is_err(), "spin must trap once fuel is exhausted");
-    let message = format!("{:#}", result.unwrap_err());
+    let err = result.expect_err("spin must trap once fuel is exhausted");
     assert!(
-        message.contains("fuel"),
-        "error should name fuel exhaustion, got: {message}"
+        matches!(call_error(&err), CallError::FuelExhausted { .. }),
+        "error should be `fuel exhausted`, got: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("fuel exhausted"),
+        "error should name fuel exhaustion, got: {err:#}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -213,19 +224,16 @@ async fn sandbox_1_2_spin_default_limits_traps_on_fuel() {
 }
 
 // ---------------------------------------------------------------------------
-// 1.3 - `spin` with `max_execution_ms = 500` and huge fuel: wall-clock
-// timeout should fire within 500ms +/- tolerance. It cannot: `chat()` wraps
-// a synchronous call with no await point, so `tokio::time::timeout` never
-// gets a chance to preempt it (F1). Fuel is set high enough that it isn't
-// the reason the call eventually returns, but low enough that the ignored
-// run finishes in a few seconds instead of hanging.
+// 1.3 - `spin` with `max_execution_ms = 500` and huge fuel: the wall-clock
+// deadline fires within 500ms +/- tolerance even though the guest never
+// yields (epoch interruption). Fuel is set far above what 500ms of spinning
+// burns, so it can't be the reason the call ends.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604)"]
-async fn sandbox_1_3_spin_wall_clock_timeout_does_not_fire() {
+async fn sandbox_1_3_spin_wall_clock_timeout_fires() {
     let limits = ResourceLimits {
-        max_fuel: 20_000_000_000,
+        max_fuel: u64::MAX,
         max_execution_ms: 500,
         ..ResourceLimits::default()
     };
@@ -234,8 +242,12 @@ async fn sandbox_1_3_spin_wall_clock_timeout_does_not_fire() {
     let result = m.chat(user_req("x")).await;
     let elapsed = start.elapsed();
 
-    assert!(result.is_err(), "expected a timeout error, got {result:?}");
-    let message = format!("{:#}", result.unwrap_err());
+    let err = result.expect_err("expected a timeout error");
+    assert!(
+        matches!(call_error(&err), CallError::DeadlineExceeded { .. }),
+        "expected `deadline exceeded`, got: {err:#} (elapsed {elapsed:?})"
+    );
+    let message = format!("{err:#}");
     assert!(
         message.contains("timed out"),
         "expected the wall-clock timeout to fire, got: {message} (elapsed {elapsed:?})"
@@ -248,14 +260,13 @@ async fn sandbox_1_3_spin_wall_clock_timeout_does_not_fire() {
 
 // ---------------------------------------------------------------------------
 // 1.4 - `slow-host` with `max_execution_ms = 1000`: a slow LLM provider
-// stalls the guest in *host* time. The timeout should fire around 1s, not
-// wait out the full provider delay (F1: no await point inside the
-// synchronous `llm::complete` host call either).
+// stalls the guest in *host* time. The deadline counts host time: the host
+// stops waiting at ~1s and the call fails with `deadline exceeded`, instead
+// of waiting out the full provider delay.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604)"]
-async fn sandbox_1_4_slow_host_wall_clock_timeout_does_not_fire() {
+async fn sandbox_1_4_slow_host_wall_clock_timeout_fires() {
     let limits = ResourceLimits {
         max_execution_ms: 1_000,
         ..ResourceLimits::default()
@@ -278,7 +289,11 @@ async fn sandbox_1_4_slow_host_wall_clock_timeout_does_not_fire() {
     let result = m.chat(user_req("x")).await;
     let elapsed = start.elapsed();
 
-    assert!(result.is_ok(), "expected a timeout error, got {result:?}");
+    let err = result.expect_err("expected a timeout error");
+    assert!(
+        matches!(call_error(&err), CallError::DeadlineExceeded { .. }),
+        "expected `deadline exceeded`, got: {err:#} (elapsed {elapsed:?})"
+    );
     assert!(
         elapsed <= Duration::from_millis(1_000) + TOLERANCE,
         "expected the timeout within 1000ms +/- {TOLERANCE:?}, measured {elapsed:?} \
@@ -287,48 +302,48 @@ async fn sandbox_1_4_slow_host_wall_clock_timeout_does_not_fire() {
 }
 
 // ---------------------------------------------------------------------------
-// 1.5 - `fuel-meter` called 10 times: fuel is set once at instantiate and
-// never refilled (F2), so a long-lived module eventually traps on every
-// call even though each individual call is well within budget.
+// 1.5 - `fuel-meter` called 10 times: fuel is a per-call budget, refilled
+// before every call, so a long-lived module never runs dry.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604)"]
 async fn sandbox_1_5_fuel_meter_ten_calls_all_succeed() {
-    // ~30% of the default 100M fuel budget per call, per the plan.
-    let mut m = load(
-        "fuel-meter",
-        ModuleManifest::new("fuel-meter"),
-        ResourceLimits::default(),
-    );
+    // Each call burns ~30% of a 100M budget; ten of them need 3x the budget,
+    // so this only passes if fuel is refilled per call.
+    let limits = ResourceLimits {
+        max_fuel: 100_000_000,
+        ..ResourceLimits::default()
+    };
+    let mut m = load("fuel-meter", ModuleManifest::new("fuel-meter"), limits);
     for i in 1..=10 {
         let result = m.chat(user_req("2100000")).await;
         assert!(
             result.is_ok(),
             "call {i}/10 should succeed (fuel should refill per call), got {result:?}"
         );
+        let fuel = m.last_invocation_metrics().unwrap().fuel_consumed;
+        assert!(
+            fuel > 0 && fuel < 100_000_000,
+            "call {i}: fuel_consumed is counted per call, got {fuel}"
+        );
     }
 }
 
 // ---------------------------------------------------------------------------
-// 1.6 - `alloc`: 16 MiB succeeds against the 64 MiB default cap; 128 MiB is a
-// clean error, not a host abort. Repeated with a manifest-set 32 MiB cap.
+// 1.6 - `alloc`: 16 MiB succeeds against the default cap; 1 GiB is a clean
+// `memory limit` error, not a host abort. Repeated with a manifest-set 32 MiB
+// cap.
 //
-// The first half (within-cap) passes today. The second half does not: when
-// the store's memory limiter denies growth, the guest's Rust allocator
-// prints an "allocation failed" message to its WASI stderr stream before
-// trapping. Flushing that stream calls into `wasmtime-wasi`'s
-// `in_tokio()` helper, which — because `WasmModule::chat()` is itself being
-// polled from inside a Tokio runtime (exactly how every real caller uses
-// it) — tries to block a thread that is already driving that runtime and
-// panics with "Cannot start a runtime from within a runtime". That is a
-// genuine Rust panic, not a caught Wasmtime trap: a direct `.await` (as
-// `WasmModule::chat()` does today) lets it unwind straight out and crash the
-// host process. This is a new finding beyond the plan's F1-F16 survey; see
-// the comment left on PL-H1 (AGE-604) with this evidence. To observe it here
-// without taking down the whole test binary, the over-cap calls are driven
-// through `tokio::task::spawn` (a panicking task is reported as a
-// `JoinError`, not a crashed process) — production code does not do this.
+// The fixture builds its buffer by `extend`ing a `Vec` 1 MiB at a time, so
+// the Vec doubles and every old buffer stays in linear memory: N MiB needs
+// roughly 2N MiB of memory (16 MiB -> 1+2+4+8+16 = 31 MiB plus the heap
+// base). That, not a host bug, is why 16 MiB against a 32 MiB cap fails.
+//
+// These calls are awaited directly, the way production callers do: the
+// guest's allocation-failure message goes through WASI stderr, whose sync
+// bindings `block_on` the Tokio runtime. Before PL-H1 that panicked the
+// host ("Cannot start a runtime from within a runtime"); the call now runs
+// off the executor, so the test binary surviving is part of the assertion.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,128 +356,134 @@ async fn sandbox_1_6_alloc_within_cap_succeeds() {
     let resp = m
         .chat(user_req("16"))
         .await
-        .expect("16 MiB is within the 64 MiB default cap");
+        .expect("16 MiB is within the 256 MiB default cap");
     assert_eq!(resp.content, "allocated 16 MiB");
 }
 
-/// Same as above, but against a tight manifest-set 32 MiB cap for a 16 MiB
-/// allocation — still comfortably within cap, but close enough that the
-/// guest allocator's grow-then-retry heuristic bumps the store's memory
-/// limiter at least once even though the *final* allocation succeeds. That
-/// bump triggers the same WASI-stdout-flush-from-inside-a-running-runtime
-/// panic described above (this is broader than "exceeding the cap": it is
-/// "coming near it"). See the comment on PL-H1 (AGE-604).
+/// 8 MiB (~16 MiB of linear memory, see above) against a manifest-set
+/// 32 MiB cap: succeeds, and the same instance serves a second call.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604) — a tight-but-sufficient cap also panics the host"]
 async fn sandbox_1_6_alloc_within_tight_manifest_cap_succeeds() {
     let limits32 = ResourceLimits {
         max_memory_bytes: 32 * 1024 * 1024,
         ..ResourceLimits::default()
     };
     let mut m32 = load("alloc", ModuleManifest::new("alloc"), limits32);
-    let req = user_req("16"); // within the 32 MiB cap
-    let result = tokio::task::spawn(async move { m32.chat(req).await }).await;
-    match result {
-        Ok(Ok(resp)) => assert_eq!(resp.content, "allocated 16 MiB"),
-        Ok(Err(e)) => panic!("16 MiB should succeed against a 32 MiB cap, got error: {e:#}"),
-        Err(join_err) => panic!(
-            "an allocation within cap must not panic the host even when the \
-             allocator's own growth heuristic comes close to the limit: {join_err}"
-        ),
+    for _ in 0..2 {
+        let resp = m32
+            .chat(user_req("8"))
+            .await
+            .unwrap_or_else(|e| panic!("8 MiB should succeed against a 32 MiB cap: {e:#}"));
+        assert_eq!(resp.content, "allocated 8 MiB");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604) — over-cap alloc panics the host, see test comment"]
 async fn sandbox_1_6_alloc_over_default_cap_is_clean_error() {
     let mut m = load(
         "alloc",
         ModuleManifest::new("alloc"),
         ResourceLimits::default(),
     );
-    let req = user_req("128"); // over the 64 MiB default cap
-    let result = tokio::task::spawn(async move { m.chat(req).await }).await;
-    match result {
-        Ok(Ok(resp)) => panic!("expected an error for an over-cap allocation, got {resp:?}"),
-        Ok(Err(e)) => {
-            /* the desired, not-yet-real outcome: a clean Result::Err */
-            let _ = e;
-        }
-        Err(join_err) => panic!(
-            "over-cap allocation must be a clean `Result::Err`, not a host panic: {join_err}"
-        ),
-    }
+    // Over the 256 MiB default cap.
+    let err = m
+        .chat(user_req("1024"))
+        .await
+        .expect_err("expected an error for an over-cap allocation");
+    assert!(
+        matches!(call_error(&err), CallError::MemoryLimit { .. }),
+        "expected `memory limit`, got: {err:#}"
+    );
+    assert!(format!("{err:#}").contains("memory limit"), "{err:#}");
+
+    // The failed call's instance is dropped; the module still serves.
+    let resp = m.chat(user_req("1")).await.expect("module recovers");
+    assert_eq!(resp.content, "allocated 1 MiB");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604) — over-cap alloc panics the host, see test comment"]
 async fn sandbox_1_6_alloc_over_manifest_cap_is_clean_error() {
     let limits32 = ResourceLimits {
         max_memory_bytes: 32 * 1024 * 1024,
         ..ResourceLimits::default()
     };
     let mut m = load("alloc", ModuleManifest::new("alloc"), limits32);
-    let req = user_req("40"); // over the manifest-set 32 MiB cap
-    let result = tokio::task::spawn(async move { m.chat(req).await }).await;
-    match result {
-        Ok(Ok(resp)) => panic!("expected an error for an over-cap allocation, got {resp:?}"),
-        Ok(Err(e)) => {
-            let _ = e;
-        }
-        Err(join_err) => panic!(
-            "over-cap allocation must be a clean `Result::Err`, not a host panic: {join_err}"
-        ),
+    for mib in ["16", "40"] {
+        let err = m
+            .chat(user_req(mib))
+            .await
+            .expect_err("expected an error for an over-cap allocation");
+        assert!(
+            matches!(call_error(&err), CallError::MemoryLimit { .. }),
+            "{mib} MiB: expected `memory limit`, got: {err:#}"
+        );
     }
 }
 
 // ---------------------------------------------------------------------------
-// 1.7 - `panic`, `trap`, then a normal call on the same instance.
+// 1.7 - `panic`, `trap`, then a normal call on the same module.
 //
-// Split in two: the panic half is a newly-found defect (see 1.6's comment —
-// same root cause, same evidence posted on PL-H1/AGE-604); the trap-then-
-// reuse half is one of the plan's explicit "decide and pin" rows, so it
-// asserts today's pinned behaviour (wasmtime poisons the instance after a
-// trap) with a comment naming the open question, and is not ignored.
+// A guest panic is a `guest trap` carrying the panic message (read from the
+// guest's stderr), not a host panic. After a trap wasmtime won't enter the
+// instance again, so `WasmModule` drops it and re-instantiates lazily on the
+// next call (guest statics start over).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H1 (AGE-604) — see sandbox_1_6_alloc_over_default_cap_is_clean_error"]
 async fn sandbox_1_7_panic_is_mapped_to_an_error_not_a_host_panic() {
     let mut m = load(
         "panic",
         ModuleManifest::new("panic"),
         ResourceLimits::default(),
     );
-    let req = user_req("boom");
-    // Driven through `spawn` so the demonstrated defect doesn't also take
-    // down every other test in this binary; production code does not do
-    // this and would crash on a direct `.await`.
-    let result = tokio::task::spawn(async move { m.chat(req).await }).await;
-    match result {
-        Ok(Err(e)) => {
-            let message = format!("{e:#}");
-            assert!(
-                message.contains("boom"),
-                "error should be mapped with the panic message, got: {message}"
-            );
-        }
-        Ok(Ok(resp)) => panic!("a panicking guest must not return Ok, got {resp:?}"),
-        Err(join_err) => panic!(
-            "a panicking guest call must be mapped to an error, not crash the host: {join_err}"
-        ),
-    }
+    // Awaited directly, as production callers do.
+    let err = m
+        .chat(user_req("boom"))
+        .await
+        .expect_err("a panicking guest must not return Ok");
+    assert!(
+        matches!(call_error(&err), CallError::GuestTrap(_)),
+        "expected `guest trap`, got: {err:#}"
+    );
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("guest trap") && message.contains("boom"),
+        "error should be mapped with the panic message, got: {message}"
+    );
 }
 
-/// OPEN QUESTION (pin, not ignored): after a trap, wasmtime poisons the
-/// component instance — a wasm-level trap (as opposed to a caught guest
-/// error) leaves the `Store` unable to enter the instance again. Today every
-/// subsequent call on the *same* `WasmModule` fails, even a normal one. If
-/// modules are meant to be long-lived (per the registry's hot-reload model),
-/// this needs a decision: either the registry must reload after every trap,
-/// or `WasmModule` needs a way to detect "poisoned" and reinstantiate
-/// in-place. This test pins today's behaviour so a change is visible.
+/// The same on a current-thread runtime, where blocking the one executor
+/// thread would otherwise deadlock or panic: a guest panic and a memory-limit
+/// abort are both plain errors, and the module keeps serving.
+#[tokio::test(flavor = "current_thread")]
+async fn guest_panic_and_memory_limit_never_take_down_a_current_thread_host() {
+    let mut panicking = load(
+        "panic",
+        ModuleManifest::new("panic"),
+        ResourceLimits::default(),
+    );
+    let err = panicking.chat(user_req("boom")).await.unwrap_err();
+    assert!(
+        matches!(call_error(&err), CallError::GuestTrap(m) if m.contains("boom")),
+        "{err:#}"
+    );
+
+    let limits = ResourceLimits {
+        max_memory_bytes: 32 * 1024 * 1024,
+        ..ResourceLimits::default()
+    };
+    let mut alloc = load("alloc", ModuleManifest::new("alloc"), limits);
+    let err = alloc.chat(user_req("40")).await.unwrap_err();
+    assert!(
+        matches!(call_error(&err), CallError::MemoryLimit { .. }),
+        "{err:#}"
+    );
+    let resp = alloc.chat(user_req("1")).await.expect("module recovers");
+    assert_eq!(resp.content, "allocated 1 MiB");
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn sandbox_1_7_trap_then_reuse_is_poisoned_today() {
+async fn sandbox_1_7_trap_then_reuse_reinstantiates() {
     let mut m = load(
         "trap",
         ModuleManifest::new("trap"),
@@ -470,19 +491,77 @@ async fn sandbox_1_7_trap_then_reuse_is_poisoned_today() {
     );
 
     let trapped = m.chat(user_req("x")).await;
-    assert!(trapped.is_err(), "unreachable must trap");
-    let message = format!("{:#}", trapped.unwrap_err());
+    let err = trapped.expect_err("unreachable must trap");
+    assert!(
+        matches!(call_error(&err), CallError::GuestTrap(_)),
+        "expected `guest trap`, got: {err:#}"
+    );
+    let message = format!("{err:#}");
     assert!(
         message.contains("unreachable"),
         "trap error should name the cause, got: {message}"
     );
 
-    // Pin: the instance is not reusable after a trap.
-    let reused = m.chat(user_req("y")).await;
+    // The next calls run on a fresh instance: the metadata export works and
+    // `invoke_tool` reaches the guest (its own "unknown tool" error, not a
+    // "cannot enter instance" failure).
+    let card = m.agent_card().expect("agent_card after a trap");
+    assert_eq!(card.name, "trap");
+    let tool = m.invoke_tool("nope", "{}").await;
+    let tool_err = format!("{:#}", tool.expect_err("the fixture has no tools"));
     assert!(
-        reused.is_err(),
-        "OPEN QUESTION pinned: today the instance stays poisoned after a trap \
-         (an attempt to reuse it errors instead of running normally)"
+        tool_err.contains("unknown tool: nope"),
+        "invoke_tool after a trap should reach the guest, got: {tool_err}"
+    );
+
+    // And trapping again is again a clean error.
+    assert!(m.chat(user_req("y")).await.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Output cap: every export's return value is capped at 1 MiB per call.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_cap_enforced() {
+    let mut m = load(
+        "huge-output",
+        ModuleManifest::new("huge-output"),
+        ResourceLimits::default(),
+    );
+
+    // 2 MiB of output against the 1 MiB default cap.
+    let err = m
+        .chat(user_req("2"))
+        .await
+        .expect_err("a 2 MiB reply must be rejected");
+    assert!(
+        matches!(
+            call_error(&err),
+            CallError::OutputTooLarge { bytes, max_output_bytes: 1_048_576 }
+                if *bytes == 2 * 1024 * 1024
+        ),
+        "expected `output too large`, got: {err:#}"
+    );
+    assert!(format!("{err:#}").contains("output too large"), "{err:#}");
+
+    // Under the cap passes, on the same module.
+    let ok = m.chat(user_req("0")).await.expect("an empty reply is fine");
+    assert!(ok.content.is_empty());
+
+    // A lower cap applies to the metadata exports too.
+    let mut tiny = load(
+        "huge-output",
+        ModuleManifest::new("huge-output"),
+        ResourceLimits {
+            max_output_bytes: 8,
+            ..ResourceLimits::default()
+        },
+    );
+    let err = tiny.agent_card().expect_err("the card is over 8 bytes");
+    assert!(
+        matches!(call_error(&err), CallError::OutputTooLarge { .. }),
+        "expected `output too large`, got: {err:#}"
     );
 }
 

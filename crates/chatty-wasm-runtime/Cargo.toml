@@ -13,7 +13,8 @@ test-support = []
 wasmtime = { version = "30", features = ["component-model"] }
 wasmtime-wasi = "30"
 anyhow.workspace = true
-tokio = { workspace = true, features = ["time"] }
+bytes.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
