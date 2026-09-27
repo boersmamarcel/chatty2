@@ -444,10 +444,7 @@ fn chi_square_test(args: &str) -> Result<String, String> {
         let expected = BENFORDS_EXPECTED[i] / 100.0 * total_f;
         if expected > 0.0 {
             let diff = observed as f64 - expected;
-            // THROWAWAY (AGE-600 CI verification, reverted immediately): break
-            // the chi-square formula to prove the new "Test benford-agent on
-            // the host target" CI step actually catches a broken chi_square_test.
-            chi_sq += diff / expected;
+            chi_sq += (diff * diff) / expected;
             if diff.abs() > max_abs_dev {
                 max_abs_dev = diff.abs();
                 most_deviant_digit = i + 1;
