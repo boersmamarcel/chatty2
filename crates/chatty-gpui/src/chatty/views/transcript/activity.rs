@@ -36,6 +36,10 @@ pub fn classify_tool(name: &str) -> ToolKind {
         // A command run in the user's terminal (AGE-584).
         return ToolKind::Command;
     }
+    if chatty_core::tools::plugin_tool::plugin_tool_display_name(name).is_some() {
+        // A spec's plugin tool (PL-U2) counts as a tool, whatever its name.
+        return ToolKind::External;
+    }
     if n.contains("todo") || n == "verify_completion" {
         // Agent plan tools are Plan blocks, not edits.
         return ToolKind::Explore;

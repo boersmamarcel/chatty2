@@ -1893,6 +1893,7 @@ dependencies = [
  "bytes",
  "calamine 0.36.1",
  "chatty-fabric",
+ "chatty-module-registry",
  "chatty-optimize",
  "chatty-terminal",
  "chatty-wasm-runtime",
@@ -1925,6 +1926,7 @@ dependencies = [
  "rmcp",
  "rpptx",
  "rust_xlsxwriter",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2021,7 +2023,6 @@ version = "0.4.11"
 dependencies = [
  "anyhow",
  "chatty-wasm-runtime",
- "notify",
  "serde",
  "tempfile",
  "tokio",

@@ -189,6 +189,7 @@ pub mod pdf_extract_text_tool;
 pub mod pdf_info_tool;
 #[cfg(feature = "pdf")]
 pub mod pdf_to_image_tool;
+pub mod plugin_tool;
 #[cfg(feature = "pptx")]
 pub mod pptx_tool;
 pub mod publish_module_tool;

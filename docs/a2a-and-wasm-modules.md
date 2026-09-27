@@ -549,9 +549,11 @@ profile = "reviewer"               # coordinator | coder | reviewer
 disable = ["fetch"]                # tool groups, narrows only
 skills = ["coder-reviewer"]        # read_skill names, named in the preamble
 
-[[plugins]]                        # carried, not loaded yet (PL-U2)
-module = "benford"
-version = "^0.2"
+[[plugins]]                        # its tools become this agent's (PL-U2)
+module = "benford-agent"
+version = "^0.2"                   # checked against the module's [module].version
+grants = ["llm"]                   # "http" / "file-write" would make every call ask first
+limits = { max_execution_ms = 5000 }  # lowers the module's [resources], never raises them
 
 [swarm]
 delegates_to = ["local-coder"]     # non-empty: the worker runs a broker of its own
@@ -587,6 +589,28 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
 | `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |
+| `plugins` | Optional. WASM modules whose tools this agent runs in-process — see below. |
+
+**Plugins: a module's tools as the agent's own (PL-U2, AGE-616).** Each `[[plugins]]`
+entry is loaded when the agent is built: the module directory (`module_settings.module_dir`)
+is searched for a `module.toml` whose `[module].name` is `module`, its version is checked
+against `version`, and one instance is made for this agent, with the module's `[config]`
+(the spec's `config` on top) and `[files].root`, and its `[resources]` lowered by the
+spec's `limits`. Every tool its `list-tools` names is registered next to the native tools
+as `<module>__<tool>` — `echo-agent__reverse` — because OpenAI-wire providers (OpenRouter,
+Azure) refuse any tool name outside `^[a-zA-Z0-9_-]{1,64}$`, so the dotted form is only
+what the transcript shows ("Ran echo-agent.reverse"). A call goes straight into the
+instance under PL-H1's per-call limits — about 40 µs, against about 1 ms through the
+gateway's `/mcp/{module}` — and a trap, deadline or guest error comes back to the model as
+the tool's error, with its reason, and the turn goes on. The spec is the plugin's
+allow-list: a tool profile does not remove it. A call asks for approval only when the
+spec grants the plugin a side-effecting capability (`http`, `file-write`). Under
+`--tool-loading dynamic` each plugin is one `load_tools` group named after it. What a
+plugin spends through `llm::complete` runs on the calling agent's model and is recorded
+as its own usage line on the turn, naming the plugin and the model that served it. A
+plugin that does not load fails the agent's build. The desktop runs spec agents as
+`chatty-tui` workers, which load their plugins the same way; it no longer adds its modules
+to the MCP server list — `/mcp/{module}` is for MCP clients outside chatty.
 
 **Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `tools.disable` removes
 whole tool *groups*, which is the wrong grain for a role — a reviewer wants `git_diff`

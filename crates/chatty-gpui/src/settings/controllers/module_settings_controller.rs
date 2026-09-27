@@ -1,7 +1,6 @@
 #[cfg(unix)]
 use crate::chatty::services::broker_runner;
 use crate::chatty::services::lazy_gateway_broker::LazyGatewayBroker;
-use crate::settings::models::mcp_store::{McpServerConfig, McpServersModel};
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::{
     AgentConfigEvent, DiscoveredModuleEntry, DiscoveredModulesModel, GlobalAgentConfigNotifier,
@@ -268,7 +267,9 @@ fn apply_gateway_result(
     result: Result<ProtocolGateway>,
     cx: &mut App,
 ) {
-    let gateway_ok;
+    // A module's tools reach an agent as a plugin its spec lists (PL-U2),
+    // not as an MCP server pointed at this gateway; `/mcp/{module}` stays
+    // for external MCP clients.
     {
         let state = cx.global_mut::<DiscoveredModulesModel>();
         if state.refresh_generation != generation {
@@ -282,112 +283,15 @@ fn apply_gateway_result(
                     settings.gateway_port
                 );
                 state.gateway = Some(gateway);
-                gateway_ok = true;
             }
             Err(err) => {
                 state.gateway_status = format!("Gateway failed to start: {err}");
                 state.gateway = None;
-                gateway_ok = false;
             }
         }
-    }
-
-    if gateway_ok {
-        sync_module_mcp_servers(settings.gateway_port, cx);
-    } else {
-        remove_module_mcp_servers(cx);
     }
 
     cx.refresh_windows();
-}
-
-/// Add/update MCP server entries for discovered modules that declare `mcp = true`.
-/// Entries are created disabled so the user must manually enable them.
-fn sync_module_mcp_servers(gateway_port: u16, cx: &mut App) {
-    let mcp_modules: Vec<String> = {
-        let discovered = cx.global::<DiscoveredModulesModel>();
-        discovered
-            .modules
-            .iter()
-            .filter(|m| m.mcp && matches!(m.status, ModuleLoadStatus::Loaded))
-            .map(|m| m.name.clone())
-            .collect()
-    };
-
-    if mcp_modules.is_empty() {
-        return;
-    }
-
-    let mut changed = false;
-    {
-        let model = cx.global_mut::<McpServersModel>();
-        for module_name in &mcp_modules {
-            let url = format!("http://127.0.0.1:{}/mcp/{}", gateway_port, module_name);
-
-            if let Some(existing) = model
-                .servers_mut()
-                .iter_mut()
-                .find(|s| s.name == *module_name && s.is_module)
-            {
-                // Update URL if gateway port changed
-                if existing.url != url {
-                    info!(module = %module_name, url = %url, "Updated module MCP server URL");
-                    existing.url = url;
-                    changed = true;
-                }
-            } else if !model.servers().iter().any(|s| s.name == *module_name) {
-                // Only create if no server (manual or module) already has this name
-                info!(module = %module_name, "Auto-registered module as MCP server (disabled)");
-                model.servers_mut().push(McpServerConfig {
-                    name: module_name.clone(),
-                    url,
-                    api_key: None,
-                    enabled: false,
-                    is_module: true,
-                });
-                changed = true;
-            }
-        }
-
-        // Remove module entries for modules that are no longer discovered
-        let before = model.servers().len();
-        model
-            .servers_mut()
-            .retain(|s| !s.is_module || mcp_modules.contains(&s.name));
-        if model.servers().len() != before {
-            changed = true;
-        }
-    }
-
-    if changed {
-        let servers = cx.global::<McpServersModel>().servers().to_vec();
-        save_mcp_servers_async(servers, cx);
-    }
-}
-
-/// Remove all module-sourced MCP server entries (e.g. when gateway stops).
-fn remove_module_mcp_servers(cx: &mut App) {
-    let changed = {
-        let model = cx.global_mut::<McpServersModel>();
-        let before = model.servers().len();
-        model.servers_mut().retain(|s| !s.is_module);
-        model.servers().len() != before
-    };
-
-    if changed {
-        let servers = cx.global::<McpServersModel>().servers().to_vec();
-        save_mcp_servers_async(servers, cx);
-    }
-}
-
-fn save_mcp_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::mcp_repository();
-        if let Err(e) = repo.save_all(servers).await {
-            error!(error = ?e, "Failed to save MCP servers after module sync");
-        }
-    })
-    .detach();
 }
 
 pub fn refresh_runtime(cx: &mut App) {
@@ -634,138 +538,6 @@ pub fn refresh_runtime(cx: &mut App) {
         }
     })
     .detach();
-}
-
-#[cfg(test)]
-mod module_mcp_sync_tests {
-    use super::*;
-    use gpui::TestAppContext;
-
-    /// 4.3: `sync_module_mcp_servers` adds a disabled entry per `mcp = true`
-    /// module, leaves a manually-added server with the same name alone, and
-    /// removes module entries for modules that disappeared — without
-    /// touching non-module entries.
-    #[gpui::test]
-    async fn row_4_3_add_rename_remove_and_manual_clash(cx: &mut TestAppContext) {
-        // `sync_module_mcp_servers` ends by detaching a `cx.spawn` task that
-        // persists the servers through `chatty_core::mcp_repository()`
-        // (tokio::fs under the hood); gpui's own test executor is not a
-        // Tokio runtime, so that detached task needs one to schedule its
-        // blocking I/O on. Entering one here is test setup, not a change to
-        // `sync_module_mcp_servers` itself, whose synchronous global-state
-        // update (what this row checks) already happened by the time it
-        // spawns that task.
-        // `sync_module_mcp_servers` ends by detaching a `cx.spawn` task that
-        // persists the servers through `chatty_core::mcp_repository()`
-        // (tokio::fs under the hood). `gpui::test`'s own teardown drives any
-        // still-pending foreground task on this same OS thread *after* this
-        // function returns (so a plain `Runtime::enter()` guard, dropped at
-        // the end of this function, is gone before that happens) — this
-        // thread needs a Tokio context installed for the rest of its life,
-        // not just for the body below. Leaking the guard is test setup for
-        // that one thread, not a change to `sync_module_mcp_servers`, whose
-        // synchronous global-state update (what this row checks) is already
-        // done by the time it spawns that task.
-        let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(
-            tokio::runtime::Runtime::new().expect("tokio runtime"),
-        ));
-        std::mem::forget(rt.enter());
-
-        cx.update(|cx| {
-            let _ = chatty_core::init_repositories();
-            cx.set_global(DiscoveredModulesModel {
-                modules: vec![
-                    module_entry("echo-agent", true),
-                    module_entry("benford-agent", true),
-                ],
-                ..Default::default()
-            });
-            cx.set_global(McpServersModel::new());
-
-            // A manually-added server sharing a module's name: must be left
-            // untouched (not overwritten into a module entry).
-            cx.global_mut::<McpServersModel>()
-                .servers_mut()
-                .push(McpServerConfig {
-                    name: "benford-agent".to_string(),
-                    url: "http://example.invalid/mcp".to_string(),
-                    api_key: Some("manual-key".to_string()),
-                    enabled: true,
-                    is_module: false,
-                });
-
-            sync_module_mcp_servers(9420, cx);
-
-            let servers = cx.global::<McpServersModel>().servers();
-            let echo = servers
-                .iter()
-                .find(|s| s.name == "echo-agent")
-                .expect("echo-agent should be auto-registered");
-            assert!(echo.is_module);
-            assert!(!echo.enabled, "auto-registered entries start disabled");
-            assert_eq!(echo.url, "http://127.0.0.1:9420/mcp/echo-agent");
-
-            let manual = servers
-                .iter()
-                .find(|s| s.name == "benford-agent" && !s.is_module)
-                .expect("the manual server must survive the clash untouched");
-            assert_eq!(manual.url, "http://example.invalid/mcp");
-            assert_eq!(manual.api_key.as_deref(), Some("manual-key"));
-            assert!(
-                !servers
-                    .iter()
-                    .any(|s| s.name == "benford-agent" && s.is_module),
-                "a module must not create a second entry under a manually \
-                 used name"
-            );
-
-            // Now the module is renamed/removed (only echo-agent remains
-            // discovered): the stale module entry for benford-agent's
-            // module-side registration (none was created above) stays
-            // gone, and a rename shows up as add-new + remove-old.
-            cx.global_mut::<DiscoveredModulesModel>().modules =
-                vec![module_entry("echo-agent-renamed", true)];
-            sync_module_mcp_servers(9420, cx);
-
-            let servers = cx.global::<McpServersModel>().servers();
-            assert!(
-                servers
-                    .iter()
-                    .any(|s| s.name == "echo-agent-renamed" && s.is_module),
-                "the renamed module should be registered under its new name"
-            );
-            assert!(
-                !servers
-                    .iter()
-                    .any(|s| s.name == "echo-agent" && s.is_module),
-                "the old module name's entry should be removed on rename"
-            );
-            assert!(
-                servers
-                    .iter()
-                    .any(|s| s.name == "benford-agent" && !s.is_module),
-                "the manual server is still there, untouched by the rename"
-            );
-        });
-    }
-
-    fn module_entry(name: &str, mcp: bool) -> DiscoveredModuleEntry {
-        DiscoveredModuleEntry {
-            directory_name: name.to_string(),
-            name: name.to_string(),
-            version: "0.1.0".to_string(),
-            description: String::new(),
-            wasm_file: format!("{name}.wasm"),
-            tools: Vec::new(),
-            chat: true,
-            agent: true,
-            openai_compat: true,
-            mcp,
-            a2a: true,
-            status: ModuleLoadStatus::Loaded,
-            execution_mode: "local".to_string(),
-        }
-    }
 }
 
 #[cfg(test)]

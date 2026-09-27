@@ -238,6 +238,11 @@ impl Server {
                 lazy_broker: config.broker.clone(),
                 local_agents: config.module_settings.virtual_agent_names(),
                 remote_agents: config.remote_agents.clone(),
+                plugin_host: crate::engine::plugin_host(
+                    &config.module_settings,
+                    &config.models,
+                    &config.providers,
+                ),
             },
         )
         .map_err(anyhow::Error::from)?;

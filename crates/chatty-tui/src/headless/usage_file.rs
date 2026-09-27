@@ -86,7 +86,8 @@ impl RunTotals {
         self.model_calls += 1;
     }
 
-    /// What a delegated agent reported spending (its terminal status).
+    /// What a delegated agent reported spending (its terminal status), or
+    /// what one of the agent's plugins spent through `llm::complete` (PL-U2).
     /// Its requests count as model calls; its tool calls are its own.
     pub fn add_delegated(&mut self, usage: &TokenUsage) {
         self.input_tokens += u64::from(usage.prompt_tokens());

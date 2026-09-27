@@ -17,7 +17,7 @@
 //! disable = ["fs-write"]        # tool groups, narrows only
 //! skills = ["coder-reviewer"]   # read_skill names
 //!
-//! [[plugins]]                   # carried, not loaded yet (PL-U2)
+//! [[plugins]]                   # its tools become the agent's (PL-U2)
 //! module = "benford"
 //! version = "^0.2"
 //!
@@ -124,8 +124,9 @@ impl ToolsSection {
     }
 }
 
-/// `[[plugins]]`: a WASM module this agent runs with. Carried, not loaded
-/// (PL-U2).
+/// `[[plugins]]`: a WASM module this agent runs with. The factory loads one
+/// instance per agent and registers its tools as `<module>__<tool>`
+/// (`tools::plugin_tool`, PL-U2).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginSpec {

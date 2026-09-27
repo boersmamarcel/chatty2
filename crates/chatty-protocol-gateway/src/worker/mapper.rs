@@ -380,8 +380,9 @@ impl TaskMapper {
 
             // Usage is held rather than sent: see the module docs. A turn's
             // requests can name more than one model (a compaction's summary
-            // call, AGE-683), so each goes on at its own.
-            SessionEvent::TokenUsage(usage) => {
+            // call, AGE-683), so each goes on at its own. A plugin's
+            // `llm::complete` calls are this task's spend too (PL-U2).
+            SessionEvent::TokenUsage(usage) | SessionEvent::PluginUsage(usage) => {
                 if usage.calls.is_empty() {
                     merge_line(&mut self.usage, usage.clone());
                 } else {
@@ -512,6 +513,7 @@ fn merge_line(lines: &mut Vec<TokenUsage>, line: TokenUsage) {
     let Some(total) = lines.iter_mut().find(|known| known.model == line.model) else {
         lines.push(TokenUsage {
             delegated_to: None,
+            plugin: None,
             calls: Vec::new(),
             estimated_cost_usd: None,
             ..line
