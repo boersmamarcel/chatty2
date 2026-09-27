@@ -116,12 +116,18 @@ impl HostLlmProvider {
             .collect()
     }
 
-    async fn complete_openai(
+    /// Build the (unsent) request for one `llm::complete` call: the URL,
+    /// headers and JSON body that `complete_openai` would send. Split out
+    /// so PL-E7's row 4.1 (AGE-602) can inspect the built `reqwest::Request`
+    /// (`.build()`) instead of sending it — no test may reach the internet,
+    /// and the "OpenRouter default" and bare "Ollama" cases hit a hardcoded
+    /// host with no override.
+    fn build_request(
         &self,
         model: &str,
-        messages: Vec<Message>,
-        tools: Option<String>,
-    ) -> Result<CompletionResponse, String> {
+        messages: &[Message],
+        tools: &Option<String>,
+    ) -> reqwest::RequestBuilder {
         let base = self
             .config
             .base_url
@@ -152,7 +158,7 @@ impl HostLlmProvider {
             body["max_tokens"] = serde_json::json!(max);
         }
 
-        if let Some(ref tools_json) = tools {
+        if let Some(tools_json) = tools {
             let normalized = Self::normalize_tools(tools_json);
             if !normalized.is_empty() {
                 let openai_tools: Vec<serde_json::Value> = normalized
@@ -168,9 +174,18 @@ impl HostLlmProvider {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
         req = req.header("Content-Type", "application/json");
+        req.json(&body)
+    }
+
+    async fn complete_openai(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        tools: Option<String>,
+    ) -> Result<CompletionResponse, String> {
+        let req = self.build_request(model, &messages, &tools);
 
         let resp = req
-            .json(&body)
             .send()
             .await
             .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -877,4 +892,393 @@ pub fn refresh_runtime(cx: &mut App) {
         }
     })
     .detach();
+}
+
+// ---------------------------------------------------------------------------
+// PL-E7 (AGE-602), evaluation-plan S4 rows 4.1-4.4.
+//
+// Rows marked `#[ignore = "known defect: PL-H2 (AGE-605)"]` or
+// `#[ignore = "known defect: PL-H9 (AGE-612)"]` fail on today's code for the
+// reason named in the evaluation plan's F3/F13 findings; `-- --ignored`
+// lists them. Nothing here is fixed — tests only.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod host_llm_provider_tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn config(
+        provider_type: ProviderType,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> LlmConfig {
+        LlmConfig {
+            provider_type,
+            api_key: api_key.map(str::to_string),
+            base_url: base_url.map(str::to_string),
+            model_identifier: "test-model".to_string(),
+            temperature: 0.0,
+            max_tokens: None,
+        }
+    }
+
+    fn one_message() -> Vec<Message> {
+        vec![Message {
+            role: Role::User,
+            content: "hi".to_string(),
+        }]
+    }
+
+    fn ok_body() -> serde_json::Value {
+        serde_json::json!({
+            "choices": [{"message": {"content": "hi", "role": "assistant"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        })
+    }
+
+    // -- 4.1: URL + auth header per provider -------------------------------
+
+    /// OpenRouter with no base URL override: the code hardcodes
+    /// `https://openrouter.ai/api/v1` then appends `/v1/chat/completions`,
+    /// doubling the `/v1` segment (F3). Inspecting the *built* (unsent)
+    /// request proves the doubling without a real network call.
+    #[test]
+    #[ignore = "known defect: PL-H2 (AGE-605)"]
+    fn row_4_1_openrouter_default_base_url_is_not_doubled() {
+        let provider =
+            HostLlmProvider::new(config(ProviderType::OpenRouter, Some("sk-test"), None));
+        let req = provider
+            .build_request("test-model", &one_message(), &None)
+            .build()
+            .expect("request should build");
+        assert_eq!(
+            req.url().as_str(),
+            "https://openrouter.ai/api/v1/chat/completions",
+            "the default OpenRouter base already ends in /v1; appending \
+             /v1/chat/completions must not double it (today it builds {})",
+            req.url()
+        );
+    }
+
+    /// Ollama with no base URL override resolves to the documented default
+    /// port and is not affected by F3 (no `/v1` in the hardcoded base).
+    #[test]
+    fn row_4_1_ollama_default_base_url() {
+        let provider = HostLlmProvider::new(config(ProviderType::Ollama, None, None));
+        let req = provider
+            .build_request("test-model", &one_message(), &None)
+            .build()
+            .expect("request should build");
+        assert_eq!(
+            req.url().as_str(),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert!(
+            req.headers().get("Authorization").is_none(),
+            "no api key configured, so no bearer header should be sent"
+        );
+    }
+
+    /// A custom base URL (no trailing `/v1`) round-trips correctly against a
+    /// real (fake) OpenAI-compatible endpoint, with a bearer auth header.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn row_4_1_custom_base_url_and_bearer_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer sk-custom"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = HostLlmProvider::new(config(
+            ProviderType::OpenRouter,
+            Some("sk-custom"),
+            Some(&server.uri()),
+        ));
+        let resp = provider
+            .complete_openai("test-model", one_message(), None)
+            .await
+            .expect("wiremock should answer 200");
+        assert_eq!(resp.content, "hi");
+    }
+
+    /// Azure OpenAI is not handled at all (F3): it should authenticate with
+    /// an `api-key` header (and its own URL shape), but `HostLlmProvider`
+    /// sends the same `Authorization: Bearer` header it sends everyone else.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "known defect: PL-H2 (AGE-605)"]
+    async fn row_4_1_azure_uses_api_key_header_not_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("api-key", "sk-azure"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = HostLlmProvider::new(config(
+            ProviderType::AzureOpenAI,
+            Some("sk-azure"),
+            Some(&server.uri()),
+        ));
+        // Today: sends `Authorization: Bearer sk-azure` instead, so the
+        // mock above (which requires `api-key`) never matches and this
+        // errors out (wiremock reports the unmatched request on verify).
+        provider
+            .complete_openai("test-model", one_message(), None)
+            .await
+            .expect("Azure should authenticate with api-key, not bearer");
+    }
+
+    // -- 4.2: current-thread runtime -----------------------------------
+
+    /// `block_in_place` panics unconditionally on a `current_thread`
+    /// runtime (tokio's own contract). `HostLlmProvider::complete` is the
+    /// synchronous `LlmProvider` entry point a WASM guest's `llm::complete`
+    /// import calls into; today it always panics there instead of erroring
+    /// or being unreachable on that runtime flavor.
+    #[test]
+    #[ignore = "known defect: PL-H2 (AGE-605)"]
+    fn row_4_2_current_thread_runtime_does_not_panic() {
+        let provider = HostLlmProvider::new(config(ProviderType::Ollama, None, None));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+        let result = rt.block_on(async {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                LlmProvider::complete(&provider, "test-model", one_message(), None)
+            }))
+        });
+        assert!(
+            result.is_ok(),
+            "HostLlmProvider::complete panicked on a current-thread runtime \
+             (block_in_place always panics there)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod module_mcp_sync_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// 4.3: `sync_module_mcp_servers` adds a disabled entry per `mcp = true`
+    /// module, leaves a manually-added server with the same name alone, and
+    /// removes module entries for modules that disappeared — without
+    /// touching non-module entries.
+    #[gpui::test]
+    async fn row_4_3_add_rename_remove_and_manual_clash(cx: &mut TestAppContext) {
+        // `sync_module_mcp_servers` ends by detaching a `cx.spawn` task that
+        // persists the servers through `chatty_core::mcp_repository()`
+        // (tokio::fs under the hood); gpui's own test executor is not a
+        // Tokio runtime, so that detached task needs one to schedule its
+        // blocking I/O on. Entering one here is test setup, not a change to
+        // `sync_module_mcp_servers` itself, whose synchronous global-state
+        // update (what this row checks) already happened by the time it
+        // spawns that task.
+        // `sync_module_mcp_servers` ends by detaching a `cx.spawn` task that
+        // persists the servers through `chatty_core::mcp_repository()`
+        // (tokio::fs under the hood). `gpui::test`'s own teardown drives any
+        // still-pending foreground task on this same OS thread *after* this
+        // function returns (so a plain `Runtime::enter()` guard, dropped at
+        // the end of this function, is gone before that happens) — this
+        // thread needs a Tokio context installed for the rest of its life,
+        // not just for the body below. Leaking the guard is test setup for
+        // that one thread, not a change to `sync_module_mcp_servers`, whose
+        // synchronous global-state update (what this row checks) is already
+        // done by the time it spawns that task.
+        let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+            tokio::runtime::Runtime::new().expect("tokio runtime"),
+        ));
+        std::mem::forget(rt.enter());
+
+        cx.update(|cx| {
+            let _ = chatty_core::init_repositories();
+            cx.set_global(DiscoveredModulesModel {
+                modules: vec![
+                    module_entry("echo-agent", true),
+                    module_entry("benford-agent", true),
+                ],
+                ..Default::default()
+            });
+            cx.set_global(McpServersModel::new());
+
+            // A manually-added server sharing a module's name: must be left
+            // untouched (not overwritten into a module entry).
+            cx.global_mut::<McpServersModel>()
+                .servers_mut()
+                .push(McpServerConfig {
+                    name: "benford-agent".to_string(),
+                    url: "http://example.invalid/mcp".to_string(),
+                    api_key: Some("manual-key".to_string()),
+                    enabled: true,
+                    is_module: false,
+                });
+
+            sync_module_mcp_servers(9420, cx);
+
+            let servers = cx.global::<McpServersModel>().servers();
+            let echo = servers
+                .iter()
+                .find(|s| s.name == "echo-agent")
+                .expect("echo-agent should be auto-registered");
+            assert!(echo.is_module);
+            assert!(!echo.enabled, "auto-registered entries start disabled");
+            assert_eq!(echo.url, "http://127.0.0.1:9420/mcp/echo-agent");
+
+            let manual = servers
+                .iter()
+                .find(|s| s.name == "benford-agent" && !s.is_module)
+                .expect("the manual server must survive the clash untouched");
+            assert_eq!(manual.url, "http://example.invalid/mcp");
+            assert_eq!(manual.api_key.as_deref(), Some("manual-key"));
+            assert!(
+                !servers
+                    .iter()
+                    .any(|s| s.name == "benford-agent" && s.is_module),
+                "a module must not create a second entry under a manually \
+                 used name"
+            );
+
+            // Now the module is renamed/removed (only echo-agent remains
+            // discovered): the stale module entry for benford-agent's
+            // module-side registration (none was created above) stays
+            // gone, and a rename shows up as add-new + remove-old.
+            cx.global_mut::<DiscoveredModulesModel>().modules =
+                vec![module_entry("echo-agent-renamed", true)];
+            sync_module_mcp_servers(9420, cx);
+
+            let servers = cx.global::<McpServersModel>().servers();
+            assert!(
+                servers
+                    .iter()
+                    .any(|s| s.name == "echo-agent-renamed" && s.is_module),
+                "the renamed module should be registered under its new name"
+            );
+            assert!(
+                !servers
+                    .iter()
+                    .any(|s| s.name == "echo-agent" && s.is_module),
+                "the old module name's entry should be removed on rename"
+            );
+            assert!(
+                servers
+                    .iter()
+                    .any(|s| s.name == "benford-agent" && !s.is_module),
+                "the manual server is still there, untouched by the rename"
+            );
+        });
+    }
+
+    fn module_entry(name: &str, mcp: bool) -> DiscoveredModuleEntry {
+        DiscoveredModuleEntry {
+            directory_name: name.to_string(),
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            wasm_file: format!("{name}.wasm"),
+            tools: Vec::new(),
+            chat: true,
+            agent: true,
+            openai_compat: true,
+            mcp,
+            a2a: true,
+            status: ModuleLoadStatus::Loaded,
+            execution_mode: "local".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod refresh_runtime_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    fn module_entry(name: &str, mcp: bool) -> DiscoveredModuleEntry {
+        DiscoveredModuleEntry {
+            directory_name: name.to_string(),
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            wasm_file: format!("{name}.wasm"),
+            tools: Vec::new(),
+            chat: true,
+            agent: true,
+            openai_compat: true,
+            mcp,
+            a2a: true,
+            status: ModuleLoadStatus::Loaded,
+            execution_mode: "local".to_string(),
+        }
+    }
+
+    /// 4.4: two `refresh_runtime` calls fired back to back (as a rapid
+    /// settings edit would) must end with exactly one gateway — not two
+    /// racing generations.
+    ///
+    /// The full async assembly (`spawn_blocking` scan -> lazy broker ->
+    /// gateway bind -> usage-flush start) needs a real Tokio runtime
+    /// underneath gpui's own executor to drive to completion; `gpui::test`'s
+    /// `TestAppContext` does not provide one (confirmed empirically: even
+    /// with a leaked, entered `Runtime` on this thread, `run_until_parked`
+    /// reports nothing scheduled for an `App`-level `cx.spawn`, and the
+    /// spawned task never observably progresses). That is a test-harness
+    /// gap, not a `refresh_runtime` bug, and is exactly why the plan's own
+    /// S4 rows 4.9/4.10 exercise the desktop for real (scripted, over a
+    /// running gateway) rather than through a unit test.
+    ///
+    /// What *is* directly testable, without any of that machinery, is the
+    /// synchronous guard every later step depends on:
+    /// `apply_scan_snapshot` refuses to apply a stale generation's result.
+    /// If two `refresh_runtime` calls race, the first one's scan (however
+    /// long it takes) can never clobber state the second one already
+    /// started — which is the actual mechanism that makes "two rapid
+    /// refreshes -> one gateway" true. The gateway-bind and usage-flush
+    /// halves of F13 are PL-H9 (AGE-612)'s own tests.
+    #[gpui::test]
+    fn row_4_4_stale_generation_is_refused(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(DiscoveredModulesModel {
+                refresh_generation: 2,
+                ..Default::default()
+            });
+            let settings = ModuleSettingsModel::default();
+
+            // Generation 1's scan finishes after generation 2 already
+            // started (the exact race two rapid `refresh_runtime` calls
+            // create): it must be discarded, not applied.
+            let stale = ScanSnapshot {
+                modules: vec![module_entry("stale-module", false)],
+                scan_error: None,
+            };
+            let applied = apply_scan_snapshot(stale, &settings, 1, cx);
+            assert!(!applied, "a stale generation's scan must be refused");
+            assert!(
+                cx.global::<DiscoveredModulesModel>().modules.is_empty(),
+                "the stale scan's modules must never reach the global state"
+            );
+
+            // Generation 2's own (current) scan is applied normally.
+            let current = ScanSnapshot {
+                modules: vec![module_entry("current-module", false)],
+                scan_error: None,
+            };
+            let applied = apply_scan_snapshot(current, &settings, 2, cx);
+            assert!(applied, "the current generation's scan must be applied");
+            assert_eq!(
+                cx.global::<DiscoveredModulesModel>()
+                    .modules
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["current-module"],
+                "only the current generation's modules should be visible, \
+                 never a mix with a superseded scan's"
+            );
+        });
+    }
 }
