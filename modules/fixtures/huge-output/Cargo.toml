@@ -1,0 +1,15 @@
+[package]
+name = "fixture-huge-output"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chatty-module-sdk = { path = "../../../crates/chatty-module-sdk" }
+
+# Standalone crate targeting wasm32-wasip2, outside the main workspace.
+# Built by scripts/build-wasm-fixtures.sh.
+[workspace]

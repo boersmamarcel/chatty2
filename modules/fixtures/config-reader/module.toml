@@ -1,0 +1,10 @@
+[module]
+name = "config-reader"
+version = "0.1.0"
+description = "Adversarial test fixture: config-reader"
+wasm = "config-reader.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

@@ -12,6 +12,8 @@ crates/chatty-module-sdk/Cargo.lock
 
 # WASM module build outputs (built by CI)
 modules/**/*.wasm
+# ...except the core-module fixture, which cargo cannot build (see its .wat).
+!modules/fixtures/core-module/core_module.wasm
 
 # AppImage build artifacts
 /squashfs-root

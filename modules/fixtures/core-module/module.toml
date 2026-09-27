@@ -1,0 +1,10 @@
+[module]
+name = "core-module"
+version = "0.1.0"
+description = "Adversarial test fixture: core-module"
+wasm = "core-module.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

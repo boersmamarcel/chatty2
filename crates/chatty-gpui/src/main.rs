@@ -1152,10 +1152,9 @@ fn main() {
                     .collect();
 
                 if !missing_pricing_modules.is_empty() {
-                    let mut client = chatty_core::hive::HiveRegistryClient::new(&hive.registry_url);
-                    if let Some(token) = hive.token.clone() {
-                        client = client.with_token(token);
-                    }
+                    // Listing modules is public; no session exists yet, and
+                    // a second holder of the token pair must not refresh it.
+                    let client = chatty_core::hive::HiveRegistryClient::new(&hive.registry_url);
 
                     match client
                         .list_modules(&chatty_core::hive::models::ListParams {
@@ -1265,6 +1264,14 @@ fn main() {
                 }
             })
             .map_err(|e| warn!(error = ?e, "Failed to sync Hive registry URL from extension"))
+            .ok();
+
+            // The registry URL is final now: start the one Hive session that
+            // holds (and refreshes) the persisted token pair.
+            cx.update(|cx| {
+                settings::controllers::extensions_controller::install_hive_session(cx);
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to start the Hive session"))
             .ok();
 
             // Ensure the built-in Hive MCP server extension exists, and seed

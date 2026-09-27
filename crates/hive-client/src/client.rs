@@ -1,6 +1,7 @@
 //! HTTP client for the Hive module registry.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
@@ -10,9 +11,10 @@ use crate::{
     cache::Cache,
     error::ClientError,
     models::{
-        AuthTokenResponse, BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams,
-        ModuleList, ModuleMetadata, ModulePricingInfo, VersionList,
+        BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams, ModuleList,
+        ModuleMetadata, ModulePricingInfo, TokenPair, VersionList,
     },
+    session::{HiveSession, send_authed},
     verify::{self, TrustLevel, VerifyInput},
 };
 
@@ -25,7 +27,7 @@ pub struct HiveRegistryClient {
     base_url: String,
     http: reqwest::Client,
     cache: Option<Cache>,
-    token: Option<String>,
+    session: Option<Arc<HiveSession>>,
 }
 
 impl HiveRegistryClient {
@@ -48,7 +50,7 @@ impl HiveRegistryClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http,
             cache: None,
-            token: None,
+            session: None,
         }
     }
 
@@ -58,19 +60,25 @@ impl HiveRegistryClient {
         Ok(self)
     }
 
-    /// Set the Bearer token used for authenticated endpoints (e.g. downloads).
-    pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+    /// Authenticate as the user signed in to `session` (e.g. for downloads).
+    /// The session refreshes its access token when it is about to expire and
+    /// after a 401, and every client sharing it sees the new one.
+    pub fn with_session(mut self, session: Arc<HiveSession>) -> Self {
+        self.session = Some(session);
         self
     }
 
-    /// Return the currently configured Bearer token, if any.
+    /// The signed-in user's current access token, refreshed first when it is
+    /// about to expire. `None` without a session or when signed out.
     ///
     /// Used by the protocol gateway to forward the user's credentials to
     /// remote execution targets (hive-runner) so they can charge the correct
     /// user's credit balance.
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
+    pub async fn access_token(&self) -> Option<String> {
+        match &self.session {
+            Some(session) => session.access_token().await,
+            None => None,
+        }
     }
 
     // ── Authentication ─────────────────────────────────────────────────────
@@ -81,7 +89,7 @@ impl HiveRegistryClient {
         username: &str,
         email: &str,
         password: &str,
-    ) -> Result<AuthTokenResponse, ClientError> {
+    ) -> Result<TokenPair, ClientError> {
         #[derive(Serialize)]
         struct RegisterBody<'a> {
             username: &'a str,
@@ -105,17 +113,11 @@ impl HiveRegistryClient {
             return Err(Self::api_error(resp).await);
         }
 
-        resp.json::<AuthTokenResponse>()
-            .await
-            .map_err(ClientError::from)
+        resp.json::<TokenPair>().await.map_err(ClientError::from)
     }
 
     /// Log in with email and password.
-    pub async fn login(
-        &self,
-        email: &str,
-        password: &str,
-    ) -> Result<AuthTokenResponse, ClientError> {
+    pub async fn login(&self, email: &str, password: &str) -> Result<TokenPair, ClientError> {
         #[derive(Serialize)]
         struct LoginBody<'a> {
             email: &'a str,
@@ -134,9 +136,46 @@ impl HiveRegistryClient {
             return Err(Self::api_error(resp).await);
         }
 
-        resp.json::<AuthTokenResponse>()
-            .await
-            .map_err(ClientError::from)
+        resp.json::<TokenPair>().await.map_err(ClientError::from)
+    }
+
+    /// Exchange `refresh_token` for a new pair (`POST /api/auth/refresh`).
+    /// The presented token is retired by the call. A rejected token —
+    /// expired, revoked, or already rotated — is [`ClientError::Unauthorized`].
+    pub async fn refresh(&self, refresh_token: &str) -> Result<TokenPair, ClientError> {
+        let url = format!("{}/api/auth/refresh", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&RefreshTokenBody { refresh_token })
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !resp.status().is_success() {
+            return Err(Self::api_error(resp).await);
+        }
+
+        resp.json::<TokenPair>().await.map_err(ClientError::from)
+    }
+
+    /// Revoke `refresh_token` (`POST /api/auth/logout`). The access token it
+    /// was paired with expires on its own within the hour.
+    pub async fn logout(&self, refresh_token: &str) -> Result<(), ClientError> {
+        let url = format!("{}/api/auth/logout", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&RefreshTokenBody { refresh_token })
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(Self::api_error(resp).await);
+        }
+        Ok(())
     }
 
     // ── Search ─────────────────────────────────────────────────────────────
@@ -242,11 +281,7 @@ impl HiveRegistryClient {
 
         tracing::debug!(%url, "beginning streaming download");
 
-        let mut request = self.http.get(&url);
-        if let Some(ref token) = self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        let response = request.send().await?;
+        let response = self.send_authed(|| self.http.get(&url)).await?;
         let status = response.status();
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -374,12 +409,9 @@ impl HiveRegistryClient {
 
         let body = crate::models::UsageReportRequest { events };
 
-        let mut request = self.http.post(&url).json(&body);
-        if let Some(ref token) = self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-
-        let response = request.send().await?;
+        let response = self
+            .send_authed(|| self.http.post(&url).json(&body))
+            .await?;
         let status = response.status();
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -432,12 +464,9 @@ impl HiveRegistryClient {
             estimated_tokens,
         };
 
-        let mut request = self.http.post(&url).json(&body);
-        if let Some(ref token) = self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-
-        let response = request.send().await?;
+        let response = self
+            .send_authed(|| self.http.post(&url).json(&body))
+            .await?;
         let status = response.status();
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -470,12 +499,9 @@ impl HiveRegistryClient {
             output_tokens,
         };
 
-        let mut request = self.http.post(&url).json(&body);
-        if let Some(ref token) = self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-
-        let response = request.send().await?;
+        let response = self
+            .send_authed(|| self.http.post(&url).json(&body))
+            .await?;
         let status = response.status();
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -498,11 +524,9 @@ impl HiveRegistryClient {
         T: serde::de::DeserializeOwned,
     {
         let url = format!("{}{}", self.base_url, path);
-        let mut request = self.http.get(&url).query(query);
-        if let Some(ref token) = self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        let response = request.send().await?;
+        let response = self
+            .send_authed(|| self.http.get(&url).query(query))
+            .await?;
         let status = response.status();
 
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -519,6 +543,15 @@ impl HiveRegistryClient {
         response.json::<T>().await.map_err(ClientError::from)
     }
 
+    async fn send_authed(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ClientError> {
+        send_authed(self.session.as_deref(), build)
+            .await
+            .map_err(ClientError::from)
+    }
+
     async fn api_error(resp: reqwest::Response) -> ClientError {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
@@ -532,6 +565,11 @@ impl HiveRegistryClient {
             tracing::warn!(error = %e, "failed to write module list cache");
         }
     }
+}
+
+#[derive(Serialize)]
+struct RefreshTokenBody<'a> {
+    refresh_token: &'a str,
 }
 
 // ── Signature verification helper ─────────────────────────────────────────

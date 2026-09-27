@@ -1,0 +1,10 @@
+[module]
+name = "huge-output"
+version = "0.1.0"
+description = "Adversarial test fixture: huge-output"
+wasm = "huge-output.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

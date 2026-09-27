@@ -56,5 +56,5 @@ else
 fi
 
 echo "==> Done. Next steps:"
-echo "  make wasm-modules    # build the echo-agent WASM (needed by tests)"
+echo "  make wasm-modules    # build the WASM modules and test fixtures (needed by tests)"
 echo "  make test            # full CI-equivalent test suite"

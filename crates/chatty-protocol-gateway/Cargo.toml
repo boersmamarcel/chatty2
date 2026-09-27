@@ -33,6 +33,8 @@ chatty-core = { path = "../chatty-core", optional = true, default-features = fal
 # criterion is about what a real caller sees. chatty-core does not depend on
 # this crate, so this dev-only edge is acyclic.
 chatty-core = { path = "../chatty-core" }
+# `fixture_path` for the echo-agent e2e test (AGE-596).
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime", features = ["test-support"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tower = "0.5"
 axum = { version = "0.8", features = ["macros"] }
