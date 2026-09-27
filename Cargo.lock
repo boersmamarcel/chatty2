@@ -2011,6 +2011,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "winres",
+ "wiremock",
 ]
 
 [[package]]
