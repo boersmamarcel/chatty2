@@ -67,18 +67,19 @@ impl ModuleExports for EchoAgent {
     fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
         chatty_module_sdk::log::info(&format!("echo-agent: invoke_tool name={name}"));
 
-        match name.as_str() {
+        let run: fn(&str) -> String = match name.as_str() {
             // Return the input string unchanged.
-            "echo" => Ok(args),
+            "echo" => |input| input.to_string(),
             // Return the input string with characters reversed.
-            "reverse" => Ok(args.chars().rev().collect()),
+            "reverse" => |input| input.chars().rev().collect(),
             // Return the number of whitespace-separated words.
-            "count_words" => Ok(args.split_whitespace().count().to_string()),
+            "count_words" => |input| input.split_whitespace().count().to_string(),
             _ => {
                 chatty_module_sdk::log::error(&format!("echo-agent: unknown tool: {name}"));
-                Err(format!("unknown tool: {name}"))
+                return Err(format!("unknown tool: {name}"));
             }
-        }
+        };
+        Ok(run(&input_argument(&args)?))
     }
 
     // -----------------------------------------------------------------------
@@ -142,6 +143,18 @@ impl ModuleExports for EchoAgent {
             tools: vec![],
         }
     }
+}
+
+/// The `input` string out of a tool's `args`, which the host passes as the
+/// JSON arguments object every tool here declares (`{"input": string}`).
+fn input_argument(args: &str) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(args).map_err(|e| format!("arguments are not JSON: {e}"))?;
+    value
+        .get("input")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "missing required string argument `input`".to_string())
 }
 
 // Wire the trait implementation to the WIT guest exports.

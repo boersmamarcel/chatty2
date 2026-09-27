@@ -280,7 +280,16 @@ exposes every loaded module through three protocols at once:
 | `POST` | `/v1/{module}/chat/completions` | OpenAI | Module-specific chat completion |
 | `POST` | `/v1/chat/completions` | OpenAI | Model-routed (`model: "module:{name}"`) |
 | `POST` | `/mcp/{module}` | MCP | JSON-RPC: `tools/list`, `tools/call`, `initialize` |
-| `GET` | `/mcp/{module}/sse` | MCP | SSE transport |
+| `GET` | `/mcp/{module}/sse` | MCP | HTTP+SSE transport: the event stream |
+| `POST` | `/mcp/{module}/sse?sessionId=…` | MCP | HTTP+SSE transport: a client message (answered on the stream) |
+
+A module is served only on the protocols its `[protocols]` enables (the others
+answer 404). Every route refuses a non-loopback `Host` or `Origin` with 403 (DNS
+rebinding) and a body over 10 MiB with 413. Each module has its own lock, so a slow
+call to one module never holds up another; a guest reply over the 1 MiB output cap
+is a 502. The OpenAI routes keep every message's role, pass the request's `user` as
+`conversation_id`, and refuse `stream: true` with 400. The per-route details are in
+[`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#what-every-route-enforces).
 
 ### A2A via the gateway
 
@@ -291,7 +300,9 @@ calls the same `A2aClient::send_message_stream()` used for remote agents.
 The gateway's `message/stream` handler (`handlers/a2a.rs`):
 
 1. Emits `{"status": {"state": "working"}, "final": false}` immediately
-2. Runs the module's `chat()` on a blocking task
+2. Runs the module's `chat()` in a task of its own (the guest itself on the blocking
+   pool) with every text part of the message, after the earlier turns of the same
+   `contextId`; a caller that disconnects does not cancel it
 3. Forwards the module's `logging::log()` calls as `working` status events through an
    `mpsc` channel, so `log::info("Processing step 3…")` shows up live in the UI
 4. On completion, emits the artifact (`parts[0].text`) and a final

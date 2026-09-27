@@ -29,7 +29,6 @@ fn mcp_list() -> Value {
 /// it: `mcp = false` makes `/mcp/{m}` (and its `/sse`) a 404, and likewise
 /// for `openai_compat` and `a2a`. The protocols left on still answer.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_10_disabled_protocol_is_404() {
     let gw = Gateway::start(
         vec![
@@ -80,10 +79,10 @@ async fn s3_10_disabled_protocol_is_404() {
 
 /// 3.11 — twenty concurrent requests to module B while module A is inside a
 /// 2 s `slow-host` call: B is not held up by A. Records B's p50/p95; B's
-/// p95 must stay under 200 ms. Today one registry write lock serializes
-/// every call to every module (F10), so B waits out A.
+/// p95 must stay under 200 ms. Before PL-H4 one registry write lock
+/// serialized every call to every module (F10), so B waited out A; each
+/// module now has its own lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_11_slow_module_does_not_block_another() {
     const A_DELAY: Duration = Duration::from_secs(2);
     let gw = Gateway::start(
@@ -234,7 +233,6 @@ async fn s3_12_oversized_request_body_is_413() {
 /// with a small body (PL-D3 caps a guest's output at 1 MB per call; PL-H4
 /// maps that to an error), not 50 MiB relayed to the caller.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_12_huge_output_is_bounded() {
     let gw = Gateway::start(vec![Module::fixture("huge-output")], vec![]).await;
 
@@ -294,7 +292,6 @@ fn authority(gw: &Gateway) -> &str {
 /// boundary assumes only local processes can call the gateway; this check is
 /// what makes that assumption true.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: PL-H4 (AGE-607)"]
 async fn s3_13_non_loopback_host_or_origin_is_rejected() {
     let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
     let port = authority(&gw).rsplit(':').next().unwrap().to_string();

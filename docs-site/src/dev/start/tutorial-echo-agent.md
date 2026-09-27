@@ -95,12 +95,16 @@ Try in Chatty after loading the module:
 `list_tools` advertises JSON-schema parameters. `invoke_tool` executes them
 locally (pure Rust, no network):
 
+`args` is the tool's arguments as one JSON object, shaped by the schema the
+tool declared; each tool here reads its `input` string from it:
+
 ```rust
 fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
+    let input = input_argument(&args)?; // args = {"input": "..."}
     match name.as_str() {
-        "echo" => Ok(args),
-        "reverse" => Ok(args.chars().rev().collect()),
-        "count_words" => Ok(args.split_whitespace().count().to_string()),
+        "echo" => Ok(input),
+        "reverse" => Ok(input.chars().rev().collect()),
+        "count_words" => Ok(input.split_whitespace().count().to_string()),
         _ => Err(format!("unknown tool: {name}")),
     }
 }

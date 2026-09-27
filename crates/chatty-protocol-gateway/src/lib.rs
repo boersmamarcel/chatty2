@@ -10,9 +10,14 @@
 //! | `POST` | `/v1/{module}/chat/completions` | OpenAI-compatible chat completion |
 //! | `POST` | `/v1/chat/completions` | Routes by model field (`module:{name}`) |
 //! | `POST` | `/mcp/{module}` | MCP JSON-RPC (`tools/list`, `tools/call`) |
-//! | `GET`  | `/mcp/{module}/sse` | MCP SSE transport |
+//! | `GET`  | `/mcp/{module}/sse` | MCP SSE transport: opens the event stream |
+//! | `POST` | `/mcp/{module}/sse?sessionId=…` | MCP SSE transport: a client message |
 //! | `GET`  | `/a2a/{module}/.well-known/agent.json` | Per-module A2A agent card |
 //! | `POST` | `/a2a/{module}` | A2A JSON-RPC (`message/send`, `tasks/get`) |
+//!
+//! A module is served only on the protocols its `[protocols]` table enables;
+//! the others answer 404 for it. Every route refuses a non-loopback `Host` or
+//! `Origin` (DNS rebinding) and a body over [`MAX_REQUEST_BYTES`].
 //!
 //! `{module}` also resolves a *local participant* — a process registered
 //! over the participant socket (see [`participant`]). Participants are
@@ -45,6 +50,7 @@
 
 mod gateway;
 mod handlers;
+mod loopback;
 pub mod participant;
 
 /// The other end of the participant socket: what a process runs when it *is*
@@ -53,4 +59,4 @@ pub mod participant;
 #[cfg(feature = "worker")]
 pub mod worker;
 
-pub use gateway::{GatewayState, ProtocolGateway};
+pub use gateway::{GatewayState, MAX_REQUEST_BYTES, ProtocolGateway};

@@ -148,8 +148,8 @@ The test suite covers all 12 integration steps:
 
 1. Module registry discovers and loads echo-agent
 2. `list_tools()` returns 3 tools
-3. `invoke_tool("echo", "hello")` → `"hello"`
-4. `invoke_tool("reverse", "hello")` → `"olleh"`
+3. `invoke_tool("echo", r#"{"input":"hello"}"#)` → `"hello"`
+4. `invoke_tool("reverse", r#"{"input":"hello"}"#)` → `"olleh"`
 5. `chat(messages)` → `"Echo: …"`
 6. `agent_card()` → name + skills verified
 7. `GET /.well-known/agent.json` → echo-agent listed

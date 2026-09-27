@@ -80,7 +80,10 @@ async fn sandbox_1_1_good_fixtures_all_four_exports() {
             m.last_invocation_metrics().is_some(),
             "last_invocation_metrics must be populated after chat"
         );
-        let out = m.invoke_tool("reverse", "abc").await.expect("invoke_tool");
+        let out = m
+            .invoke_tool("reverse", r#"{"input":"abc"}"#)
+            .await
+            .expect("invoke_tool");
         assert_eq!(out, "cba");
         assert!(m.last_invocation_metrics().is_some());
     }
