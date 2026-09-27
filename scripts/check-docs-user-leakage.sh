@@ -12,8 +12,11 @@ patterns=(
   'masked_env'
   '\bcx\.'
   'not inlined here'
-  'CLAUDE\.md'
-  'AGENTS\.md'
+  # A link to a contributor instruction file (the repo's own CLAUDE.md /
+  # AGENTS.md). Naming the files, or the user's own ~/.claude/CLAUDE.md, is
+  # fine: the user guide documents that the agent reads the user's
+  # project instruction files.
+  '\]\([^)]*(CLAUDE|AGENTS)\.md'
 )
 
 fail=0
