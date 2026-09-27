@@ -1750,3 +1750,52 @@ fn a_runner_line_names_its_agent_command() {
     );
     assert_eq!(runner_command_id("ls -la"), None);
 }
+
+/// AGE-627: before the shell exists, `is_sandboxed` used to answer from
+/// `can_sandbox()` (`bwrap --version`), so the first command under
+/// `AutoApproveSandboxed` was auto-approved even when the sandboxed spawn
+/// then fell back to a plain bash. The answer must come from the shell that
+/// actually runs, so that command asks.
+#[tokio::test]
+async fn a_shell_that_spawns_unsandboxed_asks_for_its_first_command() {
+    use crate::models::execution_approval_store::{
+        ApprovalDecision, ExecutionApprovalStore, request_execution_approval,
+    };
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    let mut session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    // Stands in for a sandboxed spawn that failed and fell back.
+    session.test_shell = Some(Box::new(|_| TerminalConfig {
+        shell: Some("/bin/bash".into()),
+        args: bash_args(),
+        ..TerminalConfig::default()
+    }));
+    assert_eq!(session.running_sandboxed(), None, "no shell yet");
+
+    let is_sandboxed = session.is_sandboxed().await;
+    assert!(!is_sandboxed);
+    assert_eq!(
+        session.running_sandboxed(),
+        Some(false),
+        "started to answer"
+    );
+
+    let mut store = ExecutionApprovalStore::new();
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (resolution_tx, _resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+    store.set_notifiers(approval_tx, resolution_tx);
+    let pending = store.get_pending_approvals();
+    let waiter = tokio::spawn(async move {
+        request_execution_approval(
+            &pending,
+            &ApprovalMode::AutoApproveSandboxed,
+            "[shell] echo first",
+            is_sandboxed,
+        )
+        .await
+    });
+    let request = approval_rx.recv().await.expect("the command asks");
+    assert!(!request.is_sandboxed);
+    store.resolve(&request.id, ApprovalDecision::Denied);
+    assert!(!waiter.await.unwrap().unwrap());
+}
