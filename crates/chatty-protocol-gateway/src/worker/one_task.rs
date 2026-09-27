@@ -114,7 +114,9 @@ where
     // unbounded because dropping a progress frame would silently make the
     // parent's transcript wrong, which is the thing being measured.
     let (frames_tx, mut frames_rx) = mpsc::unbounded_channel::<ParticipantFrame>();
-    let mapper = Arc::new(Mutex::new(TaskMapper::new(task_id.clone())));
+    let mapper = Arc::new(Mutex::new(
+        TaskMapper::new(task_id.clone()).with_capture_conversation(task.capture_conversation),
+    ));
 
     let sink: EventSink = {
         let mapper = mapper.clone();
@@ -221,10 +223,13 @@ async fn next_task(
                 task_id,
                 text,
                 bearer,
+                capture_conversation,
             } => {
                 return Ok(Some((
                     task_id,
-                    DelegatedTask::new(text).with_bearer(bearer),
+                    DelegatedTask::new(text)
+                        .with_bearer(bearer)
+                        .with_capture_conversation(capture_conversation),
                 )));
             }
             BrokerFrame::Cancel { task_id } => {
