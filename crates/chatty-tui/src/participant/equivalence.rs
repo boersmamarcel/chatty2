@@ -713,20 +713,21 @@ pub(super) mod named_virtual_agents {
     //! AGE-377's verification: two declared agents, `local-coder` and
     //! `local-reviewer`, over the exact gateway `--broker` starts. Both
     //! appear in `list_agents` with their model in the card; a task to each
-    //! spawns a child whose argv carries the expected `--model` and
-    //! `--disable`; and a reviewer child built from those flags has no
-    //! `write_file` tool in its schema.
+    //! spawns a child whose argv carries its spec, with the expected model
+    //! and disabled groups; and a reviewer child built with those groups off
+    //! has no `write_file` tool in its schema.
     //!
     //! The child is a stand-in binary that records its argv and waits, and
     //! a scripted participant registered under the name the runner will
     //! allocate (`<agent>-0`) answers the task — the same split
     //! `runner.rs`'s own tests use. Only the argv is what this pins; what
-    //! a real `chatty-tui` does with it is `apply_tool_overrides` and
-    //! `resolve_model`, checked separately below.
+    //! a real `chatty-tui` does with it is `AgentBuildContext::from_spec`
+    //! and `resolve_model`, checked separately below.
 
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use chatty_core::agent_spec::AgentSpec;
     use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
     use chatty_core::models::clarification_store::ClarificationStore;
     use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
@@ -735,7 +736,6 @@ pub(super) mod named_virtual_agents {
     use chatty_core::services::{StreamSurface, scenarios};
     use chatty_core::session::{SessionEvent, TurnPolicy, replay_scenario};
     use chatty_core::settings::models::models_store::ModelConfig;
-    use chatty_core::settings::models::module_settings::VirtualAgentConfig;
     use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
     use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
     use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
@@ -755,26 +755,20 @@ pub(super) mod named_virtual_agents {
 
     /// The team the issue's manual run uses: a coder on one model, a
     /// reviewer on another that cannot edit.
-    fn team() -> ModuleSettingsModel {
-        ModuleSettingsModel {
+    fn team() -> (ModuleSettingsModel, Vec<AgentSpec>) {
+        let settings = ModuleSettingsModel {
             // Two slots, so the second delegation does not wait on the
             // first stand-in child being reaped; queueing is C6's test.
             default_endpoint_budget: 2,
-            virtual_agents: vec![
-                VirtualAgentConfig {
-                    name: CODER.to_string(),
-                    model: Some("qwen3:4b".to_string()),
-                    ..VirtualAgentConfig::default()
-                },
-                VirtualAgentConfig {
-                    name: REVIEWER.to_string(),
-                    model: Some("gemma4:26b".to_string()),
-                    disable_tools: REVIEWER_DISABLED.iter().map(|s| s.to_string()).collect(),
-                    ..VirtualAgentConfig::default()
-                },
-            ],
+            virtual_agents: vec![CODER.to_string(), REVIEWER.to_string()],
             ..ModuleSettingsModel::default()
-        }
+        };
+        let mut coder = AgentSpec::named(CODER);
+        coder.agent.model = Some("qwen3:4b".to_string());
+        let mut reviewer = AgentSpec::named(REVIEWER);
+        reviewer.agent.model = Some("gemma4:26b".to_string());
+        reviewer.tools.disable = REVIEWER_DISABLED.iter().map(|s| s.to_string()).collect();
+        (settings, vec![coder, reviewer])
     }
 
     fn roster() -> (Vec<ModelConfig>, Vec<ProviderConfig>) {
@@ -834,10 +828,10 @@ pub(super) mod named_virtual_agents {
     /// leader's flags forwarded and the stand-in binary as the worker.
     async fn start_team_broker(dir: &std::path::Path, provider_flags: &[String]) -> Broker {
         let (models, providers) = roster();
-        let settings = team();
+        let (settings, agents) = team();
         let mut common_args = vec!["--auto-approve".to_string()];
         common_args.extend(provider_flags.iter().cloned());
-        let specs = resolve_virtual_agents(&models, &providers, &settings, &common_args);
+        let specs = resolve_virtual_agents(&models, &providers, &settings, &agents, &common_args);
         Broker::start_at(
             dir.join("participants.sock"),
             stand_in_binary(dir),
@@ -989,9 +983,9 @@ pub(super) mod named_virtual_agents {
             .iter()
             .find(|line| line.contains("--participant-name local-coder-0"))
             .unwrap_or_else(|| panic!("no coder child spawned: {argv:?}"));
-        assert!(coder.contains("--model qwen3:4b"), "{coder}");
+        assert!(coder.contains(r#""model":"qwen3:4b""#), "{coder}");
         assert!(
-            !coder.contains("--disable"),
+            !coder.contains("disable"),
             "the coder keeps every tool: {coder}"
         );
         assert!(coder.contains("--auto-approve"), "{coder}");
@@ -1000,9 +994,9 @@ pub(super) mod named_virtual_agents {
             .iter()
             .find(|line| line.contains("--participant-name local-reviewer-0"))
             .unwrap_or_else(|| panic!("no reviewer child spawned: {argv:?}"));
-        assert!(reviewer.contains("--model gemma4:26b"), "{reviewer}");
+        assert!(reviewer.contains(r#""model":"gemma4:26b""#), "{reviewer}");
         assert!(
-            reviewer.contains("--disable fs-write,shell,git"),
+            reviewer.contains(r#""disable":["fs-write","shell","git"]"#),
             "{reviewer}"
         );
 
@@ -1043,7 +1037,7 @@ pub(super) mod named_virtual_agents {
             argv[0]
         );
         assert!(argv[0].contains("--api-key k"), "{}", argv[0]);
-        assert!(argv[0].contains("--model qwen3:4b"), "{}", argv[0]);
+        assert!(argv[0].contains(r#""model":"qwen3:4b""#), "{}", argv[0]);
 
         broker.shutdown();
     }
@@ -1141,13 +1135,13 @@ mod declared_roles {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use chatty_core::agent_spec::AgentSpec;
     use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
     use chatty_core::models::clarification_store::ClarificationStore;
     use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
     use chatty_core::models::write_approval_store::WriteApprovalStore;
     use chatty_core::services::virtual_agents::resolve_virtual_agents;
     use chatty_core::settings::models::models_store::ModelConfig;
-    use chatty_core::settings::models::module_settings::VirtualAgentConfig;
     use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
     use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
     use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
@@ -1163,30 +1157,34 @@ mod declared_roles {
                             and report what you found; never edit the tree yourself.";
 
     /// The team the issue's manual run declares: one reviewer, with a role.
-    fn reviewer_team() -> ModuleSettingsModel {
-        ModuleSettingsModel {
-            virtual_agents: vec![VirtualAgentConfig {
-                name: REVIEWER.to_string(),
-                model: Some("gemma4:26b".to_string()),
-                tools: Some("reviewer".to_string()),
-                preamble: Some(PREAMBLE.to_string()),
-                ..VirtualAgentConfig::default()
-            }],
-            ..ModuleSettingsModel::default()
-        }
+    fn reviewer_team() -> Vec<AgentSpec> {
+        let mut reviewer = AgentSpec::named(REVIEWER);
+        reviewer.agent.model = Some("gemma4:26b".to_string());
+        reviewer.agent.preamble = Some(PREAMBLE.to_string());
+        reviewer.tools.profile = Some("reviewer".to_string());
+        vec![reviewer]
     }
 
-    /// The reviewer's argv, exactly as the broker would spawn its children
-    /// with, read back through `chatty-tui`'s own parser.
+    /// The reviewer's role, from the argv the broker would spawn its
+    /// children with, read back through `chatty-tui`'s own parser and spec.
     fn reviewer_role() -> chatty_core::factories::AgentRole {
-        let specs = resolve_virtual_agents(&[], &[], &reviewer_team(), &[]);
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &reviewer_team(),
+            &[],
+        );
         let argv = ["chatty-tui".to_string()]
             .into_iter()
             .chain(specs[0].args.iter().cloned());
         let cli = crate::Cli::try_parse_from(argv).expect("the worker's argv parses");
-        assert_eq!(cli.tools.as_deref(), Some("reviewer"));
-        crate::resolve_role(cli.tools.as_deref(), cli.preamble.as_deref())
-            .expect("the declared profile exists")
+        let spec = crate::run_spec(&cli, None, None).expect("the declared spec is valid");
+        assert_eq!(spec.tools.profile.as_deref(), Some("reviewer"));
+        AgentBuildContext::from_spec(&spec, AgentServices::default())
+            .expect("the declared spec builds")
+            .context
+            .role
     }
 
     /// A daemon that answers `POST /api/chat` with a failure and keeps the
@@ -1327,7 +1325,13 @@ mod declared_roles {
     #[tokio::test]
     async fn the_card_lists_the_profile_and_the_roles_first_sentence() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let specs = resolve_virtual_agents(&[], &[], &reviewer_team(), &[]);
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &reviewer_team(),
+            &[],
+        );
         let broker = Broker::start_at(
             dir.path().join("participants.sock"),
             // No child is spawned by `list_agents`; the runner only needs a

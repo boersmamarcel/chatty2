@@ -482,43 +482,76 @@ port, through `LazyBroker::ensure_started`. Later calls reuse the same broker
 (memoized). A test can read `LazyBroker::bound_addrs()` to see whether anything is
 bound yet without triggering a start.
 
-**Named virtual agents (ADR-0011 C10, AGE-377).** Every worker used to be the same:
-the roster's default model with the leader's tools. `module_settings.json` can instead
-declare a team, each member a *virtual agent* the broker publishes under its own name
-with its own model and tool set:
+**Named virtual agents (ADR-0011 C10, AGE-377; agent specs, AGE-614).** Every worker
+used to be the same: the roster's default model with the leader's tools. A team is now a
+list of *agent specs* (below), each published by the broker under its own name with its
+own model and tool set. `module_settings.json` names them:
 
 ```json
-{
-  "virtual_agents": [
-    {
-      "name": "local-coder",
-      "model": "qwen3:4b",
-      "tools": "coder",
-      "preamble": "You are the coder on this team. Make the smallest change that makes the task's check pass, run it, and report the files you touched."
-    },
-    {
-      "name": "local-reviewer",
-      "model": "gemma4:26b",
-      "tools": "reviewer",
-      "preamble": "You are the reviewer on this team. Read the diff, run the tests, and report what you found; never edit the tree yourself."
-    }
-  ]
-}
+{ "virtual_agents": ["local-coder", "local-reviewer"] }
 ```
+
+A file that still lists agent objects here (the old `VirtualAgentConfig` shape) fails to
+load with an error naming `virtual_agents`; there is no compatibility shim.
+
+**Agent specs (PL-D2, AGE-614).** An agent spec is the one declarative definition of an
+agent, the same for a worker, a `--team` leader and `chatty-tui --agent <name>`. TOML on
+disk, the same shape as JSON on the wire:
+
+```toml
+[agent]
+name = "local-reviewer"            # the A2A address, /a2a/{name}
+description = "Verifies a worker's branch"
+model = "gemma4:26b"               # resolved like --model; absent = the roster's default
+preamble = "Verify, do not trust, verdict first. …"
+
+[tools]
+profile = "reviewer"               # coordinator | coder | reviewer
+disable = ["fetch"]                # tool groups, narrows only
+skills = ["coder-reviewer"]        # read_skill names, named in the preamble
+
+[[plugins]]                        # carried, not loaded yet (PL-U2)
+module = "benford"
+version = "^0.2"
+
+[swarm]
+delegates_to = ["local-coder"]     # non-empty: the worker runs a broker of its own
+exposed = true
+callers = ["coder-reviewer-leader"]
+
+[budget]
+max_agent_turns = 30               # 0 = uncapped; the deadline applies
+max_duration = "30m"
+cap_usd = 2.0                      # per task, the spend gate's cap
+```
+
+A spec is looked up in `<workspace>/.chatty/agents/<name>.toml`, then
+`<data_dir>/chatty/agents/<name>.toml` (Linux: `~/.local/share/chatty/agents/`), then the
+presets compiled into `crates/chatty-core/agents/`; the first match wins and shadows the
+rest (`chatty_core::agent_spec::{load_agent_spec, list_agent_specs}`). Unknown fields are
+an error naming the field (`extra_args` is gone), and validation reports every problem at
+once: bad name, unknown profile, unknown tool group, bad model reference, duplicate
+plugin, bad duration or cap. `AgentBuildContext::from_spec` is the one place a spec
+becomes what an agent is built with: the role, the execution settings narrowed by
+`disable` and `max_agent_turns` and then gated, the skills line, and a per-task
+`TaskSpendGate` from `cap_usd`. A worker receives its whole spec on its argv as
+`--agent-json <spec>` and builds itself through that same function.
 
 | Field | Meaning |
 |-------|---------|
-| `name` | The name `invoke_agent` addresses, served at `/a2a/{name}`. |
-| `model` | Optional. Passed as `--model` to each child, resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the child runs the roster's default, as an undeclared worker does. |
-| `tools` | Optional. A named tool profile passed as `--tools`: `coordinator`, `coder` or `reviewer`. An allowlist of tool *names* — see below. |
-| `preamble` | Optional. The role's standing instructions, passed as `--preamble` and appended to the worker's system prompt after the base preamble, before the tool summary. |
-| `disable_tools` | Optional. Tool groups passed as `--disable`: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`; an unknown name fails the worker at start-up). Composes with `tools`: it can narrow a named profile further, but never re-enables a tool the profile already excludes. |
-| `max_agent_turns` | Optional. This worker's own turn budget (AGE-440), passed as `--max-agent-turns <n>` ahead of `extra_args` and applied to the child's execution settings before its loop guard is sized. Absent: the child runs with no turn cap and a 30-minute time budget (a run without a human never takes the persisted cap). Independent of the team file's `max_agent_turns`, which is the leader's. |
-| `extra_args` | Optional. Any further `chatty-tui` flags, appended verbatim. |
+| `agent.name` | The name `invoke_agent` addresses, served at `/a2a/{name}`; lowercase letters, digits, `-`, `_`, and the file's own name. |
+| `agent.model` | Optional. Resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the roster's default. |
+| `agent.preamble` | Optional. The role's standing instructions, appended to the system prompt after the base preamble, before the tool summary. |
+| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder` or `reviewer` — see below. |
+| `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
+| `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
+| `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
+| `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
+| `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |
 
-**Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `disable_tools` removes
+**Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `tools.disable` removes
 whole tool *groups*, which is the wrong grain for a role — a reviewer wants `git_diff`
-but not `git_commit`, and a coder wants none of the agent tools. `tools` names a profile
+but not `git_commit`, and a coder wants none of the agent tools. `tools.profile` names a profile
 instead: an allowlist of tool *names*, and the worker's whole tool set. Anything the
 profile does not name is dropped, MCP tools included, which is most of the point — a 4B
 coder used to be handed 53 tool schemas (~13k tokens) before it could read a file. A
@@ -537,8 +570,8 @@ a reviewer reads `main..sub-agent/<name>` without a shell), `read_skill`, and `a
 every profile keeps that last one, or a worker could no longer park a question on its leader
 (AGE-306). The todo plan is the leader's and the unprofiled main agent's: a worker gets one
 bounded task and does not plan it again (AGE-479). The
-profiles live in `chatty_core::factories::tool_profile`; `chatty-tui --tools <profile>`
-refuses an unknown name rather than starting a worker with every tool there is.
+profiles live in `chatty_core::factories::tool_profile`; a spec (or `chatty-tui --tools`)
+naming an unknown profile is refused rather than starting a worker with every tool there is.
 
 `preamble` is the other half of a role: without it a reviewer only knows it is a reviewer
 if the leader says so in the task, which is exactly how a reviewer came to approve a
@@ -546,8 +579,8 @@ one-line branch on the coder's word. It lands in the worker's system prompt ahea
 tool summary, and its first sentence goes on the agent's card so the leader can pick by
 reading.
 
-An empty or absent list is the single `local-agent` of before. A role is a name plus an
-argv and nothing else: `invoke_agent` takes no `model` or `role` parameter, so the
+An empty or absent list is the single `local-agent` of before. A role is a spec and
+nothing else: `invoke_agent` takes no `model` or `role` parameter, so the
 leader's tool schema and prompt prefix are identical whatever the team, and each
 agent's card — what `list_agents` shows — says which model it runs, which tool profile or
 tool groups it has, and the first sentence of its preamble, so the leader chooses by
@@ -590,10 +623,10 @@ The verification command is the team's, not an agent's, and lives next to
 
 It is skipped for any agent **whose profile has no shell**: a worker that could not run
 commands produced no build, so running the suite in its tree would report the leader's
-own state back as the worker's. `tools` and `disable_tools` compose (AGE-452), so both
-have to allow it: a `reviewer` runs the suite unless `disable_tools` also names `shell`,
-a `coordinator` never does regardless, and with no profile named, `disable_tools`
-containing `shell` alone is what skips it. The command is a plain subprocess in a
+own state back as the worker's. `tools.profile` and `tools.disable` compose (AGE-452), so
+both have to allow it: a `reviewer` runs the suite unless `disable` also names `shell`,
+a `coordinator` never does regardless, and with no profile named, `disable` containing
+`shell` alone is what skips it. The command is a plain subprocess in a
 process group of its own, not one of the agent's tools — the point of the envelope is
 that it is the runner's fact and not the worker's account of one — and the timeout
 kills that whole group, so a suite that hangs cannot outlive the delegation that
@@ -608,13 +641,12 @@ to live in four files and a shell script. A *team directory* is that in one plac
 Harbor arm can upload and a run can reproduce: `teams/<id>/team.json` with `SKILL.md`
 beside it.
 
+`team.json` is a thin file of agent spec names (AGE-614):
+
 ```json
 {
-  "leader": { "model": "qwen3:14b", "profile": "coordinator", "preamble": "You lead a coder-reviewer team and edit nothing yourself. …" },
-  "agents": [
-    { "name": "local-coder", "tools": "coder", "preamble": "You are the coder on this team. …" },
-    { "name": "local-reviewer", "tools": "reviewer", "preamble": "Verify, do not trust, verdict first. …" }
-  ],
+  "leader": "coder-reviewer-leader",
+  "agents": ["local-coder", "local-reviewer"],
   "verification": "cargo test --all-features -- --test-threads=1",
   "skill": "coder-reviewer",
   "max_agent_turns": 50
@@ -623,25 +655,27 @@ beside it.
 
 | Field | Meaning |
 |-------|---------|
-| `leader.model` | Optional. The leader's model, as `--model` resolves it. `--model` beats it; absent both, the roster's default. |
-| `leader.profile` | Optional. The leader's tool profile (`coordinator`, `coder`, `reviewer`). `--tools` beats it. |
-| `leader.preamble` | Optional. The leader's standing instructions. `--preamble` beats it. |
-| `agents` | The roster, each entry a `VirtualAgentConfig` exactly as `module_settings.virtual_agents` declares one. Replaces that list for the run. |
+| `leader` | The spec the leader runs as. `--model`, `--tools` and `--preamble` still beat its fields. |
+| `agents` | The roster, by spec name. Replaces `module_settings.virtual_agents` for the run. |
 | `verification` | Optional. The team's verification command (`team.verification` above) for the run. |
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
-| `max_agent_turns` | Optional. The leader's turn budget for the run; without it a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own `max_agent_turns` in `agents` (above), not this. |
+| `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
+
+A `team.json` in the old shape — a `leader` object, agent objects in `agents` — fails to
+load with an error naming the field.
 
 `chatty-tui --team <id>` runs as that team's leader. It implies `--broker`, declares the
-roster from the team file (nothing is written back to `module_settings.json`), applies
-the leader's model, profile and preamble unless the corresponding flag was given, sets
+roster from the team file (nothing is written back to `module_settings.json`), runs as
+the leader's spec (an explicit `--model`/`--tools`/`--preamble` beats it), sets
 the turn budget, and opens the first turn with the skill instruction. Valid with
 `--headless`, `--pipe` and the interactive TUI. The id is looked up in
 `<workspace>/.chatty/teams/<id>/`, then `<data_dir>/chatty/teams/<id>/` (Linux:
 `~/.local/share/chatty/teams/`), then the presets compiled into the binary; the first
 directory with a `team.json` wins, and a malformed file there is an error rather than a
-fall-through to the preset. The loader is
+fall-through to the preset. The specs it names are looked up the same way
+as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
-`crates/chatty-core/teams/`.
+`crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
 One preset ships, `coder-reviewer`: a `coordinator` leader, `local-coder` on the `coder`
 profile, `local-reviewer` on the `reviewer` profile with the "verify, do not trust,

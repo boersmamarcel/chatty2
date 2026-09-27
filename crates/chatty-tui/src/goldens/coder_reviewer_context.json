@@ -1,0 +1,123 @@
+{
+  "leader": {
+    "model": null,
+    "role": {
+      "preamble": "You lead a coder-reviewer team and edit nothing yourself. Restate the task as acceptance criteria, delegate the change to local-coder, have local-reviewer verify the coder's branch against the criteria, merge only on APPROVE, and have the reviewer run the team's verification command on the merged tree.",
+      "profile": "coordinator"
+    },
+    "exec_settings": {
+      "enabled": false,
+      "approval_mode": "AutoApproveSandboxed",
+      "workspace_dir": "/golden/workspace",
+      "filesystem_read_enabled": true,
+      "filesystem_write_enabled": true,
+      "fetch_enabled": true,
+      "git_enabled": false,
+      "browser_enabled": false,
+      "allow_private_network_access": false,
+      "execute_code_enabled": false,
+      "docker_code_execution_enabled": false,
+      "docker_host": null,
+      "timeout_seconds": 30,
+      "max_output_bytes": 51200,
+      "network_isolation": false,
+      "max_agent_turns": 50,
+      "memory_enabled": true,
+      "embedding_enabled": false,
+      "warn_on_external_agent": false,
+      "embedding_provider": null,
+      "embedding_model": null,
+      "hosted_conversations_enabled": false
+    },
+    "ask_user_enabled": true,
+    "instructions_dir": "/golden/workspace",
+    "local_agents": [
+      "local-coder",
+      "local-reviewer"
+    ],
+    "team_skill": {
+      "name": "coder-reviewer",
+      "content": "# Skill: coder-reviewer\n\nDescription: Deliver one bounded change as a team of workers in a fixed order: a coder implements it in its own worktree, a reviewer checks the coder's branch against the acceptance criteria without trusting the coder's report, the leader merges only on APPROVE and has the merged tree verified, then records the outcome on the tracking issue. Use for any task that names acceptance criteria and would benefit from a second pair of eyes. Do not use for questions, explanations, or edits under ten lines.\n\nRoles (from `list_agents`): prefer `local-coder` and `local-reviewer` when they are listed; otherwise use `local-agent` for both and state the role in the prompt.\n\n1. Restate the task as a numbered list of acceptance criteria. If the task gives none, write them yourself and show them before delegating. Record them with the todo tool so they survive the delegations.\n2. Delegate to the coder with one prompt containing: the criteria verbatim; \"work only in your own workspace; turn each criterion into a test before making it pass; run the repository's verification exactly as CI does; do not commit or push; report what changed, the file list, the verification commands with their result lines verbatim, and a criterion → evidence table; if a decision needs a human, stop and report BLOCKED: <reason>\".\n3. Read the coder's output. Its last lines name the branch its work was committed to (`sub-agent/<name>`). If the coder reported BLOCKED, stop and ask the user. Do not fix the coder's work yourself.\n4. Delegate to the reviewer with one prompt containing: the criteria; the branch name; the coder's report labelled \"claims to check, not to trust\"; and \"find the default branch with `git_status` (it is `main` or `master`) and read the branch with the `git_diff` tool using `range` = `<default>..<branch>`; if that prints nothing, run `git log --oneline <default>..<branch>` and say so instead of guessing, check that each criterion has a test or stated evidence, that no test was weakened, that nothing outside the task changed, and that the report's verification output is consistent with the diff; reproduce at least one negative probe yourself, for example revert one line of the fix and confirm the new test fails; do not edit any file; first line of your answer is APPROVE, REQUEST_CHANGES followed by a numbered list of concrete items, or BLOCKED: <reason>\".\n5. On REQUEST_CHANGES: delegate to a fresh coder with the original criteria, the branch name to continue from (\"start by checking out <branch>\"), and the reviewer's numbered list. Then repeat step 4. Allow this loop at most twice; on the third REQUEST_CHANGES stop and report to the user with both lists.\n6. On APPROVE: merge the branch into the current tree with the `git_merge` tool (branch = `<branch>`, no_ff = true). If the merge conflicts, do not resolve it by hand; report the conflicting files and stop. Then verify the merged tree: you have no shell, so delegate to the reviewer once more with one prompt: \"run the team's verification command on the current tree — `<the verification command from the task's first message, or the repository's own CI commands if none was given>` — and report its result lines verbatim; first line of your answer is PASS or FAIL\". On FAIL, treat it as REQUEST_CHANGES (step 5) with the failing lines as the list.\n7. On BLOCKED from either role: stop and relay the reason to the user verbatim.\n8. If a tracking issue was named, update it through the issue tool available (for example the Linear MCP server): one comment with the criteria → evidence table, the reviewer's verdict line, and the merge commit. Do not change the issue's state unless the task says to.\n9. Report to the user in this order: verdict, merge commit or the reason nothing merged, the criteria table, tokens and wall-clock if known. Never restate the diff.\n\nRules: one worker per step, never two coders on one branch; every prompt to a worker is self-contained because the worker sees none of this conversation; if a worker asks a question, answer it from the task or the criteria and only otherwise pass it to the user; nothing in any prompt may mention a benchmark, a verifier, or an answer file.\n"
+    },
+    "unattended": true,
+    "spend_gate": false
+  },
+  "local-coder": {
+    "model": null,
+    "role": {
+      "preamble": "You are the coder on this team. Work only in your own workspace, turn each acceptance criterion into a test before making it pass, run the repository's verification exactly as CI does, do not commit or push, and report what changed with a criterion-to-evidence table.",
+      "profile": "coder"
+    },
+    "exec_settings": {
+      "enabled": false,
+      "approval_mode": "AutoApproveAll",
+      "workspace_dir": "/golden/workspace",
+      "filesystem_read_enabled": true,
+      "filesystem_write_enabled": true,
+      "fetch_enabled": true,
+      "git_enabled": false,
+      "browser_enabled": false,
+      "allow_private_network_access": false,
+      "execute_code_enabled": false,
+      "docker_code_execution_enabled": false,
+      "docker_host": null,
+      "timeout_seconds": 30,
+      "max_output_bytes": 51200,
+      "network_isolation": false,
+      "max_agent_turns": 0,
+      "memory_enabled": true,
+      "embedding_enabled": false,
+      "warn_on_external_agent": false,
+      "embedding_provider": null,
+      "embedding_model": null,
+      "hosted_conversations_enabled": false
+    },
+    "ask_user_enabled": true,
+    "instructions_dir": "/golden/workspace",
+    "local_agents": [
+      "local-agent"
+    ],
+    "team_skill": null,
+    "unattended": true,
+    "spend_gate": false
+  },
+  "local-reviewer": {
+    "model": null,
+    "role": {
+      "preamble": "Verify, do not trust, verdict first. You are the reviewer on this team: read the branch's diff yourself, run the tests yourself, reproduce at least one negative probe, and never edit the tree. The first line of your answer is APPROVE, REQUEST_CHANGES or BLOCKED.",
+      "profile": "reviewer"
+    },
+    "exec_settings": {
+      "enabled": false,
+      "approval_mode": "AutoApproveAll",
+      "workspace_dir": "/golden/workspace",
+      "filesystem_read_enabled": true,
+      "filesystem_write_enabled": true,
+      "fetch_enabled": true,
+      "git_enabled": false,
+      "browser_enabled": false,
+      "allow_private_network_access": false,
+      "execute_code_enabled": false,
+      "docker_code_execution_enabled": false,
+      "docker_host": null,
+      "timeout_seconds": 30,
+      "max_output_bytes": 51200,
+      "network_isolation": false,
+      "max_agent_turns": 0,
+      "memory_enabled": true,
+      "embedding_enabled": false,
+      "warn_on_external_agent": false,
+      "embedding_provider": null,
+      "embedding_model": null,
+      "hosted_conversations_enabled": false
+    },
+    "ask_user_enabled": true,
+    "instructions_dir": "/golden/workspace",
+    "local_agents": [
+      "local-agent"
+    ],
+    "team_skill": null,
+    "unattended": true,
+    "spend_gate": false
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "title": "Deep merge",
+  "kind": "requirement-change",
+  "task": "Implement deep_merge(base, override) in merge.py: return a new dict in which the keys of override replace those of base, except that when both values are dicts they are merged recursively. Neither input may be modified. Add tests.",
+  "follow_up": "Requirement change: when both values are lists, the result is base's list followed by override's; and an override value of None deletes the key from the result. The inputs are still never modified. Add tests."
+}

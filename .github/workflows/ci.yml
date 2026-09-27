@@ -72,6 +72,9 @@ jobs:
               - 'scripts/check-no-core-reexports.sh'
               - 'scripts/check-release-authz.sh'
               - 'scripts/setup-linux.sh'
+              # resume_spike_dry_run / rebrief_template_is_frozen (AGE-650)
+              - 'scripts/resume-spike/**'
+              - 'docs/research/resume-spike-template.md'
               - '.github/workflows/ci.yml'
               - 'Makefile'
 

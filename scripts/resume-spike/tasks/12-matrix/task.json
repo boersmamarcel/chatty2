@@ -1,0 +1,6 @@
+{
+  "title": "Matrix operations",
+  "kind": "review-finding",
+  "task": "Implement transpose(m) and multiply(a, b) in matrix.py for matrices given as lists of rows (lists of numbers). Add tests.",
+  "follow_up": "Review finding: multiply silently returns garbage for mismatched shapes and ragged input. Raise ValueError when a or b is empty, when the rows of either matrix differ in length, or when a's column count differs from b's row count; transpose must raise ValueError for ragged input too. Add tests."
+}

@@ -63,6 +63,7 @@
     - [AppWorld decision](./dev/adrs/appworld-decision.md)
     - [ADR-0011 kill criteria: sub_agent vs the broker](./dev/adrs/adr-0011-broker-ab-2026-09-08.md)
     - [Fabric hop latency: baseline before BI-3](./dev/adrs/fabric-hop-latency-baseline.md)
+    - [Resume spike: the frozen prompts](./dev/adrs/resume-spike-template.md)
     - [Modules M0–M4](./dev/research/modules/index.md)
       - [M0 Trace contract](./dev/research/modules/m0-trace.md)
       - [M1 ReAct](./dev/research/modules/m1-react.md)

@@ -70,7 +70,7 @@ for path, name, heading in [
 # The nested module-settings structs are described inside their parent's row
 # (AGE-451): every field must at least be named there.
 module_table = section(schema, "— `ModuleSettingsModel`", "\n---")
-for name in ("VirtualAgentConfig", "TeamConfig"):
+for name in ("TeamConfig",):
     fields = struct_fields("crates/chatty-core/src/settings/models/module_settings.rs", name)
     missing = sorted(f for f in fields if f"`{f}`" not in module_table)
     if missing:

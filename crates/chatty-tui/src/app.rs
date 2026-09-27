@@ -817,7 +817,7 @@ mod tests {
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
                 module_agents: Vec::new(),
-                role: Default::default(),
+                spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,
                 services_loaded: true,
