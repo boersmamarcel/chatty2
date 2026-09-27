@@ -1,0 +1,10 @@
+[module]
+name = "panic"
+version = "0.1.0"
+description = "Adversarial test fixture: panic"
+wasm = "panic.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

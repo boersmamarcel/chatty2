@@ -31,7 +31,7 @@ help:
 	@echo "  make fmt           cargo fmt"
 	@echo "  make fmt-check     cargo fmt --check"
 	@echo "  make typecheck     cargo check --all-features"
-	@echo "  make wasm-modules  Build modules/echo-agent for wasm32-wasip2 (needed by tests)"
+	@echo "  make wasm-modules  Build every WASM module and test fixture (needed by tests)"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
 	@echo "  make run-tui       cargo run -p chatty-tui"
 	@echo "  make docs-gen      Generate docs/generated reference pages"
@@ -99,8 +99,7 @@ typecheck:
 	cargo check --all-features
 
 wasm-modules:
-	cd modules/echo-agent && cargo build --target wasm32-wasip2 --release \
-		&& cp target/wasm32-wasip2/release/echo_agent.wasm .
+	scripts/build-wasm-fixtures.sh
 
 run-gpui:
 	cargo run -p chatty-gpui

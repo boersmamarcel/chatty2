@@ -1,0 +1,10 @@
+[module]
+name = "trap"
+version = "0.1.0"
+description = "Adversarial test fixture: trap"
+wasm = "trap.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

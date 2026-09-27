@@ -28,13 +28,13 @@ make setup
 
 On Linux, `make setup` runs [`scripts/setup-linux.sh`](https://github.com/boersmamarcel/chatty2/blob/main/scripts/setup-linux.sh): the `lib*-dev` package list from CI plus `rustup target add wasm32-wasip2`. On macOS and Windows it prints what to install by hand and adds the `wasm32-wasip2` target.
 
-### 2. Build the echo-agent WASM module
+### 2. Build the WASM modules and test fixtures
 
 ```bash
 make wasm-modules
 ```
 
-Some integration tests load `modules/echo-agent/echo_agent.wasm`. The file is git-ignored, so it has to be built once after every fresh clone (and again if you `cargo clean` inside `modules/echo-agent`).
+Some integration tests load real modules: `echo-agent`, `benford-agent` and the adversarial fixtures under `modules/fixtures/`. `make wasm-modules` runs `scripts/build-wasm-fixtures.sh`, which builds them all and stages each at `target/wasm-fixtures/<name>/<name>.wasm` beside its `module.toml`. It is build output, so run it once after every fresh clone (and again after `cargo clean`).
 
 ### 3. Run the terminal app headless against Ollama
 
@@ -97,7 +97,7 @@ make ci
 ## Checklist
 
 - [ ] `make setup` ran (or the equivalent packages and the `wasm32-wasip2` target are installed)
-- [ ] `make wasm-modules` produced `modules/echo-agent/echo_agent.wasm`
+- [ ] `make wasm-modules` staged the modules under `target/wasm-fixtures/`
 - [ ] `chatty-tui --headless` answered a prompt
 - [ ] `cargo run -p chatty-gpui` opened the desktop app
 - [ ] `make test-fast` and `make ci` pass
@@ -106,7 +106,7 @@ make ci
 
 | Symptom | Fix |
 |---------|-----|
-| A test fails with a missing `echo_agent.wasm` | `make wasm-modules` |
+| A test fails with "run scripts/build-wasm-fixtures.sh" | `make wasm-modules` |
 | `feature edition2024 is required` | Toolchain too old; `rustup default stable` |
 | `No models configured` from `chatty-tui` | Add `--ollama` (or `--openai-compat-url`), or configure a provider in the desktop app first |
 | `Could not connect to Ollama` | `ollama serve` is not running, or the URL is wrong |

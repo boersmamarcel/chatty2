@@ -7,6 +7,8 @@
 mod host;
 mod limits;
 mod module;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use host::{BillingProvider, LlmProvider, ModuleManifest};
 pub use limits::ResourceLimits;

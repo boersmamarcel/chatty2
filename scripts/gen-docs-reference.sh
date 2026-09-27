@@ -626,7 +626,7 @@ cat > "$OUT/env-vars.md" << 'EOF'
 | `GITHUB_TOKEN` | Auto-updater GitHub API; REST fallback for the branch's PR status when `gh` is unavailable | unset |
 | `GH_TOKEN` | Second choice after `GITHUB_TOKEN` for the PR-status REST fallback | unset |
 | `OLLAMA_NUM_PARALLEL` | Read for a loopback Ollama provider to size its delegation endpoint budget (AGE-305) | unset = `default_endpoint_budget` |
-| `ECHO_AGENT_WASM` | Tests: path to the echo-agent module when it is not under `modules/` (AGE-176) | `modules/echo-agent/echo_agent.wasm` |
+| `ECHO_AGENT_WASM` | Tests: path to the echo-agent module when it is not the staged fixture (AGE-176) | `target/wasm-fixtures/echo-agent/echo-agent.wasm` |
 | `UPDATE_GOLDENS` | Tests: rewrite the stream-fixture goldens instead of diffing them | unset |
 | `APPIMAGE` | AppImage self-update path | set by AppImage |
 | `DISPLAY` | X11 display for GPUI | `:0` / `:1` |

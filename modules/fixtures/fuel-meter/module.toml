@@ -1,0 +1,10 @@
+[module]
+name = "fuel-meter"
+version = "0.1.0"
+description = "Adversarial test fixture: fuel-meter"
+wasm = "fuel-meter.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true
