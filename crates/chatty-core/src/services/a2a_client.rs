@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -111,18 +111,36 @@ pub fn usage_metadata(lines: &[TokenUsage]) -> Value {
 /// The usage a delegated task reports on its terminal status:
 /// `metadata.usage.lines`, one [`TokenUsage`] per model, each naming its
 /// model (AGE-682). Whatever the worker itself delegated is already folded
-/// in by its mapper, so this is the whole subtree (AGE-415). Empty when the
-/// status carries none.
+/// in by its mapper, so this is the whole subtree (AGE-415). A line that does
+/// not parse is logged and skipped, not the whole report; a report with the
+/// four totals but no `lines` is one line naming no model, so it counts,
+/// unpriced. Empty when the status carries no usage.
 pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Vec<TokenUsage> {
-    let Some(lines) = metadata
-        .and_then(|m| m.get(USAGE_METADATA_KEY))
-        .and_then(|usage| usage.get("lines"))
-    else {
+    let Some(usage) = metadata.and_then(|m| m.get(USAGE_METADATA_KEY)) else {
         return Vec::new();
     };
-    let lines: Vec<WireUsageLine> = serde_json::from_value(lines.clone()).unwrap_or_default();
+    let Some(lines) = usage.get("lines").and_then(Value::as_array) else {
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+        let totals = TokenUsage {
+            input_tokens: count("inputTokens"),
+            output_tokens: count("outputTokens"),
+            cache_read_tokens: count("cacheReadTokens"),
+            cache_write_tokens: count("cacheWriteTokens"),
+            ..TokenUsage::default()
+        };
+        let spent = totals.input_tokens
+            + totals.output_tokens
+            + totals.cache_read_tokens
+            + totals.cache_write_tokens;
+        return if spent == 0 { Vec::new() } else { vec![totals] };
+    };
     lines
-        .into_iter()
+        .iter()
+        .filter_map(|line| {
+            serde_json::from_value::<WireUsageLine>(line.clone())
+                .map_err(|e| warn!(error = %e, "Skipping a usage line that does not parse"))
+                .ok()
+        })
         .map(|line| TokenUsage {
             input_tokens: line.input_tokens,
             output_tokens: line.output_tokens,
@@ -895,6 +913,33 @@ mod tests {
             ),
             (100, 20, 7, 3)
         );
+    }
+
+    /// AGE-682: a line that does not parse costs only itself, not the rest
+    /// of the worker's report.
+    #[test]
+    fn a_bad_usage_line_is_skipped_not_the_report() {
+        let metadata = json!({ "usage": { "lines": [
+            { "inputTokens": 10, "outputTokens": 2 },
+            { "model": { "provider": "no_such_provider", "model_id": "x" }, "inputTokens": 5 },
+            { "inputTokens": 7 },
+        ] } });
+        let lines = usage_from_status_metadata(Some(&metadata));
+        let inputs: Vec<u32> = lines.iter().map(|l| l.input_tokens).collect();
+        assert_eq!(inputs, vec![10, 7]);
+    }
+
+    /// AGE-682: a report with the four totals but no `lines` still counts,
+    /// as one line naming no model; a report with neither is no usage.
+    #[test]
+    fn totals_without_lines_are_one_unattributed_line() {
+        let metadata = json!({ "usage": { "inputTokens": 30, "outputTokens": 15 } });
+        let lines = usage_from_status_metadata(Some(&metadata));
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].input_tokens, lines[0].output_tokens), (30, 15));
+        assert_eq!(lines[0].model, None);
+
+        assert!(usage_from_status_metadata(Some(&json!({ "usage": {} }))).is_empty());
     }
 
     /// AGE-467: a worker's compacted trace rides the terminal status next to
