@@ -141,7 +141,20 @@ pub struct InvokeAgentTool {
     /// delegation starts. `None` — the desktop, chatty-tui, any leader
     /// without a cap — means no check at all.
     spend_gate: Option<Arc<dyn SpendGate>>,
+    /// This process's caller token when a broker spawned it as a worker
+    /// ([`BROKER_CALLER_ENV`]), sent on calls to the broker's local agents so
+    /// the broker can tell a worker delegating on its own model endpoint
+    /// from any other caller (AGE-628).
+    broker_caller: Option<String>,
 }
+
+/// Where a broker hands a worker its caller token; the gateway's
+/// `participant::CALLER_ENV`.
+pub const BROKER_CALLER_ENV: &str = "CHATTY_BROKER_CALLER";
+
+/// The header the caller token rides in; the gateway's
+/// `participant::CALLER_HEADER`.
+pub const BROKER_CALLER_HEADER: &str = "x-chatty-broker-caller";
 
 impl InvokeAgentTool {
     pub fn new(
@@ -160,6 +173,9 @@ impl InvokeAgentTool {
             warn_outside_fleet: false,
             clarifications: None,
             spend_gate: None,
+            broker_caller: std::env::var(BROKER_CALLER_ENV)
+                .ok()
+                .filter(|token| !token.is_empty()),
         }
     }
 
@@ -341,7 +357,7 @@ impl Tool for InvokeAgentTool {
                 },
             });
             return self
-                .call_streaming(config, &prompt, args.include_trace)
+                .call_streaming(config, &prompt, args.include_trace, &[])
                 .await;
         }
 
@@ -362,6 +378,12 @@ impl Tool for InvokeAgentTool {
             };
 
             info!(agent = %local, "Delegating to a local worker through the broker");
+            let caller: Vec<(&str, &str)> = self
+                .broker_caller
+                .as_deref()
+                .map(|token| (BROKER_CALLER_HEADER, token))
+                .into_iter()
+                .collect();
             let config = A2aAgentConfig {
                 name: local.to_string(),
                 url: format!("{}/a2a/{}", base_url, local),
@@ -375,7 +397,7 @@ impl Tool for InvokeAgentTool {
                 source: ToolSource::Local,
             });
             return self
-                .call_streaming(&config, &prompt, args.include_trace)
+                .call_streaming(&config, &prompt, args.include_trace, &caller)
                 .await;
         }
 
@@ -414,7 +436,7 @@ impl Tool for InvokeAgentTool {
                 },
             });
             return self
-                .call_streaming(&config, &prompt, args.include_trace)
+                .call_streaming(&config, &prompt, args.include_trace, &[])
                 .await;
         }
 
@@ -446,12 +468,13 @@ impl InvokeAgentTool {
         config: &A2aAgentConfig,
         prompt: &str,
         include_trace: bool,
+        extra_headers: &[(&str, &str)],
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         use futures::StreamExt;
 
         let mut stream = self
             .client
-            .send_message_stream(config, prompt)
+            .send_message_stream_with_headers(config, prompt, extra_headers)
             .await
             .map_err(|e| {
                 let err_text = format!("⚠️ Failed to invoke agent '{}': {}", config.name, e);

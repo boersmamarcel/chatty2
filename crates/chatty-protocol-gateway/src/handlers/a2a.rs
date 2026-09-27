@@ -23,7 +23,7 @@ use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
-use crate::participant::{AgentOrigin, DelegatedTask, TaskBearer};
+use crate::participant::{AgentOrigin, CALLER_HEADER, DelegatedTask, TaskBearer};
 
 use super::a2a_participant;
 use super::jsonrpc::{
@@ -222,13 +222,19 @@ pub(crate) async fn a2a_jsonrpc(
     // (AGE-371): the broker validates nothing here — a hosted worker checks
     // it as the tenant boundary, a local one ignores it.
     let bearer = caller_bearer(&headers);
+    // Which broker worker is asking, if one is (AGE-628).
+    let caller = headers
+        .get(CALLER_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
 
     match body.method.as_str() {
         "message/send" => {
-            handle_message_send(&module_name, body.id, body.params, bearer, &state).await
+            handle_message_send(&module_name, body.id, body.params, bearer, caller, &state).await
         }
         "message/stream" => {
-            handle_message_stream(&module_name, body.id, body.params, bearer, &state)
+            handle_message_stream(&module_name, body.id, body.params, bearer, caller, &state)
                 .await
                 .into_response()
         }
@@ -251,6 +257,7 @@ async fn handle_message_send(
     id: Option<Value>,
     params: Option<Value>,
     bearer: Option<TaskBearer>,
+    caller: Option<String>,
     state: &GatewayState,
 ) -> axum::response::Response {
     use chatty_wasm_runtime::{ChatRequest, Message, Role};
@@ -295,7 +302,9 @@ async fn handle_message_send(
 
     if let Some(runner) = state.runners.get(module_name) {
         tracing::info!(agent = module_name, "A2A: starting a worker");
-        let task = DelegatedTask::new(content).with_bearer(bearer);
+        let task = DelegatedTask::new(content)
+            .with_bearer(bearer)
+            .with_caller(caller);
         return a2a_participant::runner_message_send(runner.as_ref(), id, task).await;
     }
 
@@ -412,6 +421,7 @@ async fn handle_message_stream(
     id: Option<Value>,
     params: Option<Value>,
     bearer: Option<TaskBearer>,
+    caller: Option<String>,
     state: &GatewayState,
 ) -> axum::response::Response {
     use chatty_wasm_runtime::{ChatRequest, Message, Role};
@@ -441,7 +451,9 @@ async fn handle_message_stream(
 
     if let Some(runner) = state.runners.get(module_name) {
         tracing::info!(agent = module_name, "A2A stream: starting a worker");
-        let task = DelegatedTask::new(content).with_bearer(bearer);
+        let task = DelegatedTask::new(content)
+            .with_bearer(bearer)
+            .with_caller(caller);
         return a2a_participant::runner_message_stream(runner.as_ref(), id, task).await;
     }
 

@@ -221,7 +221,12 @@ async fn next_task(
                 task_id,
                 text,
                 bearer,
-            } => return Ok(Some((task_id, DelegatedTask { text, bearer }))),
+            } => {
+                return Ok(Some((
+                    task_id,
+                    DelegatedTask::new(text).with_bearer(bearer),
+                )));
+            }
             BrokerFrame::Cancel { task_id } => {
                 debug!(task = %task_id, "Ignoring a cancel for a task that never started")
             }
