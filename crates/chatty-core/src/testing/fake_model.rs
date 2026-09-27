@@ -301,7 +301,11 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
             } => {
                 return match respond(&request.body) {
                     Some(body) => http(200, content_type, &body),
-                    None => http(500, "text/plain", "fake model: callback had no response left"),
+                    None => http(
+                        500,
+                        "text/plain",
+                        "fake model: callback had no response left",
+                    ),
                 };
             }
             Mode::Scripted(script) => {
