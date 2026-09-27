@@ -144,6 +144,20 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: scripts/build-wasm-fixtures.sh
 
+      # The gateway conformance suite (AGE-599) drives real third-party
+      # clients: the OpenAI Python package through `uv`, and the MCP
+      # Inspector through `npx`, which needs Node >= 22.19. Without these the
+      # tests print SKIP and pass without checking anything.
+      - name: Install uv (OpenAI Python client for the gateway conformance suite)
+        if: needs.changes.outputs.rust == 'true'
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Node 22 (MCP Inspector for the gateway conformance suite)
+        if: needs.changes.outputs.rust == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Run tests
         if: needs.changes.outputs.rust == 'true'
         # CI has shown intermittent SIGTRAP in `chatty-core` tests when run in

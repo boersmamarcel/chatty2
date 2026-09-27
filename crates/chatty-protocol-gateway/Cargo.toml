@@ -46,6 +46,9 @@ tower = "0.5"
 axum = { version = "0.8", features = ["macros"] }
 futures = { workspace = true }
 tempfile = { workspace = true }
+# The MCP client chatty itself connects to module servers with (streamable
+# HTTP), driven against the gateway by the conformance suite (AGE-599).
+rmcp = { workspace = true }
 
 [features]
 default = []

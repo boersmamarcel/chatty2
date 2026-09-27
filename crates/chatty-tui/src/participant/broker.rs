@@ -181,10 +181,19 @@ impl Broker {
         self.participants.clone()
     }
 
+    /// The TCP addresses this broker is bound to (BI-2, AGE-634). A running
+    /// `Broker` always has exactly one: its ephemeral loopback gateway port.
+    /// [`LazyBroker`] is what a caller checks *before* one exists.
+    pub fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+        vec![std::net::SocketAddr::from(([127, 0, 0, 1], self.port))]
+    }
+
     /// Stop serving. Workers already spawned are reaped by `LocalRunner`'s
     /// own `Drop` when it is dropped, not by this — nothing here waits for
-    /// them (Do item 4: they are reaped as the runner already does).
-    pub fn shutdown(self) {
+    /// them (Do item 4: they are reaped as the runner already does). `&self`
+    /// rather than consuming: [`PendingBroker::shutdown`] (BI-2, AGE-634)
+    /// only ever sees this through a shared reference into its `OnceCell`.
+    pub fn shutdown(&self) {
         self.server.abort();
         self.participant_listener.abort();
         chatty_protocol_gateway::participant::unbind(&self.socket);
@@ -217,6 +226,100 @@ pub fn provider_flags(
         flags.push(key.to_string());
     }
     flags
+}
+
+/// What [`PendingBroker::ensure_started`] runs the first time it is called:
+/// [`Broker::start`] (production) or [`Broker::start_at`] (tests, an
+/// isolated socket and executable).
+type StartFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Broker>> + Send>>;
+
+/// [`Broker::start`]'s parameters, captured once so the broker itself —
+/// its participant socket and TCP gateway — starts on the first
+/// `list_agents`/`invoke_agent` call instead of at process boot (BI-2,
+/// AGE-634). `main.rs` builds one of these whenever `--broker`/`--team` is
+/// given, instead of starting the broker right away.
+pub struct PendingBroker {
+    start: Box<dyn Fn() -> StartFuture + Send + Sync>,
+    once: tokio::sync::OnceCell<Broker>,
+}
+
+impl PendingBroker {
+    pub fn new(
+        models: Vec<ModelConfig>,
+        providers: Vec<ProviderConfig>,
+        module_settings: ModuleSettingsModel,
+        workspace_dir: Option<String>,
+        auto_approve: bool,
+        provider_flags: Vec<String>,
+    ) -> Self {
+        let start = move || -> StartFuture {
+            let models = models.clone();
+            let providers = providers.clone();
+            let module_settings = module_settings.clone();
+            let workspace_dir = workspace_dir.clone();
+            let provider_flags = provider_flags.clone();
+            Box::pin(async move {
+                Broker::start(
+                    &models,
+                    &providers,
+                    &module_settings,
+                    workspace_dir,
+                    auto_approve,
+                    &provider_flags,
+                )
+                .await
+            })
+        };
+        Self {
+            start: Box::new(start),
+            once: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// As [`Self::new`], but over [`Broker::start_at`]'s injected socket
+    /// path and worker executable, so a test never touches the real runtime
+    /// directory or shares a socket with another test in this binary
+    /// (they all share a pid, and thus [`socket_path`]).
+    #[cfg(test)]
+    pub(crate) fn new_at(
+        socket: PathBuf,
+        executable: PathBuf,
+        default_budget: usize,
+        specs: Vec<VirtualAgentSpec>,
+        workspace_dir: Option<String>,
+    ) -> Self {
+        let start = move || -> StartFuture {
+            let socket = socket.clone();
+            let executable = executable.clone();
+            let specs = specs.clone();
+            let workspace_dir = workspace_dir.clone();
+            Box::pin(async move {
+                Broker::start_at(socket, executable, default_budget, specs, workspace_dir).await
+            })
+        };
+        Self {
+            start: Box::new(start),
+            once: tokio::sync::OnceCell::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
+    async fn ensure_started(&self) -> anyhow::Result<String> {
+        let broker = self.once.get_or_try_init(|| (self.start)()).await?;
+        Ok(format!("http://localhost:{}", broker.port))
+    }
+
+    fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.once.get().map(Broker::bound_addrs).unwrap_or_default()
+    }
+
+    fn shutdown(&self) {
+        if let Some(broker) = self.once.get() {
+            broker.shutdown();
+        }
+    }
 }
 
 /// One `LocalRunner` per resolved agent, all metered on one shared budget
@@ -303,6 +406,7 @@ fn worktree_factory(workspace_root: String, verification: Option<String>) -> Wor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chatty_core::services::lazy_broker::LazyBroker;
     use chatty_core::settings::models::providers_store::ProviderType;
     use chatty_core::tools::LOCAL_AGENT_NAME;
 
@@ -325,6 +429,111 @@ mod tests {
         module_settings: &ModuleSettingsModel,
     ) -> Vec<VirtualAgentSpec> {
         resolve_virtual_agents(models, providers, module_settings, &[])
+    }
+
+    /// BI-2, AGE-634: nothing is bound or spawned when a `PendingBroker` is
+    /// merely constructed, and the first `list_agents` call is what actually
+    /// starts it — exactly one broker, not one per call.
+    #[tokio::test]
+    async fn broker_starts_on_first_use() {
+        let module_settings = ModuleSettingsModel::default();
+        let (_dir, socket) = test_socket();
+        let pending = PendingBroker::new_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            None,
+        );
+        assert!(
+            pending.bound_addrs().is_empty(),
+            "constructing a PendingBroker must not start anything"
+        );
+
+        let broker: Arc<dyn chatty_core::services::lazy_broker::LazyBroker> = Arc::new(pending);
+        let list_agents_tool = chatty_core::tools::list_agents_tool::ListAgentsTool::new(vec![])
+            .with_lazy_broker(broker.clone())
+            .with_local_workers([LOCAL_AGENT_NAME]);
+
+        {
+            use rig_agent::tool::{Tool, ToolContext};
+            list_agents_tool
+                .call(
+                    &mut ToolContext::new(),
+                    chatty_core::tools::list_agents_tool::ListAgentsToolArgs {},
+                )
+                .await
+                .expect("list_agents succeeds even with nothing registered yet");
+        }
+
+        let addrs = broker.bound_addrs();
+        assert_eq!(
+            addrs.len(),
+            1,
+            "exactly one broker is bound after the first list_agents call: {addrs:?}"
+        );
+
+        // A second call reuses the same broker instead of starting another.
+        {
+            use rig_agent::tool::{Tool, ToolContext};
+            list_agents_tool
+                .call(
+                    &mut ToolContext::new(),
+                    chatty_core::tools::list_agents_tool::ListAgentsToolArgs {},
+                )
+                .await
+                .expect("a second list_agents call succeeds too");
+        }
+        assert_eq!(
+            broker.bound_addrs(),
+            addrs,
+            "a second call does not start a second broker"
+        );
+    }
+
+    /// BI-2, AGE-634: a broker attached to a tool is not the same as one
+    /// asked for. A call that never reaches for the broker — here,
+    /// `invoke_agent` for a name that is neither a local worker nor a
+    /// module — must not start it either, so the desktop's "module gateway
+    /// off" case (where nothing ever needs the broker) opens no TCP port
+    /// just because a `LazyBroker` happens to be configured.
+    #[tokio::test]
+    async fn lazy_broker_opens_no_new_tcp_port() {
+        let module_settings = ModuleSettingsModel::default();
+        let (_dir, socket) = test_socket();
+        let pending = PendingBroker::new_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            None,
+        );
+        let broker: Arc<dyn chatty_core::services::lazy_broker::LazyBroker> = Arc::new(pending);
+
+        let invoke_agent_tool =
+            chatty_core::tools::invoke_agent_tool::InvokeAgentTool::new(vec![], vec![], None)
+                .with_lazy_broker(broker.clone());
+        let outcome = {
+            use rig_agent::tool::{Tool, ToolContext};
+            invoke_agent_tool
+                .call(
+                    &mut ToolContext::new(),
+                    chatty_core::tools::invoke_agent_tool::InvokeAgentArgs {
+                        agent: "nobody-registered".to_string(),
+                        prompt: "hi".to_string(),
+                        include_trace: false,
+                    },
+                )
+                .await
+        };
+        assert!(
+            outcome.is_err(),
+            "an unknown agent name is refused, not delegated"
+        );
+        assert!(
+            broker.bound_addrs().is_empty(),
+            "a call that never reaches for the broker must not start it"
+        );
     }
 
     #[tokio::test]

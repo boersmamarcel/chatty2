@@ -473,6 +473,14 @@ serving; any worker still running is reaped by the runner the same way it always
 agent-build context, so `/modules` in the same session still saves exactly what was on
 disk (AGE-382).
 
+**The broker starts lazily, on first use (BI-2, AGE-634).** Neither host starts the
+broker at boot: `--broker`/`--team` (chatty-tui) and the module gateway setting (the
+desktop) only prepare it — a `chatty_core::services::lazy_broker::LazyBroker` — and the
+first `list_agents` or `invoke_agent` call is what actually binds its socket and TCP
+port, through `LazyBroker::ensure_started`. Later calls reuse the same broker
+(memoized). A test can read `LazyBroker::bound_addrs()` to see whether anything is
+bound yet without triggering a start.
+
 **Named virtual agents (ADR-0011 C10, AGE-377).** Every worker used to be the same:
 the roster's default model with the leader's tools. `module_settings.json` can instead
 declare a team, each member a *virtual agent* the broker publishes under its own name

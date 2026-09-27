@@ -1406,6 +1406,29 @@ mod boot_order_tests {
         }
     }
 
+    /// BI-2, AGE-634: the broker starts on the first `list_agents`/
+    /// `invoke_agent` call, not at boot — so nothing that builds or starts
+    /// it (the module-settings controller's `refresh_runtime`, or the
+    /// gateway/broker wiring it captures into a `LazyGatewayBroker`) may run
+    /// above `cx.open_window`, the same property `the_window_opens_before_
+    /// any_work_is_started` pins for the other heavy boot-time work.
+    #[test]
+    fn nothing_broker_related_runs_before_the_window_opens() {
+        let before_window = source_before("cx.open_window(");
+        for needle in [
+            "module_settings_controller::refresh_runtime(cx)",
+            "broker_runner::",
+            "ProtocolGateway::new(",
+            "LazyGatewayBroker",
+        ] {
+            assert!(
+                !before_window.contains(needle),
+                "`{needle}` is referenced before the window opens; the broker \
+                 must start lazily, on first use, not during boot"
+            );
+        }
+    }
+
     /// The globals the first frame reads, and the ones `ChattyApp::new`
     /// subscribes to, must exist by the time `open_window` draws.
     ///
