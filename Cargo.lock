@@ -2105,6 +2105,7 @@ version = "0.4.11"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "async-trait",
  "axum",
  "chatty-core",
  "chatty-fabric",

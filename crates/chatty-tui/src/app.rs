@@ -807,6 +807,7 @@ mod tests {
                 execution_settings,
                 module_settings: ModuleSettingsModel::default(),
                 broker_port: None,
+                broker: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,

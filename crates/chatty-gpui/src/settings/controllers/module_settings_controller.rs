@@ -648,6 +648,10 @@ pub fn refresh_runtime(cx: &mut App) {
         if let Some(mut gateway) = state.gateway.take() {
             gateway.shutdown();
         }
+        // A pending broker from an earlier refresh is replaced outright
+        // (BI-2, AGE-634): if it never started, there was nothing bound to
+        // tear down; if it did, `state.gateway` above already shut it down.
+        state.lazy_broker = None;
         state.refresh_generation
     };
     cx.refresh_windows();
@@ -673,6 +677,41 @@ pub fn refresh_runtime(cx: &mut App) {
             if !should_start_gateway {
                 return;
             }
+
+            // The gateway — and the broker riding on it (ADR-0011 C2) —
+            // starts on the first `list_agents`/`invoke_agent` call, not
+            // here (BI-2, AGE-634). Publish a `LazyGatewayBroker` that asks
+            // *this* task to do the work when that first call comes in:
+            // building and starting the gateway needs `cx` (`AsyncApp`),
+            // which is `!Send`, so it cannot happen on whatever tokio thread
+            // the tool call runs on. This task stays parked on
+            // `request_rx.recv()` until then, or exits with nothing bound if
+            // settings change again first (dropping the sender).
+            let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let broker = Arc::new(broker_runner::LazyGatewayBroker::new(request_tx));
+            let published = cx
+                .update(|cx| {
+                    let state = cx.global_mut::<DiscoveredModulesModel>();
+                    if state.refresh_generation != generation {
+                        return false;
+                    }
+                    state.gateway_status = format!(
+                        "Gateway will start on the first delegation (http://127.0.0.1:{})",
+                        settings.gateway_port
+                    );
+                    state.lazy_broker = Some(broker);
+                    true
+                })
+                .unwrap_or(false);
+            if !published {
+                return;
+            }
+
+            let Some(reply) = request_rx.recv().await else {
+                // A later refresh replaced this broker before anything ever
+                // asked for it (dropping `request_tx`): nothing to start.
+                return;
+            };
 
             let registry_result = tokio::task::spawn_blocking({
                 let module_dir = settings.module_dir.clone();
@@ -806,8 +845,14 @@ pub fn refresh_runtime(cx: &mut App) {
                 Err(err) => Err(err),
             };
 
+            let port = settings.gateway_port;
+            let error_text = gateway_result.as_ref().err().map(|e| e.to_string());
             let _ = cx.update(|cx| {
                 apply_gateway_result(&settings, generation, gateway_result, cx);
+            });
+            let _ = reply.send(match error_text {
+                None => Ok(port),
+                Some(error) => Err(error),
             });
         }
     })

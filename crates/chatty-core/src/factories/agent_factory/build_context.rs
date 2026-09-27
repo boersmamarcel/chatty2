@@ -17,6 +17,7 @@
 
 use super::tool_profile::ToolProfile;
 use crate::services::embedding_service::EmbeddingService;
+use crate::services::lazy_broker::LazyBroker;
 use crate::services::memory_service::MemoryService;
 use crate::services::shell_service::ShellSession;
 use crate::services::skill_service::SkillService;
@@ -27,6 +28,7 @@ use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::search_settings::SearchSettingsModel;
 use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
+use std::sync::Arc;
 
 /// Contextual dependencies for building an agent.
 ///
@@ -54,9 +56,15 @@ pub struct AgentBuildContext {
     pub embedding_service: Option<EmbeddingService>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
+    /// A broker that has not necessarily started yet (BI-2, AGE-634): when
+    /// set, `list_agents`/`invoke_agent` start it themselves on first use
+    /// instead of expecting `gateway_port` to already be live. Hosts that
+    /// still resolve a port eagerly (tests, `chatty-server` in `hive`) leave
+    /// this `None`.
+    pub lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// The broker's virtual agents by name — `local-agent`, or what
     /// `module_settings.virtual_agents` declares (ADR-0011 C10). Only
-    /// addressable while `gateway_port` is set.
+    /// addressable while `gateway_port` or `lazy_broker` is set.
     pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
     /// Conversation this turn belongs to. Only consulted when the `browser`
@@ -148,6 +156,9 @@ pub struct AgentServices {
     pub embedding_service: Option<EmbeddingService>,
     pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
+    /// A broker that has not necessarily started yet (BI-2, AGE-634). See
+    /// [`AgentBuildContext::lazy_broker`].
+    pub lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// `ModuleSettingsModel::virtual_agent_names()` on the host's settings.
     pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
@@ -193,6 +204,7 @@ impl AgentBuildContext {
             embedding_service,
             module_agents,
             gateway_port,
+            lazy_broker,
             local_agents,
             remote_agents,
         } = services;
@@ -218,6 +230,7 @@ impl AgentBuildContext {
             embedding_service,
             module_agents,
             gateway_port,
+            lazy_broker,
             local_agents,
             remote_agents,
             conversation_id: None,
@@ -328,6 +341,7 @@ mod tests {
                 execution_mode: "local".to_string(),
             }],
             gateway_port: Some(4242),
+            lazy_broker: None,
             local_agents: vec!["local-coder".to_string()],
             remote_agents: vec![A2aAgentConfig {
                 name: "remote".to_string(),
