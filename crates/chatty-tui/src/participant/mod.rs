@@ -22,6 +22,8 @@ mod equivalence;
 #[cfg(test)]
 mod input_required_chain;
 #[cfg(test)]
+pub(crate) mod swarm_kit;
+#[cfg(test)]
 mod team_preset;
 
 use anyhow::{Context, Result};

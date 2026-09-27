@@ -1,0 +1,6 @@
+started kit-lead: ask the helper to say hello
+progress invoke_agent
+progress ✓ invoke_agent
+progress The helper said hello.
+finished success=true usage=[input=30 output=15 cache_read=0 cache_write=0 calls=1] result=The helper said hello.
+answer success=true: The helper said hello.
