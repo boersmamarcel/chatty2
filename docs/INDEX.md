@@ -86,6 +86,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
 | [`research/adr-0011-broker-ab-2026-09-08.md`](research/adr-0011-broker-ab-2026-09-08.md) | ADR-0011 kill criteria | `sub_agent` vs the broker, measured (AGE-302) |
 | [`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md) | ADR-0020 latency criterion | Hop latency before BI-3, the baseline BI-8 compares against (AGE-632) |
+| [`research/plugin-perf-2026-09-27.md`](research/plugin-perf-2026-09-27.md) | PL-H4, PL-U2, or re-checking PL-H1 | S7 baseline: cold load, per-protocol overhead, concurrency, 1-hour soak (AGE-603) |
 | [`research/resume-spike-template.md`](research/resume-spike-template.md) | Running or analysing the resume spike | The frozen re-brief and resume prompts both arms get; runner in `scripts/resume-spike/` (AGE-650) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
 | [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace | Trace contract |
