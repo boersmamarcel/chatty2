@@ -97,7 +97,7 @@ Every delegation is a fresh worker on a fresh branch in its own copy of the tree
 
 ### 3. Make it your own team
 
-A team directory is three things in one folder: the roster, the leader's role, and the playbook. First put the project back to its unfixed state, so your team gets the same job the preset had:
+A team is three things: the agents (each an agent spec), a `team.json` naming the leader and the roster, and the playbook. First put the project back to its unfixed state, so your team gets the same job the preset had:
 
 ```bash
 git checkout -q main && git reset -q --hard "$(git log --format=%H --grep='Bank account with a withdraw bug' -n 1)"
@@ -106,31 +106,43 @@ git branch --list 'sub-agent/*' | xargs -r git branch -D                    # �
 python3 -m unittest discover -s tests -t . && echo "back to one test"
 ```
 
-Then put a team directory in the project, where it will be found ahead of the built-in preset:
+Then write the three agents as specs, and a team directory naming them, in the project — where both are found ahead of the built-in preset:
 
 ```bash
-mkdir -p .chatty/teams/bank-fix
+mkdir -p .chatty/agents .chatty/teams/bank-fix
+cat > .chatty/agents/bank-lead.toml <<'EOF'
+[agent]
+name = "bank-lead"
+preamble = "You lead a two-worker team and edit nothing yourself. Restate the task as acceptance criteria, delegate the change to local-coder, have local-reviewer check the coder's branch, and merge only on APPROVE."
+
+[tools]
+profile = "coordinator"
+EOF
+cat > .chatty/agents/local-coder.toml <<'EOF'
+[agent]
+name = "local-coder"
+model = "qwen2.5-coder:14b"
+preamble = "You are the coder. Work only in your own workspace, write a test for each acceptance criterion before making it pass, run the tests, do not commit, and report the files you changed with the test output."
+
+[tools]
+profile = "coder"
+
+[budget]
+max_agent_turns = 30
+EOF
+cat > .chatty/agents/local-reviewer.toml <<'EOF'
+[agent]
+name = "local-reviewer"
+model = "qwen2.5-coder:14b"
+preamble = "You are the reviewer. Read the branch's diff yourself, run the tests yourself, never edit the tree. The first line of your answer is APPROVE, REQUEST_CHANGES or BLOCKED."
+
+[tools]
+profile = "reviewer"
+EOF
 cat > .chatty/teams/bank-fix/team.json <<'EOF'
 {
-  "leader": {
-    "profile": "coordinator",
-    "preamble": "You lead a two-worker team and edit nothing yourself. Restate the task as acceptance criteria, delegate the change to local-coder, have local-reviewer check the coder's branch, and merge only on APPROVE."
-  },
-  "agents": [
-    {
-      "name": "local-coder",
-      "model": "qwen2.5-coder:14b",
-      "tools": "coder",
-      "preamble": "You are the coder. Work only in your own workspace, write a test for each acceptance criterion before making it pass, run the tests, do not commit, and report the files you changed with the test output.",
-      "max_agent_turns": 30
-    },
-    {
-      "name": "local-reviewer",
-      "model": "qwen2.5-coder:14b",
-      "tools": "reviewer",
-      "preamble": "You are the reviewer. Read the branch's diff yourself, run the tests yourself, never edit the tree. The first line of your answer is APPROVE, REQUEST_CHANGES or BLOCKED."
-    }
-  ],
+  "leader": "bank-lead",
+  "agents": ["local-coder", "local-reviewer"],
   "verification": "python3 -m unittest discover -s tests -t . -v",
   "skill": "bank-fix",
   "max_agent_turns": 50
@@ -142,8 +154,8 @@ What changed against the preset, and why:
 
 | Field | Here | Why |
 |-------|------|-----|
-| `agents[].model` | `qwen2.5-coder:14b` on both workers | A coding model for the code; the leader keeps `qwen3:14b` for planning. Each worker is metered on its own model's server, so a worker on another machine would not queue behind the leader. |
-| `agents[0].max_agent_turns` | `30` | A cap on the coder's tool rounds. Without one a worker has no turn cap and a 30-minute time budget (`--max-duration`). This is the coder's own budget. |
+| `agent.model` in the worker specs | `qwen2.5-coder:14b` on both workers | A coding model for the code; the leader keeps `qwen3:14b` for planning. Each worker is metered on its own model's server, so a worker on another machine would not queue behind the leader. |
+| `budget.max_agent_turns` in `local-coder.toml` | `30` | A cap on the coder's tool rounds. Without one a worker has no turn cap and a 30-minute time budget (`--max-duration`). This is the coder's own budget. |
 | `verification` | in the file | So the task no longer has to say it. Chatty runs this in each worker's tree at the end and puts the result in the evidence block. |
 | `max_agent_turns` (top level) | `50` | The **leader's** budget for the run. A delegating leader burns a turn per hand-off and per tool call. Without it the leader has no turn cap and a 30-minute time budget. |
 | `skill` | `bank-fix` | The playbook, next: the leader's first turn opens with *read_skill bank-fix and follow it*. |
@@ -166,7 +178,7 @@ Deliver one bounded change with a coder and a reviewer.
 
 Every prompt to a worker is self-contained: the worker sees none of this conversation.
 EOF
-git add .chatty/teams && git commit -q -m "Add the bank-fix team"
+git add .chatty/agents .chatty/teams && git commit -q -m "Add the bank-fix team"
 ```
 
 Two rules in there carry most of the weight. *Every prompt to a worker is self-contained* — a worker starts with an empty conversation, so anything the leader does not put in the prompt does not exist. And *do not fix the coder's work yourself* — the leader could not anyway (no shell, no writes), but a model will try to reason its way around a missing tool unless told not to.
@@ -184,13 +196,13 @@ Same shape of run, but now the evidence block carries the verification result wi
 
 ### 5. Change the team and watch the difference
 
-Now that a run is reproducible, experiment. Each is one edit to `team.json`:
+Now that a run is reproducible, experiment. Each is one edit to a spec or `team.json`:
 
-- **Add a role.** A third worker `local-tester` with `"tools": "reviewer"` and a preamble that only writes and runs a negative probe, called by the playbook between coder and reviewer. Roles are what you make of the preamble; the tool profile just bounds them.
-- **Starve the coder.** Set its `max_agent_turns` to `8` and watch it run out mid-task; the leader is told the delegation failed. What it does next is up to your playbook — add a line for it and see whether the leader follows.
-- **Take the shell away from the reviewer.** `"disable_tools": ["shell"]` on top of `"tools": "reviewer"`: it can still read the diff but no longer run the tests — and Chatty skips the verification command for it, since a worker that could not run anything has no build to check.
+- **Add a role.** A third worker, `.chatty/agents/local-tester.toml` with `profile = "reviewer"`, listed in `team.json`'s `agents`, and a preamble that only writes and runs a negative probe, called by the playbook between coder and reviewer. Roles are what you make of the preamble; the tool profile just bounds them.
+- **Starve the coder.** Set its spec's `budget.max_agent_turns` to `8` and watch it run out mid-task; the leader is told the delegation failed. What it does next is up to your playbook — add a line for it and see whether the leader follows.
+- **Take the shell away from the reviewer.** `disable = ["shell"]` under its spec's `[tools]`, on top of `profile = "reviewer"`: it can still read the diff but no longer run the tests — and Chatty skips the verification command for it, since a worker that could not run anything has no build to check.
 
-Keep `SKILL.md` and `team.json` in the repository. The team is part of how the project gets worked on, and a run with a different team file is a different experiment.
+Keep the specs, `SKILL.md` and `team.json` in the repository. The team is part of how the project gets worked on, and a run with a different team file is a different experiment.
 
 ## Verify
 

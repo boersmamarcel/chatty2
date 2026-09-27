@@ -21,6 +21,7 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tempfile.workspace = true
 
 [[test]]
 name = "fixtures"
@@ -28,4 +29,8 @@ required-features = ["test-support"]
 
 [[test]]
 name = "must_trap"
+required-features = ["test-support"]
+
+[[test]]
+name = "sandbox"
 required-features = ["test-support"]

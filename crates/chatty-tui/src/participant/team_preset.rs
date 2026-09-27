@@ -2,18 +2,18 @@
 //! against the scripted provider lists both agents with their profiles and
 //! delegates to the coder.
 //!
-//! What `--team` does in `main.rs` is `load_team` + `Team::apply` on this
-//! run's module settings, then the exact `--broker` wiring of before; this
+//! What `--team` does in `main.rs` is `load_team`, the team's specs as the
+//! roster and `Team::run_module_settings` on this run's module settings, then the exact `--broker` wiring of before; this
 //! runs that same sequence over the real gateway and socket, with the
 //! stand-in worker binary `equivalence.rs` uses (it records its argv and
 //! waits) and a scripted participant answering the task. The leader's own
 //! model is not what this pins — the roster and the argv are.
 
+use chatty_core::agent_spec::AgentSpec;
 use chatty_core::services::team::{TeamSource, load_team};
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::services::{StreamSurface, scenarios};
 use chatty_core::session::{TurnPolicy, replay_scenario};
-use chatty_core::settings::models::module_settings::VirtualAgentConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
 use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
 use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
@@ -32,28 +32,36 @@ const REVIEWER: &str = "local-reviewer";
 /// 10-turn budget.
 fn team_settings(
     workspace: Option<&std::path::Path>,
-) -> (ModuleSettingsModel, ExecutionSettingsModel) {
+) -> (ModuleSettingsModel, Vec<AgentSpec>, ExecutionSettingsModel) {
     let team = load_team("coder-reviewer", workspace, None).expect("the team loads");
     let module_settings = ModuleSettingsModel {
         // Two slots, so the second delegation does not wait on the first
         // stand-in child being reaped; queueing is C6's test.
         default_endpoint_budget: 2,
-        virtual_agents: vec![VirtualAgentConfig {
-            name: "stale-agent".to_string(),
-            ..VirtualAgentConfig::default()
-        }],
+        virtual_agents: vec!["stale-agent".to_string()],
         ..ModuleSettingsModel::default()
     };
     let mut execution_settings = ExecutionSettingsModel::default();
     team.apply_turn_budget(&mut execution_settings);
     (
         team.run_module_settings(&module_settings),
+        team.agents.clone(),
         execution_settings,
     )
 }
 
-async fn start_team_broker(dir: &std::path::Path, module_settings: &ModuleSettingsModel) -> Broker {
-    let specs = resolve_virtual_agents(&[], &[], module_settings, &["--auto-approve".to_string()]);
+async fn start_team_broker(
+    dir: &std::path::Path,
+    module_settings: &ModuleSettingsModel,
+    agents: &[AgentSpec],
+) -> Broker {
+    let specs = resolve_virtual_agents(
+        &[],
+        &[],
+        module_settings,
+        agents,
+        &["--auto-approve".to_string()],
+    );
     Broker::start_at(
         dir.join("participants.sock"),
         stand_in_binary(dir),
@@ -71,13 +79,13 @@ async fn start_team_broker(dir: &std::path::Path, module_settings: &ModuleSettin
 #[tokio::test]
 async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_the_coder() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let (module_settings, execution_settings) = team_settings(None);
+    let (module_settings, agents, execution_settings) = team_settings(None);
     assert_eq!(module_settings.virtual_agent_names(), [CODER, REVIEWER]);
     assert_eq!(
         execution_settings.max_agent_turns, 50,
         "the preset's turn budget replaces the persisted default"
     );
-    let broker = start_team_broker(dir.path(), &module_settings).await;
+    let broker = start_team_broker(dir.path(), &module_settings, &agents).await;
 
     let output = ListAgentsTool::new(vec![])
         .with_local_workers(module_settings.virtual_agent_names())
@@ -154,13 +162,13 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
         .iter()
         .find(|line| line.contains("--participant-name local-coder-0"))
         .unwrap_or_else(|| panic!("no coder child spawned: {argv:?}"));
-    assert!(coder.contains("--tools coder"), "{coder}");
+    assert!(coder.contains(r#""profile":"coder""#), "{coder}");
     assert!(
-        coder.contains("--preamble You are the coder on this team."),
+        coder.contains(r#""preamble":"You are the coder on this team."#),
         "{coder}"
     );
     assert!(
-        !coder.contains("--model"),
+        !coder.contains(r#""model""#),
         "no model in the preset; the child resolves the roster's default: {coder}"
     );
 
@@ -174,10 +182,18 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
     let workspace = tempfile::tempdir().expect("a temp dir");
     let team_dir = workspace.path().join(".chatty/teams/coder-reviewer");
     std::fs::create_dir_all(&team_dir).unwrap();
+    let agents_dir = workspace.path().join(".chatty/agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("ws-coder.toml"),
+        "[agent]\nname = \"ws-coder\"\n[tools]\nprofile = \"coder\"\n",
+    )
+    .unwrap();
     std::fs::write(
         team_dir.join("team.json"),
         r#"{
-          "agents": [{"name": "ws-coder", "tools": "coder"}],
+          "leader": "coder-reviewer-leader",
+          "agents": ["ws-coder"],
           "verification": "make test",
           "skill": "coder-reviewer",
           "max_agent_turns": 12
@@ -187,7 +203,7 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
 
     let team = load_team("coder-reviewer", Some(workspace.path()), None).unwrap();
     assert_eq!(team.source, TeamSource::Dir(team_dir));
-    let (module_settings, execution_settings) = team_settings(Some(workspace.path()));
+    let (module_settings, agents, execution_settings) = team_settings(Some(workspace.path()));
     assert_eq!(module_settings.virtual_agent_names(), ["ws-coder"]);
     assert_eq!(
         module_settings.team.verification.as_deref(),
@@ -195,7 +211,7 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
     );
     assert_eq!(execution_settings.max_agent_turns, 12);
 
-    let specs = resolve_virtual_agents(&[], &[], &module_settings, &[]);
+    let specs = resolve_virtual_agents(&[], &[], &module_settings, &agents, &[]);
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].name, "ws-coder");
     assert_eq!(
