@@ -76,6 +76,12 @@ fn describe(event: &AppEvent) -> String {
             usage.cache_read_tokens,
             usage.cache_write_tokens
         ),
+        AppEvent::PluginUsage(usage) => format!(
+            "PluginUsage(plugin={:?}, in={}, out={})",
+            usage.plugin.as_deref().unwrap_or_default(),
+            usage.input_tokens,
+            usage.output_tokens
+        ),
         AppEvent::StreamCompleted => "StreamCompleted".to_string(),
         AppEvent::StreamCancelled => "StreamCancelled".to_string(),
         AppEvent::StreamError(error) => format!("StreamError(kind={:?})", error.kind),

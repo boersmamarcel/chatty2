@@ -347,6 +347,11 @@ impl HeadlessRunner {
                     None => self.config.module_settings.virtual_agent_names(),
                 },
                 remote_agents: self.config.remote_agents.clone(),
+                plugin_host: crate::engine::plugin_host(
+                    &self.config.module_settings,
+                    &self.config.models,
+                    &self.config.providers,
+                ),
             },
         )
         .context("the run's agent spec does not build")?;
@@ -642,6 +647,13 @@ impl HeadlessRunner {
                 self.usage.checkpoint();
             }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
+            AppEvent::PluginUsage(usage) => {
+                // Spent inside a tool, on the agent's behalf: the run's
+                // spend like a delegated worker's (PL-U2).
+                self.usage.update(|t| t.add_delegated(&usage));
+                self.usage.checkpoint();
+                self.session.note_plugin_usage(usage);
+            }
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
             AppEvent::Delegation(progress) => {
                 if let chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished {

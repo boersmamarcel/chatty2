@@ -412,6 +412,8 @@ impl ChattyApp {
                                     lazy_broker,
                                     local_agents: local_agents.unwrap_or_default(),
                                     remote_agents,
+                                    // Not built from a spec, so no plugins (PL-U2).
+                                    plugin_host: Default::default(),
                                 })
                             },
                     )
@@ -583,6 +585,8 @@ impl ChattyApp {
                                     lazy_broker,
                                     local_agents: local_agents.unwrap_or_default(),
                                     remote_agents,
+                                    // Not built from a spec, so no plugins (PL-U2).
+                                    plugin_host: Default::default(),
                                 })
                             },
                         )

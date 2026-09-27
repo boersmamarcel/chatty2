@@ -65,6 +65,8 @@ parking_lot.workspace = true
 tempfile.workspace = true
 # The resume spike's frozen template is pinned by its hash (AGE-650).
 sha2.workspace = true
+# `fixture_path` for the headless plugin test (AGE-616).
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime", features = ["test-support"] }
 
 [features]
 default = ["mcp"]

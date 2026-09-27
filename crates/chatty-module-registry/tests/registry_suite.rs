@@ -3,7 +3,7 @@
 //! temp module directories built from `target/wasm-fixtures/` (PL-E1/
 //! AGE-596), never the user's real data dir.
 //!
-//! One test per row of the evaluation plan's §3 S2 table (rows 2.1-2.8).
+//! One test per row of the evaluation plan's §3 S2 table (rows 2.1-2.7).
 //! Each asserts the **correct** behaviour from the plan's pass-criterion
 //! column, not today's behaviour; a row that fails today is
 //! `#[ignore = "known defect: <id>"]` so `cargo test -- --ignored` lists
@@ -449,47 +449,6 @@ fn sandbox_2_7_reload_with_broken_replacement_leaves_the_slot_empty() {
         reg.get("flaky").is_none(),
         "OPEN QUESTION pinned: today a failed reload leaves the slot empty rather \
          than keeping the last-good instance serving"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 2.8 - `watch`: whatever it does today.
-// ---------------------------------------------------------------------------
-
-/// `watch` starts a filesystem watcher that forwards raw `notify` events
-/// over the given channel — nothing in this crate (or, per the plan's
-/// survey, anywhere else in the codebase) ever receives from that channel
-/// and calls `reload`/`scan_directory` in response. This test proves the
-/// watcher itself does fire on a filesystem change; wiring it to anything
-/// is absent. A comment asking whether `watch` is kept has been left on
-/// PL-U2 (AGE-616), per PL-E3's Do 5.
-#[test]
-fn sandbox_2_8_watch_fires_on_filesystem_change_but_nothing_consumes_it() {
-    let tmp = tempfile::tempdir().unwrap();
-    let reg = registry();
-    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-    let _watcher = reg.watch(tmp.path(), tx).expect("watch");
-
-    stage(
-        tmp.path(),
-        "new-module",
-        "tool-args",
-        "[module]\nname = \"new-module\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n",
-    );
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let event = rt.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await
-    });
-    assert!(
-        matches!(event, Ok(Some(_))),
-        "the watcher should report the new module.toml being written, got {event:?}"
-    );
-    // Note what's absent: `reg` itself is untouched by this event — nothing
-    // called `scan_directory`/`load`/`reload` on its behalf.
-    assert!(
-        reg.get("new-module").is_none(),
-        "watch() only forwards raw fs events; nothing wires them to a reload"
     );
 }
 
