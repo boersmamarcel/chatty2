@@ -15,7 +15,7 @@ Chatty supports two kinds of agents that can be invoked during a conversation:
 | Agent type | Where it runs | How it's called | Configured in |
 |:-----------|:--------------|:----------------|:--------------|
 | **Remote A2A** | External HTTP service | Direct HTTP to the remote URL | Settings → A2A Agents |
-| **Local WASM module** | In-process via Wasmtime | Via the local Protocol Gateway (`localhost:8420` by default) | Settings → Modules |
+| **Local WASM module** | In-process via Wasmtime | Via the local Protocol Gateway (`localhost:8420` by default) | Settings → Extensions |
 
 Both are **unified behind the same tools** (`list_agents`, `invoke_agent`) and the
 same **A2A JSON-RPC protocol**, so the LLM does not need to know which kind it is
@@ -134,7 +134,8 @@ If the server answers with a `Content-Type` other than `text/event-stream`, the 
 ├──────────────────────────────────────────────────────────┤
 │                  chatty-module-registry                   │
 │  (Discovers modules on disk, parses module.toml,         │
-│   manages load/unload/hot-reload lifecycle)              │
+│   manages load/unload/reload lifecycle; a notify-based    │
+│   watch() exists but nothing calls it in production)     │
 ├──────────────────────────────────────────────────────────┤
 │                 chatty-protocol-gateway                   │
 │  (HTTP server exposing modules via OpenAI, MCP, and A2A  │
@@ -145,8 +146,8 @@ If the server answers with a `Content-Type` other than `text/event-stream`, the 
 | Crate | Role |
 |:------|:-----|
 | `chatty-module-sdk` | Guest-side SDK for module authors (types, host import wrappers, `export_module!` macro) |
-| `chatty-wasm-runtime` | Wasmtime host: loads `.wasm` components, implements host imports (`llm`, `config`, `logging`), enforces resource limits |
-| `chatty-module-registry` | Discovery (`scan_directory`), lifecycle (`load`/`unload`/`reload`/`watch`), manifest parsing |
+| `chatty-wasm-runtime` | Wasmtime host: loads `.wasm` components, implements host imports (`llm`, `config`, `logging`, and the optional `file`, `billing`), enforces resource limits |
+| `chatty-module-registry` | Discovery (`scan_directory`), lifecycle (`load`/`unload`/`reload`), manifest parsing; also exposes a `watch()` filesystem watcher that no production code calls today |
 | `chatty-protocol-gateway` | HTTP server (axum) exposing modules via OpenAI, MCP, and A2A protocols |
 | `chatty-core` | A2A client (`A2aClient`), agent tools (`list_agents`, `invoke_agent`), settings models and repositories |
 
@@ -162,8 +163,10 @@ type reference.
 | Interface | Function | Purpose |
 |:----------|:---------|:--------|
 | `llm` | `complete(model, messages, tools)` | Run an LLM completion via host-managed API keys |
-| `config` | `get(key)` | Read key-value config from the module's manifest |
+| `config` | `get(key)` | Read key-value config from the module's manifest's `[config]` table |
 | `logging` | `log(level, message)` | Emit structured logs; forwarded as A2A progress events by the gateway |
+| `file` (optional) | `read-bytes(path)` | Sandboxed read under the manifest's `[files] root`; a module without `[files]` can read nothing |
+| `billing` (optional) | `acquire-session(estimated_tokens)`, `report-usage(input, output)` | Paid modules only; reserves and settles credits against a Hive-signed session token |
 
 **Guest exports** (what the module provides to the host):
 
@@ -186,7 +189,9 @@ type reference.
     └── code_reviewer.wasm
 ```
 
-The directory is configurable in **Settings → Modules**. Platform defaults:
+The directory is configurable via module settings; enabling and disabling an
+installed module happens in **Settings → Extensions** (there is no separate
+"Modules" settings page). Platform defaults:
 
 | Platform | Path |
 |:---------|:-----|
@@ -238,11 +243,17 @@ declaring the same `name`: the first by directory name wins, the second is a fai
 `load` of a name already registered from another directory). The desktop's installed
 extensions list shows a module's failure reason under its row.
 
-`[protocols].a2a = true` is what makes a module invocable as an agent from
-conversations. Without it the module can still serve tools via MCP or completions via
-OpenAI-compat, but it does not appear in `list_agents` output. The registry skips
-`execution_mode = "remote"` modules during its WASM scan; the gateway routes those to
-the hive-runner instead.
+A module appears in `list_agents` when `[capabilities].agent = true`, it is
+`Loaded` (or `Remote`), and it is enabled in Settings → Extensions
+(`collect_module_agents` in chatty-gpui, `discover_module_agents` in
+chatty-tui) — `[protocols].a2a` plays no part in that filter. `[protocols].a2a
+= true` instead governs whether it can actually be *invoked*: `invoke_agent`
+checks the listed module's `supports_a2a` flag (set from `[protocols].a2a`)
+and refuses with an error if it is false, even though the module is listed.
+Without `a2a = true` the module can still serve tools via MCP or completions
+via OpenAI-compat — it just cannot be reached through `invoke_agent`. The
+registry skips `execution_mode = "remote"` modules during its WASM scan; the
+gateway routes those to the hive-runner instead.
 
 ### Resource limits
 
@@ -267,9 +278,11 @@ kind with `err.downcast_ref::<chatty_wasm_runtime::CallError>()`.
 
 ## Protocol gateway
 
-The gateway (`chatty-protocol-gateway`) is a local HTTP server on
-`http://localhost:<gateway_port>/` (default `8420`, **Settings → Modules**) that
-exposes every loaded module through three protocols at once:
+The gateway (`chatty-protocol-gateway`) is a local HTTP server, bound to
+`127.0.0.1` (not `0.0.0.0`) on a port the embedding app chooses — the desktop
+defaults to `8420` (`module_settings.json`'s `gateway_port`; there is no UI
+field for it yet) — that exposes every loaded module through three protocols
+at once:
 
 | Method | Path | Protocol | Description |
 |:-------|:-----|:---------|:------------|
