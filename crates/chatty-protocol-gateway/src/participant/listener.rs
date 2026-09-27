@@ -18,9 +18,9 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::origin::AgentOrigin;
 use super::protocol::{BrokerFrame, ParticipantFrame};
 use super::registry::ParticipantRegistry;
+use chatty_fabric::AgentOrigin;
 
 /// Bind a participant socket at `path`.
 ///

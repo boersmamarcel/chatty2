@@ -56,6 +56,8 @@ libc = "0.2"
 [dev-dependencies]
 # Scripted stream fixtures shared with chatty-gpui's characterization tests.
 chatty-core = { path = "../chatty-core", features = ["test-support"] }
+# `AgentOrigin` for the broker tests that register participants by hand.
+chatty-fabric = { path = "../chatty-fabric" }
 parking_lot.workspace = true
 # AGE-306's chain test puts the participant socket in a temp dir.
 tempfile.workspace = true

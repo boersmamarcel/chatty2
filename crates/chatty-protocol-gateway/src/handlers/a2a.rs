@@ -23,7 +23,8 @@ use chatty_wasm_runtime::AgentCard;
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
-use crate::participant::{AgentOrigin, CALLER_HEADER, DelegatedTask, TaskBearer};
+use crate::participant::{CALLER_HEADER, DelegatedTask, TaskBearer};
+use chatty_fabric::AgentOrigin;
 
 use super::a2a_participant;
 use super::jsonrpc::{
