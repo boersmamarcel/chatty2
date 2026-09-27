@@ -28,8 +28,9 @@ use chatty_core::tools::invoke_agent_tool::{
 };
 use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
 use chatty_core::tools::{LOCAL_AGENT_NAME, worker_executable};
+use chatty_fabric::AgentOrigin;
 use chatty_protocol_gateway::participant::{
-    AgentOrigin, BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
+    BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
 };
 use chatty_protocol_gateway::worker::TaskMapper;
 use rig_agent::tool::{Tool, ToolContext};

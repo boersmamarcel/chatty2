@@ -5,7 +5,8 @@
 //! knows: it is what registered the participant, so it is what can say
 //! whether the thing behind a name is a child process on this laptop, a
 //! microVM this user leased, a URL the user typed into settings, or a card
-//! learned from somewhere else.
+//! learned from somewhere else. The gateway serves the label on the agent
+//! card; `list_agents` and `invoke_agent` in chatty-core read it back.
 //!
 //! This is a property of the *registration*, not of the card. A participant
 //! describes itself in its card; it does not get to describe its own
@@ -46,6 +47,21 @@ impl AgentOrigin {
         }
     }
 
+    /// Read a label off an agent card.
+    ///
+    /// `None` for anything this build does not know, which callers treat as
+    /// outside the fleet — an unknown provenance is not a reason to trust
+    /// something.
+    pub fn from_wire(label: &str) -> Option<Self> {
+        match label {
+            "local" => Some(AgentOrigin::Local),
+            "fleet" => Some(AgentOrigin::Fleet),
+            "remote_configured" => Some(AgentOrigin::RemoteConfigured),
+            "discovered" => Some(AgentOrigin::Discovered),
+            _ => None,
+        }
+    }
+
     /// Whether this origin is inside the user's own fleet.
     ///
     /// The question `invoke_agent` asks before handing over a prompt: a
@@ -66,14 +82,19 @@ impl std::fmt::Display for AgentOrigin {
 mod tests {
     use super::*;
 
+    const ALL: [AgentOrigin; 4] = [
+        AgentOrigin::Local,
+        AgentOrigin::Fleet,
+        AgentOrigin::RemoteConfigured,
+        AgentOrigin::Discovered,
+    ];
+
     #[test]
     fn the_wire_spelling_is_the_documented_one() {
-        for (origin, spelling) in [
-            (AgentOrigin::Local, "local"),
-            (AgentOrigin::Fleet, "fleet"),
-            (AgentOrigin::RemoteConfigured, "remote_configured"),
-            (AgentOrigin::Discovered, "discovered"),
-        ] {
+        for (origin, spelling) in
+            ALL.into_iter()
+                .zip(["local", "fleet", "remote_configured", "discovered"])
+        {
             assert_eq!(origin.as_str(), spelling);
             assert_eq!(
                 serde_json::to_value(origin).unwrap(),
@@ -83,35 +104,16 @@ mod tests {
         }
     }
 
-    /// The reading end of this label lives in `chatty-core`
-    /// (`tools::agent_origin::AgentOrigin`), which cannot depend on this
-    /// crate. This is the test that stops the two vocabularies drifting: every
-    /// label this crate serves has to be one that crate can read back.
     #[test]
-    fn every_label_this_crate_serves_is_one_chatty_core_reads() {
-        for origin in [
-            AgentOrigin::Local,
-            AgentOrigin::Fleet,
-            AgentOrigin::RemoteConfigured,
-            AgentOrigin::Discovered,
-        ] {
-            let read_back = chatty_core::tools::AgentOrigin::from_wire(origin.as_str())
-                .unwrap_or_else(|| panic!("chatty-core cannot read {origin:?}"));
-            assert_eq!(
-                read_back.as_str(),
-                origin.as_str(),
-                "the two crates spell {origin:?} differently"
-            );
-            assert_eq!(
-                read_back.is_own_fleet(),
-                origin.is_own_fleet(),
-                "the two crates disagree about whether {origin:?} is inside the fleet"
-            );
+    fn every_label_round_trips() {
+        for origin in ALL {
+            assert_eq!(AgentOrigin::from_wire(origin.as_str()), Some(origin));
         }
     }
 
     #[test]
-    fn only_local_and_fleet_are_the_users_own() {
+    fn an_unknown_label_is_not_a_fleet_member() {
+        assert_eq!(AgentOrigin::from_wire("something_new"), None);
         assert!(AgentOrigin::Local.is_own_fleet());
         assert!(AgentOrigin::Fleet.is_own_fleet());
         assert!(!AgentOrigin::RemoteConfigured.is_own_fleet());

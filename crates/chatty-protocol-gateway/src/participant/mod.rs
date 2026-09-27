@@ -10,7 +10,6 @@
 //! The pieces:
 //!
 //! * [`budget`] — how many workers may hold one model endpoint at a time.
-//! * [`origin`] — whose machine an agent runs on, as the broker serves it.
 //! * [`protocol`] — the frames on the socket. Newline-delimited JSON, not
 //!   A2A: A2A is the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go,
@@ -24,13 +23,11 @@
 //!   (ADR-0011 C2).
 
 mod budget;
-mod origin;
 mod protocol;
 mod registry;
 mod virtual_agent;
 
 pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
-pub use origin::AgentOrigin;
 pub use protocol::{
     BrokerFrame, CALLER_ENV, CALLER_HEADER, DelegatedTask, InputAnswer, InputQuestion,
     InputRequest, ParticipantCard, ParticipantFrame, ParticipantSkill, TaskBearer, TaskInput,

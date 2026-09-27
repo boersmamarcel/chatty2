@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
-use crate::tools::agent_origin::AgentOrigin;
+use chatty_fabric::AgentOrigin;
 
 /// Arguments for listing A2A agents (no arguments needed)
 #[derive(Deserialize, Serialize)]

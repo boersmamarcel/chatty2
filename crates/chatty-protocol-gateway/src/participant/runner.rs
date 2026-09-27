@@ -624,7 +624,7 @@ mod tests {
                     name: name.to_string(),
                     ..Default::default()
                 },
-                crate::participant::AgentOrigin::Local,
+                chatty_fabric::AgentOrigin::Local,
                 tx,
             )
             .expect("the stand-in worker registers");

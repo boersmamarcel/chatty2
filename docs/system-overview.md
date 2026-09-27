@@ -60,6 +60,7 @@ flowchart TB
 | **chatty-wasm-runtime** | Wasmtime host for agent modules (`wasm32-wasip2`) |
 | **chatty-module-registry** | Discovers, validates, and loads WASM module manifests |
 | **chatty-protocol-gateway** | HTTP façade so external clients can call modules via standard APIs, and the ADR-0011 broker: local participants and named virtual agents (`local-agent`, a declared team) served at the same `/a2a/{name}` routes |
+| **chatty-fabric** | The broker's pure state (ADR-0020): node directory, task table, edge log, the `Transport` trait, and `AgentOrigin`; no axum, wasmtime, hive-client, gpui or reqwest |
 | **chatty-module-sdk** | Authoring SDK for third-party WASM agents |
 | **chatty-trace / playbook / flow / optimize** | Research crates (self-improvement papers); see [`RESERVED.md`](https://github.com/boersmamarcel/chatty2/blob/main/RESERVED.md) |
 | **hive-client / hive-billing-sdk** | Hive registry and billing integration |
