@@ -95,7 +95,7 @@ chatty-tui --headless -m "Explain Rust ownership in one paragraph"
 `--usage-file <PATH>` (with `--headless` or `--pipe`) writes what the run spent
 (tokens, model and tool calls, passes, how it ended) to `PATH` as one JSON
 object, rewritten after every model call and written last when the run ends.
-Fields and semantics: [Terminal interface → Usage file](../../docs-site/src/user/terminal.md#usage-file);
+Fields and semantics: the user guide, *Terminal interface → Usage file*;
 the schema lives in `src/headless/usage_file.rs`.
 
 ### Pipe mode
