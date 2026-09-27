@@ -12,9 +12,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chatty_module_registry::ModuleRegistry;
-use chatty_wasm_runtime::test_support::fixture_path;
+use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 
 struct NoopLlm;
@@ -313,8 +314,8 @@ fn sandbox_2_4_unknown_top_level_keys_are_silently_ignored_today() {
 
 // ---------------------------------------------------------------------------
 // 2.5 - `[resources]` reach the runtime, verified by fixture behaviour, not
-// by reading the struct. The memory half passes; the time half stays red
-// until PL-H1 lands (F1: the wall-clock timeout can't fire).
+// by reading the struct: the manifest's memory cap and wall-clock limit are
+// both enforced on a real call.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -332,16 +333,9 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
     reg.load(&dir).expect("alloc loads");
     let module = reg.get_mut("alloc").expect("alloc registered");
 
-    // 4 MiB against a 32 MiB manifest cap (an 8x margin) is deliberately
-    // generous: the guest's allocator over-requests when it grows (roughly
-    // doubling), and a request that lands anywhere near the store's memory
-    // limiter — even well inside it, e.g. 8 MiB against a 16 MiB cap — hits
-    // a separate PL-H1 defect (AGE-604) where the limiter rejecting *any*
-    // grow attempt, including one immediately retried at a smaller size,
-    // panics the host (see chatty-wasm-runtime's sandbox suite, row 1.6).
-    // This test is only proving the manifest's value reached `WasmModule`,
-    // not re-litigating that separate enforcement defect, hence the wide
-    // margin.
+    // The fixture grows a Vec 1 MiB at a time, so N MiB needs roughly
+    // 2N MiB of linear memory (see chatty-wasm-runtime's sandbox suite, row
+    // 1.6): 4 MiB fits a 32 MiB cap, 40 MiB does not.
     let req = chatty_wasm_runtime::ChatRequest {
         messages: vec![chatty_wasm_runtime::Message {
             role: chatty_wasm_runtime::Role::User,
@@ -354,23 +348,45 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
         .block_on(module.chat(req))
         .expect("4 MiB is within the manifest's 32 MiB cap");
     assert_eq!(resp.content, "allocated 4 MiB");
+
+    let over = chatty_wasm_runtime::ChatRequest {
+        messages: vec![chatty_wasm_runtime::Message {
+            role: chatty_wasm_runtime::Role::User,
+            content: "40".to_string(),
+        }],
+        conversation_id: "c".to_string(),
+    };
+    let err = rt
+        .block_on(module.chat(over))
+        .expect_err("40 MiB is over the manifest's 32 MiB cap");
+    assert!(
+        format!("{err:#}").contains("memory limit"),
+        "expected the manifest's 32 MiB cap to fire, got: {err:#}"
+    );
 }
 
+/// The time half uses `slow-host` (the guest waits on a host `llm::complete`
+/// that takes 2 s) rather than a spinning guest: under the 10⁹-per-call fuel
+/// ceiling a pure spin runs out of fuel in well under 300 ms, so only host
+/// time can outlast the manifest's limit.
 #[test]
-#[ignore = "known defect: PL-H1 (AGE-604) — manifest max_execution_ms reaches the runtime but wall-clock enforcement doesn't fire"]
 fn sandbox_2_5_resources_time_reaches_the_runtime() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = stage(
         tmp.path(),
-        "spin",
-        "spin",
-        "[module]\nname = \"spin\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
+        "slow-host",
+        "slow-host",
+        "[module]\nname = \"slow-host\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
          [resources]\nmax_execution_ms = 300\n",
     );
 
-    let mut reg = registry();
-    reg.load(&dir).expect("spin loads");
-    let module = reg.get_mut("spin").expect("spin registered");
+    let llm = Arc::new(FakeLlm::new([FakeResponse::Delay(
+        Duration::from_secs(2),
+        "late".to_string(),
+    )]));
+    let mut reg = ModuleRegistry::new(llm, ResourceLimits::default()).expect("registry");
+    reg.load(&dir).expect("slow-host loads");
+    let module = reg.get_mut("slow-host").expect("slow-host registered");
 
     let req = chatty_wasm_runtime::ChatRequest {
         messages: vec![chatty_wasm_runtime::Message {
@@ -389,6 +405,10 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
     assert!(
         message.contains("timed out"),
         "expected the manifest's 300ms wall-clock limit to fire, got: {message} (elapsed {elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_millis(300 + 400),
+        "expected the manifest's 300ms limit (+400ms tolerance), measured {elapsed:?}"
     );
 }
 
