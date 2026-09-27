@@ -88,6 +88,34 @@ pub fn trace_from_status_metadata(metadata: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The key under a terminal status's `metadata` that carries the worker's
+/// captured conversation (RC-0, AGE-649): the messages of every turn the
+/// task ran, in order, as the broker's worker mapper writes them
+/// (`chatty_protocol_gateway::worker::mapper`). Opt-in per task; absent when
+/// the task never asked for it.
+pub const CONVERSATION_METADATA_KEY: &str = "conversation";
+
+/// The key a terminal status carries instead of [`CONVERSATION_METADATA_KEY`]
+/// when the captured conversation is over the spec's 32 MB cap: the byte
+/// count of what was not sent, so a caller sees why rather than getting a
+/// silently truncated conversation.
+pub const CONVERSATION_TOO_LARGE_METADATA_KEY: &str = "conversationTooLarge";
+
+/// The conversation a delegated task's terminal status carries, if any: the
+/// JSON array of messages the worker's mapper wrote under
+/// [`CONVERSATION_METADATA_KEY`]. `None` when the task did not capture one,
+/// or when it was too large ([`conversation_too_large_from_status_metadata`]).
+pub fn conversation_from_status_metadata(metadata: Option<&Value>) -> Option<Value> {
+    metadata?.get(CONVERSATION_METADATA_KEY).cloned()
+}
+
+/// The byte count a delegated task's terminal status carries under
+/// [`CONVERSATION_TOO_LARGE_METADATA_KEY`], if its captured conversation
+/// went over the cap.
+pub fn conversation_too_large_from_status_metadata(metadata: Option<&Value>) -> Option<u64> {
+    metadata?.get(CONVERSATION_TOO_LARGE_METADATA_KEY)?.as_u64()
+}
+
 /// Discovered capabilities from a remote A2A agent card.
 #[derive(Clone, Debug)]
 pub struct AgentCard {
@@ -795,6 +823,33 @@ mod tests {
             Some(trace),
             "the trace reads back independently of the usage key"
         );
+    }
+
+    /// RC-0 (AGE-649): a captured conversation rides the terminal status
+    /// under its own key, independent of usage and trace.
+    #[test]
+    fn a_terminal_status_carries_the_workers_conversation() {
+        let metadata = json!({ "conversation": [{"role": "user", "content": "hi"}] });
+        let conversation = conversation_from_status_metadata(Some(&metadata))
+            .expect("the conversation is in the metadata");
+        assert_eq!(conversation[0]["content"], "hi");
+
+        assert!(conversation_from_status_metadata(None).is_none());
+        let usage_only = json!({ "usage": { "inputTokens": 1 } });
+        assert!(conversation_from_status_metadata(Some(&usage_only)).is_none());
+    }
+
+    /// An oversized conversation reports its byte count instead, under a
+    /// different key, so the two never collide.
+    #[test]
+    fn a_too_large_conversation_reports_its_byte_count_instead() {
+        let metadata = json!({ "conversationTooLarge": 33_554_433u64 });
+        assert!(conversation_from_status_metadata(Some(&metadata)).is_none());
+        assert_eq!(
+            conversation_too_large_from_status_metadata(Some(&metadata)),
+            Some(33_554_433)
+        );
+        assert!(conversation_too_large_from_status_metadata(None).is_none());
     }
 
     #[test]
