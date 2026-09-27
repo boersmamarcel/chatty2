@@ -676,9 +676,10 @@ async fn s5_07_paid_module_ledger_moves_by_the_reported_tokens_once() {
     let loaded = modules
         .load(module_dir().join(&name))
         .expect("the installed paid module loads");
-    let reply = modules
-        .get_mut(&loaded)
-        .expect("loaded")
+    let module = modules.get(&loaded).expect("loaded");
+    let reply = module
+        .lock()
+        .await
         .chat(chatty_wasm_runtime::ChatRequest {
             messages: vec![chatty_wasm_runtime::Message {
                 role: chatty_wasm_runtime::Role::User,
