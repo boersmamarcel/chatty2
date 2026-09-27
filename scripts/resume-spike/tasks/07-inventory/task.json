@@ -1,0 +1,6 @@
+{
+  "title": "Inventory",
+  "kind": "review-finding",
+  "task": "In inventory.py, add Inventory.low_stock(threshold), returning the sorted names whose count is below threshold, and Inventory.total(), returning the sum of all counts. Add tests.",
+  "follow_up": "Review finding: remove() lets counts go negative, and add()/remove() accept zero or negative quantities. Make both raise ValueError for a quantity that is not a positive int; make remove raise ValueError when asked for more than is in stock, leaving the count unchanged; and drop an item from the inventory once its count reaches 0. Add tests."
+}

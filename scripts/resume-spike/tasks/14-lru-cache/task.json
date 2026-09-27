@@ -1,0 +1,6 @@
+{
+  "title": "LRU cache",
+  "kind": "requirement-change",
+  "task": "Implement LRUCache(capacity) in lru.py with get(key, default=None) and put(key, value). get and put both make a key the most recently used; putting a new key into a full cache evicts the least recently used one. Raise ValueError for a capacity below 1. Add tests.",
+  "follow_up": "Requirement change: LRUCache takes an optional callback, LRUCache(capacity, on_evict=None), called as on_evict(key, value) for each eviction (not when an existing key is overwritten). Also add __len__, and __contains__, which must not change recency. Add tests."
+}

@@ -1,0 +1,6 @@
+{
+  "title": "Version comparison",
+  "kind": "requirement-change",
+  "task": "Implement compare_versions(a, b) in versions.py for dotted numeric versions such as '1.2.10': return -1, 0 or 1. Missing trailing parts count as 0 ('1.2' equals '1.2.0'). Raise ValueError for anything else. Add tests.",
+  "follow_up": "Requirement change: a version may carry a pre-release suffix after a '-', as in '1.2.0-rc1' or '2.0.0-beta'. A pre-release sorts before the same version without one; two pre-releases of the same version compare by their suffixes, split into alphabetic and numeric parts, the numbers compared numerically ('rc2' < 'rc10', 'alpha' < 'beta'). Add tests."
+}

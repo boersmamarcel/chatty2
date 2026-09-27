@@ -1,0 +1,6 @@
+{
+  "title": "Query-string parser",
+  "kind": "requirement-change",
+  "task": "Implement parse_query(qs) in query.py without urllib: 'a=1&b=2' gives {'a': '1', 'b': '2'}. A leading '?' is ignored, a key without '=' maps to '', empty pieces are skipped, and a later duplicate key wins. Add tests.",
+  "follow_up": "Requirement change: a key that appears more than once now maps to the list of its values in order (a key seen once still maps to a string), and keys and values are percent-decoded as UTF-8, with '+' meaning a space. Still no urllib. Add tests."
+}
