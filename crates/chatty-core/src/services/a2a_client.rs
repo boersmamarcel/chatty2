@@ -128,10 +128,11 @@ pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Vec<TokenUsage> {
             cache_write_tokens: count("cacheWriteTokens"),
             ..TokenUsage::default()
         };
-        let spent = totals.input_tokens
-            + totals.output_tokens
-            + totals.cache_read_tokens
-            + totals.cache_write_tokens;
+        let spent = totals
+            .input_tokens
+            .saturating_add(totals.output_tokens)
+            .saturating_add(totals.cache_read_tokens)
+            .saturating_add(totals.cache_write_tokens);
         return if spent == 0 { Vec::new() } else { vec![totals] };
     };
     lines
@@ -940,6 +941,11 @@ mod tests {
         assert_eq!(lines[0].model, None);
 
         assert!(usage_from_status_metadata(Some(&json!({ "usage": {} }))).is_empty());
+
+        // Peer-supplied totals whose sum exceeds u32::MAX must not overflow.
+        let max = u32::MAX;
+        let huge = json!({ "usage": { "inputTokens": max, "outputTokens": max } });
+        assert_eq!(usage_from_status_metadata(Some(&huge)).len(), 1);
     }
 
     /// AGE-467: a worker's compacted trace rides the terminal status next to
