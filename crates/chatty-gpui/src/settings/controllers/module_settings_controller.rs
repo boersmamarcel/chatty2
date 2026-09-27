@@ -523,19 +523,24 @@ pub fn refresh_runtime(cx: &mut App) {
                         let credit_guard =
                             Arc::new(CreditGuard::with_default_ttl(Arc::clone(&hive_client)));
 
-                        // Wire UsageCollector for post-invocation usage reporting
+                        // One `UsageCollector` per process (PL-H9, AGE-612):
+                        // `refresh_runtime` runs on every settings change, so
+                        // a fresh collector here would also leak a fresh
+                        // background flush task racing every earlier one
+                        // over the same queue file. `global` reuses the
+                        // process's one instance instead.
                         let usage_config = UsageCollectorConfig::default();
-                        let usage_collector = Arc::new(UsageCollector::new(
-                            &hive_settings.registry_url,
-                            usage_config,
-                        ));
+                        let usage_collector =
+                            UsageCollector::global(&hive_settings.registry_url, usage_config);
                         if let Some(session) = session {
                             let uc = Arc::clone(&usage_collector);
                             tokio::spawn(async move { uc.set_session(session).await });
                         }
-                        // Start the periodic flush task — without this, events
-                        // accumulate in memory but are never sent to the registry,
-                        // so dashboard analytics never increment.
+                        // Start the periodic flush task — idempotent, so
+                        // this is a no-op after the first call. Without it
+                        // (ever), events accumulate in memory but are never
+                        // sent to the registry, so dashboard analytics never
+                        // increment.
                         usage_collector.start_background_flush();
 
                         gateway = gateway

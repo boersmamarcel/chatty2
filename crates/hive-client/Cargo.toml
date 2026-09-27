@@ -24,6 +24,7 @@ ed25519-dalek = { workspace = true }
 percent-encoding = { workspace = true }
 futures-util = "0.3"
 bytes = "1"
+dirs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
