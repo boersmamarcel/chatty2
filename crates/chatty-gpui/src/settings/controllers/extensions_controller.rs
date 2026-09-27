@@ -2,7 +2,7 @@ use crate::chatty::services::mcp_service::McpService;
 use crate::settings::controllers::module_settings_controller;
 use crate::settings::models::marketplace_state::MarketplaceState;
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
-use chatty_core::hive::HiveRegistryClient;
+use chatty_core::hive::{HiveRegistryClient, HiveSession, SessionState, TokenPair};
 use chatty_core::install;
 use chatty_core::services::A2aClient;
 use chatty_core::settings::models::a2a_store::A2aAgentStatus;
@@ -11,7 +11,8 @@ use chatty_core::settings::models::extensions_store::{
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::mcp_store::{McpAuthStatus, McpServerConfig, McpServersModel};
-use gpui::{App, AsyncApp};
+use gpui::{App, AsyncApp, Global};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 // ── Default Hive MCP ──────────────────────────────────────────────────────
@@ -59,6 +60,94 @@ pub fn ensure_curated_mcp_servers(cx: &mut App) -> bool {
 
 // ── Authentication ─────────────────────────────────────────────────────────
 
+/// The process's one [`HiveSession`]. Every authenticated Hive client shares
+/// it, since two holders of one rotating refresh token would trip the
+/// registry's reuse detection and sign the user out.
+struct GlobalHiveSession(Arc<HiveSession>);
+
+impl Global for GlobalHiveSession {}
+
+/// The Hive session, once [`install_hive_session`] has run.
+pub fn hive_session(cx: &App) -> Option<Arc<HiveSession>> {
+    cx.try_global::<GlobalHiveSession>().map(|g| g.0.clone())
+}
+
+/// Start the Hive session from the persisted token pair (once; later calls
+/// return the running one) and mirror every change it makes — a refreshed
+/// pair, a rejected refresh token — back into [`HiveSettingsModel`].
+pub fn install_hive_session(cx: &mut App) -> Arc<HiveSession> {
+    if let Some(session) = hive_session(cx) {
+        return session;
+    }
+    let settings = cx.global::<HiveSettingsModel>();
+    let pair = settings.token_pair();
+    let session = Arc::new(HiveSession::new(
+        settings.registry_url.clone(),
+        pair.clone(),
+    ));
+    if pair.is_none() && settings.token.is_some() {
+        // An access token with no refresh token can't be kept alive: treat
+        // the session as ended rather than showing a signed-in user whose
+        // calls all 401 within the hour.
+        apply_session_state(SessionState::Revoked, cx);
+    }
+    cx.set_global(GlobalHiveSession(session.clone()));
+
+    let mut states = session.subscribe();
+    cx.spawn(async move |cx| {
+        while states.changed().await.is_ok() {
+            let state = states.borrow_and_update().clone();
+            cx.update(|cx| apply_session_state(state, cx))
+                .map_err(|e| warn!(error = ?e, "Failed to apply Hive session change"))
+                .ok();
+        }
+    })
+    .detach();
+    session
+}
+
+fn apply_session_state(state: SessionState, cx: &mut App) {
+    match state {
+        SessionState::SignedIn(pair) => {
+            let settings = cx.global_mut::<HiveSettingsModel>();
+            if settings.token_pair().as_ref() == Some(&pair) {
+                return;
+            }
+            settings.set_token_pair(Some(&pair));
+            save_hive_settings_async(settings.clone(), cx);
+        }
+        SessionState::Revoked => {
+            let settings = cx.global_mut::<HiveSettingsModel>();
+            settings.set_token_pair(None);
+            settings.username = None;
+            save_hive_settings_async(settings.clone(), cx);
+            sync_hive_token_to_mcp(None, cx);
+            cx.global_mut::<MarketplaceState>().signed_out_of_hive = true;
+            cx.refresh_windows();
+        }
+        SessionState::SignedOut => {}
+    }
+}
+
+/// Persist a pair from login/registration and hand it to the session.
+async fn sign_in(pair: TokenPair, username: String, email: String, cx: &mut AsyncApp) {
+    let session = cx.update(|cx| {
+        let settings = cx.global_mut::<HiveSettingsModel>();
+        settings.set_token_pair(Some(&pair));
+        settings.username = Some(username);
+        settings.email = Some(email);
+        save_hive_settings_async(settings.clone(), cx);
+        sync_hive_token_to_mcp(Some(pair.token.clone()), cx);
+        cx.global_mut::<MarketplaceState>().signed_out_of_hive = false;
+        cx.refresh_windows();
+        install_hive_session(cx)
+    });
+    match session {
+        Ok(session) => session.sign_in(pair).await,
+        Err(e) => warn!(error = ?e, "Failed to update UI after Hive sign-in"),
+    }
+}
+
 /// Log in to the Hive registry and persist credentials.
 pub fn login(email: String, password: String, cx: &mut App) {
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
@@ -66,21 +155,10 @@ pub fn login(email: String, password: String, cx: &mut App) {
 
     cx.spawn(
         async move |cx| match client.login(&email, &password).await {
-            Ok(auth) => {
-                let username = auth.username().unwrap_or_default();
-                let token = auth.token.clone();
-                cx.update(|cx| {
-                    let settings = cx.global_mut::<HiveSettingsModel>();
-                    settings.token = Some(auth.token);
-                    settings.username = Some(username.clone());
-                    settings.email = Some(email);
-                    save_hive_settings_async(settings.clone(), cx);
-                    sync_hive_token_to_mcp(Some(token), cx);
-                    cx.refresh_windows();
-                    info!(username = %username, "Logged in to Hive registry");
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after login"))
-                .ok();
+            Ok(pair) => {
+                let username = pair.username().unwrap_or_default();
+                info!(username = %username, "Logged in to Hive registry");
+                sign_in(pair, username, email, cx).await;
             }
             Err(e) => {
                 error!(error = ?e, "Hive login failed");
@@ -104,20 +182,9 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
 
     cx.spawn(
         async move |cx| match client.register(&username, &email, &password).await {
-            Ok(auth) => {
-                let token = auth.token.clone();
-                cx.update(|cx| {
-                    let settings = cx.global_mut::<HiveSettingsModel>();
-                    settings.token = Some(auth.token);
-                    settings.username = Some(username.clone());
-                    settings.email = Some(email);
-                    save_hive_settings_async(settings.clone(), cx);
-                    sync_hive_token_to_mcp(Some(token), cx);
-                    cx.refresh_windows();
-                    info!(username = %username, "Registered with Hive registry");
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after registration"))
-                .ok();
+            Ok(pair) => {
+                info!(username = %username, "Registered with Hive registry");
+                sign_in(pair, username, email, cx).await;
             }
             Err(e) => {
                 error!(error = ?e, "Hive registration failed");
@@ -134,10 +201,14 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
     .detach();
 }
 
-/// Log out: clear persisted credentials.
+/// Log out: clear persisted credentials and revoke the refresh token.
 pub fn logout(cx: &mut App) {
+    if let Some(session) = hive_session(cx) {
+        cx.spawn(async move |_cx: &mut AsyncApp| session.sign_out().await)
+            .detach();
+    }
     let settings = cx.global_mut::<HiveSettingsModel>();
-    settings.token = None;
+    settings.set_token_pair(None);
     settings.username = None;
     settings.email = None;
     save_hive_settings_async(settings.clone(), cx);
@@ -198,10 +269,9 @@ pub fn install_extension(
     cx: &mut App,
 ) {
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
-    let token = cx.global::<HiveSettingsModel>().token.clone();
     let mut client = HiveRegistryClient::new(&registry_url);
-    if let Some(tok) = token {
-        client = client.with_token(tok);
+    if let Some(session) = hive_session(cx) {
+        client = client.with_session(session);
     }
 
     let is_remote = matches!(execution_mode.as_str(), "remote" | "remote_only");

@@ -33,7 +33,7 @@ glob.workspace = true
 similar.workspace = true
 
 # Date/time
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 
 # Logging
 tracing.workspace = true

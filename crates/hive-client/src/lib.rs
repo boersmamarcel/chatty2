@@ -9,7 +9,8 @@
 //! ## Quick start
 //!
 //! ```rust,no_run
-//! use hive_client::{HiveRegistryClient, models::ListParams};
+//! use std::sync::Arc;
+//! use hive_client::{HiveRegistryClient, HiveSession, models::ListParams};
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,9 +21,10 @@
 //! println!("Found {} modules", results.total);
 //!
 //! // Download a specific version (requires auth token).
-//! let auth = client.login("user@example.com", "password123!").await?;
+//! let pair = client.login("user@example.com", "password123!").await?;
+//! let session = Arc::new(HiveSession::new("https://registry.example.com", Some(pair)));
 //! let authed = HiveRegistryClient::new("https://registry.example.com")
-//!     .with_token(auth.token);
+//!     .with_session(session);
 //! let dl = authed.download("readability-auditor", "0.1.0").await?;
 //! println!("trust: {}", dl.trust_level);
 //! # Ok(())
@@ -31,7 +33,9 @@
 //!
 //! ## Authentication
 //!
-//! Register and log in to obtain a JWT for download operations:
+//! Register and log in to obtain a token pair: a one-hour access JWT and a
+//! rotating 30-day refresh token. Hand the pair to one shared
+//! [`HiveSession`], which refreshes it before it expires and after a 401:
 //!
 //! ```rust,no_run
 //! use hive_client::HiveRegistryClient;
@@ -57,12 +61,14 @@ pub mod client;
 pub mod credit_guard;
 pub mod error;
 pub mod models;
+pub mod session;
 pub mod usage;
 pub mod verify;
 
 pub use client::HiveRegistryClient;
 pub use credit_guard::{CreditGuard, InsufficientFunds};
 pub use error::ClientError;
-pub use models::BegunDownload;
+pub use models::{BegunDownload, TokenPair};
+pub use session::{HiveSession, SessionState};
 pub use usage::{UsageCollector, UsageCollectorConfig};
 pub use verify::{TrustLevel, VerifyError};

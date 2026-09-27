@@ -111,15 +111,30 @@ pub struct BegunDownload {
 
 // ── Authentication ─────────────────────────────────────────────────────────
 
-/// Response from register/login endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthTokenResponse {
+/// The token pair `login`, `register` and `refresh` return: a one-hour access
+/// JWT (`token`, sent as the Bearer) and the opaque 30-day `refresh_token`
+/// that `POST /api/auth/refresh` exchanges for the next pair. Every refresh
+/// rotates the refresh token; presenting a retired one revokes them all.
+///
+/// `Debug` is redacted: neither token may reach a log.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenPair {
     pub token: String,
-    #[serde(default)]
-    pub expires_at: Option<String>,
+    pub refresh_token: String,
+    pub expires_at: DateTime<Utc>,
 }
 
-impl AuthTokenResponse {
+impl std::fmt::Debug for TokenPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenPair")
+            .field("token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl TokenPair {
     /// Extract the username from the JWT claims (base64-decoded payload).
     /// Returns `None` if the token is malformed or missing the `username` claim.
     pub fn username(&self) -> Option<String> {

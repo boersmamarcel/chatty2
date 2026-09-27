@@ -706,14 +706,15 @@ pub fn refresh_runtime(cx: &mut App) {
                                 _ => None,
                             })
                             .collect();
-                        (hive.clone(), hive.token.clone(), paid_modules)
+                        let session = super::extensions_controller::hive_session(cx);
+                        (hive.clone(), session, paid_modules)
                     });
 
-                    if let Ok((hive_settings, token, paid_modules)) = hive_settings_result {
-                        // Create hive client with auth token if available
+                    if let Ok((hive_settings, session, paid_modules)) = hive_settings_result {
+                        // Authenticate as the signed-in user, if any
                         let mut hive_client = HiveRegistryClient::new(&hive_settings.registry_url);
-                        if let Some(ref t) = token {
-                            hive_client = hive_client.with_token(t.clone());
+                        if let Some(ref session) = session {
+                            hive_client = hive_client.with_session(Arc::clone(session));
                         }
                         let hive_client = Arc::new(hive_client);
 
@@ -727,9 +728,9 @@ pub fn refresh_runtime(cx: &mut App) {
                             &hive_settings.registry_url,
                             usage_config,
                         ));
-                        if let Some(t) = token {
+                        if let Some(session) = session {
                             let uc = Arc::clone(&usage_collector);
-                            tokio::spawn(async move { uc.set_token(t).await });
+                            tokio::spawn(async move { uc.set_session(session).await });
                         }
                         // Start the periodic flush task — without this, events
                         // accumulate in memory but are never sent to the registry,

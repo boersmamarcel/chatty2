@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::models::{UsageEvent, UsageReportResponse};
+use crate::session::{HiveSession, send_authed};
 
 /// Controls whether usage reporting can be disabled by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +60,7 @@ impl Default for UsageCollectorConfig {
 struct CollectorInner {
     buffer: Vec<UsageEvent>,
     base_url: String,
-    token: Option<String>,
+    session: Option<Arc<HiveSession>>,
     config: UsageCollectorConfig,
 }
 
@@ -84,16 +85,16 @@ impl UsageCollector {
             inner: Arc::new(Mutex::new(CollectorInner {
                 buffer: Vec::new(),
                 base_url: base_url.into().trim_end_matches('/').to_string(),
-                token: None,
+                session: None,
                 config,
             })),
             http,
         }
     }
 
-    /// Set the Bearer token for authenticated requests.
-    pub async fn set_token(&self, token: impl Into<String>) {
-        self.inner.lock().await.token = Some(token.into());
+    /// Report as the user signed in to `session`.
+    pub async fn set_session(&self, session: Arc<HiveSession>) {
+        self.inner.lock().await.session = Some(session);
     }
 
     /// Record a usage event.  The event is buffered and will be sent on the
@@ -140,12 +141,12 @@ impl UsageCollector {
     /// On network failure, events are persisted to the offline queue file.
     /// On success, any previously queued offline events are also submitted.
     pub async fn flush(&self) -> Result<UsageReportResponse, String> {
-        let (events, base_url, token) = {
+        let (events, base_url, session) = {
             let mut inner = self.inner.lock().await;
             let events = std::mem::take(&mut inner.buffer);
             let base_url = inner.base_url.clone();
-            let token = inner.token.clone();
-            (events, base_url, token)
+            let session = inner.session.clone();
+            (events, base_url, session)
         };
 
         // Load any offline-queued events
@@ -164,12 +165,7 @@ impl UsageCollector {
             events: all_events.clone(),
         };
 
-        let mut request = self.http.post(&url).json(&body);
-        if let Some(ref tok) = token {
-            request = request.header("Authorization", format!("Bearer {tok}"));
-        }
-
-        match request.send().await {
+        match send_authed(session.as_deref(), || self.http.post(&url).json(&body)).await {
             Ok(resp) if resp.status().is_success() => {
                 // Clear the offline queue on success
                 self.clear_offline_queue().await;
@@ -179,9 +175,11 @@ impl UsageCollector {
             }
             Ok(resp) => {
                 let status = resp.status();
-                // Don't queue on auth errors — these won't resolve by retrying
+                // Still 401 after a refresh: the user is signed out. Keep the
+                // events queued; they go out once they sign in again.
                 if status == reqwest::StatusCode::UNAUTHORIZED {
-                    tracing::warn!("usage report unauthorized — dropping events");
+                    tracing::warn!("usage report unauthorized — keeping events queued");
+                    self.save_offline_queue(&all_events).await;
                     return Err("unauthorized".to_string());
                 }
                 // Queue for retry on server errors
