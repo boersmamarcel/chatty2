@@ -1,5 +1,7 @@
+use chatty_core::services::lazy_broker::LazyBroker;
 use chatty_protocol_gateway::ProtocolGateway;
 use gpui::Global;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum ModuleLoadStatus {
@@ -37,6 +39,12 @@ pub struct DiscoveredModulesModel {
     pub scanning: bool,
     pub refresh_generation: u64,
     pub gateway: Option<ProtocolGateway>,
+    /// The gateway/broker, captured to start on the first
+    /// `list_agents`/`invoke_agent` call instead of at boot (BI-2,
+    /// AGE-634). `None` until `refresh_runtime` publishes one (the module
+    /// gateway setting is on), and replaced outright on every later
+    /// refresh.
+    pub lazy_broker: Option<Arc<dyn LazyBroker>>,
 }
 
 impl Default for DiscoveredModulesModel {
@@ -49,6 +57,7 @@ impl Default for DiscoveredModulesModel {
             scanning: false,
             refresh_generation: 0,
             gateway: None,
+            lazy_broker: None,
         }
     }
 }

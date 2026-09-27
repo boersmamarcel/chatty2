@@ -24,6 +24,7 @@ use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderTyp
 use chatty_core::tools::LocalModuleAgentSummary;
 use clap::{Parser, Subcommand};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -651,7 +652,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         "Using model"
     );
 
-    // --broker (AGE-376): run this leader's own protocol gateway so
+    // --broker (AGE-376): this leader's own protocol gateway, so
     // `invoke_agent`/`list_agents` can reach its virtual agents —
     // `local-agent`, or the named team module settings declare (AGE-377) —
     // the same wiring chatty-gpui's module-settings controller turns on for
@@ -659,6 +660,11 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // worker: a leader configured by `--ollama`/`--openai-compat-url` has
     // no config dir a child could read. Unix only — the participant socket
     // underneath it does not exist elsewhere yet.
+    //
+    // The broker starts on the first `list_agents`/`invoke_agent` call, not
+    // here (BI-2, AGE-634): this only captures what `Broker::start` will
+    // need, so nothing is bound and no task is spawned until a delegation
+    // actually asks for one.
     // `--team` implies `--broker`: a team is nothing without its workers.
     let run_broker = cli.broker || cli.team.is_some();
     // The roster's specs: the team's, else the names module settings list.
@@ -672,48 +678,36 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         None => Vec::new(),
     };
     #[cfg(unix)]
-    let broker = if run_broker {
-        match participant::broker::Broker::start(
-            models.models(),
-            &providers,
-            &broker_module_settings,
-            &broker_agents,
-            execution_settings.workspace_dir.clone(),
-            matches!(
-                execution_settings.approval_mode,
-                chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
-            ),
-            &participant::broker::provider_flags(
-                cli.ollama.as_deref(),
-                cli.openai_compat_url.as_deref(),
-                cli.api_key.as_deref(),
-            ),
-        )
-        .await
-        {
-            Ok(broker) => Some(broker),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Failed to start the broker; --broker delegation is unavailable"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> =
+        run_broker.then(|| {
+            Arc::new(participant::broker::PendingBroker::new(
+                models.models().to_vec(),
+                providers.clone(),
+                broker_module_settings.clone(),
+                broker_agents.clone(),
+                execution_settings.workspace_dir.clone(),
+                matches!(
+                    execution_settings.approval_mode,
+                    chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
+                ),
+                participant::broker::provider_flags(
+                    cli.ollama.as_deref(),
+                    cli.openai_compat_url.as_deref(),
+                    cli.api_key.as_deref(),
+                ),
+            )) as Arc<dyn chatty_core::services::lazy_broker::LazyBroker>
+        });
     #[cfg(not(unix))]
     if run_broker {
         bail!("--broker needs a Unix socket, which this platform has not got");
     }
-
-    // The broker's ephemeral port, kept out of `module_settings` (AGE-382):
-    // `--broker` only threads it into this run's `AgentBuildContext`, it
-    // never persists it, so `/modules` sees and saves only what was on disk.
-    #[cfg(unix)]
-    let broker_port = broker.as_ref().map(|b| b.port);
     #[cfg(not(unix))]
+    let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> = None;
+
+    // The broker's own gateway port is not known until it actually starts
+    // (BI-2, AGE-634), so this stays `None` in production; kept out of
+    // `module_settings` either way (AGE-382), so `/modules` sees and saves
+    // only what was on disk.
     let broker_port: Option<u16> = None;
 
     // Create event channel
@@ -735,6 +729,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             execution_settings,
             module_settings,
             broker_port,
+            broker: broker.clone(),
             models,
             providers,
             mcp_service,
@@ -768,6 +763,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 execution_settings,
                 module_settings,
                 broker_port,
+                broker: broker.clone(),
                 models,
                 providers,
                 mcp_service,
@@ -833,6 +829,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 execution_settings: execution_settings.clone(),
                 module_settings,
                 broker_port,
+                broker: broker.clone(),
                 models,
                 providers: providers.clone(),
                 mcp_service: None,

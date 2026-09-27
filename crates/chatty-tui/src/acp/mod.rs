@@ -235,6 +235,7 @@ impl Server {
                     .module_settings
                     .enabled
                     .then_some(config.module_settings.gateway_port)),
+                lazy_broker: config.broker.clone(),
                 local_agents: config.module_settings.virtual_agent_names(),
                 remote_agents: config.remote_agents.clone(),
             },

@@ -246,6 +246,15 @@ impl ChattyApp {
                             .ok()
                             .flatten()
                             .unzip();
+                        // The broker starts itself on this call if it has
+                        // not already (BI-2, AGE-634).
+                        let lazy_broker = cx
+                            .update(|cx| {
+                                cx.try_global::<crate::settings::models::DiscoveredModulesModel>()
+                                    .and_then(|m| m.lazy_broker.clone())
+                            })
+                            .ok()
+                            .flatten();
                         let remote_agents = cx
                             .update(|cx| {
                                 cx.try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
@@ -272,6 +281,7 @@ impl ChattyApp {
                                 embedding_service,
                                 module_agents,
                                 gateway_port,
+                                lazy_broker,
                                 local_agents: local_agents.unwrap_or_default(),
                                 remote_agents,
                             })

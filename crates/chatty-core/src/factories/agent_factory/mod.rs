@@ -266,6 +266,7 @@ impl AgentClient {
             embedding_service,
             module_agents,
             gateway_port,
+            lazy_broker,
             local_agents,
             remote_agents,
             conversation_id,
@@ -1257,10 +1258,11 @@ impl AgentClient {
         .map(AskUserTool::new);
 
         // The broker's local workers exist exactly when the gateway that
-        // serves them does (ADR-0011 C2); the gateway publishes them
-        // whenever it starts, so its port is the whole condition. Which
-        // names there are is module settings' decision (C10).
-        let local_agents: Vec<String> = if gateway_port.is_some() {
+        // serves them does (ADR-0011 C2); a live port or a broker that will
+        // start one lazily on first use (BI-2, AGE-634) is the whole
+        // condition. Which names there are is module settings' decision
+        // (C10).
+        let local_agents: Vec<String> = if gateway_port.is_some() || lazy_broker.is_some() {
             local_agents
         } else {
             Vec::new()
@@ -1271,15 +1273,31 @@ impl AgentClient {
             ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone())
                 .with_local_workers(local_agents.iter().cloned());
         // With a gateway there is a live participant table to read, not just
-        // the settings snapshot (ADR-0011 C5).
-        if let Some(port) = gateway_port {
+        // the settings snapshot (ADR-0011 C5). A lazy broker takes priority
+        // over an already-resolved port: a host that hands in both knows the
+        // port only because it started the broker itself (a test), so the
+        // eager path is used; otherwise the tool starts the broker itself on
+        // first use.
+        if let Some(broker) = lazy_broker.clone() {
+            list_agents_tool = list_agents_tool.with_lazy_broker(broker);
+        } else if let Some(port) = gateway_port {
             list_agents_tool = list_agents_tool.with_gateway_port(port);
         }
 
-        // Create invoke_agent tool (always available)
+        // Create invoke_agent tool (always available). A lazy broker means
+        // the port is not actually live yet, so it must not also be handed
+        // to `new` as if it already were.
+        let eager_gateway_port = if lazy_broker.is_some() {
+            None
+        } else {
+            gateway_port
+        };
         let mut invoke_agent_tool =
-            InvokeAgentTool::new(remote_agents, module_agents, gateway_port)
+            InvokeAgentTool::new(remote_agents, module_agents, eager_gateway_port)
                 .with_local_agents(local_agents);
+        if let Some(broker) = lazy_broker {
+            invoke_agent_tool = invoke_agent_tool.with_lazy_broker(broker);
+        }
         invoke_agent_tool = invoke_agent_tool.with_external_agent_warning(
             exec_settings
                 .as_ref()
