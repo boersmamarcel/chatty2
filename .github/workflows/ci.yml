@@ -63,7 +63,10 @@ jobs:
               - 'modules/**/*.rs'
               - 'modules/**/Cargo.toml'
               - 'modules/**/Cargo.lock'
+              - 'modules/**/module.toml'
+              - 'modules/fixtures/**'
               - 'wit/**'
+              - 'scripts/build-wasm-fixtures.sh'
               - 'scripts/check-reserved.sh'
               - 'scripts/check-rig-pins.sh'
               - 'scripts/check-no-core-reexports.sh'
@@ -107,7 +110,6 @@ jobs:
           shared-key: linux-ci
           workspaces: |
             .
-            modules/echo-agent
           # Deliberately no `cache-on-failure: true`: it also saves on
           # cancelled jobs, and cancel-in-progress above cancels main runs
           # whenever two pushes land close together.
@@ -135,12 +137,9 @@ jobs:
             libssl-dev \
             pkg-config
 
-      - name: Build echo-agent WASM
+      - name: Build WASM modules and test fixtures (tests load them)
         if: needs.changes.outputs.rust == 'true'
-        run: |
-          cd modules/echo-agent
-          cargo build --target wasm32-wasip2 --release
-          cp target/wasm32-wasip2/release/echo_agent.wasm .
+        run: scripts/build-wasm-fixtures.sh
 
       - name: Run tests
         if: needs.changes.outputs.rust == 'true'

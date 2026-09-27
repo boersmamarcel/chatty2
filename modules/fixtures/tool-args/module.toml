@@ -1,0 +1,10 @@
+[module]
+name = "tool-args"
+version = "0.1.0"
+description = "Adversarial test fixture: tool-args"
+wasm = "tool-args.wasm"
+
+[capabilities]
+tools = ["echo_args"]
+chat = true
+agent = true

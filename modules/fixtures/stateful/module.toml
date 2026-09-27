@@ -1,0 +1,10 @@
+[module]
+name = "stateful"
+version = "0.1.0"
+description = "Adversarial test fixture: stateful"
+wasm = "stateful.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

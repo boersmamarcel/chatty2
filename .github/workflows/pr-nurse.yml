@@ -145,7 +145,6 @@ jobs:
           save-if: false
           workspaces: |
             .
-            modules/echo-agent
 
       - name: Install Linux dependencies
         run: |
@@ -156,11 +155,8 @@ jobs:
             libxcb-xfixes0-dev libxcursor-dev libxrandr-dev libxi-dev \
             libgl1-mesa-dev libfontconfig1-dev libasound2-dev libssl-dev pkg-config
 
-      - name: Build echo-agent WASM (tests load it)
-        run: |
-          cd modules/echo-agent
-          cargo build --target wasm32-wasip2 --release
-          cp target/wasm32-wasip2/release/echo_agent.wasm .
+      - name: Build WASM modules and test fixtures (tests load them)
+        run: scripts/build-wasm-fixtures.sh
 
       - name: Install Node
         if: env.REASON == 'ci-failed' || steps.merge.outputs.conflicted != ''

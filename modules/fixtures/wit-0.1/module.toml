@@ -1,0 +1,10 @@
+[module]
+name = "wit-0.1"
+version = "0.1.0"
+description = "Adversarial test fixture: wit-0.1"
+wasm = "wit-0.1.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true
