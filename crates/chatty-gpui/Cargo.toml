@@ -65,6 +65,10 @@ chatty-core = { path = "../chatty-core", features = ["test-support"] }
 # `TestAppContext` — the desktop's stream handler drives real GPUI entities,
 # so characterizing it needs a real (headless) app context.
 gpui = { workspace = true, features = ["test-support"] }
+# PL-E7 (AGE-602) rows 4.1-4.4: a fake OpenAI-compatible endpoint for
+# HostLlmProvider URL/header/runtime tests, without a real model or the
+# internet.
+wiremock = "0.6"
 
 [build-dependencies]
 # Windows icon embedding
