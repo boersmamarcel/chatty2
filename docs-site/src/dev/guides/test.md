@@ -9,7 +9,7 @@ Know which `make` target or `cargo test` invocation covers your change, and be a
 ## Prerequisites
 
 - [Build and run](../start/build-and-run.md): `make setup` done.
-- `make wasm-modules` has been run. The gateway integration tests load `modules/echo-agent/echo_agent.wasm`, which is git-ignored; without it they fail with a missing-file error.
+- `make wasm-modules` has been run (`scripts/build-wasm-fixtures.sh`). It stages every fixture, `benford-agent` and `echo-agent` under `target/wasm-fixtures/<name>/`, which is git-ignored; the integration and conformance suites fail with a missing-file error without it.
 
 ## How the suite is organised
 
@@ -25,7 +25,10 @@ Know which `make` target or `cargo test` invocation covers your change, and be a
 | [`crates/chatty-core/src/repositories/store_conformance.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/src/repositories/store_conformance.rs) | Every `RepositoryRegistry` family (13, `token_tracking` the newest) plus `ConversationRepository` against one load/save/round-trip contract, run against the JSON/SQLite and in-memory backends; exported under the `test-support` feature so hive's store runs the identical suite (AGE-280) | `cargo test -p chatty-core --lib conformance` |
 | [`scripts/team-smoke.sh`](https://github.com/boersmamarcel/chatty2/blob/main/scripts/team-smoke.sh) | The `coder-reviewer` team end to end in a container against a local Ollama, scored by a verifier — the one check for a change to the broker, `--team` or the worker tree. Not in CI | `bash scripts/team-smoke.sh`; see [Team smoke test](../architecture/team-smoke-test.md) |
 | Characterization goldens (three directories, below) | The event sequence each frontend produces for a scripted stream | see below |
-| `crates/hive-billing-sdk/tests/` | Standalone SDK with its own `Cargo.lock`; not a workspace member | `cd crates/hive-billing-sdk && cargo test` |
+| `crates/hive-billing-sdk/tests/` | Standalone SDK with its own `Cargo.lock`; not a workspace member. `.cargo/config.toml` defaults the crate to `wasm32-wasip2`, which has no test-harness support, so tests need an explicit host target | `cd crates/hive-billing-sdk && cargo test --target x86_64-unknown-linux-gnu` |
+| `modules/benford-agent/src/lib.rs` unit tests | Standalone module crate, also outside the workspace and defaulted to `wasm32-wasip2` for the same reason | `cd modules/benford-agent && cargo test --target x86_64-unknown-linux-gnu` |
+| `crates/chatty-module-sdk/` | Standalone SDK crate consumed by every module; no tests of its own, so CI holds it to a clean `wasm32-wasip2` clippy pass instead | `cd crates/chatty-module-sdk && cargo clippy --target wasm32-wasip2 -- -D warnings` |
+| [`crates/chatty-wasm-runtime/tests/sandbox.rs`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-wasm-runtime/tests/sandbox.rs) | Plugin evaluation plan S1, rows 1.1–1.14: fuel, wall-clock, memory, traps, file/config/billing imports, WASI surface, against real fixtures. Doubles as AGE-600's trip-wire: its non-ignored rows (fuel exhaustion, `wit-0.1`/`core-module` load failures, trap-then-reuse, …) already run in `cargo test --all-features`, so a sandbox regression fails CI without a separate test. Rows red today are `#[ignore = "known defect: …"]` | `cargo test -p chatty-wasm-runtime --features test-support --test sandbox`; add `-- --ignored` for the red rows |
 
 ## Steps
 

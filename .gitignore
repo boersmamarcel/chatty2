@@ -15,6 +15,10 @@ modules/**/*.wasm
 # ...except the core-module fixture, which cargo cannot build (see its .wat).
 !modules/fixtures/core-module/core_module.wasm
 
+# A module CI generates from templates/module each run to prove the
+# template still builds (AGE-600); never a real module to commit.
+/modules/ci-generated/
+
 # AppImage build artifacts
 /squashfs-root
 appimagetool-*.AppImage
