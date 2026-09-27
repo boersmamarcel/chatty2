@@ -5,9 +5,10 @@ simultaneously. All three use **plain HTTP + JSON over TCP** — there is no
 gRPC, no WebSocket (except MCP SSE), and no binary framing.
 
 An agent behind those surfaces is either a **loaded WASM module** or a
-**local participant**: a process that registered over a Unix socket and is
-served at the same `/a2a/{name}` routes (ADR-0011). The participant socket is
-the one thing here that is not HTTP; see [Local participants](#local-participants).
+**local participant**: a worker process the broker spawned on a connection it
+made for it, served at the same `/a2a/{name}` routes (ADR-0011, ADR-0020).
+That connection is the one thing here that is not HTTP; see
+[Local participants](#local-participants).
 
 ## Transport
 
@@ -23,7 +24,7 @@ the one thing here that is not HTTP; see [Local participants](#local-participant
 | A2A streaming | `POST /a2a/{module}` (method: `message/stream`) | `text/event-stream` |
 | Agent card (per module) | `GET /a2a/{module}/.well-known/agent.json` | `application/json` |
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
-| Participant registration | Unix socket (`with_participant_socket`) | newline-delimited JSON |
+| Participant connection | broker-made `socketpair` per worker (`open_connection`) | newline-delimited JSON, v2 |
 
 ### What every route enforces
 
@@ -132,7 +133,7 @@ GET  /.well-known/…  ────►│ a2a.rs handler               │
                           │            ▼                 │
                           │ a2a_participant.rs           ├──► ParticipantRegistry
                           └──────────────────────────────┘         ▲
-                                                                   │ Unix socket
+                                                                   │ socketpair per child
                                                           child processes
 ```
 
@@ -149,23 +150,41 @@ single `ParticipantRegistry`. The module handlers call the WIT exports:
 
 ## Local participants
 
-A process that connects to the participant socket, publishes an agent card
-and answers tasks is addressable at `/a2a/{name}` exactly like a module —
-same JSON-RPC methods, same SSE frames, so an A2A client cannot tell the two
-apart. **Participants are looked up first**, so a live process shadows a
-module of the same name.
+A worker on a broker-made connection that publishes an agent card and
+answers tasks is addressable at `/a2a/{name}` exactly like a module — same
+JSON-RPC methods, same SSE frames, so an A2A client cannot tell the two
+apart. **Participants are looked up first**, so a live process would shadow
+a module of the same name.
 
-The socket carries newline-delimited JSON, not A2A: A2A is the gateway's
-public wire format, and a child process is not a public endpoint.
+**The connection is the identity** (ADR-0020). The broker admits a node —
+`Directory::admit` names it `<spec>-<n>`, never reusing a name — creates a
+`socketpair`, keeps one end and hands the other to the child it spawns at
+descriptor 3 (`chatty-tui --participant-fd 3`; `open_connection`,
+`LocalRunner`). The worker's `hello` names nothing: a card's `name` is
+ignored, and the broker's `welcome` says who the worker is. There is no way
+to register otherwise. The shared socket (`with_participant_socket`, `bind`,
+`serve`) stays bound and refuses every connection with an `error` frame, so
+no local process can take a name the broker is about to route a task to.
+
+The connection carries newline-delimited JSON, not A2A: A2A is the gateway's
+public wire format, and a child process is not a public endpoint. This is
+**version 2**: every frame in both directions carries `"v":2`, and a frame
+without it is answered with an `error` frame naming v2 and the connection is
+closed. There is no v1 fallback. (hive's worker speaks v1 at its current
+chatty2 pin and moves to v2 with HS-4, AGE-678.)
 
 ```
-participant → {"type":"register","card":{"name":"worker-1",…}}
-broker      → {"type":"registered","name":"worker-1"}
-broker      → {"type":"task","taskId":"task-…","text":"summarise foo.rs"}
-participant → {"type":"status","taskId":"task-…","state":"working","message":"read_file"}
-participant → {"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
-participant → {"type":"status","taskId":"task-…","state":"completed"}
+participant → {"v":2,"type":"hello","card":{"name":"",…}}
+broker      → {"v":2,"type":"welcome","name":"local-coder-0","scope":"root","owner":null}
+broker      → {"v":2,"type":"task","taskId":"task-…","text":"summarise foo.rs"}
+participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"read_file"}
+participant → {"v":2,"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
+participant → {"v":2,"type":"status","taskId":"task-…","state":"completed"}
 ```
+
+`scope` is the conversation the node works for and `owner` the node that
+asked for it; until the spawn request carries them (BI-5) every node is the
+root's, in scope `root`.
 
 `status` states are A2A's (`submitted`, `working`, `input-required`,
 `completed`, `failed`, `canceled`); the terminal three end the task.
@@ -180,10 +199,10 @@ the message's `metadata.clarification`, which the broker turns into an `input`
 frame on the same task. The worker's next status un-parks it.
 
 ```
-participant → {"type":"status","taskId":"task-…","state":"input-required","message":"Which database?",
+participant → {"v":2,"type":"status","taskId":"task-…","state":"input-required","message":"Which database?",
                "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
-broker      → {"type":"input","taskId":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
-participant → {"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+broker      → {"v":2,"type":"input","taskId":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
+participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 ```
 
 `invoke_agent` is the caller: it re-asks the question on its own agent's
@@ -218,30 +237,29 @@ hear it. The broker ends the task at that point and quotes the question in
 > complaint, and costs nothing that polling would later have to undo.
 
 **The connection is the liveness signal.** There is no heartbeat: when the
-socket closes, for any reason, the participant is deregistered and every task
-it still owed is failed with a `failed` status naming the disconnect. A
-process that has died cannot fail to send a heartbeat, so the socket is the
-only signal that cannot lie.
+connection closes, for any reason, the participant is deregistered and every
+task it still owed is failed with a `failed` status naming the disconnect. A
+process that has died cannot fail to send a heartbeat, so the connection is
+the only signal that cannot lie.
 
-Opt in with `ProtocolGateway::with_participant_socket(path)`; without it no
-socket is opened. The hosted transport is Firecracker vsock, which reaches
-this crate as a plain stream — `serve_connection` takes any of them, and
-`ParticipantConnection::register_over` is the worker's side of the same
-generalization (AGE-307).
+The hosted transport is Firecracker vsock, which reaches this crate as a
+plain stream — `serve_connection(stream, registry, admitted_node)` takes any
+of them, and `ParticipantConnection::hello_over` is the worker's side of the
+same generalization (AGE-307; the hosted broker adopts it with HS-4).
 
 ### Virtual agents and the local runner
 
 `ProtocolGateway::with_virtual_agent` publishes one agent that is not a
-connected process but a factory. A task addressed to it starts a worker, waits
-for that worker to register over the socket, routes the task to it, and reaps
-it. To the caller it is an A2A agent like any other, which is the point:
+connected process but a factory. A task addressed to it starts a worker on a
+connection the broker made for it, waits for that worker's `hello`, routes the
+task to it, and reaps it. To the caller it is an A2A agent like any other, which is the point:
 `invoke_agent` replaces `sub_agent` without the parent learning a second
 fan-out path.
 
 `LocalRunner` is the implementation that spawns a `chatty-tui` child. It is
 not the only one: hive's `VmRunner` leases a Firecracker microVM per task
 (AGE-307) and fills the same slot, which is why the trait exists rather than
-the gateway naming a concrete runner. Everything past "the worker registered"
+the gateway naming a concrete runner. Everything past "the worker said hello"
 is the same code for both.
 
 **One child per task.** The child can serve tasks until its socket closes, but
@@ -273,10 +291,10 @@ to `8420`.
 
 ## Being a worker (`worker` feature)
 
-The `worker` feature adds the other end of the participant socket: `TaskMapper`,
-the `SessionEvent` → A2A table, and `serve_one_task`, the loop a process runs
-when it *is* the worker — register, take one task, run it, send one terminal
-status, exit.
+The `worker` feature adds the other end of the participant connection:
+`TaskMapper`, the `SessionEvent` → A2A table, and `serve_one_task`, the loop a
+process runs when it *is* the worker — say hello, take one task, run it, send
+one terminal status, exit.
 
 It lives here rather than in `chatty-tui` because two crates run it:
 `chatty-tui` on the desktop and hive's `chatty-server` inside a microVM. The

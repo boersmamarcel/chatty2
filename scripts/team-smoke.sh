@@ -100,8 +100,9 @@ git -C "$WORK_DIR" -c user.name=team-smoke -c user.email=team-smoke@chatty.inval
 BASE_COMMIT="$(git -C "$WORK_DIR" rev-parse --short HEAD)"
 
 # 5. The leader, as this user, under a timeout. A process poll every 3 s
-#    records each worker process (`--participant-name <role>-<n>`) so the
-#    summary can count what was spawned per role.
+#    records each worker process (`--participant-fd`, its role the `name` in
+#    its `--agent-json` spec) so the summary can count what was spawned per
+#    role.
 NAME="chatty-team-smoke-$$"
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -120,7 +121,7 @@ timeout --signal=INT --kill-after=20 "$TIMEOUT" docker run --rm --init --name "$
 leader_pid=$!
 while kill -0 "$leader_pid" 2>/dev/null; do
   docker top "$NAME" -o pid,args 2>/dev/null \
-    | awk '{for (i = 1; i <= NF; i++) if ($i == "--participant-name") print $1, $(i + 1)}' >> "$RUN_DIR/ps.log"
+    | awk '/--participant-fd/ && match($0, /"name":"[A-Za-z0-9_-]+"/) {print $1, substr($0, RSTART + 8, RLENGTH - 9)}' >> "$RUN_DIR/ps.log"
   sleep 3
 done
 wait "$leader_pid"

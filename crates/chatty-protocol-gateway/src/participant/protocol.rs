@@ -11,16 +11,34 @@
 //! between the two (see [`super::registry`]), which is the seam that lets a
 //! participant stream partial progress without minting JSON-RPC envelopes.
 //!
+//! # Version 2 (ADR-0020)
+//!
+//! Every frame, in both directions, carries `"v":2`. A frame without it is
+//! refused with an `error` frame naming v2 and the connection is closed;
+//! there is no v1 fallback. [`encode_frame`] and [`decode_frame`] are the
+//! only way frames go on or come off the wire, so the check cannot be
+//! skipped by one side.
+//!
+//! A connection is made by the broker, not by the worker: the broker admits
+//! a node, creates a socket pair, keeps one end and hands the other to the
+//! child it spawns. The connection *is* the identity, so the worker's
+//! `hello` names nothing — a card's `name` is ignored — and the broker's
+//! `welcome` tells the worker who it is.
+//!
 //! # A session
 //!
 //! ```text
-//! participant → {"type":"register","card":{"name":"worker-1",…}}
-//! broker      → {"type":"registered","name":"worker-1"}
-//! broker      → {"type":"task","taskId":"task-…","text":"summarise foo.rs"}
-//! participant → {"type":"status","taskId":"task-…","state":"working","message":"read_file"}
-//! participant → {"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
-//! participant → {"type":"status","taskId":"task-…","state":"completed"}
+//! participant → {"v":2,"type":"hello","card":{"name":"",…}}
+//! broker      → {"v":2,"type":"welcome","name":"local-coder-0","scope":"root","owner":null}
+//! broker      → {"v":2,"type":"task","taskId":"task-…","text":"summarise foo.rs"}
+//! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"read_file"}
+//! participant → {"v":2,"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
+//! participant → {"v":2,"type":"status","taskId":"task-…","state":"completed"}
 //! ```
+//!
+//! BI-4 (AGE-636) adds `call` frames from the worker and `call_progress` /
+//! `call_result` / `call_error` from the broker to these two enums; nothing
+//! about the envelope changes for them.
 //!
 //! # A parked task
 //!
@@ -30,16 +48,71 @@
 //! (ADR-0011 C7, AGE-306).
 //!
 //! ```text
-//! participant → {"type":"status","taskId":"task-…","state":"input-required",
+//! participant → {"v":2,"type":"status","taskId":"task-…","state":"input-required",
 //!                "message":"Which database?",
 //!                "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
-//! broker      → {"type":"input","taskId":"task-…",
+//! broker      → {"v":2,"type":"input","taskId":"task-…",
 //!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
-//! participant → {"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+//! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 //! ```
 
+use chatty_fabric::{ConversationScope, NodeName};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// The participant protocol's version. Every frame carries it as `v`.
+pub const PROTOCOL_VERSION: u64 = 2;
+
+/// Why a line off the socket is not a frame this build accepts.
+#[derive(Debug, thiserror::Error)]
+pub enum FrameError {
+    /// A frame without `v`: a v1 peer, or no peer of ours at all.
+    #[error("frame has no \"v\"; the participant protocol is v2 only")]
+    MissingVersion,
+    /// A frame for a version this build does not speak.
+    #[error("frame is version {0}; the participant protocol is v2 only")]
+    WrongVersion(Value),
+    /// Not JSON, not an object, or not a frame of this direction.
+    #[error("malformed frame: {0}")]
+    Malformed(String),
+}
+
+impl FrameError {
+    /// Whether the peer speaks another protocol version, which ends the
+    /// connection, rather than having sent one bad frame.
+    pub fn is_version(&self) -> bool {
+        matches!(self, Self::MissingVersion | Self::WrongVersion(_))
+    }
+}
+
+/// One frame as a line, without the trailing newline, carrying `"v":2`.
+pub fn encode_frame<F: Serialize>(frame: &F) -> Result<String, serde_json::Error> {
+    let Value::Object(mut fields) = serde_json::to_value(frame)? else {
+        return Err(serde::ser::Error::custom(
+            "a frame serializes to a JSON object",
+        ));
+    };
+    fields.insert("v".to_string(), Value::from(PROTOCOL_VERSION));
+    serde_json::to_string(&Value::Object(fields))
+}
+
+/// One line off the socket as a frame, refusing anything that is not v2.
+pub fn decode_frame<F: DeserializeOwned>(line: &str) -> Result<F, FrameError> {
+    let value: Value =
+        serde_json::from_str(line).map_err(|e| FrameError::Malformed(e.to_string()))?;
+    let Value::Object(mut fields) = value else {
+        return Err(FrameError::Malformed(
+            "a frame is a JSON object".to_string(),
+        ));
+    };
+    match fields.remove("v") {
+        None => return Err(FrameError::MissingVersion),
+        Some(v) if v.as_u64() == Some(PROTOCOL_VERSION) => {}
+        Some(other) => return Err(FrameError::WrongVersion(other)),
+    }
+    serde_json::from_value(Value::Object(fields)).map_err(|e| FrameError::Malformed(e.to_string()))
+}
 
 /// The state of one task, in A2A's vocabulary.
 ///
@@ -227,13 +300,15 @@ pub struct ParticipantSkill {
     pub examples: Vec<String>,
 }
 
-/// What a participant publishes about itself at registration.
+/// What a participant publishes about itself in its `hello`.
 ///
-/// `name` is the address: callers reach this participant at `/a2a/{name}`,
-/// so it has to be unique across the broker and stable for the connection's
-/// lifetime.
+/// `name` is the address callers reach it at (`/a2a/{name}`), and it is the
+/// broker's to give: whatever a worker puts here is replaced by the name
+/// the broker admitted its connection under (ADR-0020). A worker leaves it
+/// empty.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParticipantCard {
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -250,7 +325,11 @@ pub struct ParticipantCard {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ParticipantFrame {
     /// The first frame on a connection. A second one is a protocol error.
-    Register { card: ParticipantCard },
+    /// The card's `name` is ignored: the connection already names the node.
+    Hello {
+        #[serde(default)]
+        card: ParticipantCard,
+    },
     /// A task moved, optionally with progress text. The broker turns this
     /// into an A2A `TaskStatusUpdateEvent`.
     ///
@@ -290,12 +369,18 @@ pub enum ParticipantFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BrokerFrame {
-    /// Registration accepted. `name` is what callers address; it is echoed
-    /// so a participant that let the broker pick one still learns it.
-    Registered { name: String },
-    /// Registration refused — a duplicate name, or a card without one. The
+    /// The answer to `hello`: who this connection is. `name` is what
+    /// callers address, `scope` the conversation the node works for, and
+    /// `owner` the node that asked for it (`None` when the root did).
+    Welcome {
+        name: NodeName,
+        scope: ConversationScope,
+        owner: Option<NodeName>,
+    },
+    /// The connection is refused: a frame that is not v2, a first frame
+    /// that is not `hello`, or any registration on the shared socket. The
     /// broker closes the connection after this frame.
-    Rejected { reason: String },
+    Error { reason: String },
     /// Work. Answer with `Status` / `Artifact` frames carrying this `taskId`
     /// and end with a terminal state. `bearer` is the caller's token when
     /// they presented one (AGE-371); absent on the wire otherwise, so a
@@ -512,18 +597,67 @@ mod tests {
     }
 
     #[test]
-    fn register_frame_round_trips_a_card() {
-        let line = r#"{"type":"register","card":{"name":"worker-1","description":"a worker",
+    fn hello_frame_round_trips_a_card() {
+        let line = r#"{"v":2,"type":"hello","card":{"name":"worker-1","description":"a worker",
                        "skills":[{"name":"edit"}]}}"#;
-        let frame: ParticipantFrame = serde_json::from_str(line).unwrap();
-        let ParticipantFrame::Register { card } = frame else {
-            panic!("expected a register frame");
+        let frame: ParticipantFrame = decode_frame(line).unwrap();
+        let ParticipantFrame::Hello { card } = frame else {
+            panic!("expected a hello frame");
         };
-        assert_eq!(card.name, "worker-1");
+        assert_eq!(card.name, "worker-1", "carried, and ignored by the broker");
         assert_eq!(card.skills[0].name, "edit");
         // Absent optional fields default rather than failing the connection.
         assert_eq!(card.version, "");
         assert!(card.display_name.is_none());
+
+        let bare: ParticipantFrame = decode_frame(r#"{"v":2,"type":"hello"}"#).unwrap();
+        assert!(matches!(bare, ParticipantFrame::Hello { card } if card.name.is_empty()));
+    }
+
+    #[test]
+    fn every_encoded_frame_carries_v2() {
+        let line = encode_frame(&BrokerFrame::Cancel {
+            task_id: "t".into(),
+        })
+        .unwrap();
+        let json: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(json["v"], 2, "{line}");
+        let back: BrokerFrame = decode_frame(&line).unwrap();
+        assert!(matches!(back, BrokerFrame::Cancel { task_id } if task_id == "t"));
+    }
+
+    #[test]
+    fn a_frame_without_v_or_with_another_is_refused() {
+        let v1 = r#"{"type":"register","card":{"name":"worker-1"}}"#;
+        let err = decode_frame::<ParticipantFrame>(v1).unwrap_err();
+        assert!(matches!(err, FrameError::MissingVersion));
+        assert!(err.is_version());
+        assert!(err.to_string().contains("v2"), "{err}");
+
+        let v3 = r#"{"v":3,"type":"hello"}"#;
+        let err = decode_frame::<ParticipantFrame>(v3).unwrap_err();
+        assert!(matches!(err, FrameError::WrongVersion(_)));
+        assert!(err.to_string().contains("v2"), "{err}");
+
+        let err = decode_frame::<ParticipantFrame>(r#"{"v":2,"type":"register"}"#).unwrap_err();
+        assert!(
+            !err.is_version(),
+            "a v2 frame of an unknown type is malformed, not another version"
+        );
+    }
+
+    #[test]
+    fn welcome_names_the_node_its_scope_and_its_owner() {
+        let frame: BrokerFrame = decode_frame(
+            r#"{"v":2,"type":"welcome","name":"local-coder-0","scope":"root","owner":null}"#,
+        )
+        .unwrap();
+        let BrokerFrame::Welcome { name, scope, owner } = frame else {
+            panic!("expected a welcome frame");
+        };
+        assert_eq!(name.as_str(), "local-coder-0");
+        assert_eq!(scope.as_str(), "root");
+        assert!(owner.is_none());
     }
 
     #[test]

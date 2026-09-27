@@ -32,7 +32,7 @@
 
 **Sub-agent.** A delegated worker: a separate `chatty-tui` process with the parent's tool set that works on one task and reports back. The parent asks for one through `invoke_agent` against the broker's `local-agent`, and the worker reports over the broker's participant socket. Owning page: [Sub-agents](../user/sub-agents.md).
 
-**Broker.** The half of the protocol gateway that serves *local participants* — `chatty-tui` processes that register over a Unix socket and answer delegated tasks at `/a2a/{name}` (ADR-0011). The desktop starts it from the module settings; a terminal leader starts its own with `--broker`. Unix only. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md#local-participants-adr-0011).
+**Broker.** The half of the protocol gateway that serves *local participants* — `chatty-tui` processes the broker spawns on a connection it made for each, and which answer delegated tasks at `/a2a/{name}` under the name the broker gave them (ADR-0011, ADR-0020). The desktop starts it from the module settings; a terminal leader starts its own with `--broker`. Unix only. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md#local-participants-adr-0011).
 
 **Virtual agent.** A named worker the broker publishes — `local-agent` by default, or each agent spec `module_settings.virtual_agents` / a team's `agents` names: a name, an optional model, a tool profile or disabled groups, a preamble and its own budget. Roles live in specs, never on the `invoke_agent` call.
 

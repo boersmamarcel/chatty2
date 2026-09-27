@@ -1,5 +1,6 @@
-//! AGE-300 / ADR-0011 C1: a process that registers over the participant
-//! socket is served as an A2A agent by the gateway.
+//! AGE-300 / ADR-0011 C1: a worker on a connection the broker made for it
+//! is served as an A2A agent by the gateway; ADR-0020: the connection names
+//! it, and nothing registers on the shared socket.
 //!
 //! The caller in these tests is `chatty_core::services::a2a_client::A2aClient`
 //! — the client the app already uses for remote agents — talking HTTP to a
@@ -15,7 +16,7 @@ use chatty_core::services::a2a_client::{A2aClient, A2aStreamEvent};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_protocol_gateway::participant::ParticipantRegistry;
+use chatty_protocol_gateway::participant::{ParticipantRegistry, open_connection};
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -61,10 +62,7 @@ impl Harness {
 
         let listener = chatty_protocol_gateway::participant::bind(&socket)
             .expect("the participant socket binds");
-        tokio::spawn(chatty_protocol_gateway::participant::serve(
-            listener,
-            participants.clone(),
-        ));
+        tokio::spawn(chatty_protocol_gateway::participant::serve(listener));
 
         // Port 0: the OS picks, so the tests never race for a fixed one.
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -112,42 +110,61 @@ impl Harness {
 // A stub participant
 // ---------------------------------------------------------------------------
 
-/// A participant that registers, then answers each task with a scripted
-/// sequence of frames.
+/// A participant on a connection the broker made for it, which then answers
+/// each task with a scripted sequence of frames.
 struct StubParticipant {
+    /// The name the broker welcomed it under.
+    name: String,
     lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
     write: tokio::net::unix::OwnedWriteHalf,
 }
 
 impl StubParticipant {
-    async fn register(socket: &PathBuf, name: &str) -> Self {
-        let stream = UnixStream::connect(socket)
-            .await
-            .expect("the participant socket accepts a connection");
+    /// Admit a node as `spec`, take the worker's end of its connection, and
+    /// say hello with a card that claims `spec` as its name (ignored).
+    async fn connect(participants: &ParticipantRegistry, spec: &str) -> Self {
+        let connection =
+            open_connection(participants, spec).expect("the broker makes a connection");
+        let mut stub = Self::over(connection.worker_end, spec).await;
+        let welcome = stub.next_frame().await;
+        assert_eq!(welcome["type"], "welcome", "the hello is answered");
+        assert_eq!(welcome["name"], connection.name);
+        stub.name = connection.name;
+        stub
+    }
+
+    /// Say hello over `worker_end` without waiting for the answer.
+    async fn over(worker_end: std::os::unix::net::UnixStream, card_name: &str) -> Self {
+        worker_end.set_nonblocking(true).unwrap();
+        let stream = UnixStream::from_std(worker_end).unwrap();
         let (read, write) = stream.into_split();
         let mut stub = Self {
+            name: String::new(),
             lines: BufReader::new(read).lines(),
             write,
         };
 
         stub.send(json!({
-            "type": "register",
+            "type": "hello",
             "card": {
-                "name": name,
+                "name": card_name,
                 "description": "a stub worker",
                 "version": "0.1.0",
                 "skills": [{ "name": "echo", "description": "repeats the task" }],
             }
         }))
         .await;
-
-        let ack = stub.next_frame().await;
-        assert_eq!(ack["type"], "registered", "registration is acknowledged");
-        assert_eq!(ack["name"], name);
         stub
     }
 
-    async fn send(&mut self, frame: Value) {
+    /// Send `frame` as v2.
+    async fn send(&mut self, mut frame: Value) {
+        frame["v"] = json!(2);
+        self.send_raw(frame).await;
+    }
+
+    /// Send `frame` exactly as given.
+    async fn send_raw(&mut self, frame: Value) {
         let line = format!("{frame}\n");
         self.write.write_all(line.as_bytes()).await.unwrap();
         self.write.flush().await.unwrap();
@@ -159,7 +176,17 @@ impl StubParticipant {
             .expect("a frame from the broker within five seconds")
             .expect("the socket is readable")
             .expect("the broker did not close the socket");
-        serde_json::from_str(&line).expect("the broker sends JSON")
+        let frame: Value = serde_json::from_str(&line).expect("the broker sends JSON");
+        assert_eq!(frame["v"], 2, "every broker frame is v2: {frame}");
+        frame
+    }
+
+    /// The next line, or `None` once the broker has closed the connection.
+    async fn next_line(&mut self) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(5), self.lines.next_line())
+            .await
+            .expect("the broker answers or closes within five seconds")
+            .expect("the socket is readable")
     }
 
     /// Wait for a task, then answer it: two progress updates, one artifact,
@@ -214,7 +241,8 @@ impl StubParticipant {
 #[tokio::test]
 async fn a_registered_participant_round_trips_a_task_with_progress_and_an_artifact() {
     let harness = Harness::start().await;
-    let mut stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    let name = stub.name.clone();
 
     let stub_task = tokio::spawn(async move {
         let prompt = stub.answer_one_task("the file defines Foo").await;
@@ -223,7 +251,7 @@ async fn a_registered_participant_round_trips_a_task_with_progress_and_an_artifa
 
     let client = A2aClient::new();
     let mut stream = client
-        .send_message_stream(&harness.agent("stub-worker"), "summarise foo.rs")
+        .send_message_stream(&harness.agent(&name), "summarise foo.rs")
         .await
         .expect("the gateway accepts message/stream for a participant");
 
@@ -271,7 +299,8 @@ async fn a_parked_tasks_question_is_served_and_its_answer_comes_back_as_an_input
     use chatty_core::services::a2a_client::A2aClarificationRequest;
 
     let harness = Harness::start().await;
-    let mut stub = StubParticipant::register(&harness.socket, "asking-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "asking-worker").await;
+    let name = stub.name.clone();
 
     let stub_task = tokio::spawn(async move {
         let task = stub.next_frame().await;
@@ -326,7 +355,7 @@ async fn a_parked_tasks_question_is_served_and_its_answer_comes_back_as_an_input
     });
 
     let client = A2aClient::new();
-    let agent = harness.agent("asking-worker");
+    let agent = harness.agent(&name);
     let mut stream = client
         .send_message_stream(&agent, "set up the database")
         .await
@@ -392,7 +421,7 @@ async fn a_parked_tasks_question_is_served_and_its_answer_comes_back_as_an_input
     // as every client that puts its own id on a new message relies on: with
     // the participant gone it is refused as one, not as a missing answer.
     drop(stub);
-    harness.await_deregistration("asking-worker").await;
+    harness.await_deregistration(&name).await;
     let err = client
         .send_task_input(&agent, "task-nobody", "req-1", &[])
         .await
@@ -408,11 +437,12 @@ async fn a_parked_tasks_question_is_served_and_its_answer_comes_back_as_an_input
 #[tokio::test]
 async fn message_send_returns_the_participants_answer() {
     let harness = Harness::start().await;
-    let mut stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    let name = stub.name.clone();
     let stub_task = tokio::spawn(async move { stub.answer_one_task("42").await });
 
     let answer = A2aClient::new()
-        .send_message(&harness.agent("stub-worker"), "what is six times seven")
+        .send_message(&harness.agent(&name), "what is six times seven")
         .await
         .expect("message/send succeeds");
 
@@ -426,9 +456,10 @@ async fn message_send_returns_the_participants_answer() {
 async fn the_callers_bearer_reaches_the_worker_on_the_task_frame() {
     let harness = Harness::start().await;
 
-    let mut stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    let name = stub.name.clone();
     let stub_task = tokio::spawn(async move { stub.answer_one_task_frame("ok").await });
-    let mut agent = harness.agent("stub-worker");
+    let mut agent = harness.agent(&name);
     // `invoke_agent` puts `api_key` on the request as `Authorization: Bearer`.
     agent.api_key = Some("eyJ.user.token".to_string());
     A2aClient::new()
@@ -438,10 +469,11 @@ async fn the_callers_bearer_reaches_the_worker_on_the_task_frame() {
     let task = stub_task.await.unwrap();
     assert_eq!(task["bearer"], "eyJ.user.token");
 
-    let mut stub = StubParticipant::register(&harness.socket, "other-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "other-worker").await;
+    let name = stub.name.clone();
     let stub_task = tokio::spawn(async move { stub.answer_one_task_frame("ok").await });
     A2aClient::new()
-        .send_message(&harness.agent("other-worker"), "who am I")
+        .send_message(&harness.agent(&name), "who am I")
         .await
         .expect("message/send succeeds");
     let task = stub_task.await.unwrap();
@@ -457,7 +489,8 @@ async fn the_callers_bearer_reaches_the_worker_on_the_task_frame() {
 #[tokio::test]
 async fn message_send_ends_promptly_when_the_worker_asks_a_question() {
     let harness = Harness::start().await;
-    let mut stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    let name = stub.name.clone();
 
     let stub_task = tokio::spawn(async move {
         let task = stub.next_frame().await;
@@ -489,7 +522,7 @@ async fn message_send_ends_promptly_when_the_worker_asks_a_question() {
     // timeout: the point of the fix is that this does not wait one out.
     let answer = tokio::time::timeout(
         Duration::from_secs(10),
-        A2aClient::new().send_message(&harness.agent("stub-worker"), "migrate the schema"),
+        A2aClient::new().send_message(&harness.agent(&name), "migrate the schema"),
     )
     .await
     .expect("the task ends without waiting out the clarification timeout");
@@ -508,7 +541,7 @@ async fn message_send_ends_promptly_when_the_worker_asks_a_question() {
     // The worker is still parked on its question; dropping it closes the
     // socket, which is what a reaped worker's exit does in production.
     drop(stub_task.await.unwrap());
-    harness.await_deregistration("stub-worker").await;
+    harness.await_deregistration(&name).await;
 }
 
 /// The card a participant published at registration is served at its
@@ -516,13 +549,14 @@ async fn message_send_ends_promptly_when_the_worker_asks_a_question() {
 #[tokio::test]
 async fn a_participants_card_is_served_and_lists_it_on_the_aggregated_card() {
     let harness = Harness::start().await;
-    let _stub = StubParticipant::register(&harness.socket, "stub-worker").await;
+    let _stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    let name = _stub.name.clone();
 
     let card = A2aClient::new()
-        .fetch_agent_card(&harness.agent("stub-worker"))
+        .fetch_agent_card(&harness.agent(&name))
         .await
         .expect("the participant's card is served");
-    assert_eq!(card.name, "stub-worker");
+    assert_eq!(card.name, name);
     assert_eq!(card.description, "a stub worker");
     assert_eq!(card.skills, vec!["echo".to_string()]);
     assert!(
@@ -543,7 +577,7 @@ async fn a_participants_card_is_served_and_lists_it_on_the_aggregated_card() {
         .filter_map(|a| a["name"].as_str())
         .collect();
     assert!(
-        names.contains(&"stub-worker"),
+        names.contains(&name.as_str()),
         "the gateway's aggregated card lists what it can address: {names:?}"
     );
 }
@@ -555,8 +589,6 @@ async fn a_participants_card_is_served_and_lists_it_on_the_aggregated_card() {
 async fn several_virtual_agents_are_each_served_by_name_and_all_listed() {
     use chatty_protocol_gateway::participant::LocalRunner;
 
-    let dir = tempfile::tempdir().expect("a temp dir for the socket");
-    let socket = dir.path().join("participants.sock");
     let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
     let modules = Arc::new(RwLock::new(
         ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
@@ -569,7 +601,7 @@ async fn several_virtual_agents_are_each_served_by_name_and_all_listed() {
             "Model: gemma. Tool groups disabled: fs-write, shell, git.",
         ),
     ] {
-        let runner = LocalRunner::new("/bin/sh", &socket, gateway.participants())
+        let runner = LocalRunner::new("/bin/sh", gateway.participants())
             .with_agent_name(name)
             .with_description(description);
         gateway = gateway.with_virtual_agent(Arc::new(runner));
@@ -628,15 +660,19 @@ async fn several_virtual_agents_are_each_served_by_name_and_all_listed() {
 #[tokio::test]
 async fn closing_the_socket_deregisters_the_participant() {
     let harness = Harness::start().await;
-    let stub = StubParticipant::register(&harness.socket, "stub-worker").await;
-    assert!(harness.participants.is_registered("stub-worker"));
+    let stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    let name = stub.name.clone();
+    assert_eq!(name, "stub-worker-0");
+    assert!(harness.participants.is_registered(&name));
 
     drop(stub);
-    harness.await_deregistration("stub-worker").await;
+    harness.await_deregistration(&name).await;
 
-    // And the name is free again, so a replacement worker can take it.
-    let _replacement = StubParticipant::register(&harness.socket, "stub-worker").await;
-    assert!(harness.participants.is_registered("stub-worker"));
+    // A replacement is a new node with a new name: a name that has meant one
+    // node never means another (ADR-0020).
+    let replacement = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    assert_eq!(replacement.name, "stub-worker-1");
+    assert!(!harness.participants.is_registered(&name));
 }
 
 /// A participant that dies mid-task fails that task rather than leaving the
@@ -644,7 +680,8 @@ async fn closing_the_socket_deregisters_the_participant() {
 #[tokio::test]
 async fn a_participant_that_dies_mid_task_fails_its_open_task() {
     let harness = Harness::start().await;
-    let mut stub = StubParticipant::register(&harness.socket, "flaky-worker").await;
+    let mut stub = StubParticipant::connect(&harness.participants, "flaky-worker").await;
+    let name = stub.name.clone();
 
     let stub_task = tokio::spawn(async move {
         let task = stub.next_frame().await;
@@ -662,7 +699,7 @@ async fn a_participant_that_dies_mid_task_fails_its_open_task() {
 
     let client = A2aClient::new();
     let mut stream = client
-        .send_message_stream(&harness.agent("flaky-worker"), "run something")
+        .send_message_stream(&harness.agent(&name), "run something")
         .await
         .unwrap();
 
@@ -688,35 +725,153 @@ async fn a_participant_that_dies_mid_task_fails_its_open_task() {
         message.unwrap_or_default().contains("disconnected"),
         "the caller is told why, not just that"
     );
-    harness.await_deregistration("flaky-worker").await;
+    harness.await_deregistration(&name).await;
 }
 
-/// A second participant may not take a name that is already claimed: the
-/// first one's open tasks would be stranded.
-#[tokio::test]
-async fn a_duplicate_name_is_rejected_on_the_socket() {
-    let harness = Harness::start().await;
-    let _first = StubParticipant::register(&harness.socket, "stub-worker").await;
-
-    let stream = UnixStream::connect(&harness.socket).await.unwrap();
+/// Read the shared socket's answer to `first_line`: an `error` frame, then
+/// the connection closed.
+async fn shared_socket_reply(socket: &PathBuf, first_line: &str) -> Value {
+    let stream = UnixStream::connect(socket).await.unwrap();
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
-    write
-        .write_all(b"{\"type\":\"register\",\"card\":{\"name\":\"stub-worker\"}}\n")
-        .await
-        .unwrap();
+    write.write_all(first_line.as_bytes()).await.unwrap();
+    write.write_all(b"\n").await.unwrap();
 
-    let reply: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    assert_eq!(reply["type"], "rejected");
+    let reply: Value = serde_json::from_str(
+        &lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("the socket answers before it closes"),
+    )
+    .unwrap();
     assert!(
-        reply["reason"]
+        lines.next_line().await.unwrap().is_none(),
+        "and then closes the connection"
+    );
+    reply
+}
+
+/// ADR-0020, invariant 1: nothing registers on the shared socket — not a v1
+/// `register` for a name the broker is about to hand out, not a v2 `hello`
+/// — and the name stays the broker's to give.
+#[tokio::test]
+async fn nothing_registers_on_the_shared_socket() {
+    let harness = Harness::start().await;
+
+    let v1 = shared_socket_reply(
+        &harness.socket,
+        r#"{"type":"register","card":{"name":"stub-worker-0"}}"#,
+    )
+    .await;
+    assert_eq!(v1["v"], 2);
+    assert_eq!(v1["type"], "error");
+    assert!(v1["reason"].as_str().unwrap().contains("v2"), "{v1}");
+
+    let hello = shared_socket_reply(
+        &harness.socket,
+        r#"{"v":2,"type":"hello","card":{"name":"stub-worker-0"}}"#,
+    )
+    .await;
+    assert_eq!(hello["type"], "error");
+    assert!(
+        hello["reason"]
             .as_str()
             .unwrap()
-            .contains("already registered"),
-        "{reply}"
+            .contains("made by the broker"),
+        "{hello}"
     );
-    assert!(harness.participants.is_registered("stub-worker"));
+
+    assert!(harness.participants.names().is_empty());
+    let stub = StubParticipant::connect(&harness.participants, "stub-worker").await;
+    assert_eq!(stub.name, "stub-worker-0", "the name was never taken");
 }
+
+/// ADR-0020, invariant 3: the name in a registering card has no effect. A
+/// v2 worker whose card says `evil` is admitted, listed and served under
+/// the name the broker assigned.
+#[tokio::test]
+async fn card_name_is_ignored() {
+    let harness = Harness::start().await;
+    let connection = open_connection(&harness.participants, "local-coder").unwrap();
+    let assigned = connection.name.clone();
+    let mut stub = StubParticipant::over(connection.worker_end, "evil").await;
+
+    let welcome = stub.next_frame().await;
+    assert_eq!(welcome["type"], "welcome");
+    assert_eq!(welcome["name"], "local-coder-0");
+    assert_eq!(welcome["name"], assigned);
+    assert_eq!(welcome["scope"], "root");
+    assert!(welcome["owner"].is_null(), "the root asked for it");
+
+    assert_eq!(harness.participants.names(), vec![assigned.clone()]);
+    assert!(!harness.participants.is_registered("evil"));
+    let card = A2aClient::new()
+        .fetch_agent_card(&harness.agent(&assigned))
+        .await
+        .expect("the card is served under the assigned name");
+    assert_eq!(card.name, "local-coder-0");
+    assert_eq!(
+        card.description, "a stub worker",
+        "the rest of the card stands"
+    );
+    let status = reqwest::get(format!(
+        "{}/a2a/evil/.well-known/agent.json",
+        harness.base_url
+    ))
+    .await
+    .unwrap()
+    .status();
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "`evil` is nobody");
+}
+
+/// A frame without `v` gets an error frame naming v2 and the connection is
+/// closed — as a worker's first frame, and mid-session.
+#[tokio::test]
+async fn v1_frame_is_refused() {
+    let harness = Harness::start().await;
+
+    // A v1 `register` on a broker-made connection.
+    let connection = open_connection(&harness.participants, "old-worker").unwrap();
+    let name = connection.name.clone();
+    connection.worker_end.set_nonblocking(true).unwrap();
+    let (read, mut write) = UnixStream::from_std(connection.worker_end)
+        .unwrap()
+        .into_split();
+    let mut lines = BufReader::new(read).lines();
+    write
+        .write_all(b"{\"type\":\"register\",\"card\":{\"name\":\"old-worker\"}}\n")
+        .await
+        .unwrap();
+    let reply: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(reply["v"], 2);
+    assert_eq!(reply["type"], "error");
+    assert!(reply["reason"].as_str().unwrap().contains("v2"), "{reply}");
+    assert!(lines.next_line().await.unwrap().is_none(), "then closed");
+    assert!(!harness.participants.is_registered(&name));
+
+    // A welcomed worker that drops `v` from a later frame is closed too.
+    let mut stub = StubParticipant::connect(&harness.participants, "drifting-worker").await;
+    let name = stub.name.clone();
+    stub.send_raw(json!({ "type": "status", "taskId": "t", "state": "working" }))
+        .await;
+    let reply = stub.next_frame().await;
+    assert_eq!(reply["type"], "error");
+    assert!(reply["reason"].as_str().unwrap().contains("v2"), "{reply}");
+    assert!(stub.next_line().await.is_none(), "then closed");
+    harness.await_deregistration(&name).await;
+}
+
+/// A stand-in worker in `sh`, on the connection the runner hands it at
+/// descriptor 3: it says hello, reads its welcome and its task, answers
+/// `done`, and waits to be reaped.
+const ANSWERING_WORKER: &str = r#"printf '{"v":2,"type":"hello"}\n' >&3
+read -r welcome <&3
+read -r task <&3
+id=$(printf '%s' "$task" | sed 's/.*"taskId":"\([^"]*\)".*/\1/')
+printf '{"v":2,"type":"artifact","taskId":"%s","text":"done","lastChunk":true}\n' "$id" >&3
+printf '{"v":2,"type":"status","taskId":"%s","state":"completed"}\n' "$id" >&3
+exec sleep 30"#;
 
 /// The evidence block a stand-in runner hands back (AGE-406).
 const EVIDENCE_BLOCK: &str = "\n\n```evidence\nbranch: sub-agent/local-agent-0\ncommits: 2\n```";
@@ -729,27 +884,20 @@ const EVIDENCE_BLOCK: &str = "\n\n```evidence\nbranch: sub-agent/local-agent-0\n
 /// Collecting it from git is `chatty_core::services::worker_tree`'s own
 /// tests, and both ends together are `chatty-tui`'s
 /// `participant::equivalence`.
-async fn start_evidence_runner() -> (tempfile::TempDir, PathBuf, String) {
+async fn start_evidence_runner() -> (tempfile::TempDir, String) {
     use chatty_protocol_gateway::participant::{LocalRunner, TaskEvidence, WorkerWorkspace};
 
-    let dir = tempfile::tempdir().expect("a temp dir for the socket");
-    let socket = dir.path().join("participants.sock");
+    let dir = tempfile::tempdir().expect("a temp dir for the worker");
     let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
     let modules = Arc::new(RwLock::new(
         ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
     ));
     let mut gateway = ProtocolGateway::new(modules, 0);
     let participants = gateway.participants();
-    let listener =
-        chatty_protocol_gateway::participant::bind(&socket).expect("the participant socket binds");
-    tokio::spawn(chatty_protocol_gateway::participant::serve(
-        listener,
-        participants.clone(),
-    ));
 
     let cwd = dir.path().to_path_buf();
-    let runner = LocalRunner::new("/bin/sh", &socket, participants.clone())
-        .with_args(["-c", "sleep 30"])
+    let runner = LocalRunner::new("/bin/sh", participants.clone())
+        .with_args(["-c", ANSWERING_WORKER])
         .with_registration_timeout(Duration::from_secs(5))
         .with_workspace_factory(Arc::new(move |_worker: String| {
             let cwd = cwd.clone();
@@ -783,7 +931,7 @@ async fn start_evidence_runner() -> (tempfile::TempDir, PathBuf, String) {
         axum::serve(tcp, router).await.ok();
     });
 
-    (dir, socket, base_url)
+    (dir, base_url)
 }
 
 /// ADR-0011 C12 / AGE-406, Do item 4, on `message/send`: the envelope is a
@@ -791,13 +939,7 @@ async fn start_evidence_runner() -> (tempfile::TempDir, PathBuf, String) {
 /// answer, so a trace — or Harbor's ATIF — reads it without parsing prose.
 #[tokio::test]
 async fn message_send_carries_the_evidence_envelope_as_prose_and_as_a_field() {
-    let (_dir, socket, base_url) = start_evidence_runner().await;
-
-    // The runner names its first worker deterministically, so a stub can
-    // claim the name before the task is sent — the same split `runner.rs`'s
-    // own tests use.
-    let mut stub = StubParticipant::register(&socket, "local-agent-0").await;
-    tokio::spawn(async move { stub.answer_one_task("done").await });
+    let (_dir, base_url) = start_evidence_runner().await;
 
     let response: Value = reqwest::Client::new()
         .post(format!("{base_url}/a2a/local-agent"))
@@ -829,10 +971,7 @@ async fn message_send_carries_the_evidence_envelope_as_prose_and_as_a_field() {
 /// and the block arrives as the artifact chunk ahead of it.
 #[tokio::test]
 async fn message_stream_carries_the_evidence_envelope_on_its_final_status() {
-    let (_dir, socket, base_url) = start_evidence_runner().await;
-
-    let mut stub = StubParticipant::register(&socket, "local-agent-0").await;
-    tokio::spawn(async move { stub.answer_one_task("done").await });
+    let (_dir, base_url) = start_evidence_runner().await;
 
     let client = A2aClient::new();
     let mut stream = client

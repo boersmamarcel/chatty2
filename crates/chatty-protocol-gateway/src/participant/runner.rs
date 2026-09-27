@@ -2,11 +2,11 @@
 //!
 //! ADR-0011's C2. The broker publishes *virtual* agents — `local-agent` by
 //! default; a named team of them under C10 — each of which is not a
-//! connected process but a factory: a task addressed to it spawns a child,
-//! waits for that child to register over the participant socket, and routes
-//! the task to it. To the caller it is an A2A agent like any other, which is
-//! the whole point: one fan-out path for the parent, whoever ends up serving
-//! the task. Two runners differ only in name and argv (`--model`,
+//! connected process but a factory: a task addressed to it admits a node,
+//! makes a socket pair for it, spawns a child holding one end, waits for
+//! that child's `hello`, and routes the task to it (ADR-0020). To the caller
+//! it is an A2A agent like any other, which is the whole point: one fan-out
+//! path for the parent, whoever ends up serving the task. Two runners differ only in name and argv (`--model`,
 //! `--disable`), so one binary serves every role.
 //!
 //! # Lifetime
@@ -26,11 +26,11 @@
 //! directory.
 
 use std::future::Future;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -41,6 +41,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 use super::budget::{EndpointBudget, EndpointPermit};
+use super::listener::{LocalConnection, open_connection};
 use super::protocol::{CALLER_ENV, DelegatedTask, ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
 use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
@@ -95,13 +96,20 @@ pub type WorkspaceFuture = Pin<Box<dyn Future<Output = Result<Option<WorkerWorks
 /// open question).
 pub type WorkspaceFactory = Arc<dyn Fn(String) -> WorkspaceFuture + Send + Sync + 'static>;
 
-/// How long a child gets to connect and register before the task fails.
+/// The descriptor a worker finds its connection on. The runner places the
+/// worker's end of the socket pair there in the child, between fork and
+/// exec, and says so with `--participant-fd`. Fixed rather than whatever the
+/// parent's descriptor happened to be, so a stand-in worker written in `sh`
+/// can speak on it (`>&3`).
+pub const PARTICIPANT_FD: RawFd = 3;
+
+/// How long a child gets to say hello before the task fails.
 ///
 /// Generous, because it covers process start-up on a cold page cache; a real
 /// hang is caught by the caller's own HTTP timeout, not by shaving this.
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the runner checks whether the child has registered yet.
+/// How often the runner checks whether the child has said hello yet.
 const REGISTRATION_POLL: Duration = Duration::from_millis(5);
 
 /// How much of a worker's stderr to keep for an error message.
@@ -117,7 +125,6 @@ pub struct LocalRunner {
     agent_name: String,
     description: String,
     executable: PathBuf,
-    socket: PathBuf,
     /// Extra arguments every child gets — the model id, `--auto-approve`.
     args: Vec<String>,
     workspace: Option<WorkspaceFactory>,
@@ -125,18 +132,13 @@ pub struct LocalRunner {
     /// The model endpoint its workers use, and the budget that meters it.
     /// `None` leaves the runner unmetered.
     endpoint: Option<(String, EndpointBudget)>,
-    seq: AtomicU64,
     registration_timeout: Duration,
 }
 
 impl LocalRunner {
-    /// `executable` is the chatty binary to spawn; `socket` is the path its
-    /// children register on, which must be the one the gateway is serving.
-    pub fn new(
-        executable: impl Into<PathBuf>,
-        socket: impl Into<PathBuf>,
-        registry: ParticipantRegistry,
-    ) -> Self {
+    /// `executable` is the chatty binary to spawn; `registry` is the one the
+    /// gateway serves, so a spawned worker is reachable by name.
+    pub fn new(executable: impl Into<PathBuf>, registry: ParticipantRegistry) -> Self {
         Self {
             agent_name: "local-agent".to_string(),
             description: "A chatty agent in its own process, with its own \
@@ -144,12 +146,10 @@ impl LocalRunner {
                           task to it and it works autonomously and reports back."
                 .to_string(),
             executable: executable.into(),
-            socket: socket.into(),
             args: Vec::new(),
             workspace: None,
             registry,
             endpoint: None,
-            seq: AtomicU64::new(0),
             registration_timeout: REGISTRATION_TIMEOUT,
         }
     }
@@ -199,7 +199,7 @@ impl LocalRunner {
         self
     }
 
-    /// How long a child gets to connect and register before the task fails.
+    /// How long a child gets to say hello before the task fails.
     /// Defaults to [`REGISTRATION_TIMEOUT`].
     pub fn with_registration_timeout(mut self, timeout: Duration) -> Self {
         self.registration_timeout = timeout;
@@ -210,8 +210,9 @@ impl LocalRunner {
         &self.agent_name
     }
 
-    /// The registry its workers register in — the same one the gateway
-    /// serves, so a spawned worker is reachable by name like any other.
+    /// The registry its workers' connections are registered in — the same
+    /// one the gateway serves, so a spawned worker is reachable by name like
+    /// any other.
     pub fn registry(&self) -> &ParticipantRegistry {
         &self.registry
     }
@@ -277,11 +278,13 @@ impl LocalRunner {
             None => None,
         };
 
-        let name = format!(
-            "{}-{}",
-            self.agent_name,
-            self.seq.fetch_add(1, Ordering::Relaxed)
-        );
+        // The broker names the node and makes its connection; the child
+        // gets the other end and nothing to claim (ADR-0020). Dropping
+        // `worker_end` on any early return below closes the connection,
+        // which abandons the node.
+        let LocalConnection { name, worker_end } =
+            open_connection(&self.registry, &self.agent_name)
+                .context("failed to make a connection for a worker")?;
 
         let workspace = match self.workspace.as_ref() {
             Some(factory) => factory(name.clone())
@@ -290,7 +293,10 @@ impl LocalRunner {
             None => None,
         };
 
-        let mut child = self.spawn(&name, &caller_token, workspace.as_ref())?;
+        let mut child = self.spawn(&name, &caller_token, &worker_end, workspace.as_ref())?;
+        // The child holds its copy. The broker must not keep one: a dead
+        // child has to read as a closed connection.
+        drop(worker_end);
         let stderr_tail = Arc::new(Mutex::new(String::new()));
         let stderr_drain = drain_stderr(&mut child, stderr_tail.clone());
         let mut worker = Worker {
@@ -321,15 +327,21 @@ impl LocalRunner {
         &self,
         name: &str,
         caller_token: &str,
+        worker_end: &std::os::unix::net::UnixStream,
         workspace: Option<&WorkerWorkspace>,
     ) -> Result<Child> {
+        let fd = worker_end.as_raw_fd();
+        if fd <= 2 {
+            // The child's stdio is set up before `pre_exec` runs and would
+            // overwrite it. Only a parent running with a closed stdio
+            // descriptor gets here.
+            bail!("the worker's connection landed on stdio descriptor {fd}");
+        }
         let mut cmd = Command::new(&self.executable);
         cmd.args(&self.args)
             .env(CALLER_ENV, caller_token)
-            .arg("--participant-socket")
-            .arg(&self.socket)
-            .arg("--participant-name")
-            .arg(name)
+            .arg("--participant-fd")
+            .arg(PARTICIPANT_FD.to_string())
             .stdin(std::process::Stdio::null())
             // The answer comes back over the socket, so the child's stdout is
             // redundant; discarded rather than piped, so there is one less
@@ -348,12 +360,20 @@ impl LocalRunner {
                 .arg(&workspace.cwd);
         }
 
+        // SAFETY: the closure runs in the child between fork and exec, where
+        // only async-signal-safe calls are allowed; it makes two (`dup2`,
+        // `fcntl`) and touches no memory the parent's other threads could
+        // have been holding a lock on.
+        unsafe {
+            cmd.pre_exec(move || place_participant_fd(fd));
+        }
+
         debug!(worker = %name, exe = ?self.executable, "Spawning a local worker");
         cmd.spawn()
             .with_context(|| format!("failed to spawn {}", self.executable.display()))
     }
 
-    /// Wait for the child to register, or fail with why it did not.
+    /// Wait for the child's `hello`, or fail with why it did not come.
     async fn await_registration(&self, worker: &mut Worker) -> Result<()> {
         let deadline = tokio::time::Instant::now() + self.registration_timeout;
 
@@ -389,6 +409,27 @@ impl LocalRunner {
             tokio::time::sleep(REGISTRATION_POLL).await;
         }
     }
+}
+
+/// In the child, between fork and exec: put the worker's end of the socket
+/// pair at [`PARTICIPANT_FD`] and let it survive the exec. Every other copy
+/// of it is close-on-exec, so this is the only process that inherits it.
+fn place_participant_fd(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: plain descriptor syscalls on descriptors this process owns.
+    unsafe {
+        if fd != PARTICIPANT_FD && libc::dup2(fd, PARTICIPANT_FD) == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // `dup2` clears close-on-exec on the copy, but a descriptor that was
+        // already at `PARTICIPANT_FD` still has it, so clear it either way.
+        let flags = libc::fcntl(PARTICIPANT_FD, libc::F_GETFD);
+        if flags == -1
+            || libc::fcntl(PARTICIPANT_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// A slot on `endpoint` for a task `caller` asked for.
@@ -590,9 +631,7 @@ fn drain_stderr(child: &mut Child, tail: Arc<Mutex<String>>) -> Option<JoinHandl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::participant::protocol::BrokerFrame;
-    use std::sync::atomic::AtomicBool;
-    use tokio::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A "chatty binary" that ignores the flags the runner appends: `sh -c`
     /// turns anything after the command into positional parameters, so the
@@ -606,51 +645,93 @@ mod tests {
 
     fn runner(registry: ParticipantRegistry, script: &str) -> LocalRunner {
         let (exe, args) = fake_binary(script);
-        LocalRunner::new(exe, "/nonexistent/participants.sock", registry)
+        LocalRunner::new(exe, registry)
             .with_args(args)
             .with_registration_timeout(Duration::from_secs(5))
     }
 
-    /// Register `name` once it appears, standing in for a child that
-    /// connected over the socket.
-    fn register_when_asked(
-        registry: ParticipantRegistry,
-        name: &str,
-    ) -> mpsc::UnboundedReceiver<BrokerFrame> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        registry
-            .register(
-                ParticipantCard {
-                    name: name.to_string(),
-                    ..Default::default()
-                },
-                chatty_fabric::AgentOrigin::Local,
-                tx,
-            )
-            .expect("the stand-in worker registers");
-        rx
+    /// A stand-in worker's script: say hello on the connection the runner
+    /// handed it, then `then`.
+    fn hello(then: &str) -> String {
+        format!("printf '{{\"v\":2,\"type\":\"hello\"}}\\n' >&{PARTICIPANT_FD}; {then}")
+    }
+
+    /// A stand-in that says hello and then waits, like a worker mid-task.
+    /// `exec`, so the process the runner reaps is the one holding the
+    /// connection.
+    fn waiting_worker() -> String {
+        hello("exec sleep 30")
+    }
+
+    /// Every line the broker sent a stand-in that copies its connection to
+    /// `path`, once one of them contains `needle`.
+    async fn frames_containing(path: &std::path::Path, needle: &str) -> Vec<serde_json::Value> {
+        for _ in 0..500 {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            if text.contains(needle) {
+                return text
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("the broker sends JSON"))
+                    .collect();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the stand-in never received a frame containing {needle}");
     }
 
     #[tokio::test]
-    async fn a_registered_worker_is_handed_the_task() {
+    async fn a_worker_that_says_hello_is_welcomed_by_name_and_handed_the_task() {
         let registry = ParticipantRegistry::new();
-        let runner = runner(registry.clone(), "sleep 30");
-
-        // The name is allocated before the spawn, so a stand-in can claim it.
-        let mut outbound = register_when_asked(registry.clone(), "local-agent-0");
+        let dir = tempfile::tempdir().unwrap();
+        let frames = dir.path().join("frames");
+        let runner = runner(
+            registry.clone(),
+            &hello(&format!(
+                "exec cat <&{PARTICIPANT_FD} > '{}'",
+                frames.display()
+            )),
+        );
 
         let (worker, _updates) = runner
             .run_task(DelegatedTask::new("summarise foo.rs"))
             .await
-            .expect("the worker registered, so the task is delegated");
+            .expect("the worker said hello, so the task is delegated");
 
-        assert_eq!(worker.name(), "local-agent-0");
-        assert!(worker.task_id().is_some());
-        let BrokerFrame::Task { text, task_id, .. } = outbound.recv().await.unwrap() else {
-            panic!("the worker is sent a task frame");
-        };
-        assert_eq!(text, "summarise foo.rs");
-        assert_eq!(Some(task_id.as_str()), worker.task_id());
+        assert_eq!(worker.name(), "local-agent-0", "the broker names it");
+        assert!(registry.is_registered("local-agent-0"));
+        let frames = frames_containing(&frames, "summarise foo.rs").await;
+        assert_eq!(frames[0]["v"], 2);
+        assert_eq!(frames[0]["type"], "welcome");
+        assert_eq!(frames[0]["name"], "local-agent-0");
+        assert_eq!(frames[1]["type"], "task", "the welcome comes first");
+        assert_eq!(frames[1]["text"], "summarise foo.rs");
+        assert_eq!(frames[1]["taskId"].as_str(), worker.task_id());
+    }
+
+    /// The child gets its end of the connection at `PARTICIPANT_FD`, open
+    /// across the exec, and is told where with `--participant-fd`.
+    #[tokio::test]
+    async fn the_child_is_told_its_descriptor_and_finds_a_socket_there() {
+        let registry = ParticipantRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        let runner = runner(
+            registry,
+            &format!(
+                "printf '%s|' \"$0 $*\" > '{out}'; [ -S /dev/fd/{PARTICIPANT_FD} ] && echo socket >> '{out}'; {}",
+                waiting_worker(),
+                out = out.display(),
+            ),
+        );
+
+        let _worker = runner.run_task(DelegatedTask::new("x")).await.unwrap();
+        let out = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            out.contains(&format!("--participant-fd {PARTICIPANT_FD}|")),
+            "{out}"
+        );
+        assert!(out.ends_with("socket\n"), "{out}");
+        assert!(!out.contains("--participant-name"), "{out}");
     }
 
     #[tokio::test]
@@ -693,7 +774,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let released = Arc::new(AtomicBool::new(false));
 
-        let runner = runner(registry.clone(), "sleep 30").with_workspace_factory({
+        let runner = runner(registry.clone(), &waiting_worker()).with_workspace_factory({
             let cwd = dir.path().to_path_buf();
             let released = released.clone();
             Arc::new(move |worker: String| {
@@ -711,7 +792,6 @@ mod tests {
                 })
             })
         });
-        let _outbound = register_when_asked(registry, "local-agent-0");
 
         let (worker, _updates) = runner.run_task(DelegatedTask::new("work")).await.unwrap();
         assert!(
@@ -729,7 +809,7 @@ mod tests {
     #[tokio::test]
     async fn a_failing_workspace_fails_the_task_rather_than_running_unisolated() {
         let registry = ParticipantRegistry::new();
-        let runner = runner(registry, "sleep 30").with_workspace_factory(Arc::new(|_| {
+        let runner = runner(registry, &waiting_worker()).with_workspace_factory(Arc::new(|_| {
             Box::pin(async { Err(anyhow!("the worktree could not be created")) })
         }));
 
@@ -743,21 +823,23 @@ mod tests {
     #[tokio::test]
     async fn dropping_a_worker_cancels_its_task() {
         let registry = ParticipantRegistry::new();
-        let runner = runner(registry.clone(), "sleep 30");
-        let mut outbound = register_when_asked(registry.clone(), "local-agent-0");
+        let runner = runner(registry.clone(), &waiting_worker());
 
         let (worker, mut updates) = runner.run_task(DelegatedTask::new("work")).await.unwrap();
-        let _ = outbound.recv().await;
         assert_eq!(registry.open_task_count("local-agent-0"), 1);
 
         drop(worker);
 
-        assert!(matches!(
-            outbound.recv().await,
-            Some(BrokerFrame::Cancel { .. })
-        ));
         assert_eq!(registry.open_task_count("local-agent-0"), 0);
         assert!(updates.recv().await.is_none(), "the caller's stream ends");
+        // The reaped child's end closes, which deregisters the node.
+        for _ in 0..500 {
+            if !registry.is_registered("local-agent-0") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the reaped worker is still registered");
     }
 
     /// AGE-305's verification: a budget of two, three delegated tasks, and
@@ -769,13 +851,9 @@ mod tests {
         let registry = ParticipantRegistry::new();
         let budget = EndpointBudget::new(2);
         let runner = Arc::new(
-            runner(registry.clone(), "sleep 30").with_endpoint_budget(ENDPOINT, budget.clone()),
+            runner(registry.clone(), &waiting_worker())
+                .with_endpoint_budget(ENDPOINT, budget.clone()),
         );
-        // Stand-ins for the three children the runner would spawn, named in
-        // the order it allocates names.
-        let _outbound: Vec<_> = (0..3)
-            .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
-            .collect();
 
         let first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
         let second = runner.run_task(DelegatedTask::new("b")).await.unwrap();
@@ -813,10 +891,7 @@ mod tests {
     #[tokio::test]
     async fn an_unmetered_runner_spawns_without_waiting() {
         let registry = ParticipantRegistry::new();
-        let runner = runner(registry.clone(), "sleep 30");
-        let _outbound: Vec<_> = (0..2)
-            .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
-            .collect();
+        let runner = runner(registry.clone(), &waiting_worker());
 
         let _first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
         let second = tokio::time::timeout(
@@ -832,7 +907,7 @@ mod tests {
 
     #[test]
     fn the_agent_card_describes_the_worker_it_would_spawn() {
-        let runner = LocalRunner::new("/bin/sh", "/tmp/x.sock", ParticipantRegistry::new());
+        let runner = LocalRunner::new("/bin/sh", ParticipantRegistry::new());
         let card = runner.agent_card();
         assert_eq!(card.name, "local-agent");
         assert_eq!(card.skills[0].name, "delegate");
@@ -843,7 +918,7 @@ mod tests {
     /// and the text that says what its workers run.
     #[test]
     fn a_named_runner_serves_its_own_name_and_description() {
-        let runner = LocalRunner::new("/bin/sh", "/tmp/x.sock", ParticipantRegistry::new())
+        let runner = LocalRunner::new("/bin/sh", ParticipantRegistry::new())
             .with_agent_name("local-reviewer")
             .with_description("Model: gemma. Tool groups disabled: fs-write.");
         let card = runner.agent_card();
@@ -861,16 +936,12 @@ mod tests {
     async fn runners_on_different_endpoints_hold_independent_permits() {
         let registry = ParticipantRegistry::new();
         let budget = EndpointBudget::new(1);
-        let coder = runner(registry.clone(), "sleep 30")
+        let coder = runner(registry.clone(), &waiting_worker())
             .with_agent_name("local-coder")
             .with_endpoint_budget("http://localhost:11434", budget.clone());
-        let reviewer = runner(registry.clone(), "sleep 30")
+        let reviewer = runner(registry.clone(), &waiting_worker())
             .with_agent_name("local-reviewer")
             .with_endpoint_budget("http://other:8000/v1", budget.clone());
-        let _outbound = [
-            register_when_asked(registry.clone(), "local-coder-0"),
-            register_when_asked(registry.clone(), "local-reviewer-0"),
-        ];
 
         let first = coder.run_task(DelegatedTask::new("code")).await.unwrap();
         assert_eq!(budget.in_flight("http://localhost:11434"), 1);
@@ -895,18 +966,14 @@ mod tests {
 
         let registry = ParticipantRegistry::new();
         let budget = EndpointBudget::new(1);
-        let coder = runner(registry.clone(), "sleep 30")
+        let coder = runner(registry.clone(), &waiting_worker())
             .with_agent_name("local-coder")
             .with_endpoint_budget(ENDPOINT, budget.clone());
         let reviewer = Arc::new(
-            runner(registry.clone(), "sleep 30")
+            runner(registry.clone(), &waiting_worker())
                 .with_agent_name("local-reviewer")
                 .with_endpoint_budget(ENDPOINT, budget.clone()),
         );
-        let _outbound = [
-            register_when_asked(registry.clone(), "local-coder-0"),
-            register_when_asked(registry.clone(), "local-reviewer-0"),
-        ];
 
         let first = coder.run_task(DelegatedTask::new("code")).await.unwrap();
         assert_eq!(budget.in_flight(ENDPOINT), 1, "the one slot is spent");
@@ -938,8 +1005,9 @@ mod tests {
         runner(
             registry,
             &format!(
-                "printf %s \"${CALLER_ENV}\" > '{}'; sleep 30",
-                out.display()
+                "printf %s \"${CALLER_ENV}\" > '{}'; {}",
+                out.display(),
+                waiting_worker()
             ),
         )
     }
@@ -969,7 +1037,6 @@ mod tests {
         let budget = EndpointBudget::new(1);
         let runner = token_writing_runner(registry.clone(), &token_file)
             .with_endpoint_budget(ENDPOINT, budget.clone());
-        let _outbound = register_when_asked(registry.clone(), "local-agent-0");
 
         let parent = runner.run_task(DelegatedTask::new("a")).await.unwrap();
         let token = token_written_to(&token_file).await;
@@ -1003,9 +1070,6 @@ mod tests {
         let budget = EndpointBudget::new(2);
         let runner = token_writing_runner(registry.clone(), &token_file)
             .with_endpoint_budget(ENDPOINT, budget.clone());
-        let _outbound: Vec<_> = (0..2)
-            .map(|i| register_when_asked(registry.clone(), &format!("local-agent-{i}")))
-            .collect();
 
         let _parent = runner.run_task(DelegatedTask::new("a")).await.unwrap();
         let token = token_written_to(&token_file).await;
@@ -1028,9 +1092,9 @@ mod tests {
         let registry = ParticipantRegistry::new();
         let budget = EndpointBudget::new(1);
         let runner = Arc::new(
-            runner(registry.clone(), "sleep 30").with_endpoint_budget(ENDPOINT, budget.clone()),
+            runner(registry.clone(), &waiting_worker())
+                .with_endpoint_budget(ENDPOINT, budget.clone()),
         );
-        let _outbound = register_when_asked(registry.clone(), "local-agent-0");
         let _first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
 
         let second = tokio::spawn({
