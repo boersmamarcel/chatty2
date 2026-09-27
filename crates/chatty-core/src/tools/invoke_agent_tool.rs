@@ -9,8 +9,8 @@ use crate::models::clarification_store::{PendingClarifications, request_clarific
 use crate::models::message_types::ToolSource;
 use crate::models::token_usage::TokenUsage;
 use crate::services::a2a_client::{
-    A2aClarificationRequest, A2aClient, A2aStreamEvent, trace_from_status_metadata,
-    usage_from_status_metadata,
+    A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
+    trace_from_status_metadata, usage_from_status_metadata,
 };
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
@@ -88,6 +88,14 @@ pub struct InvokeAgentOutput {
     /// costs no more context than it did before this field existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
+    /// The worker's captured conversation (RC-0, AGE-649), when its terminal
+    /// status carried one. Test-support only for now: nothing sets the
+    /// broker-side capture flag outside a test, and nothing here reads this
+    /// field back into a session; RC-3 is what a leader does with it.
+    /// Absent from the JSON the model sees otherwise, for the same reason
+    /// `trace` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<serde_json::Value>,
 }
 
 /// Error type for invoke_agent tool
@@ -495,6 +503,7 @@ impl InvokeAgentTool {
         let mut error_msg = None;
         let mut usage = Vec::new();
         let mut trace = None;
+        let mut conversation = None;
 
         while let Some(event) = stream.next().await {
             match event {
@@ -534,11 +543,20 @@ impl InvokeAgentTool {
                         success = false;
                         error_msg = Some(e);
                         break;
-                    } else if state == "completed" && include_trace {
-                        // The worker's trace rides the same terminal status
-                        // as its usage (AGE-467); a failed task never
-                        // reaches this branch, so it never returns one.
-                        trace = trace_from_status_metadata(metadata.as_ref());
+                    } else if state == "completed" {
+                        if include_trace {
+                            // The worker's trace rides the same terminal
+                            // status as its usage (AGE-467); a failed task
+                            // never reaches this branch, so it never
+                            // returns one.
+                            trace = trace_from_status_metadata(metadata.as_ref());
+                        }
+                        // The worker's captured conversation rides the same
+                        // terminal status too (RC-0, AGE-649), read back
+                        // unconditionally: unlike the trace, capture is a
+                        // broker-side decision this call has no argument
+                        // for, so there is nothing here to gate it on.
+                        conversation = conversation_from_status_metadata(metadata.as_ref());
                     }
                     // An "input-required" without a request is an approval
                     // the worker is waiting on, which the worker settles
@@ -604,6 +622,7 @@ impl InvokeAgentTool {
             },
             success: true,
             trace,
+            conversation,
         })
     }
 }

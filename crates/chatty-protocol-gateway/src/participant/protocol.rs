@@ -165,6 +165,10 @@ pub struct DelegatedTask {
     /// to tell a worker delegating on its own model endpoint from any other
     /// caller (AGE-628), and it is not part of the task frame.
     pub caller: Option<String>,
+    /// Whether the worker should capture its conversation at this task's
+    /// terminal status (RC-0, AGE-649). Opt-in and off by default, so an
+    /// ordinary task's frames are unchanged.
+    pub capture_conversation: bool,
 }
 
 /// The header a broker worker's `invoke_agent` puts its caller token in, on
@@ -181,6 +185,7 @@ impl DelegatedTask {
             text: text.into(),
             bearer: None,
             caller: None,
+            capture_conversation: false,
         }
     }
 
@@ -191,6 +196,13 @@ impl DelegatedTask {
 
     pub fn with_bearer(mut self, bearer: Option<TaskBearer>) -> Self {
         self.bearer = bearer;
+        self
+    }
+
+    /// Ask the worker to capture its conversation at this task's terminal
+    /// status (RC-0, AGE-649).
+    pub fn with_capture_conversation(mut self, capture: bool) -> Self {
+        self.capture_conversation = capture;
         self
     }
 }
@@ -288,12 +300,17 @@ pub enum BrokerFrame {
     /// and end with a terminal state. `bearer` is the caller's token when
     /// they presented one (AGE-371); absent on the wire otherwise, so a
     /// broker and a worker from either side of that change still agree.
+    /// `captureConversation` asks the worker to attach its conversation to
+    /// the terminal status (RC-0, AGE-649); also absent on the wire when
+    /// `false`, for the same reason.
     #[serde(rename_all = "camelCase")]
     Task {
         task_id: String,
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bearer: Option<TaskBearer>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        capture_conversation: bool,
     },
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
@@ -415,6 +432,7 @@ mod tests {
             task_id: "task-1".into(),
             text: "do it".into(),
             bearer: None,
+            capture_conversation: false,
         })
         .unwrap();
         assert_eq!(json["type"], "task");
@@ -424,6 +442,10 @@ mod tests {
             json.get("bearer").is_none(),
             "a task without a bearer is the frame it was before AGE-371"
         );
+        assert!(
+            json.get("captureConversation").is_none(),
+            "a task that does not ask for capture is the frame it was before AGE-649"
+        );
     }
 
     #[test]
@@ -432,16 +454,48 @@ mod tests {
             task_id: "task-1".into(),
             text: "do it".into(),
             bearer: Some(TaskBearer::new("eyJ.token")),
+            capture_conversation: false,
         })
         .unwrap();
         assert_eq!(json["bearer"], "eyJ.token");
 
         let old: BrokerFrame =
             serde_json::from_str(r#"{"type":"task","taskId":"t","text":"x"}"#).unwrap();
-        let BrokerFrame::Task { bearer, .. } = old else {
+        let BrokerFrame::Task {
+            bearer,
+            capture_conversation,
+            ..
+        } = old
+        else {
             panic!("expected a task frame");
         };
         assert!(bearer.is_none());
+        assert!(
+            !capture_conversation,
+            "an old frame without the field means off"
+        );
+    }
+
+    #[test]
+    fn a_task_frame_carries_capture_conversation_and_reads_one_without() {
+        let json = serde_json::to_value(BrokerFrame::Task {
+            task_id: "task-1".into(),
+            text: "do it".into(),
+            bearer: None,
+            capture_conversation: true,
+        })
+        .unwrap();
+        assert_eq!(json["captureConversation"], true);
+
+        let back: BrokerFrame = serde_json::from_value(json).unwrap();
+        let BrokerFrame::Task {
+            capture_conversation,
+            ..
+        } = back
+        else {
+            panic!("expected a task frame");
+        };
+        assert!(capture_conversation);
     }
 
     #[test]
@@ -450,6 +504,7 @@ mod tests {
             task_id: "t".into(),
             text: "x".into(),
             bearer: Some(TaskBearer::new("secret-token")),
+            capture_conversation: false,
         };
         let printed = format!("{frame:?}");
         assert!(!printed.contains("secret-token"), "{printed}");

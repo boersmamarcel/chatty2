@@ -78,7 +78,8 @@ async fn my_swarm_feature() {
 - A worker is `worker_executable()`'s `chatty-tui` behind a two-line `sh`
   wrapper that only sets `HOME` and the XDG dirs to the kit's temp dir, so it
   never reads your real settings. `cargo test -p chatty-tui` builds the
-  binary (`tests/worker_binary.rs` is what makes it).
+  binary (`tests/worker_binary.rs` is what makes it); `CHATTY_WORKER_EXE`
+  overrides which binary `worker_executable()` picks.
 - `normalize` / `parent_trace` strip the temp dir, ports and uuids; request
   bodies are otherwise byte-stable run to run (`swarm_kit_is_deterministic`).
 

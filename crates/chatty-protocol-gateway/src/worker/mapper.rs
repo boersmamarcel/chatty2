@@ -23,7 +23,7 @@
 //! | `Delegation` | `status: working` (a grandchild's progress) |
 //! | `ApiCallUsage` | — (folded into `TokenUsage`) |
 //! | `TokenUsage` | — (held, and attached to the terminal status) |
-//! | `TurnMessages` | — |
+//! | `TurnMessages` | — (held when capture is on, and attached to the terminal status; RC-0, AGE-649) |
 //! | `Error` / `Cancelled` | `status: working`, and the task's recorded outcome |
 //! | `TurnEnded` | — (see below) |
 //! | `FollowUp` | — |
@@ -68,15 +68,32 @@
 //! this worker's own delegations spent is forwarded with it (AGE-415), and
 //! lines merge only when they share a model, so the root sees one line per
 //! model however deep the tree below it, and its lines carry the whole tree.
+//!
+//! # Conversation capture (RC-0, AGE-649)
+//!
+//! A resumable worker needs its own history back, not just its answer. This
+//! is opt-in per task — the broker sets `DelegatedTask::capture_conversation`
+//! when it hands a worker its task — and off by default, so an ordinary
+//! delegation's frames are byte-identical to what they were before this
+//! existed. When it is on, every `TurnMessages` event's messages accumulate
+//! in arrival order (the same order `Conversation::finalize_turn` persists
+//! them in, AGE-247) and ride the terminal status under
+//! [`CONVERSATION_METADATA_KEY`], capped at 32 MB
+//! (`fabric-resumable-conversations` §4.1). Over the cap, the byte count
+//! rides under [`CONVERSATION_TOO_LARGE_METADATA_KEY`] instead — never a
+//! silently truncated conversation.
 
 use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::token_usage::TokenUsage;
-use chatty_core::services::a2a_client::{TRACE_METADATA_KEY, USAGE_METADATA_KEY, usage_metadata};
+use chatty_core::services::a2a_client::{
+    CONVERSATION_METADATA_KEY, CONVERSATION_TOO_LARGE_METADATA_KEY, TRACE_METADATA_KEY,
+    USAGE_METADATA_KEY, usage_metadata,
+};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -157,6 +174,13 @@ const TRACE_TAIL_STEPS: usize = TRACE_MAX_STEPS - TRACE_HEAD_STEPS;
 /// The whole trace is cut to this many characters, dropping steps from the
 /// middle when the step-count cap alone still leaves it too big.
 const TRACE_MAX_CHARS: usize = 12_000;
+
+// ── RC-0 (AGE-649): the worker's captured conversation ──────────────────────
+
+/// The cap on a captured conversation's serialized size, per
+/// `fabric-resumable-conversations` §4.1. Above it the terminal status
+/// carries [`CONVERSATION_TOO_LARGE_METADATA_KEY`] instead of the data.
+const CAPTURE_CAP_BYTES: usize = 32 * 1024 * 1024;
 
 /// Cut `s` to `limit` characters, noting how much was removed. A cut always
 /// gets its own line, so the marker never runs into the content it follows.
@@ -249,6 +273,13 @@ pub struct TaskMapper {
     /// Tool call id → index into `trace`, for a call still waiting on its
     /// result or error.
     open_calls: HashMap<String, usize>,
+    /// Whether this task's conversation is captured at its terminal status
+    /// (RC-0, AGE-649). Off by default.
+    capture_conversation: bool,
+    /// Every `TurnMessages` event's messages, in arrival order, when capture
+    /// is on. Untouched otherwise, so it never allocates for the common
+    /// case.
+    captured_messages: Vec<Value>,
 }
 
 impl TaskMapper {
@@ -263,7 +294,17 @@ impl TaskMapper {
             usage: Vec::new(),
             trace: Vec::new(),
             open_calls: HashMap::new(),
+            capture_conversation: false,
+            captured_messages: Vec::new(),
         }
+    }
+
+    /// Turn on conversation capture for this task (RC-0, AGE-649). Off by
+    /// default: leaving this unset produces the exact frames this mapper
+    /// always did (`capture_off_is_byte_identical`).
+    pub fn with_capture_conversation(mut self, capture: bool) -> Self {
+        self.capture_conversation = capture;
+        self
     }
 
     /// Fold a tool-call event into the trace, if it is one (AGE-467). `Text`
@@ -363,6 +404,17 @@ impl TaskMapper {
                 None
             }
 
+            // Held rather than sent, like usage, and only when capture is on
+            // (RC-0, AGE-649): see the module docs.
+            SessionEvent::TurnMessages(messages) => {
+                if self.capture_conversation
+                    && let Ok(Value::Array(items)) = serde_json::to_value(messages)
+                {
+                    self.captured_messages.extend(items);
+                }
+                None
+            }
+
             SessionEvent::Cancelled => {
                 self.state = TaskState::Canceled;
                 None
@@ -401,7 +453,8 @@ impl TaskMapper {
     /// (AGE-467). `None` when neither has anything to report.
     fn terminal_metadata(&self) -> Option<Value> {
         let trace = compact_trace(&self.trace);
-        if self.usage.is_empty() && trace.is_none() {
+        let conversation = self.conversation_metadata();
+        if self.usage.is_empty() && trace.is_none() && conversation.is_none() {
             return None;
         }
 
@@ -412,7 +465,33 @@ impl TaskMapper {
         if let Some(trace) = trace {
             metadata.insert(TRACE_METADATA_KEY.to_string(), Value::String(trace));
         }
+        if let Some((key, value)) = conversation {
+            metadata.insert(key, value);
+        }
         Some(Value::Object(metadata))
+    }
+
+    /// The captured conversation for [`terminal_metadata`](Self::terminal_metadata)
+    /// to insert (RC-0, AGE-649): `None` when capture was never turned on for
+    /// this task. Above [`CAPTURE_CAP_BYTES`] the messages are replaced with
+    /// their byte count under [`CONVERSATION_TOO_LARGE_METADATA_KEY`], never
+    /// silently truncated.
+    fn conversation_metadata(&self) -> Option<(String, Value)> {
+        if !self.capture_conversation {
+            return None;
+        }
+        let messages = Value::Array(self.captured_messages.clone());
+        let bytes = serde_json::to_vec(&messages)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
+        if bytes > CAPTURE_CAP_BYTES {
+            Some((
+                CONVERSATION_TOO_LARGE_METADATA_KEY.to_string(),
+                json!(bytes as u64),
+            ))
+        } else {
+            Some((CONVERSATION_METADATA_KEY.to_string(), messages))
+        }
     }
 
     fn status(&self, state: TaskState, message: Option<String>) -> ParticipantFrame {
@@ -458,6 +537,7 @@ mod tests {
     use chatty_core::models::token_usage::{ApiCallUsage, ModelRef};
     use chatty_core::services::{StreamError, StreamErrorKind};
     use chatty_core::settings::models::providers_store::ProviderType;
+    use rig_core::completion::Message;
 
     /// How the task would end if its turns stopped now.
     fn outcome(mapper: &TaskMapper) -> TaskState {
@@ -1077,6 +1157,108 @@ mod tests {
         assert!(
             metadata.is_none(),
             "nothing to report: no usage, no trace: {metadata:?}"
+        );
+    }
+
+    // ── RC-0 (AGE-649): the worker's captured conversation ───────────────────
+
+    /// AGE-247's order: the prompt, an assistant tool call, its tool result,
+    /// then the final text — rig's own record of the turn, which
+    /// `SessionEvent::TurnMessages` already carries whole. Capture just has
+    /// to preserve it verbatim.
+    #[test]
+    fn capture_equals_worker_history() {
+        let history = vec![
+            Message::user("read the readme and summarise it"),
+            Message::assistant("calling read_file"),
+            Message::user("# Chatty\nA desktop chat app."),
+            Message::assistant("It's a chat app."),
+        ];
+
+        let mut mapper = TaskMapper::new("task-1").with_capture_conversation(true);
+        assert!(
+            mapper
+                .map(&SessionEvent::TurnMessages(history.clone()))
+                .is_none(),
+            "TurnMessages never becomes a frame, captured or not"
+        );
+
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        let metadata = metadata.expect("the captured conversation is attached");
+        let expected = serde_json::to_value(&history).unwrap();
+        assert_eq!(
+            metadata["conversation"], expected,
+            "the captured conversation is the worker's own history, message for message"
+        );
+    }
+
+    /// Above the 32 MB cap, the terminal status reports the byte count
+    /// instead of the data (spec §4.1) — never a silently truncated
+    /// conversation.
+    #[test]
+    fn capture_cap_enforced() {
+        let huge = Message::assistant("x".repeat(CAPTURE_CAP_BYTES + 1024));
+        let mut mapper = TaskMapper::new("task-1").with_capture_conversation(true);
+        assert!(
+            mapper
+                .map(&SessionEvent::TurnMessages(vec![huge]))
+                .is_none()
+        );
+
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        let metadata = metadata.expect("the cap being hit is itself reported");
+        assert!(
+            metadata.get("conversation").is_none(),
+            "an oversized conversation is never sent: {metadata}"
+        );
+        let bytes = metadata["conversationTooLarge"]
+            .as_u64()
+            .expect("the byte count is reported instead of the data");
+        assert!(
+            bytes as usize > CAPTURE_CAP_BYTES,
+            "the reported size should be what the data actually was: {bytes}"
+        );
+    }
+
+    /// Capture is opt-in: a task that never turns it on puts nothing new on
+    /// the wire, even when a `TurnMessages` event with real content flows
+    /// through the mapper — the frames stay exactly what they were before
+    /// this feature existed.
+    #[test]
+    fn capture_off_is_byte_identical() {
+        let mut mapper = TaskMapper::new("task-1");
+        assert!(
+            mapper
+                .map(&SessionEvent::TurnMessages(vec![Message::user(
+                    "read the readme"
+                )]))
+                .is_none()
+        );
+        mapper.map(&tool_started("c1", "read_file"));
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: "c1".into(),
+            result: "# Chatty".into(),
+        });
+
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        let metadata = metadata.expect("the tool call still produces a trace");
+        assert!(
+            metadata.get("conversation").is_none(),
+            "capture is off: no conversation on the wire: {metadata}"
+        );
+        assert!(metadata.get("conversationTooLarge").is_none());
+        assert!(
+            metadata["trace"]
+                .as_str()
+                .unwrap()
+                .contains("### read_file (ok)"),
+            "everything else is exactly what it was before this feature existed: {metadata}"
         );
     }
 }
