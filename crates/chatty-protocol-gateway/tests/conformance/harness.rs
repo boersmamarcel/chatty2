@@ -100,8 +100,9 @@ pub struct Gateway {
     /// The one provider behind every module's `llm::complete`: what a guest
     /// forwards to it is what the guest itself received.
     pub llm: Arc<FakeLlm>,
+    /// Who is connected, and where a test admits a participant (3.14).
     #[cfg(unix)]
-    pub socket: PathBuf,
+    pub participants: chatty_protocol_gateway::participant::ParticipantRegistry,
     pub http: reqwest::Client,
     _dir: tempfile::TempDir,
 }
@@ -122,19 +123,8 @@ impl Gateway {
 
         let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)), 0);
 
-        // The participant socket is served here rather than by `start()`,
-        // which binds a fixed port instead of an ephemeral one.
         #[cfg(unix)]
-        let socket = {
-            let socket = dir.path().join("participants.sock");
-            let listener =
-                chatty_protocol_gateway::participant::bind(&socket).expect("the socket binds");
-            tokio::spawn(chatty_protocol_gateway::participant::serve(
-                listener,
-                gateway.participants(),
-            ));
-            socket
-        };
+        let participants = gateway.participants();
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -149,7 +139,7 @@ impl Gateway {
             base,
             llm,
             #[cfg(unix)]
-            socket,
+            participants,
             http: reqwest::Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(60))

@@ -1,4 +1,4 @@
-//! The Unix-domain-socket listener local participants register over.
+//! Broker-made connections, and the shared socket nobody registers on.
 //!
 //! One connection is one participant for as long as it is open. The
 //! connection *is* the liveness signal (ADR-0011): when the read loop ends,
@@ -6,21 +6,39 @@
 //! failed. There is no heartbeat, because a process that has died cannot
 //! fail to send one.
 //!
-//! Unix only. The hosted half of ADR-0011 is a vsock listener (AGE-307) with
-//! the same frames on it; nothing here is shaped by the socket family beyond
-//! the accept loop, so that listener reuses [`serve_connection`].
+//! The connection is also the identity (ADR-0020). The broker admits a node
+//! and makes the connection for it — a socket pair for a local worker
+//! ([`open_connection`]) — so what speaks on it is whoever the broker handed
+//! the other end to. The worker's `hello` claims nothing; the broker answers
+//! with `welcome` and the name it admitted.
+//!
+//! The shared socket ([`bind`], [`serve`]) is where workers used to register
+//! themselves, first come first named. It stays bound, and refuses every
+//! connection: nothing registers there, so no local process can take a name
+//! the broker is about to route a task to.
+//!
+//! Unix only. The hosted half is a vsock connection the hosted broker makes
+//! per microVM (HS-4, AGE-678); [`serve_connection`] is not shaped by the
+//! socket family, so it reuses it.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::protocol::{BrokerFrame, ParticipantFrame};
-use super::registry::ParticipantRegistry;
+use super::protocol::{BrokerFrame, FrameError, ParticipantFrame, decode_frame, encode_frame};
+use super::registry::{AdmittedNode, ParticipantRegistry};
 use chatty_fabric::AgentOrigin;
+
+/// Why every connection on the shared socket is refused.
+const SHARED_SOCKET_REFUSAL: &str = "this socket admits no workers: a worker's connection \
+                                     is made by the broker that spawns it (ADR-0020)";
+
+/// How long a connection on the shared socket gets to send its first line.
+const REFUSAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Bind a participant socket at `path`.
 ///
@@ -43,15 +61,13 @@ pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
     UnixListener::bind(path)
 }
 
-/// Accept participants until `listener` is dropped or the task is aborted.
-pub async fn serve(listener: UnixListener, registry: ParticipantRegistry) {
+/// Accept connections on the shared socket until `listener` is dropped or
+/// the task is aborted, refusing each one.
+pub async fn serve(listener: UnixListener) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                let registry = registry.clone();
-                tokio::spawn(async move {
-                    serve_connection(stream, registry).await;
-                });
+                tokio::spawn(refuse(stream));
             }
             Err(e) => {
                 warn!(error = %e, "Participant socket accept failed; listener stopping");
@@ -61,13 +77,63 @@ pub async fn serve(listener: UnixListener, registry: ParticipantRegistry) {
     }
 }
 
-/// Drive one participant connection from its first frame to its last.
+/// Answer a connection on the shared socket with an `error` frame and
+/// close it. A frame that is not v2 is told so; anything else — `hello`
+/// included — is told that this socket registers nobody.
+async fn refuse(stream: UnixStream) {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut lines = BufReader::new(read_half).lines();
+    // Bounded, so a peer that connects and says nothing does not hold a
+    // task open for the life of the broker.
+    let first = tokio::time::timeout(REFUSAL_READ_TIMEOUT, lines.next_line()).await;
+    let reason = match first {
+        Ok(Ok(Some(line))) => match decode_frame::<ParticipantFrame>(&line) {
+            Err(e) if e.is_version() => e.to_string(),
+            _ => SHARED_SOCKET_REFUSAL.to_string(),
+        },
+        Ok(Ok(None)) | Ok(Err(_)) => return,
+        Err(_) => SHARED_SOCKET_REFUSAL.to_string(),
+    };
+    warn!(%reason, "Refused a connection on the shared participant socket");
+    let _ = write_frame(&mut write_half, &BrokerFrame::Error { reason }).await;
+}
+
+/// A connection the broker made for a local worker: the node's name, and
+/// the worker's end, which the caller hands to the process it spawns.
+///
+/// The broker's end is already being served. Dropping the worker's end
+/// without handing it on closes the connection, which abandons the node.
+#[derive(Debug)]
+pub struct LocalConnection {
+    pub name: String,
+    pub worker_end: std::os::unix::net::UnixStream,
+}
+
+/// Admit a node started as `spec`, make a socket pair for it, and serve the
+/// broker's end. Both ends are close-on-exec, so neither leaks into a
+/// process nobody meant to give it to; the spawner clears the flag on the
+/// worker's end in the one child that gets it.
+///
+/// Must be called within a Tokio runtime.
+pub fn open_connection(registry: &ParticipantRegistry, spec: &str) -> io::Result<LocalConnection> {
+    let node = registry
+        .admit(spec, AgentOrigin::Local)
+        .map_err(io::Error::other)?;
+    let name = node.name().to_string();
+    let (broker_end, worker_end) = std::os::unix::net::UnixStream::pair()?;
+    broker_end.set_nonblocking(true)?;
+    let broker_end = UnixStream::from_std(broker_end)?;
+    tokio::spawn(serve_connection(broker_end, registry.clone(), node));
+    Ok(LocalConnection { name, worker_end })
+}
+
+/// Drive one broker-made connection from its `hello` to its last frame.
 ///
 /// Split into read and write halves: the write half drains the registry's
 /// outbound queue for this participant, the read half owns registration and
 /// routing. When the read half returns, the participant is deregistered and
 /// the outbound sender is dropped, which ends the writer.
-pub async fn serve_connection<S>(stream: S, registry: ParticipantRegistry)
+pub async fn serve_connection<S>(stream: S, registry: ParticipantRegistry, node: AdmittedNode)
 where
     S: tokio::io::AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -77,27 +143,39 @@ where
 
     let writer = tokio::spawn(write_frames(write_half, outbound_rx));
 
-    // 1. The first frame must be a registration.
+    // 1. The first frame must be a v2 `hello`. The welcome is queued before
+    // the node is registered, so it is on the wire ahead of any task.
     let name = match lines.next_line().await {
-        Ok(Some(line)) => match register_from(&line, &registry, outbound_tx.clone()) {
-            Ok(name) => {
-                let _ = outbound_tx.send(BrokerFrame::Registered { name: name.clone() });
-                name
+        Ok(Some(line)) => match decode_frame::<ParticipantFrame>(&line) {
+            Ok(ParticipantFrame::Hello { card }) => {
+                let _ = outbound_tx.send(node.welcome());
+                registry.register(node, card, outbound_tx.clone())
             }
-            Err(reason) => {
-                warn!(%reason, "Refusing a participant connection");
-                let _ = outbound_tx.send(BrokerFrame::Rejected { reason });
+            refused => {
+                let reason = match refused {
+                    Err(e) if e.is_version() => e.to_string(),
+                    Err(e) => format!("the first frame must be a v2 'hello': {e}"),
+                    Ok(_) => "the first frame must be a v2 'hello'".to_string(),
+                };
+                warn!(node = node.name(), %reason, "Refusing a participant connection");
+                registry.abandon(node);
+                let _ = outbound_tx.send(BrokerFrame::Error { reason });
                 drop(outbound_tx);
                 let _ = writer.await;
                 return;
             }
         },
         Ok(None) => {
-            debug!("A participant connected and closed without registering");
+            debug!(
+                node = node.name(),
+                "A connection closed before its worker said hello"
+            );
+            registry.abandon(node);
             return;
         }
         Err(e) => {
-            warn!(error = %e, "Participant connection failed before registering");
+            warn!(node = node.name(), error = %e, "A connection failed before its worker said hello");
+            registry.abandon(node);
             return;
         }
     };
@@ -106,7 +184,15 @@ where
     loop {
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
-            Ok(Some(line)) => match serde_json::from_str::<ParticipantFrame>(&line) {
+            Ok(Some(line)) => match decode_frame::<ParticipantFrame>(&line) {
+                // A peer that stops speaking v2 is not ours to guess at.
+                Err(e @ (FrameError::MissingVersion | FrameError::WrongVersion(_))) => {
+                    warn!(participant = %name, error = %e, "Closing the connection: not v2");
+                    let _ = outbound_tx.send(BrokerFrame::Error {
+                        reason: e.to_string(),
+                    });
+                    break;
+                }
                 // A malformed line is dropped, not fatal: one bad frame
                 // should not fail every task the participant still owes.
                 Err(e) => warn!(participant = %name, error = %e, "Ignoring a malformed frame"),
@@ -135,21 +221,15 @@ where
     info!(participant = %name, "Participant connection closed");
 }
 
-/// Parse and apply the registration frame, returning the claimed name.
-fn register_from(
-    line: &str,
-    registry: &ParticipantRegistry,
-    outbound: mpsc::UnboundedSender<BrokerFrame>,
-) -> Result<String, String> {
-    let frame: ParticipantFrame =
-        serde_json::from_str(line).map_err(|e| format!("malformed first frame: {e}"))?;
-    let ParticipantFrame::Register { card } = frame else {
-        return Err("the first frame on a participant connection must be 'register'".to_string());
-    };
-    // A Unix socket is this machine, by construction (ADR-0011 C5).
-    registry
-        .register(card, AgentOrigin::Local, outbound)
-        .map_err(|e| e.to_string())
+/// Write one frame as a line.
+async fn write_frame<W>(write_half: &mut W, frame: &BrokerFrame) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut line = encode_frame(frame).map_err(io::Error::other)?;
+    line.push('\n');
+    write_half.write_all(line.as_bytes()).await?;
+    write_half.flush().await
 }
 
 /// Write queued broker frames as newline-delimited JSON until the queue is
@@ -159,17 +239,8 @@ where
     W: AsyncWrite + Unpin,
 {
     while let Some(frame) = outbound.recv().await {
-        let Ok(mut line) = serde_json::to_string(&frame) else {
-            warn!("Failed to serialize a broker frame; dropping it");
-            continue;
-        };
-        line.push('\n');
-        if let Err(e) = write_half.write_all(line.as_bytes()).await {
+        if let Err(e) = write_frame(&mut write_half, &frame).await {
             debug!(error = %e, "Participant socket write failed; writer stopping");
-            return;
-        }
-        if let Err(e) = write_half.flush().await {
-            debug!(error = %e, "Participant socket flush failed; writer stopping");
             return;
         }
     }

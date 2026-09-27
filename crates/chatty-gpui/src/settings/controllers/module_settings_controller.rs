@@ -451,73 +451,71 @@ pub fn refresh_runtime(cx: &mut App) {
                     }
 
                     // ADR-0011 C2: the gateway is also the fleet broker.
-                    // Children register on a socket beside its HTTP port, and
-                    // each virtual agent — `local-agent`, or the named team
-                    // module settings declare (C10) — spawns one per
-                    // delegated task. Unix only — the socket and the runners
-                    // behind it do not exist on Windows, so the gateway there
-                    // is just the gateway.
+                    // Each virtual agent — `local-agent`, or the named team
+                    // module settings declare (C10) — spawns one child per
+                    // delegated task, on a connection the broker makes for
+                    // it (ADR-0020); the shared socket beside the HTTP port
+                    // refuses every registration. Unix only — the runners do
+                    // not exist on Windows, so the gateway there is just the
+                    // gateway.
                     #[cfg(unix)]
                     {
                         let participants = gateway.participants();
-                        let socket = broker_runner::socket_path();
-                        if broker_runner::serve_socket(participants.clone(), &socket) {
-                            let (workspace_dir, specs) = cx
-                                .update(|cx| {
-                                    let exec = cx.global::<ExecutionSettingsModel>();
-                                    // A worker inherits the desktop's approval
-                                    // policy; it has no user to ask. A desktop
-                                    // leader forwards no provider flags: the
-                                    // child reads the same config dir.
-                                    let common_args: Vec<String> = if matches!(
-                                        exec.approval_mode,
-                                        ApprovalMode::AutoApproveAll
-                                    ) {
-                                        vec!["--auto-approve".to_string()]
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    let models = cx
-                                        .try_global::<ModelsModel>()
-                                        .map(|m| m.models())
-                                        .unwrap_or(&[]);
-                                    let providers = cx
-                                        .try_global::<ProviderModel>()
-                                        .map(|p| p.providers())
-                                        .unwrap_or(&[]);
-                                    // The roster's specs, looked up from the
-                                    // workspace a worker's tree comes from. A
-                                    // spec that does not load leaves the
-                                    // broker without workers, loudly.
-                                    let agents = match load_roster(
-                                        &settings.virtual_agents,
-                                        exec.workspace_dir.as_deref().map(Path::new),
-                                    ) {
-                                        Ok(agents) => agents,
-                                        Err(e) => {
-                                            error!(error = ?e, "Failed to load the virtual agents' specs");
-                                            return (exec.workspace_dir.clone(), Vec::new());
-                                        }
-                                    };
-                                    let specs = resolve_virtual_agents(
-                                        models,
-                                        providers,
-                                        &settings,
-                                        &agents,
-                                        &common_args,
-                                    );
-                                    (exec.workspace_dir.clone(), specs)
-                                })
-                                .unwrap_or((None, Vec::new()));
-                            for runner in broker_runner::local_runners(
-                                participants,
-                                socket,
-                                workspace_dir,
-                                settings.default_endpoint_budget,
-                                specs,
-                            ) {
-                                gateway = gateway.with_virtual_agent(Arc::new(runner));
-                            }
+                        broker_runner::serve_socket(&broker_runner::socket_path());
+                        let (workspace_dir, specs) = cx
+                            .update(|cx| {
+                                let exec = cx.global::<ExecutionSettingsModel>();
+                                // A worker inherits the desktop's approval
+                                // policy; it has no user to ask. A desktop
+                                // leader forwards no provider flags: the
+                                // child reads the same config dir.
+                                let common_args: Vec<String> = if matches!(
+                                    exec.approval_mode,
+                                    ApprovalMode::AutoApproveAll
+                                ) {
+                                    vec!["--auto-approve".to_string()]
+                                } else {
+                                    Vec::new()
+                                };
+                                let models = cx
+                                    .try_global::<ModelsModel>()
+                                    .map(|m| m.models())
+                                    .unwrap_or(&[]);
+                                let providers = cx
+                                    .try_global::<ProviderModel>()
+                                    .map(|p| p.providers())
+                                    .unwrap_or(&[]);
+                                // The roster's specs, looked up from the
+                                // workspace a worker's tree comes from. A
+                                // spec that does not load leaves the
+                                // broker without workers, loudly.
+                                let agents = match load_roster(
+                                    &settings.virtual_agents,
+                                    exec.workspace_dir.as_deref().map(Path::new),
+                                ) {
+                                    Ok(agents) => agents,
+                                    Err(e) => {
+                                        error!(error = ?e, "Failed to load the virtual agents' specs");
+                                        return (exec.workspace_dir.clone(), Vec::new());
+                                    }
+                                };
+                                let specs = resolve_virtual_agents(
+                                    models,
+                                    providers,
+                                    &settings,
+                                    &agents,
+                                    &common_args,
+                                );
+                                (exec.workspace_dir.clone(), specs)
+                            })
+                            .unwrap_or((None, Vec::new()));
+                        for runner in broker_runner::local_runners(
+                            participants,
+                            workspace_dir,
+                            settings.default_endpoint_budget,
+                            specs,
+                        ) {
+                            gateway = gateway.with_virtual_agent(Arc::new(runner));
                         }
                     }
 

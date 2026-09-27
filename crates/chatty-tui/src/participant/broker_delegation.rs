@@ -7,8 +7,8 @@
 //! test: it is exactly what `main.rs` runs when `--broker` is passed —
 //! before this issue, nothing in chatty-tui ever called it, so a headless
 //! leader had no `local-agent` to offer (the issue's "Why"). The worker is
-//! scripted the same way `equivalence.rs` scripts one, over the same real
-//! gateway and socket a `--broker` leader actually serves; a real LLM
+//! the stand-in child `equivalence.rs` uses (`stand_in.rs`), spawned by the
+//! real `local-agent` runner on the connection it makes; a real LLM
 //! answering "say hello" is not what this pins, the wiring from a leader's
 //! `invoke_agent` tool through its own broker to `local-agent` and back is.
 //!
@@ -28,15 +28,12 @@ use chatty_core::tools::invoke_agent_tool::{
 };
 use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
 use chatty_core::tools::{LOCAL_AGENT_NAME, worker_executable};
-use chatty_fabric::AgentOrigin;
-use chatty_protocol_gateway::participant::{
-    BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
-};
+use chatty_protocol_gateway::participant::ParticipantFrame;
 use chatty_protocol_gateway::worker::TaskMapper;
 use rig_agent::tool::{Tool, ToolContext};
-use tokio::sync::mpsc;
 
 use super::broker::Broker;
+use super::stand_in::scripted_worker_binary;
 
 /// The policy a scripted worker's turn "runs" under, matching
 /// `equivalence.rs`'s.
@@ -48,42 +45,6 @@ fn policy() -> TurnPolicy {
         already_asked_to_retry: false,
         think_disabled: false,
     }
-}
-
-/// Register a scripted `local-agent` participant that answers its one task
-/// by replaying `events` through the real broker↔A2A mapping — identical to
-/// `equivalence.rs`'s `spawn_scripted_worker`, since it is the same
-/// worker-side contract both tests pin.
-fn spawn_scripted_worker(registry: &ParticipantRegistry, events: Vec<SessionEvent>) {
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
-    registry
-        .register(
-            ParticipantCard {
-                name: LOCAL_AGENT_NAME.to_string(),
-                description: "a scripted worker".to_string(),
-                ..Default::default()
-            },
-            AgentOrigin::Local,
-            outbound_tx,
-        )
-        .expect("the scripted worker registers");
-
-    let registry = registry.clone();
-    tokio::spawn(async move {
-        while let Some(frame) = outbound_rx.recv().await {
-            let BrokerFrame::Task { task_id, .. } = frame else {
-                continue;
-            };
-            let mut mapper = TaskMapper::new(task_id);
-            for event in &events {
-                if let Some(frame) = mapper.map(event) {
-                    registry.on_frame(LOCAL_AGENT_NAME, frame);
-                }
-            }
-            registry.on_frame(LOCAL_AGENT_NAME, mapper.terminal());
-            return;
-        }
-    });
 }
 
 /// The issue's "Why": today a headless leader's `list_agents` has no
@@ -128,15 +89,6 @@ async fn list_agents_offers_local_agent_once_the_broker_is_started() {
 async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
     let module_settings = ModuleSettingsModel::default();
     let dir = tempfile::tempdir().expect("a temp dir for the socket");
-    let broker = Broker::start_at(
-        dir.path().join("participants.sock"),
-        worker_executable(),
-        module_settings.default_endpoint_budget,
-        resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
-        None,
-    )
-    .await
-    .expect("the broker starts");
 
     let scenario = scenarios()
         .into_iter()
@@ -152,7 +104,15 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
         .collect();
     assert!(!expected_answer.is_empty(), "the scenario has an answer");
 
-    spawn_scripted_worker(&broker.participants(), events);
+    let broker = Broker::start_at(
+        dir.path().join("participants.sock"),
+        scripted_worker_binary(dir.path(), &events),
+        module_settings.default_endpoint_budget,
+        resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
+        None,
+    )
+    .await
+    .expect("the broker starts");
 
     // Built exactly as `agent_factory::mod.rs` builds it when `--broker` has
     // set `gateway_port = Some(broker.port)`.
@@ -200,7 +160,7 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
 
 // ── AGE-467: `include_trace` on `invoke_agent` ──────────────────────────────
 
-/// Start a broker, register a scripted `local-agent` that replays `events`,
+/// Start a broker whose `local-agent` spawns a stand-in replaying `events`,
 /// and drive a real `invoke_agent` call against it with `include_trace` set
 /// as given. Mirrors `invoke_agent_delegates_to_local_agent_and_returns_its_
 /// answer`'s setup, parametrized over the one thing these tests vary.
@@ -212,15 +172,13 @@ async fn delegate(
     let dir = tempfile::tempdir().expect("a temp dir for the socket");
     let broker = Broker::start_at(
         dir.path().join("participants.sock"),
-        worker_executable(),
+        scripted_worker_binary(dir.path(), &events),
         module_settings.default_endpoint_budget,
         resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
         None,
     )
     .await
     .expect("the broker starts");
-
-    spawn_scripted_worker(&broker.participants(), events);
 
     let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
         .with_local_agents([LOCAL_AGENT_NAME]);

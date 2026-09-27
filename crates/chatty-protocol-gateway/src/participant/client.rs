@@ -1,35 +1,39 @@
 //! The participant side of the socket: what a worker talks.
 //!
 //! It lives next to the listener so the two halves of the protocol cannot
-//! drift. A worker (`chatty-tui --participant-socket …`) owns one of these
-//! for its whole life: connect, register, then answer tasks until the broker
-//! closes the socket or the process exits.
+//! drift. A worker (`chatty-tui --participant-fd N`) owns one of these for
+//! its whole life: say hello over the connection the broker made for it,
+//! learn its name from the welcome, then answer tasks until the broker
+//! closes the connection or the process exits.
 //!
-//! The transport is the caller's, not this type's. It is a Unix socket on
-//! the desktop and an `AF_VSOCK` stream from inside a microVM (AGE-307), and
+//! The transport is the caller's, not this type's. It is the worker's end of
+//! a socket pair on the desktop and an `AF_VSOCK` stream from inside a
+//! microVM (AGE-307, HS-4), and
 //! the frames are identical over both — which is the whole reason C1's
 //! contract could be reused for the hosted half. The halves are boxed rather
 //! than the type being generic so that the shared worker loop stays one
 //! concrete type regardless of what it is speaking over.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
+use chatty_fabric::{ConversationScope, NodeName};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
-use tokio::net::UnixStream;
 use tracing::debug;
 
-use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
+use super::protocol::{
+    BrokerFrame, ParticipantCard, ParticipantFrame, TaskState, decode_frame, encode_frame,
+};
 
 type BoxedRead = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
-/// A registered connection to the broker.
+/// A welcomed connection to the broker.
 pub struct ParticipantConnection {
     reader: ParticipantReader,
     writer: ParticipantWriter,
-    name: String,
+    name: NodeName,
+    scope: ConversationScope,
+    owner: Option<NodeName>,
 }
 
 /// The broker's frames, read one at a time.
@@ -47,59 +51,59 @@ pub struct ParticipantWriter {
 }
 
 impl ParticipantConnection {
-    /// Connect to `socket` and register `card`.
+    /// Say `hello` with `card` over `stream`, the connection the broker made
+    /// for this worker, and wait for the `welcome`.
     ///
-    /// Returns once the broker has acknowledged. A rejection — a duplicate
-    /// name, a card without one — is an error here rather than a state the
-    /// caller has to poll for, because a participant that is not registered
-    /// has nothing else it can do.
-    pub async fn register(socket: impl AsRef<Path>, card: ParticipantCard) -> Result<Self> {
-        let socket = socket.as_ref();
-        let stream = UnixStream::connect(socket)
-            .await
-            .with_context(|| format!("failed to reach the broker at {}", socket.display()))?;
-        Self::register_over(stream, card).await
-    }
-
-    /// Register `card` over an already-connected stream.
-    ///
-    /// The general form: a microVM's worker reaches the broker over vsock,
-    /// which is not a path (AGE-307).
-    pub async fn register_over<S>(stream: S, card: ParticipantCard) -> Result<Self>
+    /// A refusal is an error here rather than a state the caller has to poll
+    /// for, because a worker the broker did not welcome has nothing else it
+    /// can do. The card's `name` is ignored by the broker; [`name`](Self::name)
+    /// is what it assigned.
+    pub async fn hello_over<S>(stream: S, card: ParticipantCard) -> Result<Self>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
         let (read, write) = tokio::io::split(stream);
-
-        let mut conn = Self {
-            reader: ParticipantReader {
-                lines: BufReader::new(Box::new(read) as BoxedRead).lines(),
-            },
-            writer: ParticipantWriter {
-                write: Box::new(write) as BoxedWrite,
-            },
-            name: card.name.clone(),
+        let mut reader = ParticipantReader {
+            lines: BufReader::new(Box::new(read) as BoxedRead).lines(),
         };
-        conn.send(ParticipantFrame::Register { card }).await?;
+        let mut writer = ParticipantWriter {
+            write: Box::new(write) as BoxedWrite,
+        };
+        writer.send(ParticipantFrame::Hello { card }).await?;
 
-        match conn.next_frame().await? {
-            Some(BrokerFrame::Registered { name }) => {
-                debug!(participant = %name, "Registered with the broker");
-                conn.name = name;
-                Ok(conn)
+        match reader.next_frame().await? {
+            Some(BrokerFrame::Welcome { name, scope, owner }) => {
+                debug!(participant = %name, %scope, "Welcomed by the broker");
+                Ok(Self {
+                    reader,
+                    writer,
+                    name,
+                    scope,
+                    owner,
+                })
             }
-            Some(BrokerFrame::Rejected { reason }) => {
-                bail!("the broker refused the registration: {reason}")
+            Some(BrokerFrame::Error { reason }) => {
+                bail!("the broker refused the connection: {reason}")
             }
-            Some(other) => bail!("expected a registration reply, got {other:?}"),
-            None => bail!("the broker closed the socket without replying to the registration"),
+            Some(other) => bail!("expected a welcome, got {other:?}"),
+            None => bail!("the broker closed the connection without a welcome"),
         }
     }
 
-    /// The name callers address this participant by. The broker's is
-    /// authoritative — it echoes what it actually recorded.
+    /// The name callers address this participant by, as the broker
+    /// assigned it.
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_str()
+    }
+
+    /// The conversation this participant works for.
+    pub fn scope(&self) -> &ConversationScope {
+        &self.scope
+    }
+
+    /// The node that asked for this participant; `None` when the root did.
+    pub fn owner(&self) -> Option<&NodeName> {
+        self.owner.as_ref()
     }
 
     /// The next frame from the broker, or `None` when it closes the socket.
@@ -176,8 +180,8 @@ impl ParticipantReader {
             if line.trim().is_empty() {
                 continue;
             }
-            return Ok(Some(serde_json::from_str(&line).with_context(|| {
-                format!("the broker sent a frame this build cannot parse: {line}")
+            return Ok(Some(decode_frame(&line).with_context(|| {
+                format!("the broker sent a frame this build cannot accept: {line}")
             })?));
         }
     }
@@ -185,7 +189,7 @@ impl ParticipantReader {
 
 impl ParticipantWriter {
     pub async fn send(&mut self, frame: ParticipantFrame) -> Result<()> {
-        let mut line = serde_json::to_string(&frame).context("failed to encode a frame")?;
+        let mut line = encode_frame(&frame).context("failed to encode a frame")?;
         line.push('\n');
         self.write
             .write_all(line.as_bytes())

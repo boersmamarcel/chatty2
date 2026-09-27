@@ -1,10 +1,12 @@
-//! Local participants: processes that register over a socket and are served
-//! as A2A agents by the same gateway that serves WASM modules.
+//! Local participants: worker processes the broker spawns and serves as A2A
+//! agents from the same gateway that serves WASM modules.
 //!
 //! ADR-0011 routes all fleet coordination through one broker. This is the
-//! local half of it: a child process connects to a Unix socket, publishes an
-//! agent card, and from then on is addressable at `/a2a/{name}` exactly like
-//! a module — same JSON-RPC methods, same SSE shape, so the existing
+//! local half of it: the broker admits a node, makes a socket pair for it
+//! and hands one end to the child it spawns (ADR-0020). The child says
+//! `hello` with an agent card, the broker answers `welcome` with the name it
+//! chose, and from then on the child is addressable at `/a2a/{name}` exactly
+//! like a module — same JSON-RPC methods, same SSE shape, so the existing
 //! `A2aClient` reaches it unchanged.
 //!
 //! The pieces:
@@ -14,8 +16,9 @@
 //!   A2A: A2A is the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go,
 //!   and the way back down to a task parked on a question (AGE-306).
-//! * [`listener`] — the accept loop, and the rule that a closed socket
-//!   deregisters its participant and fails its open tasks.
+//! * [`listener`] — broker-made connections, the rule that a closed one
+//!   deregisters its participant and fails its open tasks, and the shared
+//!   socket that refuses every registration.
 //! * [`client`] — the other end of the socket, which a chatty child speaks.
 //! * [`virtual_agent`] — the interface a runner implements: an agent with no
 //!   participant until a task arrives.
@@ -29,12 +32,13 @@ mod virtual_agent;
 
 pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
 pub use protocol::{
-    BrokerFrame, CALLER_ENV, CALLER_HEADER, DelegatedTask, InputAnswer, InputQuestion,
-    InputRequest, ParticipantCard, ParticipantFrame, ParticipantSkill, TaskBearer, TaskInput,
-    TaskState,
+    BrokerFrame, CALLER_ENV, CALLER_HEADER, DelegatedTask, FrameError, InputAnswer, InputQuestion,
+    InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame, ParticipantSkill,
+    TaskBearer, TaskInput, TaskState, decode_frame, encode_frame,
 };
 pub use registry::{
-    AnswerError, ParticipantRegistry, RegisterError, RegisteredAgent, TaskStream, TaskUpdate,
+    AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, TaskStream,
+    TaskUpdate,
 };
 pub use virtual_agent::{EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle};
 
@@ -51,6 +55,8 @@ mod runner;
 #[cfg(unix)]
 pub use client::{ParticipantConnection, ParticipantReader, ParticipantWriter};
 #[cfg(unix)]
-pub use listener::{bind, serve, serve_connection, unbind};
+pub use listener::{LocalConnection, bind, open_connection, serve, serve_connection, unbind};
 #[cfg(unix)]
-pub use runner::{EvidenceFactory, LocalRunner, Worker, WorkerWorkspace, WorkspaceFactory};
+pub use runner::{
+    EvidenceFactory, LocalRunner, PARTICIPANT_FD, Worker, WorkerWorkspace, WorkspaceFactory,
+};

@@ -9,8 +9,10 @@
 //! rendering both ends share.
 //!
 //! The broker path runs end to end: a real `ProtocolGateway` on a real port,
-//! a real `A2aClient` inside a real `InvokeAgentTool`. Only the child's turn
-//! is scripted, because that is the input both sides share.
+//! a real `LocalRunner` spawning a real child on a connection it made, a
+//! real `A2aClient` inside a real `InvokeAgentTool`. Only the child's turn
+//! is scripted — the stand-in replays its frames (`stand_in.rs`) — because
+//! that is the input both sides share.
 //!
 //! # Text is extra
 //!
@@ -33,15 +35,14 @@ use chatty_core::tools::invoke_agent_tool::{
     InvokeAgentArgs, InvokeAgentProgress, InvokeAgentTool,
 };
 use chatty_core::tools::{LOCAL_AGENT_NAME, progress_text_for_event};
-use chatty_fabric::AgentOrigin;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_protocol_gateway::participant::{
-    BrokerFrame, ParticipantCard, ParticipantFrame, ParticipantRegistry,
-};
+use chatty_protocol_gateway::participant::{LocalRunner, ParticipantFrame, ParticipantRegistry};
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use rig_agent::tool::{Tool, ToolContext};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
+
+use super::stand_in::scripted_worker_binary;
 
 use chatty_protocol_gateway::worker::TaskMapper;
 
@@ -102,14 +103,19 @@ impl LlmProvider for NoopProvider {
     }
 }
 
-/// Start a gateway on an ephemeral port and return its port and registry.
-async fn start_gateway() -> (u16, ParticipantRegistry) {
+/// Start a gateway on an ephemeral port whose `local-agent` is a real
+/// `LocalRunner` spawning `executable`, and return its port and registry.
+async fn start_runner(executable: std::path::PathBuf) -> (u16, ParticipantRegistry) {
     let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
     let modules = Arc::new(RwLock::new(
         ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
     ));
     let gateway = ProtocolGateway::new(modules, 0);
     let participants = gateway.participants();
+    let runner = LocalRunner::new(executable, participants.clone())
+        .with_agent_name(LOCAL_AGENT_NAME)
+        .with_registration_timeout(std::time::Duration::from_secs(10));
+    let gateway = gateway.with_virtual_agent(Arc::new(runner));
 
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
@@ -119,41 +125,6 @@ async fn start_gateway() -> (u16, ParticipantRegistry) {
     });
 
     (port, participants)
-}
-
-/// Register a participant under `name` that answers its one task by
-/// replaying `events` through the mapping under test.
-fn spawn_scripted_worker(registry: &ParticipantRegistry, name: &str, events: Vec<SessionEvent>) {
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
-    registry
-        .register(
-            ParticipantCard {
-                name: name.to_string(),
-                description: "a scripted worker".to_string(),
-                ..Default::default()
-            },
-            AgentOrigin::Local,
-            outbound_tx,
-        )
-        .expect("the scripted worker registers");
-
-    let registry = registry.clone();
-    let name = name.to_string();
-    tokio::spawn(async move {
-        while let Some(frame) = outbound_rx.recv().await {
-            let BrokerFrame::Task { task_id, .. } = frame else {
-                continue;
-            };
-            let mut mapper = TaskMapper::new(task_id);
-            for event in &events {
-                if let Some(frame) = mapper.map(event) {
-                    registry.on_frame(&name, frame);
-                }
-            }
-            registry.on_frame(&name, mapper.terminal());
-            return;
-        }
-    });
 }
 
 /// The parent's progress, and the response `invoke_agent` hands the model.
@@ -169,8 +140,8 @@ struct BrokerRun {
 /// Delegate one task through the real `invoke_agent` tool and record what the
 /// parent saw.
 async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
-    let (port, registry) = start_gateway().await;
-    spawn_scripted_worker(&registry, LOCAL_AGENT_NAME, events);
+    let dir = tempfile::tempdir().expect("a dir for the stand-in worker");
+    let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
     let tool =
         InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
@@ -436,11 +407,10 @@ mod evidence {
     //! Exercising it needs a real `LocalRunner` over a real `git worktree`,
     //! not the bare registered participant `broker_run` above uses — only a
     //! runner's `WorkerWorkspace` carries an envelope collector. The worker
-    //! itself is still the scripted stand-in `spawn_scripted_worker` sets
-    //! up, registered under the name the runner deterministically allocates
-    //! its first worker (`local-agent-0`); what it *left in its tree* is
-    //! seeded by the workspace factory, since a scripted worker edits
-    //! nothing of its own.
+    //! itself is the scripted stand-in child (`stand_in.rs`), on the
+    //! connection the runner made for its first worker (`local-agent-0`);
+    //! what it *left in its tree* is seeded by the workspace factory, since
+    //! a scripted worker edits nothing of its own.
 
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -464,9 +434,9 @@ mod evidence {
     use rig_agent::tool::{Tool, ToolContext};
     use tokio::sync::RwLock;
 
-    use super::{NoopProvider, assistant_text, policy, spawn_scripted_worker};
+    use super::super::stand_in::scripted_worker_binary;
+    use super::{NoopProvider, assistant_text, policy};
 
-    const FIRST_WORKER: &str = "local-agent-0";
     const FIRST_BRANCH: &str = "sub-agent/local-agent-0";
     /// Exit code 3 rather than 0 or 1: it can only have come from actually
     /// running the command.
@@ -506,6 +476,7 @@ mod evidence {
         root: PathBuf,
         verification: Option<String>,
         edits: bool,
+        executable: PathBuf,
     ) -> (u16, ParticipantRegistry) {
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
@@ -514,39 +485,34 @@ mod evidence {
         let gateway = ProtocolGateway::new(modules, 0);
         let registry = gateway.participants();
 
-        let runner = LocalRunner::new(
-            "/bin/sh",
-            "/nonexistent/participants.sock",
-            registry.clone(),
-        )
-        .with_agent_name(LOCAL_AGENT_NAME)
-        .with_args(["-c", "sleep 30"])
-        .with_registration_timeout(Duration::from_secs(5))
-        .with_workspace_factory(Arc::new(move |worker: String| {
-            let root = root.to_string_lossy().to_string();
-            let verification = verification.clone();
-            Box::pin(async move {
-                let (cwd, evidence, on_exit) =
-                    worker_tree::create_with_commit_hook(&root, &worker, verification)
-                        .await?
-                        .expect("the workspace is a git repository");
-                if edits {
-                    std::fs::write(cwd.join("added.rs"), "fn added() {}\n").unwrap();
-                }
-                Ok(Some(WorkerWorkspace {
-                    cwd,
-                    evidence: Some(Box::new(move || {
-                        Box::pin(async move {
-                            evidence().await.map(|found| TaskEvidence {
-                                text: found.block(),
-                                data: found.json(),
+        let runner = LocalRunner::new(executable, registry.clone())
+            .with_agent_name(LOCAL_AGENT_NAME)
+            .with_registration_timeout(Duration::from_secs(10))
+            .with_workspace_factory(Arc::new(move |worker: String| {
+                let root = root.to_string_lossy().to_string();
+                let verification = verification.clone();
+                Box::pin(async move {
+                    let (cwd, evidence, on_exit) =
+                        worker_tree::create_with_commit_hook(&root, &worker, verification)
+                            .await?
+                            .expect("the workspace is a git repository");
+                    if edits {
+                        std::fs::write(cwd.join("added.rs"), "fn added() {}\n").unwrap();
+                    }
+                    Ok(Some(WorkerWorkspace {
+                        cwd,
+                        evidence: Some(Box::new(move || {
+                            Box::pin(async move {
+                                evidence().await.map(|found| TaskEvidence {
+                                    text: found.block(),
+                                    data: found.json(),
+                                })
                             })
-                        })
-                    })),
-                    on_exit,
-                }))
-            })
-        }));
+                        })),
+                        on_exit,
+                    }))
+                })
+            }));
         let gateway = gateway.with_virtual_agent(Arc::new(runner));
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -605,11 +571,15 @@ mod evidence {
     async fn a_coder_that_commits_gets_an_envelope_with_branch_diff_and_verification() {
         let dir = tempfile::tempdir().expect("a workspace dir");
         repo(dir.path()).await;
-        let (port, registry) =
-            start_runner_gateway(dir.path().to_path_buf(), Some(VERIFICATION.into()), true).await;
-
         let events = completed_turn().await;
-        spawn_scripted_worker(&registry, FIRST_WORKER, events.clone());
+        let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
+        let (port, _registry) = start_runner_gateway(
+            dir.path().to_path_buf(),
+            Some(VERIFICATION.into()),
+            true,
+            scripted_worker_binary(bin.path(), &events),
+        )
+        .await;
 
         let (response, progress) = delegate(port).await;
         let response = response.expect("the delegation succeeds");
@@ -652,11 +622,15 @@ mod evidence {
     async fn a_reviewer_that_commits_nothing_gets_no_envelope_and_no_hint() {
         let dir = tempfile::tempdir().expect("a workspace dir");
         repo(dir.path()).await;
-        let (port, registry) =
-            start_runner_gateway(dir.path().to_path_buf(), Some(VERIFICATION.into()), false).await;
-
         let events = completed_turn().await;
-        spawn_scripted_worker(&registry, FIRST_WORKER, events.clone());
+        let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
+        let (port, _registry) = start_runner_gateway(
+            dir.path().to_path_buf(),
+            Some(VERIFICATION.into()),
+            false,
+            scripted_worker_binary(bin.path(), &events),
+        )
+        .await;
 
         let (response, progress) = delegate(port).await;
         let response = response.expect("the delegation succeeds");
@@ -682,16 +656,18 @@ mod evidence {
     async fn a_failed_delegation_still_reports_what_is_on_the_branch() {
         let dir = tempfile::tempdir().expect("a workspace dir");
         repo(dir.path()).await;
-        let (port, registry) = start_runner_gateway(dir.path().to_path_buf(), None, true).await;
-
-        spawn_scripted_worker(
-            &registry,
-            FIRST_WORKER,
-            vec![SessionEvent::Error(StreamError {
-                kind: StreamErrorKind::Other,
-                message: "the worker crashed".to_string(),
-            })],
-        );
+        let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
+        let crashed = [SessionEvent::Error(StreamError {
+            kind: StreamErrorKind::Other,
+            message: "the worker crashed".to_string(),
+        })];
+        let (port, _registry) = start_runner_gateway(
+            dir.path().to_path_buf(),
+            None,
+            true,
+            scripted_worker_binary(bin.path(), &crashed),
+        )
+        .await;
 
         let (result, progress) = delegate(port).await;
         assert!(
@@ -717,15 +693,11 @@ pub(super) mod named_virtual_agents {
     //! and disabled groups; and a reviewer child built with those groups off
     //! has no `write_file` tool in its schema.
     //!
-    //! The child is a stand-in binary that records its argv and waits, and
-    //! a scripted participant registered under the name the runner will
-    //! allocate (`<agent>-0`) answers the task — the same split
-    //! `runner.rs`'s own tests use. Only the argv is what this pins; what
+    //! The child is a stand-in binary (`stand_in.rs`) that records its argv
+    //! and answers the task on the connection the runner made for it. Only
+    //! the argv is what this pins; what
     //! a real `chatty-tui` does with it is `AgentBuildContext::from_spec`
     //! and `resolve_model`, checked separately below.
-
-    use std::path::PathBuf;
-    use std::time::Duration;
 
     use chatty_core::agent_spec::AgentSpec;
     use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
@@ -740,14 +712,11 @@ pub(super) mod named_virtual_agents {
     use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
     use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
     use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
-    use chatty_fabric::AgentOrigin;
-    use chatty_protocol_gateway::participant::{BrokerFrame, ParticipantCard, ParticipantRegistry};
-    use chatty_protocol_gateway::worker::TaskMapper;
     use clap::Parser;
     use rig_agent::tool::{Tool, ToolContext};
-    use tokio::sync::mpsc;
 
     use crate::participant::broker::Broker;
+    use crate::participant::stand_in::{recorded_argv, scripted_worker_binary};
 
     const CODER: &str = "local-coder";
     const REVIEWER: &str = "local-reviewer";
@@ -788,42 +757,6 @@ pub(super) mod named_virtual_agents {
         (models, vec![ollama])
     }
 
-    /// A "chatty-tui" that appends its argv to `argv.log` beside itself and
-    /// then waits to be reaped, as a real child would wait on its task.
-    pub(crate) fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("chatty-tui");
-        std::fs::write(
-            &path,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/argv.log\"\nexec sleep 30\n",
-        )
-        .expect("the stand-in binary is written");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("the stand-in binary is executable");
-        path
-    }
-
-    /// The argv lines the stand-in children recorded so far, once there
-    /// are at least `at_least` of them.
-    pub(crate) async fn recorded_argv(dir: &std::path::Path, at_least: usize) -> Vec<String> {
-        let log = dir.join("argv.log");
-        for _ in 0..200 {
-            let lines: Vec<String> = std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_string)
-                .collect();
-            if lines.len() >= at_least {
-                return lines;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!(
-            "the stand-in child never recorded its argv in {}",
-            log.display()
-        );
-    }
-
     /// A broker exactly as `--broker` would start it for `team()`, with the
     /// leader's flags forwarded and the stand-in binary as the worker.
     async fn start_team_broker(dir: &std::path::Path, provider_flags: &[String]) -> Broker {
@@ -834,7 +767,7 @@ pub(super) mod named_virtual_agents {
         let specs = resolve_virtual_agents(&models, &providers, &settings, &agents, &common_args);
         Broker::start_at(
             dir.join("participants.sock"),
-            stand_in_binary(dir),
+            scripted_worker_binary(dir, &completed_turn().await),
             settings.default_endpoint_budget,
             specs,
             None,
@@ -843,63 +776,9 @@ pub(super) mod named_virtual_agents {
         .expect("the broker starts with two declared agents")
     }
 
-    /// Register a stand-in under `name` that answers its task only once the
-    /// child spawned for it has recorded its argv — the runner reaps the
-    /// child the moment the task ends, and the stand-in answers in
-    /// microseconds, so without this gate `sh` could be killed before its
-    /// first line runs. Otherwise `spawn_scripted_worker`.
-    pub(crate) fn spawn_argv_gated_worker(
-        registry: &ParticipantRegistry,
-        name: &str,
-        argv_log: PathBuf,
-        events: Vec<SessionEvent>,
-    ) {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
-        registry
-            .register(
-                ParticipantCard {
-                    name: name.to_string(),
-                    description: "a scripted worker".to_string(),
-                    ..Default::default()
-                },
-                AgentOrigin::Local,
-                outbound_tx,
-            )
-            .expect("the scripted worker registers");
-
-        let registry = registry.clone();
-        let name = name.to_string();
-        tokio::spawn(async move {
-            while let Some(frame) = outbound_rx.recv().await {
-                let BrokerFrame::Task { task_id, .. } = frame else {
-                    continue;
-                };
-                let marker = format!("--participant-name {name}");
-                for _ in 0..500 {
-                    if std::fs::read_to_string(&argv_log)
-                        .unwrap_or_default()
-                        .contains(&marker)
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                let mut mapper = TaskMapper::new(task_id);
-                for event in &events {
-                    if let Some(frame) = mapper.map(event) {
-                        registry.on_frame(&name, frame);
-                    }
-                }
-                registry.on_frame(&name, mapper.terminal());
-                return;
-            }
-        });
-    }
-
-    /// Delegate one task to `agent` through the real `invoke_agent`, with a
-    /// scripted stand-in answering under the name the runner allocates.
-    async fn delegate(broker: &Broker, dir: &std::path::Path, agent: &str) {
-        let events = replay_scenario(
+    /// A turn a stand-in child replays for its task.
+    pub(crate) async fn completed_turn() -> Vec<SessionEvent> {
+        replay_scenario(
             scenarios()
                 .into_iter()
                 .find(|s| s.name == "tool_call_then_result")
@@ -912,14 +791,12 @@ pub(super) mod named_virtual_agents {
                 think_disabled: false,
             },
         )
-        .await;
-        spawn_argv_gated_worker(
-            &broker.participants(),
-            &format!("{agent}-0"),
-            dir.join("argv.log"),
-            events,
-        );
+        .await
+    }
 
+    /// Delegate one task to `agent` through the real `invoke_agent`; the
+    /// runner's stand-in child answers it.
+    async fn delegate(broker: &Broker, agent: &str) {
         let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
             .with_local_agents([CODER, REVIEWER]);
         tool.call(
@@ -932,6 +809,18 @@ pub(super) mod named_virtual_agents {
         )
         .await
         .unwrap_or_else(|e| panic!("delegating to {agent} succeeds: {e:#}"));
+    }
+
+    /// The recorded argv line of the child spawned as `agent`, which its
+    /// spec names; the broker-made connection is on `--participant-fd 3`.
+    pub(crate) fn child_argv<'a>(argv: &'a [String], agent: &str) -> &'a String {
+        let child = argv
+            .iter()
+            .find(|line| line.contains(&format!(r#""name":"{agent}""#)))
+            .unwrap_or_else(|| panic!("no {agent} child spawned: {argv:?}"));
+        assert!(child.contains("--participant-fd 3"), "{child}");
+        assert!(!child.contains("--participant-name"), "{child}");
+        child
     }
 
     /// The issue's "Verify": both declared agents are listed with their
@@ -975,14 +864,11 @@ pub(super) mod named_virtual_agents {
             find(REVIEWER).description
         );
 
-        delegate(&broker, dir.path(), CODER).await;
-        delegate(&broker, dir.path(), REVIEWER).await;
+        delegate(&broker, CODER).await;
+        delegate(&broker, REVIEWER).await;
 
         let argv = recorded_argv(dir.path(), 2).await;
-        let coder = argv
-            .iter()
-            .find(|line| line.contains("--participant-name local-coder-0"))
-            .unwrap_or_else(|| panic!("no coder child spawned: {argv:?}"));
+        let coder = child_argv(&argv, CODER);
         assert!(coder.contains(r#""model":"qwen3:4b""#), "{coder}");
         assert!(
             !coder.contains("disable"),
@@ -990,10 +876,7 @@ pub(super) mod named_virtual_agents {
         );
         assert!(coder.contains("--auto-approve"), "{coder}");
 
-        let reviewer = argv
-            .iter()
-            .find(|line| line.contains("--participant-name local-reviewer-0"))
-            .unwrap_or_else(|| panic!("no reviewer child spawned: {argv:?}"));
+        let reviewer = child_argv(&argv, REVIEWER);
         assert!(reviewer.contains(r#""model":"gemma4:26b""#), "{reviewer}");
         assert!(
             reviewer.contains(r#""disable":["fs-write","shell","git"]"#),
@@ -1028,7 +911,7 @@ pub(super) mod named_virtual_agents {
         );
         let broker = start_team_broker(dir.path(), &flags).await;
 
-        delegate(&broker, dir.path(), CODER).await;
+        delegate(&broker, CODER).await;
 
         let argv = recorded_argv(dir.path(), 1).await;
         assert!(
@@ -1387,11 +1270,10 @@ mod spend_cap {
     //! no-gate path is every other test in this file, unchanged.
     //!
     //! The refusing case runs against a real `LocalRunner` whose worker is
-    //! the argv-recording stand-in: the control shows that, without a gate,
+    //! the argv-recording stand-in (`stand_in.rs`): the control shows that, without a gate,
     //! the same delegation *does* spawn it, so "nothing spawned" is a real
     //! finding and not an idle runner.
 
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1402,44 +1284,10 @@ mod spend_cap {
     use chatty_core::tools::invoke_agent_tool::{
         InvokeAgentArgs, InvokeAgentError, InvokeAgentProgress, InvokeAgentTool,
     };
-    use chatty_module_registry::ModuleRegistry;
-    use chatty_protocol_gateway::ProtocolGateway;
-    use chatty_protocol_gateway::participant::{LocalRunner, ParticipantRegistry};
-    use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
     use rig_agent::tool::{Tool, ToolContext};
-    use tokio::sync::RwLock;
 
-    use super::named_virtual_agents::{spawn_argv_gated_worker, stand_in_binary};
-    use super::{NoopProvider, assistant_text, policy, spawn_scripted_worker, start_gateway};
-
-    /// A gateway whose `local-agent` is a real `LocalRunner` spawning the
-    /// stand-in binary — the spawn the gate must prevent.
-    async fn start_runner_gateway(dir: &Path) -> (u16, ParticipantRegistry) {
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
-        let modules = Arc::new(RwLock::new(
-            ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
-        ));
-        let gateway = ProtocolGateway::new(modules, 0);
-        let registry = gateway.participants();
-
-        let runner = LocalRunner::new(
-            stand_in_binary(dir),
-            dir.join("participants.sock"),
-            registry.clone(),
-        )
-        .with_agent_name(LOCAL_AGENT_NAME)
-        .with_registration_timeout(Duration::from_secs(5));
-        let gateway = gateway.with_virtual_agent(Arc::new(runner));
-
-        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = tcp.local_addr().unwrap().port();
-        let router = gateway.build_router();
-        tokio::spawn(async move {
-            axum::serve(tcp, router).await.ok();
-        });
-
-        (port, registry)
-    }
+    use super::super::stand_in::scripted_worker_binary;
+    use super::{assistant_text, policy, start_runner};
 
     /// `invoke_agent` as the factory builds it for a leader with a gate.
     fn leader_tool(port: u16, gate: Option<Arc<dyn SpendGate>>) -> InvokeAgentTool {
@@ -1469,7 +1317,7 @@ mod spend_cap {
     #[tokio::test]
     async fn a_leader_over_its_cap_is_refused_and_nothing_spawns() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let (port, registry) = start_runner_gateway(dir.path()).await;
+        let (port, registry) = start_runner(scripted_worker_binary(dir.path(), &[])).await;
 
         let tool = leader_tool(port, Some(Arc::new(FixedSpendGate::refusing(12.5, 10.0))));
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
@@ -1509,7 +1357,6 @@ mod spend_cap {
     #[tokio::test]
     async fn without_a_gate_the_same_delegation_spawns_a_worker() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let (port, registry) = start_runner_gateway(dir.path()).await;
         let events = replay_scenario(
             scenarios()
                 .into_iter()
@@ -1518,12 +1365,7 @@ mod spend_cap {
             policy(),
         )
         .await;
-        spawn_argv_gated_worker(
-            &registry,
-            &format!("{LOCAL_AGENT_NAME}-0"),
-            dir.path().join("argv.log"),
-            events.clone(),
-        );
+        let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
         let response = delegate(&leader_tool(port, None))
             .await
@@ -1532,10 +1374,7 @@ mod spend_cap {
         assert_eq!(response, assistant_text(&events).concat().trim());
         let argv = std::fs::read_to_string(dir.path().join("argv.log"))
             .expect("the runner spawned the stand-in child");
-        assert!(
-            argv.contains(&format!("--participant-name {LOCAL_AGENT_NAME}-0")),
-            "{argv}"
-        );
+        assert!(argv.contains("--participant-fd 3"), "{argv}");
     }
 
     /// Under the cap: the gate is asked and says yes, and the delegation is
@@ -1550,8 +1389,8 @@ mod spend_cap {
             policy(),
         )
         .await;
-        let (port, registry) = start_gateway().await;
-        spawn_scripted_worker(&registry, LOCAL_AGENT_NAME, events.clone());
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
         let tool = leader_tool(port, Some(Arc::new(FixedSpendGate::permitting())));
         let mut progress_rx = install_progress_channel(&tool.progress_slot());

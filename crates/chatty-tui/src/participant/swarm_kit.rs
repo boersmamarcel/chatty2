@@ -238,6 +238,20 @@ impl SwarmKit {
             .expect("the temp dir resolves")
     }
 
+    /// The root broker's shared participant socket, which refuses every
+    /// registration (ADR-0020).
+    pub fn socket(&self) -> PathBuf {
+        self.root().join("run").join("participants.sock")
+    }
+
+    /// Who is connected to the root broker.
+    pub fn participants(&self) -> chatty_protocol_gateway::participant::ParticipantRegistry {
+        self.broker
+            .as_ref()
+            .expect("the broker is running")
+            .participants()
+    }
+
     /// The leader delegates `prompt` to the first agent in the roster.
     pub async fn run_leader(&self, prompt: &str) -> LeaderRun {
         let agent = self
@@ -671,6 +685,153 @@ async fn pre_fabric_goldens_replay() {
     for (name, lines) in runs {
         assert_pre_fabric(name, &lines);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Broker-made connections (BI-3, AGE-635; ADR-0020 invariants 1 and 2)
+// ---------------------------------------------------------------------------
+
+/// Invariant 1: a process that did not receive a broker-made connection
+/// cannot register as any node. A same-user process dials the shared socket
+/// and claims the name the broker is about to give its first worker, the v1
+/// way and the v2 way; both are refused and closed, and the real worker —
+/// spawned on the connection the broker made — still gets its task.
+#[tokio::test]
+async fn squatting_on_the_shared_socket_is_refused() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let kit = SwarmKit::start(
+        vec![AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse)],
+        Script::new().route(WORKER_MODEL, [Reply::text("The real worker answered.")]),
+        Script::new(),
+    )
+    .await;
+    let first_worker = format!("{WORKER}-0");
+
+    for claim in [
+        serde_json::json!({ "type": "register", "card": { "name": first_worker } }),
+        serde_json::json!({ "v": 2, "type": "hello", "card": { "name": first_worker } }),
+    ] {
+        let stream = tokio::net::UnixStream::connect(kit.socket())
+            .await
+            .expect("the shared socket accepts a connection");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(format!("{claim}\n").as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the squatter is answered"),
+        )
+        .unwrap();
+        assert_eq!(reply["type"], "error", "{claim} is refused: {reply}");
+        assert!(
+            lines.next_line().await.unwrap().is_none(),
+            "and its connection closed"
+        );
+        assert!(!kit.participants().is_registered(&first_worker));
+    }
+
+    let run = kit.run_leader("do the delegated task").await;
+    let out = run.output.as_ref().expect("the delegation succeeded");
+    assert!(out.success);
+    assert_eq!(out.response, "The real worker answered.");
+    assert_eq!(
+        kit.sse.requests_for(WORKER_MODEL).len(),
+        1,
+        "the real worker made the model call"
+    );
+}
+
+/// The `socket:[inode]` link of the broker-made connection held by the
+/// worker of `kit`: its `chatty-tui` child whose `HOME` is the kit's, read
+/// at the descriptor its `--participant-fd` names. Polls until the worker
+/// is up.
+async fn worker_connection_link(kit: &SwarmKit) -> String {
+    let parent = std::process::id().to_string();
+    let home = format!("HOME={}", kit.root().join("home").display());
+    let deadline = std::time::Instant::now() + DEADLINE;
+    while std::time::Instant::now() < deadline {
+        for entry in std::fs::read_dir("/proc").expect("/proc is readable") {
+            let proc_dir = entry.expect("a /proc entry").path();
+            let is_child = std::fs::read_to_string(proc_dir.join("status"))
+                .is_ok_and(|status| status.lines().any(|l| l == format!("PPid:\t{parent}")));
+            let is_ours = std::fs::read(proc_dir.join("environ"))
+                .is_ok_and(|env| env.split(|b| *b == 0).any(|var| var == home.as_bytes()));
+            if !(is_child && is_ours) {
+                continue;
+            }
+            let argv = std::fs::read(proc_dir.join("cmdline")).unwrap_or_default();
+            let argv: Vec<String> = argv
+                .split(|b| *b == 0)
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect();
+            let Some(fd) = argv
+                .iter()
+                .position(|a| a == "--participant-fd")
+                .and_then(|at| argv.get(at + 1))
+            else {
+                continue;
+            };
+            if let Ok(link) = std::fs::read_link(proc_dir.join("fd").join(fd)) {
+                return link.to_string_lossy().into_owned();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("no worker of this kit came up holding a participant descriptor");
+}
+
+/// Invariant 2: neither the worker's persistent shell nor a process that
+/// shell starts has the participant socket open. The model has the shell
+/// list its own descriptors (`/proc/$$/fd`: `$$` is the shell) and a
+/// child's (`/proc/self/fd` inside `sh -c` is that `ls`'s own); the socket's
+/// inode — read from the worker's own descriptor table, where it must be —
+/// is in neither.
+#[tokio::test]
+async fn worker_shell_cannot_see_the_participant_fd() {
+    const LISTING: &str = "ls -l /proc/$$/fd; sh -c 'ls -l /proc/self/fd'";
+    let kit = SwarmKit::start(
+        vec![AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse)],
+        Script::new().route(
+            WORKER_MODEL,
+            [
+                Reply::tool_call("shell_execute", serde_json::json!({ "command": LISTING })),
+                // Keeps the worker up while its descriptor table is read.
+                Reply::Delay(300),
+                Reply::text("Listed."),
+            ],
+        ),
+        Script::new(),
+    )
+    .await;
+
+    let (link, run) = tokio::join!(
+        worker_connection_link(&kit),
+        kit.run_leader("list your descriptors")
+    );
+    let out = run.output.as_ref().expect("the delegation succeeded");
+    assert_eq!(out.response, "Listed.");
+    assert!(
+        link.starts_with("socket:["),
+        "the worker holds its connection at --participant-fd: {link}"
+    );
+
+    let requests = kit.sse.requests_for(WORKER_MODEL);
+    let listing = String::from_utf8_lossy(&requests[1].body);
+    assert!(
+        listing.matches(" -> ").count() >= 6,
+        "the shell really listed both descriptor tables: {listing}"
+    );
+    assert!(
+        !listing.contains(&link),
+        "the participant socket {link} leaked into the worker's shell or its child: {listing}"
+    );
 }
 
 #[test]
