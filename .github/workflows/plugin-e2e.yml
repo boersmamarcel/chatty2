@@ -1,0 +1,123 @@
+name: Plugin e2e (nightly)
+
+# The chatty × Hive contract and trust suite (PL-E6, AGE-601; evaluation
+# plan §3 S5 + S6, §4 item 5). chatty2 `main` × hive `main`: hive's registry
+# and runner are built with chatty-wasm-runtime patched to this checkout, so
+# ABI drift between the two repos fails here rather than in production. The
+# stack is hive's docker compose `e2e` profile (Postgres, MinIO, registry,
+# runner, a wiremock LLM upstream), seeded with this repo's WASM fixtures.
+#
+# Nightly and on demand only, never per PR: it needs a private hive checkout
+# and a docker stack. Rows that are red today fail with a message naming
+# their PL-H issue; the job summary is the table. Run the same thing locally
+# with `scripts/hive-e2e.sh all` (see the script's header).
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-e2e
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  HIVE_DIR: ${{ github.workspace }}/hive
+  HIVE_E2E_PROJECT: hive-e2e-nightly
+  HIVE_E2E_REPORT: ${{ github.workspace }}/hive-e2e-report.md
+
+jobs:
+  hive-contract:
+    # ubuntu-24.04: the registry and runner binaries built on the runner run
+    # in ubuntu:24.04 containers (crates/hive-e2e/compose.prebuilt.yml), so
+    # the glibc must match.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: chatty2
+    steps:
+      - name: Checkout chatty2
+        uses: actions/checkout@v4
+        with:
+          path: chatty2
+
+      - name: Checkout hive (private)
+        uses: actions/checkout@v4
+        with:
+          repository: boersmamarcel/hive
+          ref: main
+          token: ${{ secrets.HIVE_READ_TOKEN }}
+          path: hive
+
+      # Two debug workspaces with wasmtime in each do not fit the runner's
+      # default free space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: plugin-e2e
+          workspaces: |
+            chatty2 -> target
+            hive -> target
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config jq
+
+      - name: Build WASM modules and test fixtures
+        run: scripts/build-wasm-fixtures.sh
+
+      - name: Build hive against this chatty2
+        run: scripts/hive-e2e.sh build
+
+      - name: Start the hive stack
+        run: scripts/hive-e2e.sh up
+
+      - name: Seed it with the fixtures
+        run: scripts/hive-e2e.sh seed
+
+      - name: Run the S5 + S6 suite
+        run: scripts/hive-e2e.sh test
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [[ -f "$HIVE_E2E_REPORT" ]]; then
+            cat "$HIVE_E2E_REPORT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report: the suite did not run (see the failed step)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hive-e2e-report
+          path: ${{ env.HIVE_E2E_REPORT }}
+          if-no-files-found: ignore
+
+      - name: Stack logs on failure
+        if: failure()
+        run: |
+          docker compose -p "$HIVE_E2E_PROJECT" logs --no-color --tail 200 registry runner llm-upstream || true
+
+      - name: Tear the stack down
+        if: always()
+        run: scripts/hive-e2e.sh down || true

@@ -1,0 +1,6 @@
+{
+  "title": "Rate limiter",
+  "kind": "review-finding",
+  "task": "Implement RateLimiter in limiter.py: RateLimiter(max_calls, period, clock), where clock() returns the current time in seconds. allow() returns True and records the call when fewer than max_calls calls were allowed in the last period seconds (a sliding window: a call at time t stops counting at t + period), and returns False otherwise. Add tests with a fake clock.",
+  "follow_up": "Review finding: the limiter must never record a refused call, and it keeps every timestamp forever. Do not record refused calls, drop timestamps once they stop counting so memory stays bounded by max_calls, and add remaining(), which returns how many calls would be allowed right now without recording anything. Add tests."
+}

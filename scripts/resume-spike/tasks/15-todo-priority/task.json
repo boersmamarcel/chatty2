@@ -1,0 +1,6 @@
+{
+  "title": "Priority to-do list",
+  "kind": "review-finding",
+  "task": "Implement TodoList in todo.py: add(title, priority) stores an item, next() removes and returns the title with the highest priority (the largest number) and raises IndexError when the list is empty, and len() gives the number of items. Add tests.",
+  "follow_up": "Review finding: items with equal priority come out in an arbitrary order; they must come out first in, first out. Also add peek(), which returns what next() would return without removing it and raises IndexError when the list is empty. Add tests."
+}

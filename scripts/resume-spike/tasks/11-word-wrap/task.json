@@ -1,0 +1,6 @@
+{
+  "title": "Word wrap",
+  "kind": "review-finding",
+  "task": "Implement wrap(text, width) in wrap.py without the textwrap module: split the text on whitespace and greedily pack the words into lines of at most width characters, words separated by one space. Return the list of lines. Add tests.",
+  "follow_up": "Review finding: a word longer than width produces a line longer than width. Split such a word into width-sized chunks; the last chunk may be shorter and then shares its line with the following words when they fit. Also raise ValueError when width is less than 1. Add tests."
+}

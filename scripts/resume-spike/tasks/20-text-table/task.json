@@ -1,0 +1,6 @@
+{
+  "title": "Text table",
+  "kind": "requirement-change",
+  "task": "Implement format_table(headers, rows) in table.py. It returns one string of lines joined by '\\n': the header line, a separator line, then one line per row. Cells are converted with str(), each column is as wide as its widest cell (header included), cells are left-aligned and joined by ' | ', and the separator is each column's width in '-' joined by '-+-'. No line has trailing whitespace. Add tests.",
+  "follow_up": "Requirement change: a column in which every row's cell is an int or a float is right-aligned, its header included; other columns stay left-aligned. Floats are shown with two decimals. Add tests."
+}

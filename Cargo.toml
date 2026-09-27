@@ -9,6 +9,8 @@ members = [
     "crates/chatty-protocol-gateway",
     "crates/chatty-fabric",
     "crates/hive-client",
+    # Nightly chatty × Hive contract and trust suite (PL-E6, AGE-601).
+    "crates/hive-e2e",
     # Research / self-improving agent crates (AGE-5 / AGE-26); Stage B → harbor-chatty
     "crates/chatty-trace",
     "crates/chatty-playbook",

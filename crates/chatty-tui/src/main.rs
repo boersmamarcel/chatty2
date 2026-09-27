@@ -258,6 +258,24 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     usage_file: Option<std::path::PathBuf>,
 
+    /// Start a --headless run from a saved conversation instead of an empty
+    /// one: PATH holds the JSON array of messages a worker's captured
+    /// conversation carries (RC-0), as --save-conversation writes it. The
+    /// --message is the next turn on that history.
+    ///
+    /// Used by the resume spike (`scripts/resume-spike/`, AGE-650).
+    ///
+    /// Example: --restore /tmp/first/conversation.json
+    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_socket"])]
+    restore: Option<std::path::PathBuf>,
+
+    /// Write a --headless run's whole conversation to PATH when it ends, as
+    /// the JSON array of messages --restore reads.
+    ///
+    /// Example: --save-conversation /tmp/first/conversation.json
+    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_socket"])]
+    save_conversation: Option<std::path::PathBuf>,
+
     /// Auto-approve all tool executions without prompting.
     ///
     /// Skips the y/n approval prompt for shell commands, file writes,
@@ -793,7 +811,11 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         {
             engine.note_task(message);
         }
-        engine.init_conversation().await?;
+        match cli.restore.as_deref() {
+            Some(path) => engine.restore_conversation(path).await?,
+            None => engine.init_conversation().await?,
+        }
+        engine.set_save_conversation(cli.save_conversation.clone());
         if let Some(socket) = cli.participant_socket.as_deref() {
             #[cfg(unix)]
             {
@@ -1703,6 +1725,22 @@ mod resolve_model_tests {
             cli.usage_file,
             Some(std::path::PathBuf::from("/tmp/u.json"))
         );
+    }
+
+    /// AGE-650: `--restore` and `--save-conversation` are headless-only.
+    #[test]
+    fn restore_and_save_conversation_are_headless_only() {
+        for flag in ["--restore", "--save-conversation"] {
+            let parsed = cli(&["--headless", "-m", "hi", flag, "/tmp/c.json"]);
+            assert!(parsed.restore.is_some() || parsed.save_conversation.is_some());
+            for argv in [
+                vec!["chatty-tui", flag, "/tmp/c.json"],
+                vec!["chatty-tui", "--pipe", flag, "/tmp/c.json"],
+                vec!["chatty-tui", "--headless", "--pipe", flag, "/tmp/c.json"],
+            ] {
+                assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+            }
+        }
     }
 
     /// A run without a human: a given cap keeps the old cap-only shape;
