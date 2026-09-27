@@ -124,6 +124,12 @@ impl PriceBook {
         }
     }
 
+    /// Price `model` at `pricing`, replacing whatever the book held for it.
+    pub fn set(&mut self, model: ModelRef, pricing: TokenPricing) {
+        self.entries.retain(|(known, _)| *known != model);
+        self.entries.push((model, pricing));
+    }
+
     /// `model`'s prices at `at`, or `None` when the book does not price it.
     pub fn pricing(&self, model: &ModelRef, _at: Option<SystemTime>) -> Option<TokenPricing> {
         self.entries

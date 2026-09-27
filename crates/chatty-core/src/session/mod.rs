@@ -875,9 +875,11 @@ impl AgentSession {
         conversation.set_streaming_delegation_trace(None);
 
         conversation.add_tool_calls(tool_calls);
+        // The conversation's bound price is newer than the book's snapshot
+        // of the same model, so it replaces that entry rather than losing to it.
         let mut book = self.price_book.clone();
         if let Some(pricing) = conversation.pricing() {
-            book.insert(conversation.model_ref().clone(), *pricing);
+            book.set(conversation.model_ref().clone(), *pricing);
         }
         for mut usage in std::mem::take(&mut self.delegated_usages) {
             usage.price(&book);

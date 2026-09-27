@@ -1192,6 +1192,38 @@ mod totals_and_pricing {
         assert!((own.estimated_cost_usd.unwrap() - 10.0 / 1_000_000.0).abs() < 1e-12);
     }
 
+    /// AGE-682: the conversation's bound price beats the session's price-book
+    /// snapshot for the same model, so a price edited in Settings applies
+    /// from the next model switch, not only once the session is rebuilt.
+    #[tokio::test]
+    async fn the_bound_price_beats_a_stale_price_book() {
+        let mut edited = leader_model();
+        edited.cost_per_million_input_tokens = Some(2.0);
+        let mut session = session_with_model(&edited).await;
+        let mut roster = ModelsModel::new();
+        roster.add_model(leader_model());
+        session.set_price_book(roster.price_book());
+
+        complete_turn(
+            &mut session,
+            tool_turn(1, vec![call(1, 1_000_000, 0, 0, 0)]),
+        )
+        .await;
+
+        let own = session
+            .conversation()
+            .unwrap()
+            .token_usage()
+            .last_usage()
+            .cloned()
+            .unwrap();
+        let cost = own.estimated_cost_usd.expect("the bound model is priced");
+        assert!(
+            (cost - 2.0).abs() < 1e-9,
+            "priced at the bound $2/M, not the snapshot's $1/M: {cost}"
+        );
+    }
+
     /// AGE-682: a delegated line on a model the leader cannot price — or
     /// one that names no model at all — is unpriced, not charged at the
     /// leader's rates and not $0.
