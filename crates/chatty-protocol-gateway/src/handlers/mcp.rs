@@ -165,6 +165,9 @@ async fn handle_tools_call(
     if let Err(e) = module_call::check_credits(state, module_name).await {
         return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
+    if let Err(e) = module_call::check_usage_reporting(state, module_name) {
+        return json_rpc_error(StatusCode::OK, id, -32000, e);
+    }
 
     let mut module = module.lock().await;
     let result = module.invoke_tool(&tool_name, &args).await;
