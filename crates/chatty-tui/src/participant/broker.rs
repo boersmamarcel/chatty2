@@ -36,8 +36,8 @@ use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::tools::worker_executable;
-use chatty_module_registry::ModuleRegistry;
 use chatty_fabric::{EdgeLog, Transport};
+use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 #[cfg(test)]
 use chatty_protocol_gateway::RouteCounter;

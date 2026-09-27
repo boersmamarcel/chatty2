@@ -45,8 +45,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use chatty_core::services::fabric_transport::{CallReplies, OutboundCall, SocketTransport};
 use chatty_core::services::{StreamError, StreamErrorKind};
-use chatty_fabric::Transport;
 use chatty_core::session::SessionEvent;
+use chatty_fabric::Transport;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -182,25 +182,40 @@ impl WorkerConnection {
         };
 
         let (reader, mut writer_half) = connection.into_split();
-        // The turn's progress and its calls share the write half. The turn
-        // is over when its sink is dropped, whatever calls are still queued.
+        // The turn's progress and its calls share the write half, until the
+        // turn is over; then whatever progress is still queued goes out, and
+        // the socket is free for the terminal status.
+        let (turn_over, mut turn_over_rx) = tokio::sync::oneshot::channel::<()>();
         let writer = tokio::spawn(async move {
+            let mut progress_open = true;
             loop {
                 let frame = tokio::select! {
                     biased;
-                    frame = frames_rx.recv() => match frame {
+                    frame = frames_rx.recv(), if progress_open => match frame {
                         Some(frame) => frame,
-                        None => return Ok(writer_half),
+                        None => {
+                            progress_open = false;
+                            continue;
+                        }
                     },
                     Some(OutboundCall { id, request }) = calls.recv() => {
                         ParticipantFrame::Call { id, request }
                     }
+                    _ = &mut turn_over_rx => break,
                 };
                 if let Err(e) = writer_half.send(frame).await {
                     warn!(error = %e, "Failed to write to the broker");
                     return Err(e);
                 }
             }
+            // The sink died with the turn's future, so this ends.
+            while let Some(frame) = frames_rx.recv().await {
+                if let Err(e) = writer_half.send(frame).await {
+                    warn!(error = %e, "Failed to report progress to the broker");
+                    return Err(e);
+                }
+            }
+            Ok(writer_half)
         });
 
         // Answers and call replies come down the read half while the turn
@@ -218,6 +233,7 @@ impl WorkerConnection {
         let outcome = run(task, sink, inputs_rx).await;
         reader.abort();
         replies.disconnected();
+        let _ = turn_over.send(());
 
         // The sink died with the future that owned it, which closed the
         // queue and ended the writer; only then is the socket free for the
@@ -357,4 +373,168 @@ async fn next_task(
 /// worker that will never answer.
 fn lock(mapper: &Mutex<TaskMapper>) -> std::sync::MutexGuard<'_, TaskMapper> {
     mapper.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use chatty_fabric::{
+        CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Transport,
+    };
+    use futures::StreamExt;
+    use tokio::net::UnixStream;
+
+    use super::*;
+    use crate::participant::{
+        BrokerCalls, LocalConnection, ParticipantRegistry, TaskState, open_connection,
+    };
+
+    /// A callee on its own broker-made connection that answers its one task
+    /// with `answer from <its name>` after `delay`.
+    async fn callee(registry: &ParticipantRegistry, spec: &str, delay: Duration) -> String {
+        let LocalConnection { name, worker_end } = open_connection(registry, spec).unwrap();
+        worker_end.set_nonblocking(true).unwrap();
+        let stream = UnixStream::from_std(worker_end).unwrap();
+        let mut connection = ParticipantConnection::hello_over(stream, worker_card("test"))
+            .await
+            .unwrap();
+        let answer = format!("answer from {name}");
+        tokio::spawn(async move {
+            while let Ok(Some(frame)) = connection.next_frame().await {
+                if let BrokerFrame::Task { task_id, .. } = frame {
+                    tokio::time::sleep(delay).await;
+                    connection
+                        .artifact(&task_id, answer.clone(), true)
+                        .await
+                        .unwrap();
+                    connection
+                        .finish(&task_id, TaskState::Completed, None, None)
+                        .await
+                        .unwrap();
+                    // Stay connected: the caller is not done with the rest.
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        name
+    }
+
+    fn invoke(agent: &str) -> CallRequest {
+        CallRequest::InvokeAgent(InvokeAgentParams {
+            agent: agent.to_string(),
+            prompt: "go".to_string(),
+            handle: None,
+            include_trace: false,
+        })
+    }
+
+    /// One call to the end: its result, or its error.
+    async fn run_call(
+        transport: &dyn Transport,
+        agent: &str,
+    ) -> Result<InvokeAgentOutcome, CallError> {
+        let mut stream = transport.call(invoke(agent)).await?;
+        while let Some(event) = stream.next().await {
+            match event? {
+                CallEvent::Result(result) => return Ok(serde_json::from_value(result).unwrap()),
+                CallEvent::Progress(_) | CallEvent::InputRequired { .. } => {}
+            }
+        }
+        panic!("call to {agent} ended without a result");
+    }
+
+    /// BI-4: three calls in flight in one task, over one connection, finish
+    /// out of order, and each result reaches the call that asked for it. A
+    /// fourth, to nobody, fails on its own without disturbing the rest.
+    #[tokio::test]
+    async fn concurrent_calls_match_by_id() {
+        let registry = ParticipantRegistry::new();
+        let calls = Arc::new(BrokerCalls::new(
+            registry.clone(),
+            Arc::new(BTreeMap::new()),
+            None,
+        ));
+        registry.install_calls(&calls);
+
+        // Issued in this order, finishing fast, mid, slow.
+        let slow = callee(&registry, "slow", Duration::from_millis(600)).await;
+        let fast = callee(&registry, "fast", Duration::from_millis(20)).await;
+        let mid = callee(&registry, "mid", Duration::from_millis(300)).await;
+
+        let LocalConnection { name, worker_end } = open_connection(&registry, "caller").unwrap();
+        worker_end.set_nonblocking(true).unwrap();
+        let worker = WorkerConnection::connect(
+            UnixStream::from_std(worker_end).unwrap(),
+            worker_card("test"),
+        )
+        .await
+        .unwrap();
+        let transport = worker.transport();
+        for _ in 0..500 {
+            if registry.is_registered(&name) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let (_task, _updates) = registry
+            .submit_task(&name, DelegatedTask::new("call three agents"))
+            .expect("the caller is connected");
+
+        let finished = Arc::new(Mutex::new(Vec::new()));
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let (order, outcomes) = (finished.clone(), results.clone());
+        let agents = [
+            slow.clone(),
+            fast.clone(),
+            mid.clone(),
+            "nobody".to_string(),
+        ];
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            worker.serve_one_task(move |_task, _sink, _inputs| async move {
+                let runs = agents.iter().map(|agent| {
+                    let (transport, order) = (transport.clone(), order.clone());
+                    async move {
+                        let result = run_call(transport.as_ref(), agent).await;
+                        order.lock().unwrap().push(agent.clone());
+                        (agent.clone(), result)
+                    }
+                });
+                *outcomes.lock().unwrap() = futures::future::join_all(runs).await;
+                Ok(())
+            }),
+        )
+        .await
+        .expect("the calls finish")
+        .expect("the task ran");
+
+        assert_eq!(
+            *finished.lock().unwrap(),
+            vec![
+                "nobody".to_string(),
+                fast.clone(),
+                mid.clone(),
+                slow.clone()
+            ],
+            "the calls finished out of the order they were made in"
+        );
+        for (agent, result) in results.lock().unwrap().iter() {
+            if agent == "nobody" {
+                assert!(
+                    matches!(result, Err(CallError::UnknownAgent(a)) if a == "nobody"),
+                    "{result:?}"
+                );
+                continue;
+            }
+            let outcome = result.as_ref().expect("the call succeeded");
+            assert!(outcome.success);
+            assert_eq!(
+                outcome.response,
+                format!("answer from {agent}"),
+                "{agent}'s result reached {agent}'s call"
+            );
+        }
+    }
 }

@@ -98,9 +98,11 @@ impl BrokerCalls {
     /// them: connected participants, then virtual agents, each with its
     /// origin (ADR-0011 C5).
     fn directory(&self) -> Value {
-        let participants = self.registry.agents().into_iter().map(|agent| {
-            with_origin(a2a_participant::card_to_json(&agent.card), agent.origin)
-        });
+        let participants = self
+            .registry
+            .agents()
+            .into_iter()
+            .map(|agent| with_origin(a2a_participant::card_to_json(&agent.card), agent.origin));
         let runners = self.runners.values().map(|runner| {
             with_origin(
                 a2a_participant::card_to_json(&runner.agent_card()),

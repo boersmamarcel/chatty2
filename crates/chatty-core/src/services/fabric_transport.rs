@@ -104,7 +104,11 @@ impl Transport for SocketTransport {
             pending: self.pending.clone(),
             id,
         };
-        if self.outbound.send(OutboundCall { id, request: req }).is_err() {
+        if self
+            .outbound
+            .send(OutboundCall { id, request: req })
+            .is_err()
+        {
             return Err(CallError::Disconnected(
                 "the connection to the broker is closed".to_string(),
             ));
@@ -227,7 +231,10 @@ mod tests {
         let call = transport.call(CallRequest::ListAgents).await.unwrap();
         replies.disconnected();
         let events: Vec<_> = call.collect().await;
-        assert!(matches!(events.as_slice(), [Err(CallError::Disconnected(_))]));
+        assert!(matches!(
+            events.as_slice(),
+            [Err(CallError::Disconnected(_))]
+        ));
     }
 
     #[tokio::test]

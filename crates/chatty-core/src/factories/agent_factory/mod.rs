@@ -1268,14 +1268,12 @@ impl AgentClient {
         // start one lazily on first use (BI-2, AGE-634) is the whole
         // condition. Which names there are is module settings' decision
         // (C10).
-        let local_agents: Vec<String> = if gateway_port.is_some()
-            || lazy_broker.is_some()
-            || fabric_transport.is_some()
-        {
-            local_agents
-        } else {
-            Vec::new()
-        };
+        let local_agents: Vec<String> =
+            if gateway_port.is_some() || lazy_broker.is_some() || fabric_transport.is_some() {
+                local_agents
+            } else {
+                Vec::new()
+            };
 
         // Create list_agents tool (always available)
         let mut list_agents_tool =

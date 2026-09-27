@@ -662,7 +662,15 @@ impl InvokeAgentTool {
             }
         }
 
-        self.finish(&config.name, response, success, error_msg, usage, trace, conversation)
+        self.finish(
+            &config.name,
+            response,
+            success,
+            error_msg,
+            usage,
+            trace,
+            conversation,
+        )
     }
 
     /// Delegate to local role `agent` over `transport` (ADR-0020, BI-4):
