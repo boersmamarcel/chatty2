@@ -38,13 +38,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chatty_core::agent_spec::AgentSpec;
 use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::services::install_progress_channel;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::models_store::ModelConfig;
-use chatty_core::settings::models::module_settings::VirtualAgentConfig;
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use chatty_core::testing::fake_model::{FakeDaemon, RecordedRequest, Reply, Script};
 use chatty_core::tools::invoke_agent_tool::{
@@ -72,7 +72,8 @@ pub(crate) struct AgentDef {
     /// fake server.
     pub model: String,
     pub endpoint: Endpoint,
-    /// Start the worker with `--broker`, so it can delegate in turn.
+    /// Declare `swarm.delegates_to`, so the worker runs a broker of its own
+    /// and can delegate in turn.
     pub sub_leader: bool,
 }
 
@@ -151,20 +152,30 @@ impl SwarmKit {
                 )
             })
             .collect();
+        // Each agent is a spec in the kit's data directory, where a
+        // sub-leader's own broker finds the roster module settings name.
+        let specs: Vec<AgentSpec> = roster
+            .iter()
+            .map(|agent| {
+                let mut spec = AgentSpec::named(&agent.name);
+                spec.agent.model = Some(agent.model.clone());
+                if agent.sub_leader {
+                    spec.swarm.delegates_to = vec!["*".to_string()];
+                }
+                spec
+            })
+            .collect();
+        let agents_dir = base.join("data").join("chatty").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agents dir");
+        for spec in &specs {
+            std::fs::write(
+                agents_dir.join(format!("{}.toml", spec.agent.name)),
+                spec.to_toml().expect("a spec serializes"),
+            )
+            .expect("spec file");
+        }
         let module_settings = ModuleSettingsModel {
-            virtual_agents: roster
-                .iter()
-                .map(|agent| VirtualAgentConfig {
-                    name: agent.name.clone(),
-                    model: Some(agent.model.clone()),
-                    extra_args: if agent.sub_leader {
-                        vec!["--broker".to_string()]
-                    } else {
-                        Vec::new()
-                    },
-                    ..VirtualAgentConfig::default()
-                })
-                .collect(),
+            virtual_agents: roster.iter().map(|agent| agent.name.clone()).collect(),
             ..ModuleSettingsModel::default()
         };
         let execution = ExecutionSettingsModel {
@@ -197,6 +208,7 @@ impl SwarmKit {
             &models,
             &providers,
             &module_settings,
+            &specs,
             &["--auto-approve".to_string()],
         );
         let broker = Broker::start_at(

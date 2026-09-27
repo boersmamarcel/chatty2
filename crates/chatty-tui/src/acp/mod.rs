@@ -31,9 +31,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Responder, Stdio};
 use anyhow::{Context, anyhow};
-use chatty_core::factories::agent_factory::{
-    AgentBuildContext, AgentServices, gated_exec_settings,
-};
+use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
 use chatty_core::services::StreamSurface;
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, SessionEvent, TurnInput, turn_transport,
@@ -218,13 +216,13 @@ impl Server {
             Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
             None => None,
         };
-        let ctx = AgentBuildContext {
-            mcp_tools,
-            role: config.role.clone(),
-            ask_user_enabled: false,
-            instructions_dir: Some(workspace.clone()),
-            ..AgentBuildContext::from_services(AgentServices {
-                exec_settings: gated_exec_settings(&settings),
+        // `settings` carries `ask_user_enabled: false` and the ACP session's
+        // workspace, which `from_spec` reads for `ask_user_enabled` and
+        // `instructions_dir`.
+        let built = AgentBuildContext::from_spec(
+            &config.spec,
+            AgentServices {
+                exec_settings: Some(settings.clone()),
                 user_secrets: config.user_secrets.clone(),
                 memory_service: config.memory_service.clone(),
                 skill_service: Some(chatty_core::services::SkillService::new(
@@ -240,7 +238,12 @@ impl Server {
                 lazy_broker: config.broker.clone(),
                 local_agents: config.module_settings.virtual_agent_names(),
                 remote_agents: config.remote_agents.clone(),
-            })
+            },
+        )
+        .map_err(anyhow::Error::from)?;
+        let ctx = AgentBuildContext {
+            mcp_tools,
+            ..built.context
         };
         let id = uuid::Uuid::new_v4().to_string();
         session

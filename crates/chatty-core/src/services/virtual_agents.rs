@@ -1,28 +1,35 @@
-//! The broker's virtual agents, resolved from settings once for both
-//! frontends (ADR-0011 C10 / AGE-377).
+//! The broker's virtual agents, resolved from agent specs once for both
+//! frontends (ADR-0011 C10 / AGE-377, AGE-614).
 //!
 //! A worker is a `chatty-tui` child, and everything that makes one worker
-//! differ from another is its argv: `--model` picks the model, `--disable`
-//! trims the tool set, and the leader's own provider flags (`--ollama`,
+//! differ from another is its [`AgentSpec`], which travels on the child's
+//! argv as `--agent-json <spec>` — the spec's wire form — so the child
+//! builds itself through [`AgentBuildContext::from_spec`] exactly as a
+//! `--agent` run would. The leader's own provider flags (`--ollama`,
 //! `--openai-compat-url`, `--api-key`) tell a child with no `providers.json`
-//! — a Harbor sandbox — where the model server is. So a *role* is a name
-//! plus an argv, declared in `module_settings.json` as a
-//! [`VirtualAgentConfig`], and never a parameter on `invoke_agent`: the
-//! leader's tool schema and prompt prefix stay identical whatever the team.
+//! — a Harbor sandbox — where the model server is. A *role* is never a
+//! parameter on `invoke_agent`: the leader's tool schema and prompt prefix
+//! stay identical whatever the team.
 //!
 //! This decides the argv and the endpoint to meter for each declared agent.
 //! Wrapping that in a `LocalRunner` is left to the caller, since that type
 //! lives in `chatty-protocol-gateway`, which this crate does not depend on
 //! (see [`worker_endpoint`](super::worker_endpoint)).
+//!
+//! [`AgentBuildContext::from_spec`]: crate::factories::AgentBuildContext::from_spec
 
-use crate::factories::agent_factory::{tool_profile, tool_profile_names};
+use crate::agent_spec::AgentSpec;
+use crate::factories::agent_factory::tool_profile;
 use crate::settings::models::ModuleSettingsModel;
+use crate::settings::models::execution_settings::canonical_tool_group;
 use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
-use crate::settings::models::module_settings::VirtualAgentConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::LOCAL_AGENT_NAME;
 
 use super::worker_endpoint::resolve_worker_endpoint;
+
+/// The flag a worker's spec rides on.
+pub const AGENT_JSON_FLAG: &str = "--agent-json";
 
 /// One virtual agent the broker publishes: the name callers address, the
 /// card text that says what it runs, its children's argv, and the model
@@ -48,96 +55,65 @@ pub struct VirtualAgentSpec {
 
 /// Resolve every virtual agent the broker should publish.
 ///
-/// One per `module_settings.virtual_agents` entry, or the single default
-/// `local-agent` when none is declared. `common_args` is appended to every
-/// agent's argv after its own — `--auto-approve` when the leader runs
-/// unattended, and the leader's provider flags when it was configured by
-/// flags rather than by a config dir the child would read too.
+/// One per spec in `agents` — the roster `module_settings.virtual_agents`
+/// (or a team) names, already loaded — or the single default `local-agent`
+/// when it is empty. `module_settings` supplies the endpoint budgets and the
+/// team's verification command. `common_args` is appended to every agent's
+/// argv after its spec — `--auto-approve` when the leader runs unattended,
+/// and the leader's provider flags when it was configured by flags rather
+/// than by a config dir the child would read too.
 pub fn resolve_virtual_agents(
     models: &[ModelConfig],
     providers: &[ProviderConfig],
     module_settings: &ModuleSettingsModel,
+    agents: &[AgentSpec],
     common_args: &[String],
 ) -> Vec<VirtualAgentSpec> {
-    let default_agent = [VirtualAgentConfig {
-        name: LOCAL_AGENT_NAME.to_string(),
-        ..VirtualAgentConfig::default()
-    }];
-    let declared: &[VirtualAgentConfig] = if module_settings.virtual_agents.is_empty() {
+    let default_agent = [AgentSpec::named(LOCAL_AGENT_NAME)];
+    let declared: &[AgentSpec] = if agents.is_empty() {
         &default_agent
     } else {
-        &module_settings.virtual_agents
+        agents
     };
 
     declared
         .iter()
-        .map(|agent| {
-            let mut args = Vec::new();
-            if let Some(model) = agent.model.as_deref() {
-                args.push("--model".to_string());
-                args.push(model.to_string());
+        .map(|spec| {
+            let mut args = vec![
+                AGENT_JSON_FLAG.to_string(),
+                spec.to_json().expect("an agent spec serializes"),
+            ];
+            // An agent that delegates in turn needs a broker of its own —
+            // a sub-leader. Which agents it may reach is DP-1's to enforce.
+            if !spec.swarm.delegates_to.is_empty() {
+                args.push("--broker".to_string());
             }
-            // A profile is an allowlist of tool names and `--disable` a list
-            // of groups; `chatty-tui` composes the two (a profile only ever
-            // takes tools away, it never turns a disabled group back on), so
-            // both ride along whenever they're set (AGE-452).
-            if let Some(profile) = agent.tools.as_deref() {
-                if tool_profile(profile).is_none() {
-                    tracing::warn!(
-                        agent = %agent.name,
-                        profile,
-                        valid = ?tool_profile_names(),
-                        "Virtual agent names an unknown tool profile; its workers will fail to start"
-                    );
-                }
-                args.push("--tools".to_string());
-                args.push(profile.to_string());
-            }
-            if !agent.disable_tools.is_empty() {
-                args.push("--disable".to_string());
-                args.push(agent.disable_tools.join(","));
-            }
-            if let Some(preamble) = agent.preamble.as_deref().map(str::trim)
-                && !preamble.is_empty()
-            {
-                args.push("--preamble".to_string());
-                args.push(preamble.to_string());
-            }
-            if let Some(turns) = agent.max_agent_turns {
-                args.push("--max-agent-turns".to_string());
-                args.push(turns.to_string());
-            }
-            args.extend(agent.extra_args.iter().cloned());
             args.extend(common_args.iter().cloned());
 
-            let endpoint = resolve_worker_endpoint(
-                models,
-                providers,
-                module_settings,
-                agent.model.as_deref(),
-            );
+            let model = spec.agent.model.as_deref();
+            let endpoint = resolve_worker_endpoint(models, providers, module_settings, model);
             if endpoint.is_none() {
                 tracing::warn!(
-                    agent = %agent.name,
-                    model = ?agent.model,
+                    agent = %spec.agent.name,
+                    model = ?model,
                     "Virtual agent's model resolves to no configured provider; its workers are unmetered"
                 );
             }
 
             VirtualAgentSpec {
-                name: agent.name.clone(),
-                description: describe(agent, models),
+                name: spec.agent.name.clone(),
+                description: describe(spec, models),
                 args,
                 endpoint,
-                verification: verification_for(agent, module_settings),
+                verification: verification_for(spec, module_settings),
             }
         })
         .collect()
 }
 
-/// The tool group `--disable` names when a worker is to run without a
-/// shell, and the tool a named profile has to allow for the same thing
-/// (AGE-406, "Do not" item 2).
+/// The tool group a spec disables when a worker is to run without a shell,
+/// and the tool a named profile has to allow for the same thing (AGE-406,
+/// "Do not" item 2).
 const SHELL_TOOL_GROUP: &str = "shell";
 const SHELL_TOOL_NAME: &str = "shell_execute";
 
@@ -146,24 +122,22 @@ const SHELL_TOOL_NAME: &str = "shell_execute";
 ///
 /// A worker that cannot run commands did not produce a build, so running
 /// the suite in its tree would report the leader's own state back as the
-/// worker's. `tools` and `disable_tools` compose (AGE-452): a named profile
-/// has to allow `shell_execute` *and* `disable_tools` has to leave `shell`
+/// worker's. `tools.profile` and `tools.disable` compose (AGE-452): a named
+/// profile has to allow `shell_execute` *and* `disable` has to leave `shell`
 /// enabled, so a `reviewer` runs the suite unless it also disables `shell`,
-/// and a `coordinator` never does regardless of `disable_tools`.
-fn verification_for(
-    agent: &VirtualAgentConfig,
-    module_settings: &ModuleSettingsModel,
-) -> Option<String> {
-    let profile_has_shell = match agent.tools.as_deref() {
-        // An unknown profile name is warned about above and fails the
+/// and a `coordinator` never does regardless of `disable`.
+fn verification_for(spec: &AgentSpec, module_settings: &ModuleSettingsModel) -> Option<String> {
+    let profile_has_shell = match spec.tools.profile.as_deref() {
+        // An unknown profile name fails the spec's validation, and so the
         // child at start-up, so what this answers for it never matters.
         Some(profile) => tool_profile(profile).is_none_or(|p| p.allows(SHELL_TOOL_NAME)),
         None => true,
     };
-    let not_disabled = !agent
-        .disable_tools
+    let not_disabled = !spec
+        .tools
+        .disable
         .iter()
-        .any(|group| group == SHELL_TOOL_GROUP);
+        .any(|group| canonical_tool_group(group) == SHELL_TOOL_GROUP);
     let has_shell = profile_has_shell && not_disabled;
     has_shell
         .then(|| module_settings.team.verification.clone())
@@ -172,31 +146,29 @@ fn verification_for(
 
 /// The card text: what the agent is, which model it runs, and which tool
 /// groups it lacks.
-fn describe(agent: &VirtualAgentConfig, models: &[ModelConfig]) -> String {
+fn describe(spec: &AgentSpec, models: &[ModelConfig]) -> String {
     let mut text = String::from(
         "A chatty agent in its own process, with its own workspace. \
          Delegate a self-contained task to it and it works autonomously \
          and reports back.",
     );
-    match agent.model.as_deref() {
+    match spec.agent.model.as_deref() {
         Some(model) => text.push_str(&format!(" Model: {model}.")),
         None => match resolve_model_query(models, None) {
             Some(model) => text.push_str(&format!(" Model: {} (the default).", model.name)),
             None => text.push_str(" Model: the configured default."),
         },
     }
-    if let Some(profile) = agent.tools.as_deref() {
+    let disabled = &spec.tools.disable;
+    if let Some(profile) = spec.tools.profile.as_deref() {
         text.push_str(&format!(" Tool profile: {profile}."));
-    } else if agent.disable_tools.is_empty() {
+    } else if disabled.is_empty() {
         text.push_str(" Tools: the full set.");
     }
-    if !agent.disable_tools.is_empty() {
-        text.push_str(&format!(
-            " Tool groups disabled: {}.",
-            agent.disable_tools.join(", ")
-        ));
+    if !disabled.is_empty() {
+        text.push_str(&format!(" Tool groups disabled: {}.", disabled.join(", ")));
     }
-    if let Some(sentence) = first_sentence(agent.preamble.as_deref()) {
+    if let Some(sentence) = first_sentence(spec.agent.preamble.as_deref()) {
         text.push_str(&format!(" Role: {sentence}"));
     }
     text
@@ -237,28 +209,25 @@ mod tests {
         provider
     }
 
-    fn team() -> ModuleSettingsModel {
-        ModuleSettingsModel {
-            virtual_agents: vec![
-                VirtualAgentConfig {
-                    name: "local-coder".to_string(),
-                    model: Some("qwen".to_string()),
-                    ..VirtualAgentConfig::default()
-                },
-                VirtualAgentConfig {
-                    name: "local-reviewer".to_string(),
-                    model: Some("gemma".to_string()),
-                    disable_tools: vec!["fs-write".into(), "shell".into(), "git".into()],
-                    extra_args: vec!["--enable".into(), "fetch".into()],
-                    ..VirtualAgentConfig::default()
-                },
-            ],
-            ..ModuleSettingsModel::default()
-        }
+    fn agent(name: &str, model: Option<&str>) -> AgentSpec {
+        let mut spec = AgentSpec::named(name);
+        spec.agent.model = model.map(str::to_string);
+        spec
+    }
+
+    fn team() -> Vec<AgentSpec> {
+        let mut reviewer = agent("local-reviewer", Some("gemma"));
+        reviewer.tools.disable = vec!["fs-write".into(), "shell".into(), "git".into()];
+        vec![agent("local-coder", Some("qwen")), reviewer]
+    }
+
+    fn spec_in(args: &[String]) -> AgentSpec {
+        assert_eq!(args[0], AGENT_JSON_FLAG);
+        AgentSpec::from_json(&args[1]).expect("the argv carries the spec")
     }
 
     /// Nothing declared is exactly the pre-C10 broker: one `local-agent`,
-    /// no `--model`, only the common flags.
+    /// the default model, only the common flags besides its bare spec.
     #[test]
     fn nothing_declared_is_the_one_default_worker() {
         let models = vec![model("qwen", ProviderType::Ollama)];
@@ -267,12 +236,20 @@ mod tests {
             &models,
             &providers,
             &ModuleSettingsModel::default(),
+            &[],
             &["--auto-approve".to_string()],
         );
 
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, LOCAL_AGENT_NAME);
-        assert_eq!(specs[0].args, vec!["--auto-approve".to_string()]);
+        assert_eq!(
+            specs[0].args,
+            vec![
+                AGENT_JSON_FLAG.to_string(),
+                r#"{"agent":{"name":"local-agent"}}"#.to_string(),
+                "--auto-approve".to_string()
+            ]
+        );
         assert_eq!(
             specs[0].endpoint,
             Some(("http://localhost:11434".to_string(), 1))
@@ -284,82 +261,49 @@ mod tests {
         );
     }
 
-    /// Do item 2: `--model` when set, `--disable` when set, then
-    /// `extra_args`, then what every worker gets.
+    /// Each agent's child gets its whole spec on the argv, then what every
+    /// worker gets.
     #[test]
-    fn each_declared_agent_gets_its_own_argv() {
-        let models = vec![
-            model("qwen", ProviderType::Ollama),
-            model("gemma", ProviderType::Ollama),
-        ];
-        let providers = vec![provider(ProviderType::Ollama, "http://localhost:11434")];
+    fn each_declared_agent_gets_its_own_spec_on_the_argv() {
         let common = vec![
             "--auto-approve".to_string(),
             "--ollama".to_string(),
             "http://localhost:11434".to_string(),
         ];
-        let specs = resolve_virtual_agents(&models, &providers, &team(), &common);
+        let roster = team();
+        let specs =
+            resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &roster, &common);
 
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].name, "local-coder");
-        assert_eq!(
-            specs[0].args,
-            vec![
-                "--model",
-                "qwen",
-                "--auto-approve",
-                "--ollama",
-                "http://localhost:11434"
-            ]
-        );
-        assert_eq!(specs[1].name, "local-reviewer");
-        assert_eq!(
-            specs[1].args,
-            vec![
-                "--model",
-                "gemma",
-                "--disable",
-                "fs-write,shell,git",
-                "--enable",
-                "fetch",
-                "--auto-approve",
-                "--ollama",
-                "http://localhost:11434"
-            ]
-        );
+        for (resolved, declared) in specs.iter().zip(&roster) {
+            assert_eq!(resolved.name, declared.agent.name);
+            assert_eq!(&spec_in(&resolved.args), declared);
+            assert_eq!(resolved.args[2..], common[..]);
+        }
     }
 
-    /// AGE-440: a worker with its own `max_agent_turns` gets
-    /// `--max-agent-turns <n>` in its argv, ahead of `extra_args`; a worker
-    /// that does not set it gets no such flag at all, so its child falls
-    /// back to `execution_settings`' own default (regression).
+    /// A spec that delegates in turn is a sub-leader: its child runs a
+    /// broker of its own. One that does not, does not.
     #[test]
-    fn max_agent_turns_becomes_a_cli_flag_only_when_set() {
-        let mut settings = team();
-        settings.virtual_agents[0].max_agent_turns = Some(30);
-        // local-reviewer (index 1) leaves it unset.
-
-        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
-
-        assert_eq!(specs[0].name, "local-coder");
-        assert_eq!(
-            specs[0].args,
-            vec!["--model", "qwen", "--max-agent-turns", "30"]
+    fn an_agent_that_delegates_gets_its_own_broker() {
+        let mut lead = AgentSpec::named("kit-lead");
+        lead.swarm.delegates_to = vec!["*".to_string()];
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &[lead, AgentSpec::named("kit-worker")],
+            &[],
         );
-
-        assert_eq!(specs[1].name, "local-reviewer");
-        assert!(
-            !specs[1].args.contains(&"--max-agent-turns".to_string()),
-            "an agent with no max_agent_turns must get no CLI flag for it: {:?}",
-            specs[1].args
-        );
+        assert_eq!(specs[0].args[2..], ["--broker".to_string()]);
+        assert_eq!(specs[1].args.len(), 2, "{:?}", specs[1].args);
     }
 
-    /// Do item 6: the card says which model and which tool groups are
-    /// missing, so the leader can pick a reviewer by reading `list_agents`.
+    /// The card says which model and which tool groups are missing, so the
+    /// leader can pick a reviewer by reading `list_agents`.
     #[test]
     fn the_description_carries_the_model_and_the_disabled_groups() {
-        let specs = resolve_virtual_agents(&[], &[], &team(), &[]);
+        let specs = resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &team(), &[]);
 
         assert!(
             specs[0].description.contains("Model: qwen."),
@@ -385,9 +329,9 @@ mod tests {
         );
     }
 
-    /// Do item 3, the budget half: two agents on different provider URLs
-    /// are metered on different endpoints; two on one URL share its key,
-    /// which is what makes them share one budget once the caller wraps it.
+    /// Two agents on different provider URLs are metered on different
+    /// endpoints; two on one URL share its key, which is what makes them
+    /// share one budget once the caller wraps it.
     #[test]
     fn agents_are_metered_on_their_own_models_endpoint() {
         let models = vec![
@@ -399,17 +343,14 @@ mod tests {
             provider(ProviderType::Ollama, "http://localhost:11434"),
             provider(ProviderType::OpenRouter, "http://other:8000/v1"),
         ];
-        let mut settings = team();
-        settings.virtual_agents.push(VirtualAgentConfig {
-            name: "local-tester".to_string(),
-            model: Some("phi".to_string()),
-            ..VirtualAgentConfig::default()
-        });
+        let mut roster = team();
+        roster.push(agent("local-tester", Some("phi")));
+        let mut settings = ModuleSettingsModel::default();
         settings
             .endpoint_budgets
             .insert("http://other:8000/v1".to_string(), 3);
 
-        let specs = resolve_virtual_agents(&models, &providers, &settings, &[]);
+        let specs = resolve_virtual_agents(&models, &providers, &settings, &roster, &[]);
 
         assert_eq!(
             specs[0].endpoint,
@@ -428,13 +369,13 @@ mod tests {
 
     /// AGE-406: the team's verification command reaches every agent that
     /// could have produced a build, and no agent that could not — read off
-    /// `disable_tools` when that is all the agent declares.
+    /// `disable` when that is all the agent declares.
     #[test]
     fn the_teams_verification_command_skips_an_agent_that_disables_the_shell_group() {
-        let mut settings = team();
+        let mut settings = ModuleSettingsModel::default();
         settings.team.verification = Some("cargo test".to_string());
 
-        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
+        let specs = resolve_virtual_agents(&[], &[], &settings, &team(), &[]);
 
         assert_eq!(specs[0].verification.as_deref(), Some("cargo test"));
         assert_eq!(
@@ -443,39 +384,29 @@ mod tests {
         );
     }
 
-    /// AGE-452, applied to AGE-406: `tools` and `disable_tools` compose, so
-    /// both have to allow `shell_execute` — `coordinator` has no
-    /// `shell_execute` regardless, `reviewer` does but loses it once
-    /// `disable_tools` also names `shell`, and `coder` with neither
-    /// restriction keeps it.
+    /// AGE-452, applied to AGE-406: `profile` and `disable` compose, so both
+    /// have to allow `shell_execute`.
     #[test]
     fn a_named_profile_decides_whether_the_verification_command_runs() {
+        let with = |name: &str, profile: &str, disable: &[&str]| {
+            let mut spec = AgentSpec::named(name);
+            spec.tools.profile = Some(profile.to_string());
+            spec.tools.disable = disable.iter().map(|s| s.to_string()).collect();
+            spec
+        };
+        let roster = vec![
+            with("local-lead", "coordinator", &[]),
+            with("local-reviewer", "reviewer", &["shell"]),
+            with("local-coder", "coder", &[]),
+        ];
         let settings = ModuleSettingsModel {
-            virtual_agents: vec![
-                VirtualAgentConfig {
-                    name: "local-lead".to_string(),
-                    tools: Some("coordinator".to_string()),
-                    ..VirtualAgentConfig::default()
-                },
-                VirtualAgentConfig {
-                    name: "local-reviewer".to_string(),
-                    tools: Some("reviewer".to_string()),
-                    disable_tools: vec!["shell".into()],
-                    ..VirtualAgentConfig::default()
-                },
-                VirtualAgentConfig {
-                    name: "local-coder".to_string(),
-                    tools: Some("coder".to_string()),
-                    ..VirtualAgentConfig::default()
-                },
-            ],
             team: TeamConfig {
                 verification: Some("cargo test".to_string()),
             },
             ..ModuleSettingsModel::default()
         };
 
-        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
+        let specs = resolve_virtual_agents(&[], &[], &settings, &roster, &[]);
 
         assert_eq!(
             specs[0].verification, None,
@@ -483,7 +414,7 @@ mod tests {
         );
         assert_eq!(
             specs[1].verification, None,
-            "the reviewer profile allows shell_execute, but disable_tools also names \
+            "the reviewer profile allows shell_execute, but disable also names \
              shell, and the two compose rather than one winning"
         );
         assert_eq!(specs[2].verification.as_deref(), Some("cargo test"));
@@ -491,7 +422,7 @@ mod tests {
 
     #[test]
     fn no_declared_verification_command_means_none_is_run() {
-        let specs = resolve_virtual_agents(&[], &[], &team(), &[]);
+        let specs = resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &team(), &[]);
         assert!(specs.iter().all(|spec| spec.verification.is_none()));
     }
 
@@ -499,111 +430,40 @@ mod tests {
     fn a_model_that_resolves_to_nothing_leaves_the_agent_unmetered() {
         let models = vec![model("qwen", ProviderType::Ollama)];
         let providers = vec![provider(ProviderType::Ollama, "http://localhost:11434")];
-        let settings = ModuleSettingsModel {
-            virtual_agents: vec![VirtualAgentConfig {
-                name: "local-mystery".to_string(),
-                model: Some("no-such-model".to_string()),
-                ..VirtualAgentConfig::default()
-            }],
-            ..ModuleSettingsModel::default()
-        };
-
-        let specs = resolve_virtual_agents(&models, &providers, &settings, &[]);
+        let specs = resolve_virtual_agents(
+            &models,
+            &providers,
+            &ModuleSettingsModel::default(),
+            &[agent("local-mystery", Some("no-such-model"))],
+            &[],
+        );
         assert_eq!(specs[0].endpoint, None);
-        assert_eq!(specs[0].args, vec!["--model", "no-such-model"]);
     }
 
-    /// A role travels as argv (ADR-0011 C11): the profile as `--tools`, the
-    /// standing instructions as `--preamble`, both ahead of `extra_args`.
-    #[test]
-    fn a_declared_role_rides_along_as_tools_and_preamble_flags() {
-        let settings = ModuleSettingsModel {
-            virtual_agents: vec![VirtualAgentConfig {
-                name: "local-reviewer".to_string(),
-                model: Some("gemma".to_string()),
-                tools: Some("reviewer".to_string()),
-                preamble: Some("You are the reviewer. Run the tests.".to_string()),
-                ..VirtualAgentConfig::default()
-            }],
-            ..ModuleSettingsModel::default()
-        };
-
-        let specs = resolve_virtual_agents(&[], &[], &settings, &["--auto-approve".to_string()]);
-
-        assert_eq!(
-            specs[0].args,
-            vec![
-                "--model",
-                "gemma",
-                "--tools",
-                "reviewer",
-                "--preamble",
-                "You are the reviewer. Run the tests.",
-                "--auto-approve",
-            ]
-        );
-    }
-
-    /// AGE-452: `tools` and `disable_tools` compose, so a worker can run a
-    /// named profile and still have a group disabled the profile alone
-    /// would have allowed (e.g. a `reviewer` an author wants to keep off
-    /// `ask_user` for — see `resolve_virtual_agents`'s doc comment).
-    #[test]
-    fn a_profile_and_disabled_groups_ride_along_together() {
-        let settings = ModuleSettingsModel {
-            virtual_agents: vec![VirtualAgentConfig {
-                name: "local-reviewer".to_string(),
-                disable_tools: vec!["fs-write".into()],
-                tools: Some("reviewer".to_string()),
-                ..VirtualAgentConfig::default()
-            }],
-            ..ModuleSettingsModel::default()
-        };
-
-        let specs = resolve_virtual_agents(&[], &[], &settings, &[]);
-
-        assert_eq!(
-            specs[0].args,
-            vec!["--tools", "reviewer", "--disable", "fs-write"]
-        );
-        assert!(
-            specs[0].description.contains("Tool profile: reviewer."),
-            "{}",
-            specs[0].description
-        );
-        assert!(
-            specs[0]
-                .description
-                .contains("Tool groups disabled: fs-write."),
-            "{}",
-            specs[0].description
-        );
-    }
-
-    /// Do item 3: the card carries the profile name and the preamble's first
-    /// sentence, so the leader picks a reviewer by reading `list_agents`.
+    /// The card carries the profile name and the preamble's first sentence,
+    /// so the leader picks a reviewer by reading `list_agents`.
     #[test]
     fn the_card_carries_the_profile_and_the_preambles_first_sentence() {
-        let settings = ModuleSettingsModel {
-            virtual_agents: vec![VirtualAgentConfig {
-                name: "local-reviewer".to_string(),
-                tools: Some("reviewer".to_string()),
-                preamble: Some(
-                    "You review code you did not write. Never edit the tree; \
-                     run the tests and report."
-                        .to_string(),
-                ),
-                ..VirtualAgentConfig::default()
-            }],
-            ..ModuleSettingsModel::default()
-        };
+        let mut reviewer = AgentSpec::named("local-reviewer");
+        reviewer.tools.profile = Some("reviewer".to_string());
+        reviewer.tools.disable = vec!["fs-write".to_string()];
+        reviewer.agent.preamble = Some(
+            "You review code you did not write. Never edit the tree; \
+             run the tests and report."
+                .to_string(),
+        );
 
-        let description = resolve_virtual_agents(&[], &[], &settings, &[])
-            .swap_remove(0)
-            .description;
+        let description =
+            resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &[reviewer], &[])
+                .swap_remove(0)
+                .description;
 
         assert!(
             description.contains("Tool profile: reviewer."),
+            "{description}"
+        );
+        assert!(
+            description.contains("Tool groups disabled: fs-write."),
             "{description}"
         );
         assert!(

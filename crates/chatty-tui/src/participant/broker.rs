@@ -1,6 +1,6 @@
 //! `--broker`: a headless, pipe or interactive leader runs its own protocol
 //! gateway so it can delegate to its virtual agents — `local-agent`, or
-//! the named team `module_settings.virtual_agents` declares (ADR-0011 C10)
+//! the agent specs `module_settings.virtual_agents` names (ADR-0011 C10)
 //! — the way the desktop's module-settings controller does for the GPUI
 //! app (AGE-376).
 //!
@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chatty_core::agent_spec::AgentSpec;
 use chatty_core::services::virtual_agents::{VirtualAgentSpec, resolve_virtual_agents};
 use chatty_core::services::worker_tree;
 use chatty_core::settings::models::ModuleSettingsModel;
@@ -80,11 +81,13 @@ impl Broker {
     /// its own `git worktree` under the same root, and inherits the same
     /// no-human approval policy. `provider_flags` are the leader's own
     /// `--ollama`/`--openai-compat-url`/`--api-key`, forwarded verbatim
-    /// (see [`provider_flags`]).
+    /// (see [`provider_flags`]). `agents` is the roster's specs, already
+    /// loaded; empty is the one default worker.
     pub async fn start(
         models: &[ModelConfig],
         providers: &[ProviderConfig],
         module_settings: &ModuleSettingsModel,
+        agents: &[AgentSpec],
         workspace_dir: Option<String>,
         auto_approve: bool,
         provider_flags: &[String],
@@ -94,7 +97,8 @@ impl Broker {
             common_args.push("--auto-approve".to_string());
         }
         common_args.extend(provider_flags.iter().cloned());
-        let specs = resolve_virtual_agents(models, providers, module_settings, &common_args);
+        let specs =
+            resolve_virtual_agents(models, providers, module_settings, agents, &common_args);
         Self::start_at(
             socket_path(),
             worker_executable(),
@@ -248,6 +252,7 @@ impl PendingBroker {
         models: Vec<ModelConfig>,
         providers: Vec<ProviderConfig>,
         module_settings: ModuleSettingsModel,
+        agents: Vec<AgentSpec>,
         workspace_dir: Option<String>,
         auto_approve: bool,
         provider_flags: Vec<String>,
@@ -256,6 +261,7 @@ impl PendingBroker {
             let models = models.clone();
             let providers = providers.clone();
             let module_settings = module_settings.clone();
+            let agents = agents.clone();
             let workspace_dir = workspace_dir.clone();
             let provider_flags = provider_flags.clone();
             Box::pin(async move {
@@ -263,6 +269,7 @@ impl PendingBroker {
                     &models,
                     &providers,
                     &module_settings,
+                    &agents,
                     workspace_dir,
                     auto_approve,
                     &provider_flags,
@@ -428,7 +435,7 @@ mod tests {
         providers: &[ProviderConfig],
         module_settings: &ModuleSettingsModel,
     ) -> Vec<VirtualAgentSpec> {
-        resolve_virtual_agents(models, providers, module_settings, &[])
+        resolve_virtual_agents(models, providers, module_settings, &[], &[])
     }
 
     /// BI-2, AGE-634: nothing is bound or spawned when a `PendingBroker` is
