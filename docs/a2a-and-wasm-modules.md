@@ -201,8 +201,8 @@ The directory is configurable in **Settings → Modules**. Platform defaults:
 name = "echo-agent"
 version = "0.1.0"
 description = "A simple echo agent for testing"
-wasm = "echo_agent.wasm"        # Relative to this file's directory
-# execution_mode = "local"      # "remote" modules run on the hive-runner; no local .wasm
+wasm = "echo_agent.wasm"        # Plain relative path inside this directory (no `..`, no absolute)
+# execution_mode = "local"      # "local" | "remote" | "remote_only"; remote modules run on the hive-runner
 
 [capabilities]
 tools = ["echo", "reverse"]     # Tool names the module exposes
@@ -217,7 +217,26 @@ a2a = true                      # Expose via /a2a/{name} (required for invoke_ag
 [resources]
 max_memory_mb = 64              # Memory cap (0 = use default: 256 MiB; may only lower)
 max_execution_ms = 30000        # Per-call timeout (0 = use default: 60 s; may only lower)
+
+[config]                        # Optional: string → string values the guest reads via config::get
+greeting = "hello"
+
+[files]                         # Optional: the only directory file::read-bytes may read
+root = "weights"                # Plain relative path inside this directory
 ```
+
+Parsing is strict: an unknown key or table, an `execution_mode` other than
+`local`/`remote`/`remote_only`, a non-string `[config]` value, or a `wasm`/`[files].root`
+path that is absolute or uses `..`, `\` or `:` is a manifest error. A `[resources]` value
+above a host ceiling is clamped to it, with a warning on the manifest
+(`ModuleManifest::warnings`).
+
+`ModuleRegistry::scan_directory` visits module directories in name order and returns a
+`ScanReport { loaded, remote, failed }`: every directory that did not load is in `failed`
+with its reason, and remote modules are listed apart from local loads. Two directories
+declaring the same `name`: the first by directory name wins, the second is a failure (so is
+`load` of a name already registered from another directory). The desktop's installed
+extensions list shows a module's failure reason under its row.
 
 `[protocols].a2a = true` is what makes a module invocable as an agent from
 conversations. Without it the module can still serve tools via MCP or completions via

@@ -4,6 +4,7 @@
 #
 #   target/wasm-fixtures/<name>/<name>.wasm
 #   target/wasm-fixtures/<name>/module.toml
+#   target/wasm-fixtures/<name>/<root>/     (when module.toml has `[files] root`)
 #
 # One directory per module, since a registry-loadable module is a directory
 # holding its own module.toml. `chatty_wasm_runtime::test_support::fixture_path`
@@ -38,6 +39,13 @@ stage() {
   cp "$wasm" "$dest/$name.wasm"
   # A module.toml names its own wasm file; point it at the staged name.
   sed -E "s|^wasm = .*|wasm = \"$name.wasm\"|" "$manifest_dir/module.toml" > "$dest/module.toml"
+  # A `[files] root` directory ships beside the module (PL-H3).
+  local files_root
+  files_root="$(sed -nE 's/^root = "(.*)"/\1/p' "$manifest_dir/module.toml")"
+  if [[ -n "$files_root" ]]; then
+    rm -rf "${dest:?}/$files_root"
+    cp -R "$manifest_dir/$files_root" "$dest/$files_root"
+  fi
 }
 
 for entry in "${crates[@]}"; do
