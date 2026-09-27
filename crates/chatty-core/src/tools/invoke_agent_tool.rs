@@ -12,6 +12,7 @@ use crate::services::a2a_client::{
     A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
     trace_from_status_metadata, usage_from_status_metadata,
 };
+use crate::services::lazy_broker::LazyBroker;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
@@ -155,6 +156,11 @@ pub struct InvokeAgentTool {
     /// the broker can tell a worker delegating on its own model endpoint
     /// from any other caller (AGE-628).
     broker_caller: Option<String>,
+    /// A broker that has not necessarily started yet (BI-2, AGE-634).
+    /// Consulted only when `gateway_base_url` is `None`: the production
+    /// desktop/chatty-tui wiring hands this in instead of a pre-resolved
+    /// port, and the first local/module delegation actually starts it.
+    lazy_broker: Option<Arc<dyn LazyBroker>>,
 }
 
 /// Where a broker hands a worker its caller token; the gateway's
@@ -185,6 +191,33 @@ impl InvokeAgentTool {
             broker_caller: std::env::var(BROKER_CALLER_ENV)
                 .ok()
                 .filter(|token| !token.is_empty()),
+            lazy_broker: None,
+        }
+    }
+
+    /// Start the broker itself on first use instead of expecting it
+    /// already running (BI-2, AGE-634). Ignored when a `gateway_port` was
+    /// already given to [`Self::new`]: that path is for tests and hosts
+    /// that already know a live port.
+    pub fn with_lazy_broker(mut self, broker: Arc<dyn LazyBroker>) -> Self {
+        self.lazy_broker = Some(broker);
+        self
+    }
+
+    /// The gateway's base URL, resolving a [`LazyBroker`] on first use if
+    /// that is all this tool has. `None` means there is nothing to delegate
+    /// through — no port, no lazy broker.
+    async fn gateway_base_url(&self) -> Option<String> {
+        if let Some(url) = &self.gateway_base_url {
+            return Some(url.clone());
+        }
+        let broker = self.lazy_broker.as_ref()?;
+        match broker.ensure_started().await {
+            Ok(url) => Some(url),
+            Err(error) => {
+                warn!(%error, "Failed to start the broker for a delegation");
+                None
+            }
         }
     }
 
@@ -379,7 +412,7 @@ impl Tool for InvokeAgentTool {
             .map(String::as_str)
             .find(|local| *local == agent_name)
         {
-            let Some(ref base_url) = self.gateway_base_url else {
+            let Some(base_url) = self.gateway_base_url().await else {
                 return Err(InvokeAgentError::InvocationFailed(format!(
                     "Agent '{local}' needs the protocol gateway. \
                          Enable it in Settings \u{2192} Modules."
@@ -419,7 +452,7 @@ impl Tool for InvokeAgentTool {
                 )));
             }
 
-            let Some(ref base_url) = self.gateway_base_url else {
+            let Some(base_url) = self.gateway_base_url().await else {
                 return Err(InvokeAgentError::InvocationFailed(format!(
                     "Local module '{}' found but the protocol gateway is not running. \
                          Enable it in Settings → Modules.",

@@ -13,6 +13,7 @@ use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQu
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::paste::PasteStore;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
+use chatty_core::services::lazy_broker::LazyBroker;
 use chatty_core::services::team::Team;
 use chatty_core::services::{
     AgentTaskSnapshot, McpService, MemoryService, StreamSurface, is_agent_todo_tool,
@@ -355,7 +356,12 @@ pub struct ChatEngine {
     pub module_settings: ModuleSettingsModel,
     /// The `--broker` leader's own gateway port, held apart from
     /// `module_settings` so `/modules` can never persist it (AGE-382).
+    /// Always `None` now that the broker starts lazily (BI-2, AGE-634): the
+    /// port is not known until `broker` below actually starts it.
     pub broker_port: Option<u16>,
+    /// The `--broker`/`--team` leader's own gateway, not started yet (BI-2,
+    /// AGE-634): `list_agents`/`invoke_agent` start it on first use.
+    pub broker: Option<Arc<dyn LazyBroker>>,
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
@@ -451,7 +457,12 @@ pub struct ChatEngineConfig {
     pub module_settings: ModuleSettingsModel,
     /// The `--broker` leader's own gateway port, held apart from
     /// `module_settings` so `/modules` can never persist it (AGE-382).
+    /// Always `None` now that the broker starts lazily (BI-2, AGE-634): the
+    /// port is not known until `broker` below actually starts it.
     pub broker_port: Option<u16>,
+    /// The `--broker`/`--team` leader's own gateway, not started yet (BI-2,
+    /// AGE-634): `list_agents`/`invoke_agent` start it on first use.
+    pub broker: Option<Arc<dyn LazyBroker>>,
     pub models: ModelsModel,
     pub providers: Vec<ProviderConfig>,
     pub mcp_service: Option<McpService>,
@@ -499,6 +510,7 @@ impl ChatEngine {
             execution_settings: config.execution_settings,
             module_settings: config.module_settings,
             broker_port: config.broker_port,
+            broker: config.broker,
             models: config.models,
             providers: config.providers,
             mcp_service: config.mcp_service,
@@ -665,6 +677,7 @@ impl ChatEngine {
                     .module_settings
                     .enabled
                     .then_some(self.module_settings.gateway_port)),
+                lazy_broker: self.broker.clone(),
                 local_agents: self.local_agents(),
                 remote_agents: self.remote_agents.clone(),
             })
@@ -1455,6 +1468,7 @@ mod tests {
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
                 broker_port: None,
+                broker: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,
@@ -1836,6 +1850,7 @@ mod tests {
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
                 broker_port: None,
+                broker: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
                 mcp_service: None,
