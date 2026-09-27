@@ -24,7 +24,41 @@ Where it lands: macOS puts a link in `/usr/local/bin` (you may be asked for an a
 | **Pipe** | `cat notes.md \| chatty-tui --pipe` | stdin is the message; the answer goes to stdout |
 | **ACP** | `chatty-tui acp` | Serves the [Agent Client Protocol](https://agentclientprotocol.com) on stdin/stdout, so an editor such as Zed or VS Code can run chatty as its agent ([below](#use-chatty-as-an-agent-in-zed-or-vs-code)) |
 
-Useful flags: `--model <id or name>` picks a model (exact id, then name, then substring); `--enable` / `--disable` switch tool groups for this run (`shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal`; an unknown name is an error), and `--only` runs with exactly the groups named; `--auto-approve` skips every approval prompt ([Security & sandboxing](./security.md)). Full list: [CLI flags](../dev/reference/cli-flags.md).
+Useful flags: `--model <id or name>` picks a model (exact id, then name, then substring); `--enable` / `--disable` switch tool groups for this run (`shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal`; an unknown name is an error), and `--only` runs with exactly the groups named; `--auto-approve` skips every approval prompt ([Security & sandboxing](./security.md)); `--usage-file <path>` writes what a headless or pipe run spent (tokens, model and tool calls, how it ended) to a JSON file ([below](#usage-file)). Full list: [CLI flags](../dev/reference/cli-flags.md).
+
+## Usage file
+
+`chatty-tui --headless --usage-file <PATH> -m "…"` (or `--pipe`) writes what the
+run spent to `PATH` as one JSON object; stdout, stderr and the exit code are unchanged. It is
+written when the run ends however it ends (including SIGINT/SIGTERM/SIGHUP), and
+rewritten after every model call while it runs, so a run killed from outside
+leaves its latest totals with `"exit": "running"`. Each write goes through a
+temporary file and a rename, so a reader never sees half an object.
+
+```json
+{"schema":1,"input_tokens":550,"output_tokens":25,"cache_read_tokens":350,"cache_write_tokens":null,"reasoning_tokens":4,"model_calls":4,"tool_calls":2,"tool_calls_failed":1,"turns":3,"follow_up_passes":2,"duration_ms":18,"exit":"completed","model":"llama3.2"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `schema` | `1`; bumped only when a field changes meaning or goes away |
+| `input_tokens` | Prompt tokens over every model call, cached ones included |
+| `output_tokens` | Generated tokens over every model call, reasoning included |
+| `cache_read_tokens` | Prompt tokens served from the provider's cache (part of `input_tokens`); `null` when no call reported any |
+| `cache_write_tokens` | Prompt tokens written to the provider's cache (part of `input_tokens`); `null` when no call reported any |
+| `reasoning_tokens` | Output tokens spent reasoning (part of `output_tokens`); `null` when no call reported any |
+| `model_calls` | Model requests that completed and reported usage |
+| `tool_calls` | Tool calls the model started |
+| `tool_calls_failed` | Those that ended in an error |
+| `turns` | Passes: the task, then every prompt the run sent itself |
+| `follow_up_passes` | The passes after the task's (stall resumes, retries, nudges, finalizations) |
+| `duration_ms` | Wall-clock time since the run started |
+| `exit` | `running`, `completed`, `deadline` (the `--max-duration` budget was spent), `error` (non-zero exit) or `cancelled` (a signal) |
+| `model` | The model identifier the run used |
+
+Totals are summed per model call across every pass, plus what delegated agents
+reported spending; `tool_calls` counts this agent's own calls. A request cut off
+mid-stream reports no usage and is not counted.
 
 ## Zero-config quick start
 

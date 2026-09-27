@@ -1910,6 +1910,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 900,
             output_tokens: 20,
+            reasoning_tokens: 0,
         };
         let call2 = chatty_core::models::token_usage::ApiCallUsage {
             turn: 2,
@@ -1917,6 +1918,7 @@ mod tests {
             cache_read_tokens: 900,
             cache_write_tokens: 0,
             output_tokens: 10,
+            reasoning_tokens: 0,
         };
 
         engine.handle_event(AppEvent::TokenUsage(

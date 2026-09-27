@@ -238,6 +238,24 @@ struct Cli {
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     max_duration: Option<std::time::Duration>,
 
+    /// Write what a --headless or --pipe run spent to PATH as one JSON
+    /// object, for scripts that compare runs. stdout, stderr and the exit
+    /// code do not change.
+    ///
+    /// Written when the run ends — completed, out of time, failed, or
+    /// interrupted by SIGINT/SIGTERM/SIGHUP — and rewritten after every
+    /// model call while it runs, through a temporary file and a rename so
+    /// a reader never sees half of it. Fields (schema 1): schema,
+    /// input_tokens (cached included), output_tokens (reasoning included),
+    /// cache_read_tokens, cache_write_tokens, reasoning_tokens (null when
+    /// the provider reported none), model_calls, tool_calls,
+    /// tool_calls_failed, turns, follow_up_passes, duration_ms, exit
+    /// (running | completed | deadline | error | cancelled), model.
+    ///
+    /// Example: --usage-file /tmp/run-usage.json
+    #[arg(long, value_name = "PATH")]
+    usage_file: Option<std::path::PathBuf>,
+
     /// Auto-approve all tool executions without prompting.
     ///
     /// Skips the y/n approval prompt for shell commands, file writes,
@@ -378,7 +396,24 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let usage = match cli.usage_file.clone() {
+        Some(_) if !(cli.headless || cli.pipe) || cli.participant_socket.is_some() => {
+            bail!("--usage-file needs --headless or --pipe");
+        }
+        path => {
+            headless::usage_file::UsageRecorder::new(path, cli.model.clone().unwrap_or_default())
+        }
+    };
+    let result = run(cli, usage.clone()).await;
+    // A run that failed before (or while) its runner was built still
+    // leaves an `error` object; one that already wrote its last is kept.
+    if result.is_err() {
+        usage.finish(headless::RunExit::Error);
+    }
+    result
+}
 
+async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()> {
     let acp_mode = cli.command == Some(Command::Acp);
     if acp_mode && (cli.headless || cli.pipe || cli.participant_socket.is_some()) {
         bail!("acp cannot be combined with --headless, --pipe or --participant-socket");
@@ -765,6 +800,7 @@ async fn main() -> Result<()> {
         );
 
         engine.set_max_duration(max_duration);
+        engine.set_usage_recorder(usage);
         // A --headless run knows its task before its agent exists; pipe
         // and participant runs read theirs later.
         if cli.headless
@@ -1742,6 +1778,16 @@ mod resolve_model_tests {
         }
         let cli = cli(&["--headless", "-m", "hi", "--max-duration", "30m"]);
         assert_eq!(cli.max_duration, Some(std::time::Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn usage_file_is_optional_and_takes_a_path() {
+        assert_eq!(cli(&["--headless", "-m", "hi"]).usage_file, None);
+        let cli = cli(&["--headless", "-m", "hi", "--usage-file", "/tmp/u.json"]);
+        assert_eq!(
+            cli.usage_file,
+            Some(std::path::PathBuf::from("/tmp/u.json"))
+        );
     }
 
     /// A run without a human: a given cap keeps the old cap-only shape;

@@ -9,6 +9,10 @@
 //! element of `messages`. This wrapper sits under rig's client instead and
 //! rewrites the serialized chat-completions body on its way out.
 //!
+//! A streamed request also gets `stream_options.include_usage`, so an
+//! OpenAI-compatible server behind this client reports its token usage
+//! (see [`request_stream_usage`]).
+//!
 //! Only `POST …/chat/completions` bodies are touched. Everything else
 //! (model listing, key verification, multipart uploads) passes straight
 //! through to `reqwest`.
@@ -91,6 +95,35 @@ pub(crate) fn mark_latest_message(body: &mut serde_json::Value) -> bool {
     false
 }
 
+/// Ask a streamed chat-completions request for its usage.
+///
+/// rig's OpenRouter client leaves `stream_options` out (OpenRouter reports
+/// usage on the final chunk unasked), but the same client is how chatty
+/// talks to every OpenAI-compatible server (`--openai-compat-url`), and
+/// vLLM, llama.cpp and the like send no usage on a stream unless
+/// `stream_options.include_usage` is set: every call counted zero tokens.
+/// A caller's own `include_usage` is left as it is. Returns whether
+/// anything changed.
+pub(crate) fn request_stream_usage(body: &mut serde_json::Value) -> bool {
+    if body.get("stream").and_then(|s| s.as_bool()) != Some(true) {
+        return false;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return false;
+    };
+    let options = obj
+        .entry("stream_options")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(options) = options.as_object_mut() else {
+        return false;
+    };
+    if options.contains_key("include_usage") {
+        return false;
+    }
+    options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+    true
+}
+
 /// Rewrite a chat-completions request body; pass any other request through.
 fn rewrite<T: Into<Bytes>>(req: Request<T>) -> Request<Bytes> {
     let (mut parts, body) = req.into_parts();
@@ -99,7 +132,7 @@ fn rewrite<T: Into<Bytes>>(req: Request<T>) -> Request<Bytes> {
         parts.method == Method::POST && parts.uri.path().ends_with("/chat/completions");
     if is_chat_completion
         && let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body)
-        && mark_latest_message(&mut json)
+        && (mark_latest_message(&mut json) | request_stream_usage(&mut json))
         && let Ok(rewritten) = serde_json::to_vec(&json)
     {
         // reqwest derives the length from the body it is given.
@@ -194,6 +227,35 @@ mod tests {
         );
         assert!(body["messages"][1]["content"].is_null());
         assert_eq!(body["messages"][2]["content"], json!("ok"));
+    }
+
+    #[test]
+    fn a_streamed_request_asks_for_its_usage() {
+        let mut body = json!({ "stream": true, "messages": [] });
+        assert!(request_stream_usage(&mut body));
+        assert_eq!(body["stream_options"], json!({ "include_usage": true }));
+        // Idempotent, and a caller's own choice stands.
+        assert!(!request_stream_usage(&mut body));
+        let mut body =
+            json!({ "stream": true, "stream_options": { "include_usage": false, "x": 1 } });
+        assert!(!request_stream_usage(&mut body));
+        assert_eq!(
+            body["stream_options"],
+            json!({ "include_usage": false, "x": 1 })
+        );
+        let mut body = json!({ "stream": true, "stream_options": { "x": 1 } });
+        assert!(request_stream_usage(&mut body));
+        assert_eq!(
+            body["stream_options"],
+            json!({ "include_usage": true, "x": 1 })
+        );
+    }
+
+    #[test]
+    fn a_blocking_request_is_left_alone() {
+        let mut body = json!({ "messages": [] });
+        assert!(!request_stream_usage(&mut body));
+        assert!(body.get("stream_options").is_none());
     }
 
     #[test]

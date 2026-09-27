@@ -30,6 +30,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use super::usage_file::{RunExit, UsageRecorder};
 use crate::engine::{ChatEngineConfig, Transcript};
 use crate::events::AppEvent;
 
@@ -94,6 +95,8 @@ pub struct HeadlessRunner {
     /// Whether the task asks for an answer file, once `note_task` has seen
     /// it; the agent is built with it (`AgentBuildContext::answer_file`).
     pub(super) answer_file: Option<bool>,
+    /// What the run has spent, and the `--usage-file` it goes to.
+    pub(super) usage: UsageRecorder,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -141,6 +144,7 @@ impl HeadlessRunner {
             max_duration: None,
             deadline: None,
             answer_file: None,
+            usage: UsageRecorder::default(),
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
@@ -158,6 +162,20 @@ impl HeadlessRunner {
         self.max_duration = budget;
     }
 
+    /// Record the run's usage into `recorder`, which writes it to the
+    /// `--usage-file` as the run goes and when it ends; see
+    /// [`super::usage_file`].
+    pub fn set_usage_recorder(&mut self, recorder: UsageRecorder) {
+        recorder.set_model(self.config.model_config.model_identifier.clone());
+        self.usage = recorder;
+    }
+
+    /// Write the usage file's last object, if the run has one. The first
+    /// call wins.
+    pub fn finish_usage(&self, exit: RunExit) {
+        self.usage.finish(exit);
+    }
+
     /// Tell the runner its task before the agent is built (`--headless
     /// --message`), so `final_answer` only writes an answer file when the
     /// task asks for one — the same test `run_headless` applies.
@@ -170,6 +188,7 @@ impl HeadlessRunner {
 
     /// Start the run's clock, if it has a budget.
     pub(super) fn start_clock(&mut self) -> Option<Deadline> {
+        self.usage.restart_clock();
         self.deadline = self.max_duration.map(Deadline::starting_now);
         self.deadline
     }
@@ -404,6 +423,7 @@ impl HeadlessRunner {
                 .collect::<Vec<_>>()
                 .join("\n");
             self.scripted_inputs.lock().unwrap().push(text);
+            self.usage.update(|t| t.turns += 1);
             let turn = self
                 .session
                 .begin_scripted_turn(input, scenario, self.event_sink())
@@ -413,6 +433,7 @@ impl HeadlessRunner {
         }
         match self.session.begin_turn(input, self.event_sink()) {
             Ok(turn) => {
+                self.usage.update(|t| t.turns += 1);
                 tokio::spawn(turn);
             }
             Err(e) => {
@@ -456,6 +477,7 @@ impl HeadlessRunner {
                     self.in_tool_turn = true;
                     self.tool_turns_spent += 1;
                 }
+                self.usage.update(|t| t.tool_calls += 1);
                 self.session.note_tool_started(&id, &name);
                 self.transcript.tool_started(id, name);
             }
@@ -470,6 +492,7 @@ impl HeadlessRunner {
             }
             AppEvent::ToolCallError { id, error } => {
                 self.in_tool_turn = false;
+                self.usage.update(|t| t.tool_calls_failed += 1);
                 self.session.note_tool_error(&id, &error);
                 self.transcript.tool_error(&id, error);
             }
@@ -526,9 +549,23 @@ impl HeadlessRunner {
                     self.session.clarifications().cancel_all();
                 }
             }
+            AppEvent::ApiCallUsage(call) => {
+                // Per model call, not per turn: a pass that stalls or fails
+                // never gets its turn's `TokenUsage`, but the calls it made
+                // before that still cost what they cost.
+                self.usage.update(|t| t.add_call(&call));
+                self.usage.checkpoint();
+            }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
             AppEvent::Delegation(progress) => {
+                if let chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished {
+                    usage: Some(usage),
+                    ..
+                } = &progress
+                {
+                    self.usage.update(|t| t.add_delegated(usage));
+                }
                 self.session.note_delegation(&progress);
                 let line = crate::engine::helpers::delegation_line(&progress);
                 if matches!(
@@ -546,16 +583,19 @@ impl HeadlessRunner {
             AppEvent::StreamCompleted => {
                 self.transcript.finish_streaming();
                 self.finish_turn();
+                self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Completed);
             }
             AppEvent::StreamError(error) => {
                 self.transcript.mark_error(&error.to_string());
                 self.finish_turn();
+                self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Error);
             }
             AppEvent::StreamCancelled => {
                 self.transcript.mark_cancelled();
                 self.finish_turn();
+                self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Cancelled);
             }
             AppEvent::AgentProtocolFollowUp(prompt) => {

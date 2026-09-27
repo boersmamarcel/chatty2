@@ -90,6 +90,14 @@ Send a single message and print the response to stdout:
 chatty-tui --headless -m "Explain Rust ownership in one paragraph"
 ```
 
+#### Usage file
+
+`--usage-file <PATH>` (with `--headless` or `--pipe`) writes what the run spent
+(tokens, model and tool calls, passes, how it ended) to `PATH` as one JSON
+object, rewritten after every model call and written last when the run ends.
+Fields and semantics: the user guide, *Terminal interface → Usage file*;
+the schema lives in `src/headless/usage_file.rs`.
+
 ### Pipe mode
 
 Read from stdin, send as a message, print the response:
