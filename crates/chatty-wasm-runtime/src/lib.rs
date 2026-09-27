@@ -1,17 +1,23 @@
 //! `chatty-wasm-runtime` — Wasmtime embedding for chatty WASM modules.
 //!
 //! Provides [`WasmModule`] which loads a WASM component compiled to
-//! `wasm32-wasip2`, manages resource limits, and implements the host-side
-//! WIT interface (`llm`, `config`, `logging`).
+//! `wasm32-wasip2`, enforces per-call resource limits (fuel, wall-clock via
+//! epoch interruption, memory, output size; see [`ResourceLimits`]), and
+//! implements the host-side WIT interface (`llm`, `config`, `logging`).
 
+mod error;
 mod host;
 mod limits;
 mod module;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+pub use error::CallError;
 pub use host::{BillingProvider, LlmProvider, ModuleManifest};
-pub use limits::ResourceLimits;
+pub use limits::{
+    EPOCH_TICK, MAX_EXECUTION_MS_CEILING, MAX_FUEL_CEILING, MAX_MEMORY_BYTES_CEILING,
+    MAX_OUTPUT_BYTES_CEILING, METADATA_CALL_MS, ResourceLimits,
+};
 pub use module::{InvocationMetrics, WasmModule};
 
 /// Host-side WIT types re-exported for callers.
