@@ -27,6 +27,7 @@ use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
 use chatty_core::tools::LocalModuleAgentSummary;
+use chatty_core::tools::plugin_tool::PluginHost;
 
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -449,6 +450,20 @@ pub struct ChatEngine {
     init_generation: u64,
 }
 
+/// Where a spec's plugins are found (PL-U2, AGE-616): the module
+/// directory, and the configured models their `llm::complete` may name.
+pub(crate) fn plugin_host(
+    module_settings: &ModuleSettingsModel,
+    models: &ModelsModel,
+    providers: &[ProviderConfig],
+) -> PluginHost {
+    PluginHost {
+        module_roots: vec![PathBuf::from(&module_settings.module_dir)],
+        models: models.models().to_vec(),
+        providers: providers.to_vec(),
+    }
+}
+
 /// Configuration for constructing a new `ChatEngine`.
 pub struct ChatEngineConfig {
     pub model_config: ModelConfig,
@@ -672,6 +687,7 @@ impl ChatEngine {
                 lazy_broker: self.broker.clone(),
                 local_agents: self.local_agents(),
                 remote_agents: self.remote_agents.clone(),
+                plugin_host: plugin_host(&self.module_settings, &self.models, &self.providers),
             },
         )
         .expect("the run's agent spec was validated at start-up");
@@ -1022,6 +1038,21 @@ impl ChatEngine {
                     .saturating_add(usage.cache_write_tokens);
                 self.session.record_turn_usage(usage.clone());
                 self.last_turn_usage = Some(usage);
+                EngineAction::Redraw
+            }
+            // A plugin's spend counts in the totals, not in the context fill.
+            AppEvent::PluginUsage(usage) => {
+                self.total_input_tokens =
+                    self.total_input_tokens.saturating_add(usage.input_tokens);
+                self.total_output_tokens =
+                    self.total_output_tokens.saturating_add(usage.output_tokens);
+                self.total_cache_read_tokens = self
+                    .total_cache_read_tokens
+                    .saturating_add(usage.cache_read_tokens);
+                self.total_cache_write_tokens = self
+                    .total_cache_write_tokens
+                    .saturating_add(usage.cache_write_tokens);
+                self.session.note_plugin_usage(usage);
                 EngineAction::Redraw
             }
             AppEvent::TurnMessages(messages) => {

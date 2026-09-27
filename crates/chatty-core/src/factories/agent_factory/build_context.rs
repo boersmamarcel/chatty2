@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::tool_profile::{ToolProfile, tool_profile};
-use crate::agent_spec::{AgentSpec, SpecErrors};
+use crate::agent_spec::{AgentSpec, PluginSpec, SpecErrors};
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::memory_service::MemoryService;
@@ -38,6 +38,7 @@ use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::execution_settings::set_tool_group;
 use crate::settings::models::search_settings::SearchSettingsModel;
+use crate::tools::plugin_tool::PluginHost;
 use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
 
 /// Contextual dependencies for building an agent.
@@ -130,6 +131,12 @@ pub struct AgentBuildContext {
     /// shared is never read. Only chatty-gpui sets it, on top of
     /// [`Self::from_services`]; chatty-tui and hive keep the tmux-only gate.
     pub embedded_terminals: Option<std::sync::Arc<dyn TerminalSource>>,
+    /// The spec's `[[plugins]]` (PL-U2, AGE-616): loaded by the factory, one
+    /// instance per plugin for this agent, their tools registered beside the
+    /// native ones. Empty for an agent that is not built from a spec.
+    pub plugins: Vec<PluginSpec>,
+    /// Where `plugins` are found and what their `llm::complete` may reach.
+    pub plugin_host: PluginHost,
 }
 
 /// What makes one worker a reviewer and another a coder (ADR-0011 C11):
@@ -172,6 +179,10 @@ pub struct AgentServices {
     /// `ModuleSettingsModel::virtual_agent_names()` on the host's settings.
     pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
+    /// Where a spec's plugins are found (PL-U2): the host's module
+    /// directory and its configured models. Unused unless the agent is
+    /// built from a spec that lists plugins.
+    pub plugin_host: PluginHost,
 }
 
 /// The execution settings an agent should be built with: `Some` when any
@@ -217,6 +228,7 @@ impl AgentBuildContext {
             lazy_broker,
             local_agents,
             remote_agents,
+            plugin_host,
         } = services;
         Self {
             // Gathering the MCP tool list is async; every host does it
@@ -264,6 +276,9 @@ impl AgentBuildContext {
             instructions_dir: None,
             // Only the desktop has embedded terminals.
             embedded_terminals: None,
+            // Only a spec lists plugins (`from_spec`).
+            plugins: Vec::new(),
+            plugin_host,
         }
     }
 }
@@ -294,7 +309,8 @@ impl AgentBuildContext {
     /// `ask_user_enabled` / `instructions_dir` read the narrowed settings as
     /// every host does. `tools.profile` and `agent.preamble` become the
     /// role, `tools.skills` a line of the preamble, `budget.cap_usd` the
-    /// spend gate. Plugins are carried by the spec, not loaded (PL-U2).
+    /// spend gate, and `plugins` the plugins the factory loads (PL-U2) from
+    /// `services.plugin_host`.
     pub fn from_spec(spec: &AgentSpec, services: AgentServices) -> Result<SpecBuild, SpecErrors> {
         spec.validate(None)?;
         let mut services = services;
@@ -321,6 +337,7 @@ impl AgentBuildContext {
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_ref())
                 .map(PathBuf::from),
+            plugins: spec.plugins.clone(),
             ..Self::from_services(AgentServices {
                 exec_settings: settings.as_ref().and_then(gated_exec_settings),
                 ..services
@@ -442,6 +459,10 @@ mod tests {
                 enabled: true,
                 skills: Vec::new(),
             }],
+            plugin_host: PluginHost {
+                module_roots: vec![PathBuf::from("/modules")],
+                ..PluginHost::default()
+            },
         });
 
         assert_eq!(
@@ -459,6 +480,11 @@ mod tests {
         assert_eq!(ctx.local_agents, vec!["local-coder".to_string()]);
         assert_eq!(ctx.remote_agents.len(), 1);
         assert_eq!(ctx.remote_agents[0].name, "remote");
+        assert_eq!(
+            ctx.plugin_host.module_roots,
+            vec![PathBuf::from("/modules")]
+        );
+        assert!(ctx.plugins.is_empty(), "only a spec lists plugins");
 
         // The conversation's half stays unset for the caller to fill in.
         assert!(ctx.mcp_tools.is_none());
@@ -486,6 +512,9 @@ preamble = "Review."
 profile = "reviewer"
 disable = ["fs_write", "ask-user"]
 skills = ["coder-reviewer"]
+
+[[plugins]]
+module = "echo-agent"
 
 [budget]
 max_agent_turns = 30
@@ -530,6 +559,10 @@ cap_usd = 2.5
         assert_eq!(built.model.as_deref(), Some("qwen3:4b"));
         assert_eq!(built.max_duration, Some(Duration::from_secs(3600)));
         assert_eq!(ctx.local_agents, vec!["local-agent".to_string()]);
+        assert_eq!(
+            ctx.plugins, spec.plugins,
+            "the factory loads the spec's plugins"
+        );
     }
 
     #[test]

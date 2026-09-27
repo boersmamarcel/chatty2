@@ -5,6 +5,6 @@ description = "Adversarial test fixture: slow-host"
 wasm = "slow-host.wasm"
 
 [capabilities]
-tools = []
+tools = ["ask"]
 chat = true
 agent = true

@@ -72,6 +72,13 @@ pub enum StreamChunk {
     /// Counted with the turn, but not one of the requests the provider's
     /// aggregate covers.
     CompactionUsage(ApiCallUsage),
+    /// Usage for one `llm::complete` call a plugin tool made during the turn
+    /// (PL-U2, AGE-616), on the model that served it. Not one of the
+    /// requests the provider's aggregate covers.
+    PluginUsage {
+        plugin: String,
+        call: ApiCallUsage,
+    },
     /// Usage aggregated over every request in the turn, from the provider's
     /// final response. Arrives after the per-call chunks. `turn` is always 0
     /// (see [`normalize_usage`]'s aggregate convention).
@@ -594,6 +601,7 @@ pub async fn stream_prompt(
     let history_len = history.len();
     let request_recorder = agent.request_recorder().clone();
     request_recorder.clear();
+    let plugin_usage = agent.plugin_usage().to_vec();
 
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
@@ -621,6 +629,14 @@ pub async fn stream_prompt(
                     for call in context_shaper.take_compaction_usage() {
                         clock.exclude(&call);
                         yield Ok(StreamChunk::CompactionUsage(call));
+                    }
+                    // A plugin's calls ran inside a tool, which has returned
+                    // by the time anything after it arrives; the last ones
+                    // are drained by the end of the stream (`None`).
+                    for (plugin, usage) in &plugin_usage {
+                        for call in usage.take() {
+                            yield Ok(StreamChunk::PluginUsage { plugin: plugin.clone(), call });
+                        }
                     }
                     match item {
                         Some(result) => {

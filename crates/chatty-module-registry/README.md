@@ -10,16 +10,17 @@ and adds:
   `module.toml` manifests
 - **Manifest parsing** — typed `ModuleManifest` with capabilities,
   protocols, and resource limits
-- **A `notify`-based filesystem watcher** (`watch`) that can re-load changed
-  modules — implemented and tested, but not called by any production code
-  today; nothing hot-reloads a module yet
 - **Lifecycle** — load, unload, reload, enumerate currently loaded modules
+
+There is no filesystem watcher: an agent that runs a module as a plugin
+loads its own instance when it is built (PL-U2), so a changed module is
+picked up by the next agent, and by `reload` or a new scan here.
 
 ## Public surface
 
 - [`ModuleRegistry`] — owns all loaded modules, exposes
-  `scan_directory`, `load`, `unload`, `reload`, `get`, `get_mut`, `manifest`,
-  `module_names`, `len`, `is_empty`, and `watch`
+  `scan_directory`, `load`, `unload`, `reload`, `get`, `manifest`,
+  `module_names`, `len` and `is_empty`
 - [`ModuleManifest`] + [`ModuleCapabilities`], [`ModuleProtocols`],
   [`ModuleResourceLimits`]
 

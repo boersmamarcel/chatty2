@@ -113,6 +113,7 @@ pub(super) async fn build_provider_agent(
         tool_loader,
         supports_images: model_config.supports_images,
         model_id: model_config.model_identifier.clone(),
+        plugin_usage: Vec::new(),
     })
 }
 

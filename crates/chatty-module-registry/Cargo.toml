@@ -6,7 +6,6 @@ description = "Module discovery, loading, and lifecycle management for chatty WA
 
 [dependencies]
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
-notify = "7.0"
 toml = "0.8"
 serde = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
