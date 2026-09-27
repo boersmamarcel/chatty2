@@ -386,8 +386,10 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
                 result,
                 usage,
             } => {
-                // The lines' totals, so one line per model (AGE-682) reads
-                // exactly as the one usage value the goldens recorded.
+                // The lines' token totals, so one line per model (AGE-682)
+                // reads exactly as the one usage value the goldens recorded.
+                // The wire carries no call count, so each decoded line's is
+                // the default 1: summing it would count lines, not calls.
                 let usage = if usage.is_empty() {
                     "none".to_string()
                 } else {
@@ -398,7 +400,7 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
                         sum(|u| u.output_tokens),
                         sum(|u| u.cache_read_tokens),
                         sum(|u| u.cache_write_tokens),
-                        sum(|u| u.api_turn_count)
+                        usage.iter().map(|u| u.api_turn_count).max().unwrap_or(0)
                     )
                 };
                 format!(
