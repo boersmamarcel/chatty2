@@ -1,18 +1,19 @@
 //! Wiring the broker's local runners into the desktop's protocol gateway
 //! (ADR-0011 C2 / AGE-301; named virtual agents, C10 / AGE-377).
 //!
-//! The gateway is started by the module-settings controller. This adds the
-//! two things that turn it into a fleet broker: a Unix socket children
-//! register on, and the virtual agents — `local-agent`, or the agent specs
-//! `module_settings.virtual_agents` names — that spawn one child per task.
+//! The gateway is started by the module-settings controller. This adds what
+//! turns it into a fleet broker: the virtual agents — `local-agent`, or the
+//! agent specs `module_settings.virtual_agents` names — that spawn one child
+//! per task on a connection the broker makes for it (ADR-0020), and the
+//! shared participant socket, which refuses every registration.
 //!
 //! Nothing here decides *what* a worker does — the child is `chatty-tui` in
 //! participant mode, running the same session the desktop does, and which
 //! model and tools each named agent's children get is
 //! `chatty_core::services::virtual_agents`' decision, shared with
-//! chatty-tui's `--broker`. The only decisions here are where the socket
-//! lives, where a worker runs, and how the per-endpoint budget (ADR-0011
-//! C6) is wrapped.
+//! chatty-tui's `--broker`. The only decisions here are where the shared
+//! socket lives, where a worker runs, and how the per-endpoint budget
+//! (ADR-0011 C6) is wrapped.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +27,8 @@ use chatty_protocol_gateway::participant::{
 };
 use tracing::{info, warn};
 
-/// Where children register.
+/// Where the shared participant socket is bound. Nothing registers on it
+/// (ADR-0020); it refuses every connection.
 ///
 /// The runtime directory when there is one (`/run/user/<uid>`, cleaned up on
 /// logout), otherwise the temp directory. Unix socket paths are limited to
@@ -50,7 +52,6 @@ pub fn socket_path() -> PathBuf {
 /// endpoint nothing more specific is known about.
 pub fn local_runners(
     registry: ParticipantRegistry,
-    socket: PathBuf,
     workspace_dir: Option<String>,
     default_budget: usize,
     specs: Vec<VirtualAgentSpec>,
@@ -68,11 +69,10 @@ pub fn local_runners(
     specs
         .into_iter()
         .map(|spec| {
-            let mut runner =
-                LocalRunner::new(worker_executable(), socket.clone(), registry.clone())
-                    .with_agent_name(spec.name)
-                    .with_description(spec.description)
-                    .with_args(spec.args);
+            let mut runner = LocalRunner::new(worker_executable(), registry.clone())
+                .with_agent_name(spec.name)
+                .with_description(spec.description)
+                .with_args(spec.args);
             if let Some(root) = workspace_dir.clone() {
                 runner = runner
                     .with_workspace_factory(worktree_factory(root, spec.verification.clone()));
@@ -115,27 +115,22 @@ fn worktree_factory(workspace_root: String, verification: Option<String>) -> Wor
     })
 }
 
-/// Open the participant socket and serve it, returning whether it came up.
+/// Bind the shared participant socket and serve it, refusing every
+/// registration.
 ///
-/// A failure is logged and swallowed: the gateway's HTTP surface is what
-/// modules need and it works without a socket. Only delegation to
-/// `local-agent` is lost, and `invoke_agent` reports that itself when the
-/// call fails.
-pub fn serve_socket(registry: ParticipantRegistry, socket: &PathBuf) -> bool {
+/// A failure is logged and swallowed: nothing needs the socket to work —
+/// workers reach the broker over the connection it makes for each of them.
+pub fn serve_socket(socket: &PathBuf) {
     match chatty_protocol_gateway::participant::bind(socket) {
         Ok(listener) => {
-            tokio::spawn(chatty_protocol_gateway::participant::serve(
-                listener, registry,
-            ));
-            true
+            tokio::spawn(chatty_protocol_gateway::participant::serve(listener));
         }
         Err(e) => {
             warn!(
                 socket = %socket.display(),
                 error = %e,
-                "No local participant socket; delegation to a local worker is unavailable"
+                "Could not bind the shared participant socket"
             );
-            false
         }
     }
 }

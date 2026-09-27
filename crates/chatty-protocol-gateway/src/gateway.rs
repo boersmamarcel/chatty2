@@ -164,7 +164,9 @@ impl ProtocolGateway {
         self
     }
 
-    /// Listen for local participants on a Unix socket at `path`.
+    /// Bind the shared participant socket at `path`, which refuses every
+    /// registration: a worker's connection is made by the broker that
+    /// spawns it (ADR-0020), never by the worker dialling in.
     ///
     /// A stale socket file from a previous run is replaced; a live one is
     /// not (see [`participant::bind`](crate::participant::bind)). The socket
@@ -193,8 +195,8 @@ impl ProtocolGateway {
 
     /// The live participant registry.
     ///
-    /// Cloning it is how an embedder inspects who is connected, or registers
-    /// an in-process participant without going through the socket.
+    /// Cloning it is how an embedder inspects who is connected, and how a
+    /// runner admits the nodes it makes connections for.
     pub fn participants(&self) -> ParticipantRegistry {
         self.participants.clone()
     }
@@ -271,8 +273,7 @@ impl ProtocolGateway {
             let socket = crate::participant::bind(&path)
                 .with_context(|| format!("failed to bind participant socket {}", path.display()))?;
             info!(socket = %path.display(), "participant socket listening");
-            let registry = self.participants.clone();
-            self.participant_task = Some(tokio::spawn(crate::participant::serve(socket, registry)));
+            self.participant_task = Some(tokio::spawn(crate::participant::serve(socket)));
         }
 
         let (tx, rx) = oneshot::channel::<()>();

@@ -137,8 +137,9 @@ chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
 ```
 
 Flags a worker is started with (a leader rarely passes these by hand):
-`--workspace <DIR>` (its own `git worktree`), `--participant-socket <PATH>` +
-`--participant-name <NAME>` (register with the broker and wait for one task),
+`--workspace <DIR>` (its own `git worktree`), `--participant-fd <N>` (the
+connection the broker made for it; say hello and wait for one task — set by the
+broker, never by hand),
 `--tools <profile>` (`coordinator` / `coder` / `reviewer` allowlist), `--preamble
 <text>` (role instructions) and `--max-agent-turns <n>` (that worker's own turn
 budget, AGE-440; `0` is no cap). A run without a human (`--headless`, `--pipe`, a
@@ -211,7 +212,7 @@ ui/            Ratatui widgets (chat view, input, status bar, approval, plan car
 ```
 
 `ChatEngine` is UI-agnostic — it powers the interactive TUI, headless mode and every
-delegated worker (`--participant-socket`), which is what lets a leader and its
+delegated worker (`--participant-fd`), which is what lets a leader and its
 workers be the same binary.
 
 ### Event flow

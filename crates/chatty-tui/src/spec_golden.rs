@@ -143,15 +143,7 @@ fn worker_contexts(workspace: &str) -> Vec<(String, AgentBuildContext, Option<St
     .map(|spec| {
         let mut argv = vec!["chatty-tui".to_string()];
         argv.extend(spec.args.iter().cloned());
-        argv.extend(
-            [
-                "--participant-socket",
-                "/golden/sock",
-                "--participant-name",
-                "w-0",
-            ]
-            .map(str::to_string),
-        );
+        argv.extend(["--participant-fd", "3"].map(str::to_string));
         let (ctx, model) = context_for(
             &argv,
             workspace,

@@ -330,16 +330,29 @@ description, version, skills and `capabilities.streaming`.
 ### Local participants (ADR-0011)
 
 `{module}` in the A2A routes above also resolves a **local participant**: a
-process that connected to the gateway's Unix socket, published an agent card
-and answers tasks over that socket. ADR-0011 routes all fleet coordination —
-local and hosted — through this one broker rather than through a second
-fan-out path, so a child process and a WASM module are the same thing to an
-A2A caller. Participants are looked up **first**, so a live process shadows a
-module of the same name.
+worker process the broker spawned on a connection it made for it, which
+published an agent card and answers tasks over that connection. ADR-0011
+routes all fleet coordination — local and hosted — through this one broker
+rather than through a second fan-out path, so a child process and a WASM
+module are the same thing to an A2A caller. Participants are looked up
+**first**, so a live process would shadow a module of the same name.
 
-The socket carries newline-delimited JSON frames (`register`, `task`,
-`status`, `artifact`, `cancel`, `input`), which the gateway maps onto the same A2A
-status and artifact updates a module produces. The connection is the liveness
+**The connection is the identity** (ADR-0020, AGE-635). The broker admits a
+node, which names it `<spec>-<n>` (`local-coder-0`), creates a `socketpair`
+and hands one end to the child at descriptor 3 (`--participant-fd 3`); the
+child marks it close-on-exec as `main`'s first statement, so no shell or tool
+it starts inherits it. The child's `hello` names nothing — its card's `name`
+is ignored — and the broker's `welcome` tells it its name, scope and owner.
+Nothing registers any other way: the shared participant socket stays bound
+and answers every connection with an `error` frame, so no local process can
+take a name the broker is about to route a task to.
+
+The connection carries newline-delimited JSON frames, protocol **v2**: every
+frame carries `"v":2` (`hello`, `welcome`, `error`, `task`, `status`,
+`artifact`, `cancel`, `input`), and a frame without it is answered with an
+`error` frame naming v2 and the connection is closed — there is no v1. The
+gateway maps them onto the same A2A status and artifact updates a module
+produces. The connection is the liveness
 signal: closing it deregisters the participant and fails every task it still
 owed. A worker's `ask_user` parks its task in `input-required` with the
 question attached; the caller answers with `message/send` on the same task id
@@ -347,11 +360,12 @@ and the broker hands the answer down as an `input` frame (AGE-306). The frames
 and the mapping are documented in
 [`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
 
-Opening the socket is opt-in (`ProtocolGateway::with_participant_socket`) and
-Unix-only. The hosted transport is Firecracker vsock, which arrives here as an
-ordinary stream: both `serve_connection` and `ParticipantConnection` take any
-`AsyncRead + AsyncWrite`, so the frames, the registration and the liveness rule
-are shared rather than reimplemented (AGE-307, in `boersmamarcel/hive`).
+The participant path is Unix-only. The hosted transport is Firecracker vsock,
+which arrives here as an ordinary stream: both `serve_connection` and
+`ParticipantConnection` take any `AsyncRead + AsyncWrite`, so the frames, the
+hello/welcome and the liveness rule are shared rather than reimplemented
+(AGE-307, in `boersmamarcel/hive`; hive speaks v1 at its current chatty2 pin and
+adopts v2 with HS-4, AGE-678).
 
 ## LLM-facing tools
 
@@ -432,8 +446,8 @@ existed.
 ### `local-agent` — a chatty agent in its own process
 
 `invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
-The gateway spawns `chatty-tui --participant-socket … --participant-name …`, the child
-registers, and its turn comes back as A2A status and artifact updates. This is
+The gateway spawns `chatty-tui --participant-fd 3` on a connection it made, the child
+says hello, and its turn comes back as A2A status and artifact updates. This is
 One fan-out path, a public wire format, and a place to put discovery, budgets and the
 ledger.
 
