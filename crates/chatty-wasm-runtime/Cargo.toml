@@ -25,3 +25,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 [[test]]
 name = "fixtures"
 required-features = ["test-support"]
+
+[[test]]
+name = "must_trap"
+required-features = ["test-support"]
