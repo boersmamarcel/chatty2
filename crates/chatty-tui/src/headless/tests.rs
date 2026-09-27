@@ -2174,4 +2174,207 @@ mod runner {
             request["stream_options"]
         );
     }
+    // A turn that announces its next step and ends without taking it.
+    // -------------------------------------------------------------------
+
+    /// A turn that reads a file and then ends on `closing` with no tool call.
+    fn read_then_say_turn(closing: &str) -> Scenario {
+        Scenario {
+            name: "read_then_say",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::Text("Let me read the module.".into())),
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_read".into(),
+                    name: "read_file".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_read".into(),
+                    arguments: r#"{"path":"src/lib.rs"}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_read".into(),
+                    result: "fn f() {}".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text(closing.to_string())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn an_announced_but_untaken_step_gets_a_continue_nudge() {
+        let (runner, event_rx, started, _workspace) = scripted_runner(vec![
+            read_then_say_turn("I found the root cause. Let me confirm and apply the fix."),
+            answer_turn("Fixed the bug and the tests pass."),
+            answer_turn("never reached"),
+        ])
+        .await;
+        let inputs = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2, "the turn, then one nudge");
+        assert_eq!(inputs.lock().unwrap()[1], ANNOUNCED_STEP_NUDGE);
+    }
+
+    #[tokio::test]
+    async fn announced_step_nudges_are_bounded() {
+        let mut turns: Vec<Scenario> = (0..MAX_ANNOUNCED_STEP_NUDGES + 2)
+            .map(|_| answer_turn("Let me check when do_query() is called:"))
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + MAX_ANNOUNCED_STEP_NUDGES,
+            "the first turn plus the bounded nudges"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closing_line_or_an_announcement_before_a_tool_call_is_not_nudged() {
+        for closing in [
+            "Fixed the bug; the tests pass. Let me know if you want more.",
+            "Fixed the bug; the tests pass.",
+        ] {
+            let (runner, event_rx, started, _workspace) =
+                scripted_runner(vec![read_then_say_turn(closing), answer_turn("never")]).await;
+
+            run_headless(runner, event_rx, CODING_TASK.to_string())
+                .await
+                .expect("the run exits 0");
+
+            assert_eq!(*started.lock().unwrap(), 1, "{closing}");
+        }
+    }
+
+    /// A turn that writes a plan and then ends on `closing` with no further
+    /// tool call, so the session queues its todo-protocol follow-up after
+    /// the turn ends.
+    fn plan_then_say_turn(closing: &str) -> Scenario {
+        Scenario {
+            name: "plan_then_say",
+            progress: Vec::new(),
+            items: vec![
+                ScriptedItem::Chunk(StreamChunk::ToolCallStarted {
+                    id: "call_plan".into(),
+                    name: "write_todos".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallInput {
+                    id: "call_plan".into(),
+                    arguments: r#"{"goal":"fix","todos":[]}"#.into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::ToolCallResult {
+                    id: "call_plan".into(),
+                    result: "ok".into(),
+                }),
+                ScriptedItem::Chunk(StreamChunk::Text(closing.to_string())),
+                ScriptedItem::Chunk(StreamChunk::Done),
+            ],
+        }
+    }
+
+    /// The session emits its todo-protocol follow-up after `TurnEnded`.
+    /// Headless never delivered it: the loop broke at `StreamCompleted`
+    /// before the event was read. A nudge sent at that `StreamCompleted`
+    /// keeps the loop reading, so the follow-up used to land in the mailbox
+    /// and start a third turn once the nudge pass ended — a turn nobody
+    /// waits for. Headless sequences its own passes; the session's
+    /// follow-up is dropped, as it always was.
+    #[tokio::test]
+    async fn the_sessions_todo_follow_up_never_runs_behind_a_headless_pass() {
+        let (mut runner, event_rx, started, _workspace) = scripted_runner(vec![
+            plan_then_say_turn("The plan is written. Let me apply the fix."),
+            answer_turn("Fixed."),
+            answer_turn("never reached"),
+        ])
+        .await;
+        let inputs = runner.scripted_inputs.clone();
+        // A scripted tool call never runs the tool: stand in for
+        // `write_todos` when its call starts, after the turn's reset.
+        let controller = runner
+            .session
+            .conversation()
+            .expect("the conversation exists")
+            .agent()
+            .task_controller();
+        let counter = started.clone();
+        runner.set_event_observer(Arc::new(move |event| match event {
+            chatty_core::session::SessionEvent::TurnStarted => {
+                *counter.lock().unwrap() += 1;
+            }
+            chatty_core::session::SessionEvent::ToolCallStarted { name, .. }
+                if name == "write_todos" =>
+            {
+                controller
+                    .write_todos(
+                        "fix".to_string(),
+                        vec![(
+                            "t1".to_string(),
+                            "Fix it".to_string(),
+                            "Apply the fix".to_string(),
+                        )],
+                    )
+                    .expect("the plan is accepted");
+            }
+            _ => {}
+        }));
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        let inputs = inputs.lock().unwrap();
+        assert_eq!(
+            inputs.len(),
+            2,
+            "the turn and its nudge, and nothing queued behind them: {inputs:?}"
+        );
+        assert_eq!(inputs[1], ANNOUNCED_STEP_NUDGE);
+        assert_eq!(*started.lock().unwrap(), 2);
+    }
+
+    /// A turn past the verbosity limit that still ends by announcing a
+    /// step belongs to the overflow path: its own prompts, then
+    /// finalization once they run out, never a nudge on top.
+    #[tokio::test]
+    async fn an_overflowing_turn_gets_the_overflow_prompts_and_no_nudge() {
+        let overflowing = format!(
+            "{} Let me apply the fix.",
+            "The parser drops the argument. ".repeat(200)
+        );
+        let mut turns: Vec<Scenario> = (0..=MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS)
+            .map(|_| answer_turn(&overflowing))
+            .collect();
+        turns.push(answer_turn("never reached"));
+        let (runner, event_rx, started, _workspace) = scripted_runner(turns).await;
+        let inputs = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the run exits 0");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            1 + MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS,
+            "the turn and its overflow prompts, no nudge after them"
+        );
+        assert!(
+            inputs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|input| input != ANNOUNCED_STEP_NUDGE),
+            "{:?}",
+            inputs.lock().unwrap()
+        );
+    }
 }
