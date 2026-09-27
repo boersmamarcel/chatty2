@@ -59,4 +59,4 @@ pub mod participant;
 #[cfg(feature = "worker")]
 pub mod worker;
 
-pub use gateway::{GatewayState, MAX_REQUEST_BYTES, ProtocolGateway};
+pub use gateway::{GatewayState, MAX_REQUEST_BYTES, ProtocolGateway, RouteCounter};

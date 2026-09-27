@@ -15,6 +15,9 @@ chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 # Already in the graph via chatty-module-registry / chatty-wasm-runtime; this
 # adds axum and tower-http, not wasmtime.
 chatty-protocol-gateway = { path = "../chatty-protocol-gateway", features = ["worker"] }
+# The fabric's `Transport` a worker's calls and the leader's travel over, and
+# the broker's edge log (ADR-0020, BI-4).
+chatty-fabric = { path = "../chatty-fabric" }
 # `--broker` (AGE-376): a headless/pipe/interactive leader runs its own
 # `ProtocolGateway` so it can delegate to `local-agent`, the same way the
 # desktop's module-settings controller does.
@@ -58,8 +61,6 @@ libc = "0.2"
 [dev-dependencies]
 # Scripted stream fixtures shared with chatty-gpui's characterization tests.
 chatty-core = { path = "../chatty-core", features = ["test-support"] }
-# `AgentOrigin` for the broker tests that register participants by hand.
-chatty-fabric = { path = "../chatty-fabric" }
 parking_lot.workspace = true
 # AGE-306's chain test puts the participant socket in a temp dir.
 tempfile.workspace = true

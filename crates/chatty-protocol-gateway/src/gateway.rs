@@ -3,7 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -20,7 +21,8 @@ use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 use crate::handlers::a2a::{self, Contexts};
 use crate::handlers::mcp::{self, SseSessions};
 use crate::handlers::{index, openai};
-use crate::participant::{ParticipantRegistry, VirtualAgent};
+use crate::participant::{BrokerCalls, DirectTransport, ParticipantRegistry, VirtualAgent};
+use chatty_fabric::{EdgeLog, Transport};
 
 // ---------------------------------------------------------------------------
 // GatewayState
@@ -51,6 +53,46 @@ pub struct GatewayState {
     pub(crate) contexts: Contexts,
     /// Open `GET /mcp/{m}/sse` streams, by session id.
     pub(crate) sse_sessions: SseSessions,
+    /// What runs calls over worker connections (BI-4). Held, never read:
+    /// it lives as long as the server does, and the registry only holds it
+    /// weakly.
+    #[allow(dead_code)]
+    pub(crate) calls: Arc<BrokerCalls>,
+    /// How many HTTP requests reached a role or the directory.
+    pub(crate) routes: RouteCounter,
+}
+
+/// How many requests the HTTP side served for the broker's roles — the
+/// connected participants and virtual agents at `/a2a/{name}` — and for its
+/// directory, the aggregated `/.well-known/agent.json` (ADR-0020 invariant
+/// 4). Every request this server takes comes from loopback (it binds
+/// 127.0.0.1 and refuses anything else), so these are the loopback counts.
+/// A worker reaches roles and the directory over its connection, so in a
+/// swarm of workers both stay at zero.
+#[derive(Clone, Default)]
+pub struct RouteCounter {
+    roles: Arc<AtomicU64>,
+    directory: Arc<AtomicU64>,
+}
+
+impl RouteCounter {
+    /// Requests for `/a2a/{role}`, its card included.
+    pub fn role_requests(&self) -> u64 {
+        self.roles.load(Ordering::Relaxed)
+    }
+
+    /// Requests for the aggregated agent card.
+    pub fn directory_requests(&self) -> u64 {
+        self.directory.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn count_role(&self) {
+        self.roles.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_directory(&self) {
+        self.directory.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The largest request body any route reads (10 MiB). A bigger one is a
@@ -107,6 +149,11 @@ pub struct ProtocolGateway {
     participant_socket: Option<PathBuf>,
     participant_task: Option<tokio::task::JoinHandle<()>>,
     runners: BTreeMap<String, Arc<dyn VirtualAgent>>,
+    /// Where each call's edge-log row goes (BI-4); `None` writes none.
+    edges: Option<Arc<Mutex<EdgeLog>>>,
+    /// Built on first use, from the virtual agents published by then.
+    calls: OnceLock<Arc<BrokerCalls>>,
+    routes: RouteCounter,
 }
 
 impl ProtocolGateway {
@@ -128,6 +175,9 @@ impl ProtocolGateway {
             participant_socket: None,
             participant_task: None,
             runners: BTreeMap::new(),
+            edges: None,
+            calls: OnceLock::new(),
+            routes: RouteCounter::default(),
         }
     }
 
@@ -193,6 +243,41 @@ impl ProtocolGateway {
         self
     }
 
+    /// Write one edge-log row per call to `log` (BI-4).
+    pub fn with_edge_log(mut self, log: EdgeLog) -> Self {
+        self.edges = Some(Arc::new(Mutex::new(log)));
+        self
+    }
+
+    /// The broker's call path: what runs a worker's calls over its
+    /// connection, installed on the participant registry the first time it
+    /// is asked for. Publish every virtual agent before this — the call path
+    /// reaches the ones published by then.
+    pub fn calls(&self) -> Arc<BrokerCalls> {
+        self.calls
+            .get_or_init(|| {
+                let calls = Arc::new(BrokerCalls::new(
+                    self.participants.clone(),
+                    Arc::new(self.runners.clone()),
+                    self.edges.clone(),
+                ));
+                self.participants.install_calls(&calls);
+                calls
+            })
+            .clone()
+    }
+
+    /// The in-process root's handle into this broker: calls run directly on
+    /// it, with no socket and no HTTP hop (ADR-0020, BI-4).
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        Arc::new(DirectTransport::new(self.calls()))
+    }
+
+    /// The HTTP side's per-route counts for roles and the directory.
+    pub fn route_counter(&self) -> RouteCounter {
+        self.routes.clone()
+    }
+
     /// The live participant registry.
     ///
     /// Cloning it is how an embedder inspects who is connected, and how a
@@ -217,6 +302,8 @@ impl ProtocolGateway {
             runners: Arc::new(self.runners.clone()),
             contexts: Contexts::default(),
             sse_sessions: SseSessions::default(),
+            calls: self.calls(),
+            routes: self.routes.clone(),
         };
 
         Router::new()

@@ -114,9 +114,13 @@ pub(crate) fn card_to_json(card: &ParticipantCard) -> Value {
 // ---------------------------------------------------------------------------
 
 /// A submitted task and everything that has to be cleaned up after it.
-struct RunningTask {
-    task_id: String,
-    updates: TaskStream,
+///
+/// Shared with the broker's call path ([`crate::participant::BrokerCalls`]),
+/// which runs a worker's `invoke_agent` over its connection with exactly
+/// the lifecycle an A2A request gets.
+pub(crate) struct RunningTask {
+    pub(crate) task_id: String,
+    pub(crate) updates: TaskStream,
     /// Cancels the task if the caller hangs up before it finishes.
     guard: TaskGuard,
     /// Present only for a worker a virtual agent started: the process or the
@@ -125,6 +129,11 @@ struct RunningTask {
 }
 
 impl RunningTask {
+    /// The participant serving the task: the worker's node name.
+    pub(crate) fn participant(&self) -> &str {
+        &self.guard.participant
+    }
+
     /// The task reached a terminal state; nothing is left to cancel.
     ///
     /// `metadata` is the terminal status's, carrying the worker's token
@@ -136,7 +145,11 @@ impl RunningTask {
     /// was told the task is over and therefore after its worktree is
     /// committed — the count and the diff stat would be one edit stale
     /// otherwise (AGE-406).
-    async fn finish(&mut self, succeeded: bool, metadata: Option<&Value>) -> Option<TaskEvidence> {
+    pub(crate) async fn finish(
+        &mut self,
+        succeeded: bool,
+        metadata: Option<&Value>,
+    ) -> Option<TaskEvidence> {
         self.guard.finished();
         let worker = self.worker.as_mut()?;
         worker.finish(succeeded, metadata);
@@ -146,7 +159,10 @@ impl RunningTask {
 
 /// Fold the evidence envelope into the terminal status's `metadata`, next
 /// to whatever else rides there.
-fn with_evidence(metadata: Option<Value>, evidence: Option<&TaskEvidence>) -> Option<Value> {
+pub(crate) fn with_evidence(
+    metadata: Option<Value>,
+    evidence: Option<&TaskEvidence>,
+) -> Option<Value> {
     let Some(evidence) = evidence else {
         return metadata;
     };
@@ -161,7 +177,11 @@ fn with_evidence(metadata: Option<Value>, evidence: Option<&TaskEvidence>) -> Op
 }
 
 /// Submit `task` to an already-registered participant.
-fn submit(registry: &ParticipantRegistry, name: &str, task: DelegatedTask) -> Option<RunningTask> {
+pub(crate) fn submit(
+    registry: &ParticipantRegistry,
+    name: &str,
+    task: DelegatedTask,
+) -> Option<RunningTask> {
     let (task_id, updates) = registry.submit_task(name, task)?;
     Some(RunningTask {
         guard: TaskGuard::new(registry.clone(), name.to_string(), task_id.clone()),
@@ -172,7 +192,10 @@ fn submit(registry: &ParticipantRegistry, name: &str, task: DelegatedTask) -> Op
 }
 
 /// Start a worker for `task` and submit it.
-async fn spawn(runner: &dyn VirtualAgent, task: DelegatedTask) -> Result<RunningTask, String> {
+pub(crate) async fn spawn(
+    runner: &dyn VirtualAgent,
+    task: DelegatedTask,
+) -> Result<RunningTask, String> {
     let (worker, updates) = runner.run_task(task).await.map_err(|e| format!("{e:#}"))?;
     let task_id = worker
         .task_id()

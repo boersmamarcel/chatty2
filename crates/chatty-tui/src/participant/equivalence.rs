@@ -162,7 +162,9 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     let mut usage = Vec::new();
     while let Ok(event) = progress_rx.try_recv() {
         match event {
-            InvokeAgentProgress::Text(text) => progress.push(text),
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
+                progress.push(text)
+            }
             InvokeAgentProgress::Finished {
                 usage: reported, ..
             } => usage = reported,
@@ -545,7 +547,7 @@ mod evidence {
 
         let mut progress = String::new();
         while let Ok(event) = progress_rx.try_recv() {
-            if let InvokeAgentProgress::Text(text) = event {
+            if let InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) = event {
                 progress.push_str(&text);
             }
         }

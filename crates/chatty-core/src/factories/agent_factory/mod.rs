@@ -283,6 +283,7 @@ impl AgentClient {
             ask_user_enabled,
             instructions_dir,
             embedded_terminals,
+            fabric_transport,
         } = ctx;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
@@ -1267,7 +1268,10 @@ impl AgentClient {
         // start one lazily on first use (BI-2, AGE-634) is the whole
         // condition. Which names there are is module settings' decision
         // (C10).
-        let local_agents: Vec<String> = if gateway_port.is_some() || lazy_broker.is_some() {
+        let local_agents: Vec<String> = if gateway_port.is_some()
+            || lazy_broker.is_some()
+            || fabric_transport.is_some()
+        {
             local_agents
         } else {
             Vec::new()
@@ -1288,6 +1292,11 @@ impl AgentClient {
         } else if let Some(port) = gateway_port {
             list_agents_tool = list_agents_tool.with_gateway_port(port);
         }
+        // A delegated worker reads its broker's directory over the
+        // connection the broker made, never over loopback (ADR-0020, BI-4).
+        if let Some(transport) = fabric_transport.clone() {
+            list_agents_tool = list_agents_tool.with_transport(transport);
+        }
 
         // Create invoke_agent tool (always available). A lazy broker means
         // the port is not actually live yet, so it must not also be handed
@@ -1302,6 +1311,11 @@ impl AgentClient {
                 .with_local_agents(local_agents);
         if let Some(broker) = lazy_broker {
             invoke_agent_tool = invoke_agent_tool.with_lazy_broker(broker);
+        }
+        // ... and reaches its local roles over it too; remote agents and
+        // modules stay on `A2aClient`.
+        if let Some(transport) = fabric_transport {
+            invoke_agent_tool = invoke_agent_tool.with_transport(transport);
         }
         invoke_agent_tool = invoke_agent_tool.with_external_agent_warning(
             exec_settings

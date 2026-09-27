@@ -46,8 +46,37 @@ pub enum CallEvent {
     /// A progress event; for `invoke_agent` an `InvokeAgentProgress`, as
     /// JSON, which chatty-core converts back at its edge.
     Progress(Value),
+    /// The callee parked its task on a question (`ask_user`, AGE-306).
+    /// `request` is the question as the participant protocol carries it
+    /// (`{id, questions}`); the caller answers with
+    /// [`Transport::answer`] on `task`. Only a transport that can carry the
+    /// answer back down yields this: the root's direct handle does, a
+    /// worker's connection does not yet (BI-5 relays questions across
+    /// hops).
+    InputRequired { task: String, request: Value },
     /// The call's result. The last item of a successful stream.
     Result(Value),
+}
+
+/// What `invoke_agent` returns when the callee's task ended, whether it
+/// succeeded or not: the `call_result` of an `invoke_agent` call.
+///
+/// A failure the callee reported (its turn failed, its worker could not
+/// start) is an outcome, not a [`CallError`]: the caller renders it exactly
+/// as it renders a failed A2A task. `metadata` is the terminal status's —
+/// usage, trace, conversation and the runner's evidence ride there, as
+/// they do on A2A.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvokeAgentOutcome {
+    pub success: bool,
+    /// Everything the callee streamed as its answer, in order.
+    #[serde(default)]
+    pub response: String,
+    /// Why it failed, when it did and said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 /// Why a call failed. Serialises as `{"kind": …, "message": …}`, the
@@ -79,6 +108,19 @@ pub type CallStream = BoxStream<'static, Result<CallEvent, CallError>>;
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
     async fn call(&self, req: CallRequest) -> Result<CallStream, CallError>;
+
+    /// Answer the question a call's callee parked `task` on
+    /// ([`CallEvent::InputRequired`]). `input` is the participant
+    /// protocol's `{requestId, answers}`.
+    ///
+    /// A transport that never yields [`CallEvent::InputRequired`] has
+    /// nothing to answer, which is the default.
+    async fn answer(&self, task: &str, input: Value) -> Result<(), CallError> {
+        let _ = input;
+        Err(CallError::Failed(format!(
+            "task '{task}' cannot be answered over this transport"
+        )))
+    }
 }
 
 #[cfg(test)]

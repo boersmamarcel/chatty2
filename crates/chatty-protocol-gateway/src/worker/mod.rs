@@ -30,4 +30,4 @@ pub use mapper::{InputReceiver, TaskMapper, answer_clarifications, clarification
 mod one_task;
 
 #[cfg(unix)]
-pub use one_task::{EventSink, serve_one_task, worker_card};
+pub use one_task::{EventSink, WorkerConnection, serve_one_task, worker_card};

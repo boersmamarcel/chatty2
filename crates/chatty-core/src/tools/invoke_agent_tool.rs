@@ -12,11 +12,14 @@ use crate::services::a2a_client::{
     A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
     trace_from_status_metadata, usage_from_status_metadata,
 };
+use crate::services::fabric_transport::progress_from_value;
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::list_agents_tool::LocalModuleAgentSummary;
-use chatty_fabric::AgentOrigin;
+use chatty_fabric::{
+    AgentOrigin, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Transport,
+};
 
 /// The agent name the broker publishes for "a chatty agent in its own
 /// process" (ADR-0011 C2).
@@ -38,6 +41,12 @@ pub enum InvokeAgentProgress {
     },
     /// A text chunk from the agent's response.
     Text(String),
+    /// A line the agent reported about its own work — a tool call starting
+    /// or finishing, as `progress_text_for_event` renders it — rather than
+    /// part of its answer. Kept apart from [`Text`](Self::Text) so a worker
+    /// that delegated can pass its callee's steps one level further up
+    /// without passing up the callee's answer as well (BI-4, AGE-636).
+    Step(String),
     /// Agent invocation finished.
     Finished {
         success: bool,
@@ -161,6 +170,12 @@ pub struct InvokeAgentTool {
     /// desktop/chatty-tui wiring hands this in instead of a pre-resolved
     /// port, and the first local/module delegation actually starts it.
     lazy_broker: Option<Arc<dyn LazyBroker>>,
+    /// The fabric this agent reaches its local roles through (ADR-0020,
+    /// BI-4): a worker's broker-made connection, or the root's direct
+    /// handle into its own broker. When one is present, a local role is
+    /// never reached over loopback HTTP; remote agents and modules still
+    /// go through `A2aClient`.
+    transport: Option<Arc<dyn Transport>>,
 }
 
 /// Where a broker hands a worker its caller token; the gateway's
@@ -192,6 +207,31 @@ impl InvokeAgentTool {
                 .ok()
                 .filter(|token| !token.is_empty()),
             lazy_broker: None,
+            transport: None,
+        }
+    }
+
+    /// Reach local roles through `transport` instead of the gateway's
+    /// loopback HTTP (ADR-0020, BI-4): a worker's broker-made connection.
+    pub fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// The fabric local roles are reached through: the one this tool was
+    /// given, else the lazy broker's direct handle (starting it), else
+    /// none, and local roles go over the gateway's URL.
+    async fn fabric_transport(&self) -> Option<Arc<dyn Transport>> {
+        if let Some(transport) = &self.transport {
+            return Some(transport.clone());
+        }
+        let broker = self.lazy_broker.as_ref()?;
+        match broker.transport().await {
+            Ok(transport) => transport,
+            Err(error) => {
+                warn!(%error, "Failed to start the broker for a delegation");
+                None
+            }
         }
     }
 
@@ -412,6 +452,18 @@ impl Tool for InvokeAgentTool {
             .map(String::as_str)
             .find(|local| *local == agent_name)
         {
+            if let Some(transport) = self.fabric_transport().await {
+                info!(agent = %local, "Delegating to a local worker over the fabric");
+                self.send_progress(InvokeAgentProgress::Started {
+                    agent_name: local.to_string(),
+                    prompt: prompt.clone(),
+                    source: ToolSource::Local,
+                });
+                return self
+                    .call_over_fabric(transport.as_ref(), local, &prompt, args.include_trace)
+                    .await;
+            }
+
             let Some(base_url) = self.gateway_base_url().await else {
                 return Err(InvokeAgentError::InvocationFailed(format!(
                     "Agent '{local}' needs the protocol gateway. \
@@ -565,7 +617,7 @@ impl InvokeAgentTool {
                     } else if state == "working"
                         && let Some(ref msg) = message
                     {
-                        self.send_progress(InvokeAgentProgress::Text(msg.clone()));
+                        self.send_progress(InvokeAgentProgress::Step(msg.clone()));
                     } else if state == "input-required"
                         && let Some(request) =
                             A2aClarificationRequest::from_status_metadata(metadata.as_ref())
@@ -610,6 +662,138 @@ impl InvokeAgentTool {
             }
         }
 
+        self.finish(&config.name, response, success, error_msg, usage, trace, conversation)
+    }
+
+    /// Delegate to local role `agent` over `transport` (ADR-0020, BI-4):
+    /// the same progress, answer and failures as the A2A path, from the
+    /// broker's call frames instead of an SSE stream.
+    async fn call_over_fabric(
+        &self,
+        transport: &dyn Transport,
+        agent: &str,
+        prompt: &str,
+        include_trace: bool,
+    ) -> Result<InvokeAgentOutput, InvokeAgentError> {
+        use futures::StreamExt;
+
+        let request = CallRequest::InvokeAgent(InvokeAgentParams {
+            agent: agent.to_string(),
+            prompt: prompt.to_string(),
+            handle: None,
+            include_trace,
+        });
+        let mut stream = transport.call(request).await.map_err(|e| {
+            let err_text = format!("\u{26a0}\u{fe0f} Failed to invoke agent '{agent}': {e}");
+            self.send_progress(InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(err_text),
+                usage: Vec::new(),
+            });
+            InvokeAgentError::InvocationFailed(format!("Failed to invoke agent '{agent}': {e}"))
+        })?;
+
+        let mut outcome = None;
+        let mut failure = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(CallEvent::Progress(value)) => {
+                    if let Some(progress) = progress_from_value(value) {
+                        self.send_progress(progress);
+                    }
+                }
+                Ok(CallEvent::InputRequired { task, request }) => {
+                    let answered = match serde_json::from_value::<A2aClarificationRequest>(request)
+                    {
+                        Ok(request) => {
+                            self.answer_over_fabric(transport, agent, &task, request)
+                                .await
+                        }
+                        // A question with nothing to answer is an approval
+                        // the worker settles itself, as on the A2A path.
+                        Err(_) => Ok(()),
+                    };
+                    if let Err(e) = answered {
+                        // Dropping the stream on the way out cancels the
+                        // call, which reaps the worker.
+                        failure = Some(e);
+                        break;
+                    }
+                }
+                Ok(CallEvent::Result(value)) => {
+                    outcome = Some(serde_json::from_value::<InvokeAgentOutcome>(value).map_err(
+                        |e| format!("the broker's result for '{agent}' did not parse: {e}"),
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    warn!(agent = %agent, error = %e, "Fabric call failed");
+                    failure = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+
+        let outcome = match (failure, outcome) {
+            (Some(reason), _) | (None, Some(Err(reason))) => InvokeAgentOutcome {
+                success: false,
+                response: String::new(),
+                error: Some(reason),
+                metadata: None,
+            },
+            (None, Some(Ok(outcome))) => outcome,
+            (None, None) => InvokeAgentOutcome {
+                success: false,
+                response: String::new(),
+                error: Some("the broker ended the call without a result".to_string()),
+                metadata: None,
+            },
+        };
+
+        let metadata = outcome.metadata.as_ref();
+        // The worker's spend rides on its terminal status; a failed task
+        // spent its tokens too (AGE-415).
+        let usage = usage_from_status_metadata(metadata)
+            .into_iter()
+            .map(|line| TokenUsage {
+                delegated_to: Some(agent.to_string()),
+                ..line
+            })
+            .collect();
+        let (trace, conversation) = if outcome.success {
+            (
+                include_trace
+                    .then(|| trace_from_status_metadata(metadata))
+                    .flatten(),
+                conversation_from_status_metadata(metadata),
+            )
+        } else {
+            (None, None)
+        };
+        self.finish(
+            agent,
+            outcome.response,
+            outcome.success,
+            outcome.error,
+            usage,
+            trace,
+            conversation,
+        )
+    }
+
+    /// Report how a delegation ended, to the progress channel and to the
+    /// model — the one ending both the A2A and the fabric path share.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        agent: &str,
+        response: String,
+        success: bool,
+        error_msg: Option<String>,
+        usage: Vec<TokenUsage>,
+        trace: Option<String>,
+        conversation: Option<serde_json::Value>,
+    ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let response = response.trim().to_string();
 
         if !success {
@@ -624,7 +808,7 @@ impl InvokeAgentTool {
             });
             return Err(InvokeAgentError::InvocationFailed(format!(
                 "Agent '{}' reported failure{}",
-                config.name,
+                agent,
                 error_msg.map(|m| format!(": {}", m)).unwrap_or_default()
             )));
         }
@@ -641,15 +825,15 @@ impl InvokeAgentTool {
             usage,
         });
 
-        debug!(agent = %config.name, response_len = response.len(), "Agent responded");
+        debug!(agent = %agent, response_len = response.len(), "Agent responded");
 
         // Return the actual agent output to the parent model as well. This keeps
         // the sub-agent trace useful for transparency while still giving the
         // calling model the concrete result it needs to answer correctly.
         Ok(InvokeAgentOutput {
-            agent: config.name.clone(),
+            agent: agent.to_string(),
             response: if response.is_empty() {
-                format!("Agent '{}' completed successfully.", config.name)
+                format!("Agent '{}' completed successfully.", agent)
             } else {
                 response
             },
@@ -672,10 +856,44 @@ impl InvokeAgentTool {
         task_id: &str,
         request: A2aClarificationRequest,
     ) -> Result<(), String> {
+        let request_id = request.id.clone();
+        let answers = self.ask(&config.name, task_id, request).await?;
+        self.client
+            .send_task_input(config, task_id, &request_id, &answers)
+            .await
+            .map_err(|e| undeliverable(&config.name, e))
+    }
+
+    /// As [`answer_input_required`](Self::answer_input_required), with the
+    /// answer going back down over the fabric the call came over.
+    async fn answer_over_fabric(
+        &self,
+        transport: &dyn Transport,
+        agent: &str,
+        task_id: &str,
+        request: A2aClarificationRequest,
+    ) -> Result<(), String> {
+        let request_id = request.id.clone();
+        let answers = self.ask(agent, task_id, request).await?;
+        let input = serde_json::json!({ "requestId": request_id, "answers": answers });
+        transport
+            .answer(task_id, input)
+            .await
+            .map_err(|e| undeliverable(agent, e))
+    }
+
+    /// Re-ask a delegated agent's questions on this agent's own store and
+    /// wait for the answers (AGE-306).
+    async fn ask(
+        &self,
+        agent: &str,
+        task_id: &str,
+        request: A2aClarificationRequest,
+    ) -> Result<Vec<crate::models::clarification_store::ClarificationAnswer>, String> {
         let Some(pending) = self.clarifications.as_ref() else {
             return Err(format!(
                 "Agent '{}' asked a question and nobody here can answer it: {}",
-                config.name,
+                agent,
                 request
                     .questions
                     .first()
@@ -685,31 +903,21 @@ impl InvokeAgentTool {
         };
 
         info!(
-            agent = %config.name,
+            agent = %agent,
             task = %task_id,
             request = %request.id,
             questions = request.questions.len(),
             "Delegated agent asked a question; escalating"
         );
-        let answers = request_clarification(pending, request.questions)
+        request_clarification(pending, request.questions)
             .await
-            .map_err(|e| {
-                format!(
-                    "Agent '{}' asked a question that went unanswered: {e}",
-                    config.name
-                )
-            })?;
-
-        self.client
-            .send_task_input(config, task_id, &request.id, &answers)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Agent '{}' asked a question, but the answer could not be delivered: {e:#}",
-                    config.name
-                )
-            })
+            .map_err(|e| format!("Agent '{agent}' asked a question that went unanswered: {e}"))
     }
+}
+
+/// Why an answer never reached the agent that asked for it.
+fn undeliverable(agent: &str, error: impl std::fmt::Display) -> String {
+    format!("Agent '{agent}' asked a question, but the answer could not be delivered: {error:#}")
 }
 
 #[cfg(test)]

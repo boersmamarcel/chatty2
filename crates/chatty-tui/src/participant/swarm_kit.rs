@@ -263,11 +263,11 @@ impl SwarmKit {
     }
 
     /// The leader delegates `prompt` to `agent` through the real
-    /// `invoke_agent` tool, over the root broker.
+    /// `invoke_agent` tool, over the root broker's direct handle — the
+    /// in-process root reaches its broker without a socket or an HTTP hop
+    /// (ADR-0020, BI-4).
     pub async fn run_leader_to(&self, agent: &str, prompt: &str) -> LeaderRun {
-        let port = self.broker.as_ref().expect("the broker is running").port;
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents(self.roster.clone());
+        let tool = self.leader_tool();
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let output = tokio::time::timeout(
@@ -296,6 +296,20 @@ impl SwarmKit {
             progress,
             requests,
         }
+    }
+}
+
+impl SwarmKit {
+    /// The leader's `invoke_agent`, holding the root broker's direct handle.
+    pub fn leader_tool(&self) -> InvokeAgentTool {
+        InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents(self.roster.clone())
+            .with_transport(self.broker().transport())
+    }
+
+    /// The root broker.
+    pub fn broker(&self) -> &Broker {
+        self.broker.as_ref().expect("the broker is running")
     }
 }
 
@@ -406,7 +420,11 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),
-            InvokeAgentProgress::Text(text) => format!("progress {text}"),
+            // A step and an answer chunk read alike in the goldens, which
+            // were recorded before the two were told apart (BI-4).
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
+                format!("progress {text}")
+            }
             InvokeAgentProgress::Finished {
                 success,
                 result,
@@ -635,7 +653,7 @@ async fn swarm_kit_two_process_delegation() {
         .progress
         .iter()
         .filter_map(|p| match p {
-            InvokeAgentProgress::Text(text) => Some(text.as_str()),
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => Some(text.as_str()),
             _ => None,
         })
         .collect();

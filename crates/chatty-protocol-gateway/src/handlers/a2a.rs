@@ -43,6 +43,9 @@ pub(crate) async fn module_agent_card(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
 ) -> impl IntoResponse {
+    if is_role(&state, &module_name) {
+        state.routes.count_role();
+    }
     if let Some(card) = state.participants.card(&module_name) {
         return (StatusCode::OK, Json(a2a_participant::card_to_json(&card))).into_response();
     }
@@ -74,6 +77,7 @@ pub(crate) async fn module_agent_card(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> impl IntoResponse {
+    state.routes.count_directory();
     // Only the modules served over A2A are agents of this gateway.
     let modules: Vec<_> = {
         let reg = state.registry.read().await;
@@ -119,6 +123,12 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
         "gateway": true,
         "agents": agents,
     }))
+}
+
+/// Whether `name` is one of the broker's roles — a connected participant or
+/// a virtual agent — rather than a module.
+fn is_role(state: &GatewayState, name: &str) -> bool {
+    state.participants.is_registered(name) || state.runners.contains_key(name)
 }
 
 /// Tag one agent card with its origin.
@@ -209,6 +219,9 @@ pub(crate) async fn a2a_jsonrpc(
     headers: HeaderMap,
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    if is_role(&state, &module_name) {
+        state.routes.count_role();
+    }
     if body.jsonrpc != "2.0" {
         return json_rpc_error(
             StatusCode::BAD_REQUEST,
