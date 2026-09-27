@@ -153,11 +153,14 @@ fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
 ```
 
 Unit tests for the statistical functions run on the **host** target (no WASM
-required):
+required). The crate's own `.cargo/config.toml` defaults the build target to
+`wasm32-wasip2`, so a bare `cargo test` tries to *execute* the compiled
+`.wasm` as a native binary and fails with a permission error — pass the host
+target explicitly:
 
 ```sh
 cd modules/benford-agent
-cargo test
+cargo test --target x86_64-unknown-linux-gnu   # or your host's triple
 ```
 
 ## Step 4 — Three ways callers reach the same logic
@@ -170,11 +173,14 @@ The gateway exposes one WASM module on three protocol surfaces:
 | A2A | `POST /a2a/benford-agent` | Yes — same narrative in `result.message.parts` |
 | MCP | `POST /mcp/benford-agent` | No — raw `tools/call` only; caller orchestrates |
 
-From Chatty's main agent (requires `[protocols].a2a = true`):
-
-```text
-/agent benford-agent Analyze these invoice amounts: 1234 4521 891 2340 567 8901
-```
+From Chatty's main agent (requires `[capabilities].agent = true` to be listed
+and `[protocols].a2a = true` to be invocable): ask the assistant to use it —
+e.g. "use benford-agent to analyze these invoice amounts: 1234 4521 891 2340
+567 8901" — which makes the assistant call `invoke_agent` after discovering
+`benford-agent` via `list_agents`. This is not the `/agent` slash command:
+that dispatches by name only to a *remote* A2A agent configured in Settings →
+A2A Agents, and would otherwise just start a generic local sub-agent with
+"benford-agent Analyze these invoice amounts: …" as its prompt.
 
 Or via curl (gateway running):
 
@@ -208,7 +214,8 @@ cp target/wasm32-wasip2/release/benford_agent.wasm .
 cp -r . ~/.local/share/chatty/modules/benford-agent/
 ```
 
-Enable the module in **Settings → Modules**.
+Enable the module in **Settings → Extensions** (there is no separate
+"Modules" settings page).
 
 ## Design notes
 

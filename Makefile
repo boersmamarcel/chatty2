@@ -12,7 +12,8 @@
 # update this file too.
 
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
-        test-gateway lint fmt fmt-check typecheck wasm-modules run-gpui \
+        test-gateway lint fmt fmt-check typecheck wasm-modules wasm-template \
+        test-benford lint-module-sdk test-billing-sdk run-gpui \
         run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
         docs-check-nav docs-check-frontmatter docs-check-leakage \
         docs-check-reference docs-check animations
@@ -27,11 +28,15 @@ help:
 	@echo "  make test-tui      cargo test -p chatty-tui (TUI changes only)"
 	@echo "  make test-gpui     cargo test -p chatty-gpui (GPUI changes only)"
 	@echo "  make test-gateway  cargo test -p chatty-protocol-gateway (gateway changes only)"
-	@echo "  make lint          cargo clippy --all-features -- -D warnings"
+	@echo "  make lint          cargo clippy --all-features --all-targets -- -D warnings"
 	@echo "  make fmt           cargo fmt"
 	@echo "  make fmt-check     cargo fmt --check"
 	@echo "  make typecheck     cargo check --all-features"
 	@echo "  make wasm-modules  Build every WASM module and test fixture (needed by tests)"
+	@echo "  make wasm-template cargo-generate a module from templates/module and build it (needs cargo-generate)"
+	@echo "  make test-benford  benford-agent's own unit tests, on the host target"
+	@echo "  make lint-module-sdk  clippy chatty-module-sdk for wasm32-wasip2"
+	@echo "  make test-billing-sdk  hive-billing-sdk's tests, on the host target"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
 	@echo "  make run-tui       cargo run -p chatty-tui"
 	@echo "  make docs-gen      Generate docs/generated reference pages"
@@ -63,12 +68,15 @@ build:
 build-release:
 	cargo build --release
 
-# Matches the CI invocation exactly. Tests run in parallel: the SIGTRAPs
-# that used to force --test-threads=1 were pdfium being used from several
-# test threads at once, fixed at the source by `PdfiumHandle` in
-# crates/chatty-core/src/services/pdfium_utils.rs (AGE-176).
+# Matches the CI invocation exactly (AGE-600). PdfiumHandle
+# (crates/chatty-core/src/services/pdfium_utils.rs, AGE-176) fixed the SIGTRAP
+# that came from pdfium being used from several test threads at once, but CI
+# still serializes (ci.yml's "Run tests" step): GitHub-hosted runners have
+# shown other intermittent SIGTRAPs under parallel execution. `make test` was
+# left parallel and had drifted from CI; match it here so a flake reproduces
+# locally instead of only in CI.
 test:
-	cargo test --all-features
+	cargo test --all-features -- --test-threads=1
 
 # Fast inner loop: most logic lives in chatty-core. Use this while iterating
 # on tools / services / settings models. Run `make test` before pushing.
@@ -87,7 +95,7 @@ test-gateway:
 	cargo test -p chatty-protocol-gateway
 
 lint:
-	cargo clippy --all-features -- -D warnings
+	cargo clippy --all-features --all-targets -- -D warnings
 
 fmt:
 	cargo fmt
@@ -101,6 +109,30 @@ typecheck:
 wasm-modules:
 	scripts/build-wasm-fixtures.sh
 
+# cargo-generate a module from templates/module and build it, the way the
+# tutorials tell an author to (AGE-600). `modules/ci-generated` is
+# git-ignored. Needs `cargo generate` (`cargo install cargo-generate`).
+wasm-template:
+	rm -rf modules/ci-generated
+	cargo generate --path templates/module --name ci-generated \
+		--define description=ci --destination modules --silent --no-workspace
+	cargo build --manifest-path modules/ci-generated/Cargo.toml \
+		--target wasm32-wasip2 --release
+
+# benford-agent, chatty-module-sdk and hive-billing-sdk are standalone crates
+# (their own `[workspace]`), so `make test`/`make lint` above never touch
+# them. Both test crates default to `wasm32-wasip2` via their own
+# `.cargo/config.toml`, which has no libtest runner, so the host target must
+# be explicit (AGE-600).
+test-benford:
+	cargo test --manifest-path modules/benford-agent/Cargo.toml --target x86_64-unknown-linux-gnu
+
+lint-module-sdk:
+	cargo clippy --manifest-path crates/chatty-module-sdk/Cargo.toml --target wasm32-wasip2 -- -D warnings
+
+test-billing-sdk:
+	cargo test --manifest-path crates/hive-billing-sdk/Cargo.toml --target x86_64-unknown-linux-gnu
+
 run-gpui:
 	cargo run -p chatty-gpui
 
@@ -109,7 +141,7 @@ run-tui:
 
 # Mirrors the Rust path in .github/workflows/ci.yml.
 # GitHub skips this compile/test path when a PR only touches docs.
-ci: wasm-modules test
+ci: wasm-modules wasm-template test test-benford lint-module-sdk test-billing-sdk
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	bash scripts/check-reserved.sh

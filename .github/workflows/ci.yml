@@ -65,6 +65,12 @@ jobs:
               - 'modules/**/Cargo.lock'
               - 'modules/**/module.toml'
               - 'modules/fixtures/**'
+              # The `cargo generate` scaffold CI builds fresh each run
+              # (AGE-600). Not caught by the '**/Cargo.toml' glob alone:
+              # `cargo-generate.toml` and `module.toml` here aren't matched by
+              # any pattern above, and a change to any of them (or AGE-445's
+              # eventual rename) must re-run the build.
+              - 'templates/module/**'
               - 'wit/**'
               - 'scripts/build-wasm-fixtures.sh'
               - 'scripts/check-reserved.sh'
@@ -111,8 +117,18 @@ jobs:
           # of clippy's. Bump again if the cache ever needs to be rebuilt.
           prefix-key: v1-rust
           shared-key: linux-ci
+          # `modules/benford-agent`, `crates/chatty-module-sdk` and
+          # `crates/hive-billing-sdk` each declare their own `[workspace]`
+          # (AGE-600): they are not workspace members, so their `target/`
+          # dirs live outside `.` and need their own cache entries. The
+          # fixtures under `modules/fixtures/*` build into the main
+          # workspace's `target/wasm-fixtures/` (see
+          # `scripts/build-wasm-fixtures.sh`) and are already covered by `.`.
           workspaces: |
             .
+            modules/benford-agent
+            crates/chatty-module-sdk
+            crates/hive-billing-sdk
           # Deliberately no `cache-on-failure: true`: it also saves on
           # cancelled jobs, and cancel-in-progress above cancels main runs
           # whenever two pushes land close together.
@@ -143,6 +159,47 @@ jobs:
       - name: Build WASM modules and test fixtures (tests load them)
         if: needs.changes.outputs.rust == 'true'
         run: scripts/build-wasm-fixtures.sh
+
+      # cargo-generate isn't preinstalled on GitHub-hosted runners;
+      # cargo-binstall fetches its prebuilt binary instead of compiling it.
+      - name: Install cargo-binstall
+        if: needs.changes.outputs.rust == 'true'
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-generate
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo binstall --no-confirm cargo-generate
+
+      # AGE-600: the plugin path had rotted unnoticed because CI only ever
+      # built echo-agent. Generate a module from templates/module exactly the
+      # way the tutorials tell an author to, then build it, so a change that
+      # breaks the template is caught here instead of by the next author.
+      # `modules/ci-generated` is git-ignored.
+      - name: Generate and build a module from templates/module
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          rm -rf modules/ci-generated
+          cargo generate --path templates/module --name ci-generated \
+            --define description=ci --destination modules --silent --no-workspace
+          cargo build --manifest-path modules/ci-generated/Cargo.toml \
+            --target wasm32-wasip2 --release
+
+      # benford-agent and the SDK crates are standalone (not workspace
+      # members) so `cargo test --all-features` below never touches them;
+      # both default to `wasm32-wasip2` via their own `.cargo/config.toml`,
+      # which has no libtest runner, so the host target must be explicit
+      # (AGE-600).
+      - name: Test benford-agent on the host target
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo test --manifest-path modules/benford-agent/Cargo.toml --target x86_64-unknown-linux-gnu
+
+      - name: Clippy chatty-module-sdk for wasm32-wasip2
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo clippy --manifest-path crates/chatty-module-sdk/Cargo.toml --target wasm32-wasip2 -- -D warnings
+
+      - name: Test hive-billing-sdk on the host target
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo test --manifest-path crates/hive-billing-sdk/Cargo.toml --target x86_64-unknown-linux-gnu
 
       # The gateway conformance suite (AGE-599) drives real third-party
       # clients: the OpenAI Python package through `uv`, and the MCP

@@ -2,7 +2,8 @@ package chatty:module@0.2.0;
 
 /// The contract between chatty (host) and WASM modules (guest).
 ///
-/// Host imports: llm, config, logging — minimal trust surface.
+/// Host imports: llm, config, logging (used by every module), plus the
+/// optional file and billing interfaces — minimal trust surface.
 /// Guest exports: agent — chat, tool invocation, and discovery.
 
 // ---------------------------------------------------------------------------
@@ -167,7 +168,10 @@ interface file {
 interface billing {
     /// Information about an acquired billing session.
     record session-info {
-        /// Hive-signed JWT. Module can verify using embedded public key.
+        /// Hive-signed JWT. The current `hive-billing-sdk` verifies it with
+        /// HS256 (HMAC-SHA256) against an embedded shared secret, not an
+        /// embedded public key — see the crate's doc comment for the planned
+        /// Ed25519 upgrade and why HMAC-in-WASM is deterrence, not proof.
         token: string,
         /// User's current credit balance (informational).
         balance-tokens: s64,

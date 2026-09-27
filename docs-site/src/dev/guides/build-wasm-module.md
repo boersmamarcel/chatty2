@@ -4,15 +4,15 @@
 
 ## Goal
 
-A `wasm32-wasip2` component, built from the repo template, installed in the modules directory, answering on the gateway and callable from a conversation with `/agent <name> …`.
+A `wasm32-wasip2` component, built from the repo template, installed in the modules directory, answering on the gateway and invocable from a conversation through the `invoke_agent` tool (there is no `/agent <name> …` slash command that dispatches to a WASM module by name — see "Common mistakes" below).
 
-A module is a sandboxed guest implementing the [`ModuleExports`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs) trait: `chat`, `invoke_tool`, `list_tools`, `get_agent_card`. The host provides exactly three imports — `llm::complete` (the host-managed LLM; API keys stay on the host), `config::get` (per-module key/value config from the manifest) and `logging::log`. Everything else — tools, business logic, multi-turn loops — runs inside your guest. The contract is in the [WIT reference](../architecture/wit-reference.md); how a call travels from `invoke_agent` through the gateway and the runtime to your `chat` export (your module is never linked into `chatty-core`) is in [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md).
+A module is a sandboxed guest implementing the [`ModuleExports`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs) trait: `chat`, `invoke_tool`, `list_tools`, `get_agent_card`. The host provides `llm::complete` (the host-managed LLM; API keys stay on the host), `config::get` (per-module key/value config from the manifest's `[config]` table) and `logging::log` — used by every module — plus two optional imports: `file::read-bytes` (sandboxed reads under a manifest-granted root) and `billing` (paid modules only). Everything else — tools, business logic, multi-turn loops — runs inside your guest. The contract is in the [WIT reference](../architecture/wit-reference.md); how a call travels from `invoke_agent` through the gateway and the runtime to your `chat` export (your module is never linked into `chatty-core`) is in [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md).
 
 ## Prerequisites
 
 - The `wasm32-wasip2` target: `make setup`, or `rustup target add wasm32-wasip2`.
 - [`cargo-generate`](https://github.com/cargo-generate/cargo-generate) if you want to scaffold from the template (`cargo install cargo-generate`).
-- Chatty running with **Settings → Modules** enabled; the gateway then serves modules on `http://localhost:8420` (the default port).
+- Chatty running with the module enabled in **Settings → Extensions** (there is no separate "Modules" settings page); the gateway then serves modules on `http://localhost:8420` by convention — the gateway crate itself has no compiled-in default port or address, the embedding app (chatty-gpui) picks both.
 
 ## Steps
 
@@ -45,7 +45,7 @@ The SDK is a path dependency when the module lives under `modules/` in the repo:
 chatty-module-sdk = { path = "../../crates/chatty-module-sdk" }
 ```
 
-The template's `module.toml` declares `name`, `version`, `description` and `wasm` under `[module]`, `[capabilities]` (`tools`, `chat`, `agent`), `[protocols]` (`openai_compat`, `mcp`, `a2a`) and `[resources]` (`max_memory_mb`, `max_execution_ms`). Keep `[protocols].a2a = true`: it is what makes the module appear in `list_agents` and invocable with `invoke_agent`. Field-by-field meaning and the resource defaults are in the manifest section of [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md).
+The template's `module.toml` declares `name`, `version`, `description` and `wasm` under `[module]`, `[capabilities]` (`tools`, `chat`, `agent`), `[protocols]` (`openai_compat`, `mcp`, `a2a`) and `[resources]` (`max_memory_mb`, `max_execution_ms`). Keep `[capabilities].agent = true` (that, plus the module being loaded and enabled, is what makes it appear in `list_agents`) and `[protocols].a2a = true` (that is what lets `invoke_agent` actually reach it — without it the tool reports the module can't be invoked, even though it is listed). Field-by-field meaning and the resource defaults are in the manifest section of [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md).
 
 ### 3. Implement `ModuleExports`
 
@@ -79,17 +79,19 @@ mkdir -p ~/.local/share/chatty/modules/my-agent
 cp -r . ~/.local/share/chatty/modules/my-agent/
 ```
 
-In Chatty: **Settings → Modules** → enable modules, set the module directory if you used another path, then restart or reload.
+In Chatty: **Settings → Extensions** → enable your module, then restart or reload.
 
 ### 5. Test your module
 
-Unit tests for pure-Rust logic run on the host target with a plain `cargo test` inside the module directory. For the gateway round trip, the repo's echo-agent suite is the model to copy:
+Unit tests for pure-Rust logic run on the host target with a plain `cargo test` inside the module directory (pass `--target <your host triple>` if the module's `.cargo/config.toml` defaults to `wasm32-wasip2`, or a bare `cargo test` tries to execute the compiled `.wasm` as a native binary and fails). For the gateway round trip, the repo's echo-agent suite is the model to copy:
 
 ```sh
 # From the repo root — builds echo-agent WASM if needed
 make wasm-modules
-cargo test -p chatty-protocol-gateway echo_agent
+cargo test -p chatty-protocol-gateway --test echo_agent_e2e
 ```
+
+Note: `cargo test -p chatty-protocol-gateway echo_agent` (a name filter) only matches the handful of `echo_agent_e2e.rs` step names that literally contain the substring `echo_agent` — most step names don't. Passing `--test echo_agent_e2e` with no filter is what actually runs the whole suite.
 
 Manual smoke test with the gateway running:
 
@@ -100,33 +102,35 @@ curl -s http://localhost:8420/a2a/my-agent \
        "params":{"message":{"parts":[{"type":"text","text":"hello"}]}}}'
 ```
 
-Then from a conversation: `/agent my-agent hello`.
+Then from a conversation, ask the assistant to use it — e.g. "use my-agent to say hello" — so the LLM calls `invoke_agent { "agent": "my-agent", "prompt": "hello" }` after discovering it via `list_agents`. (Chatty does have an `/agent` slash command, but it only dispatches by name to a *remote* agent already registered in Settings → A2A Agents; for anything else — including a plain installed WASM module — it launches a generic local sub-agent with the whole rest of the line as its prompt, not a call to your module.)
 
 ## Verify
 
 - `GET http://localhost:8420/` lists your module and its endpoints.
 - The curl above returns your `chat` output in `result.message.parts`.
 - `POST /mcp/my-agent` with `tools/list` shows the tools you advertised.
-- `/agent my-agent …` in Chatty returns the same answer.
+- Asking the assistant to use `my-agent` in a conversation returns the same answer, via `invoke_agent`.
 
 ## Checklist
 
 - [ ] `wasm32-wasip2` target installed
 - [ ] `module.toml` `[module].name` matches the agent card `name` and the directory name
-- [ ] `[protocols].a2a = true`
+- [ ] `[capabilities].agent = true` (to appear in `list_agents`) and `[protocols].a2a = true` (to be invocable)
 - [ ] `.wasm` copied next to `module.toml`
-- [ ] Modules enabled in Settings, gateway reachable on `:8420`
+- [ ] Module enabled in Settings → Extensions, gateway reachable on `:8420`
 - [ ] Host-target unit tests for your tool logic
 
 ## Common mistakes
 
 | Mistake | Fix |
 |---------|-----|
-| Module missing from `list_agents` | `[protocols].a2a = true` |
+| Module missing from `list_agents` | `[capabilities].agent = true`, the module is `Loaded`, and it is enabled in Settings → Extensions |
+| `invoke_agent` reports the module can't be invoked | `[protocols].a2a = true` |
 | Built for the host target | Use the `.cargo/config.toml` from the template, or pass `--target wasm32-wasip2` |
 | `.wasm` name does not match `[module].wasm` | The manifest path is relative to `module.toml` |
 | Calling `llm::complete` with a model id Chatty does not have | Pass `""` for the host default |
 | Expecting the host to run your tool calls | The host only services `llm::complete`; execute tools in the guest and call again |
+| Expecting `/agent my-agent …` to reach the module | It doesn't — that slash command only routes by name to a configured A2A agent; use `invoke_agent` (ask the assistant to use the module) instead |
 
 ## Reference
 

@@ -5,12 +5,12 @@ Wasmtime embedding and host-side WIT interface for chatty WASM modules.
 This crate wraps `wasmtime` 30 with the component model enabled, loads
 WASM components compiled to `wasm32-wasip2`, applies resource limits, and
 provides the host-side implementation of the WIT interfaces (`llm`,
-`config`, `logging`, optional `billing`).
+`config`, `logging`, optional `file`, optional `billing`).
 
 ## Public surface
 
 - [`WasmModule`] — loaded, callable module instance
-- [`ResourceLimits`] — fuel / memory / table caps applied per module
+- [`ResourceLimits`] — fuel / memory / wall-clock / output-size caps applied per call (PL-D3: 10⁹ fuel, 256 MiB, 60 s including host time, 1 MiB output; a manifest may only lower these)
 - [`Engine`] — re-exported `wasmtime::Engine` so callers can share one engine
 - Host traits: [`LlmProvider`], [`BillingProvider`]
 - WIT types: `AgentCard`, `ChatRequest`, `ChatResponse`, `Message`, `Role`, `Skill`, `TokenUsage`, `ToolCall`, `ToolDefinition`
