@@ -8,6 +8,9 @@ description = "HTTP protocol gateway exposing WASM modules via OpenAI, MCP, and 
 chatty-module-registry = { path = "../chatty-module-registry" }
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 hive-client = { path = "../hive-client" }
+# The broker's pure state (ADR-0020); `AgentOrigin` lives there so the
+# gateway and chatty-core share one vocabulary.
+chatty-fabric = { path = "../chatty-fabric" }
 
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

@@ -1,0 +1,3 @@
+{"ts":1790000000000,"kind":"task","from":"leader-0","to":"local-coder-0","scope":"conv-1","run":0,"chain":["leader-0"],"bytes":42,"outcome":"completed"}
+{"ts":1790000000500,"kind":"message","from":"local-coder-0","to":"leader-0","scope":"conv-1","run":0,"chain":["leader-0","local-coder-0"],"bytes":17,"outcome":"pending"}
+{"ts":1790000001000,"kind":"refusal","from":"unregistered peer","to":"local-coder-0","scope":null,"run":null,"chain":[],"bytes":0,"outcome":"refused: not_on_tree"}
