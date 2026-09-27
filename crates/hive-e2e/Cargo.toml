@@ -1,0 +1,40 @@
+[package]
+name = "hive-e2e"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Nightly chatty × Hive contract and trust suite (PL-E6): S5/S6 rows against a live hive compose stack, plus the tampering proxy"
+
+[dependencies]
+# The chatty side of every row: the client, the installer the desktop runs,
+# the module loader, and the gateway that forwards remote modules.
+hive-client = { path = "../hive-client" }
+chatty-core = { path = "../chatty-core", default-features = false }
+chatty-module-registry = { path = "../chatty-module-registry" }
+chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
+chatty-protocol-gateway = { path = "../chatty-protocol-gateway" }
+
+# The tampering proxy.
+axum = "0.8"
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+futures-util = "0.3"
+bytes = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
+percent-encoding = { workspace = true }
+
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+# HS256 for the short-lived session token row 5.3 mints (the registry's own
+# JWT format; `jsonwebtoken` is not a chatty2 dependency).
+hmac = "0.13"
+chrono = { workspace = true, features = ["now"] }
+uuid = { workspace = true }
+tempfile = { workspace = true }
+toml = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
