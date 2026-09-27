@@ -20,6 +20,18 @@
 //! two points the child is a process holding a workspace, and it is that
 //! whole occupancy the budget is sizing, not the seconds it spends streaming.
 //!
+//! # A worker that delegates on its own endpoint
+//!
+//! A worker holding a slot can itself delegate through the same broker
+//! (AGE-628): the desktop's children fall back to the root's gateway. If
+//! every slot on the endpoint is taken — with the default budget of one, by
+//! the caller itself — waiting would wait on the caller, which is waiting on
+//! this task: a deadlock with no timeout. So a permit can be tagged with the
+//! token of the worker holding it ([`EndpointPermit::held_by`]), and a runner
+//! asked for work by a holder of a slot on its endpoint takes one only if it
+//! is free right now ([`EndpointBudget::try_acquire`]), failing fast
+//! otherwise.
+//!
 //! # Queue depth
 //!
 //! Every wait is a `tracing` event carrying the endpoint, its limit and the
@@ -57,6 +69,9 @@ struct Inner {
     /// Endpoints that have been used at least once. Created lazily so a
     /// budget can be configured for endpoints this process never touches.
     live: Mutex<HashMap<String, Arc<Endpoint>>>,
+    /// Which worker holds a slot where: a worker's caller token → the
+    /// endpoint of its permit. See [`EndpointPermit::held_by`].
+    holders: Mutex<HashMap<String, String>>,
 }
 
 struct Endpoint {
@@ -75,6 +90,7 @@ impl EndpointBudget {
                 default_limit: default_limit.max(1),
                 limits: HashMap::new(),
                 live: Mutex::new(HashMap::new()),
+                holders: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -112,8 +128,8 @@ impl EndpointBudget {
 
         // The common case is an idle endpoint, and it should not pay for the
         // logging the queued case wants.
-        if let Ok(permit) = live.semaphore.clone().try_acquire_owned() {
-            return EndpointPermit { _permit: permit };
+        if let Some(permit) = self.try_acquire(endpoint) {
+            return permit;
         }
 
         let queued = QueuedGuard::enter(&live);
@@ -143,7 +159,39 @@ impl EndpointBudget {
             queue_depth = live.queued.load(Ordering::Relaxed),
             "Delegated task admitted to a model endpoint"
         );
-        EndpointPermit { _permit: permit }
+        self.permit(endpoint, permit)
+    }
+
+    /// A slot on `endpoint` if one is free right now, else `None` — for a
+    /// caller that must not wait (see the module docs on delegating on one's
+    /// own endpoint).
+    pub fn try_acquire(&self, endpoint: &str) -> Option<EndpointPermit> {
+        let permit = self
+            .endpoint(endpoint)
+            .semaphore
+            .clone()
+            .try_acquire_owned();
+        permit.ok().map(|permit| self.permit(endpoint, permit))
+    }
+
+    /// Whether the worker whose caller token is `holder` holds a slot on
+    /// `endpoint` right now.
+    pub fn is_held_by(&self, endpoint: &str, holder: &str) -> bool {
+        self.inner
+            .holders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(holder)
+            .is_some_and(|held| held == endpoint)
+    }
+
+    fn permit(&self, endpoint: &str, permit: OwnedSemaphorePermit) -> EndpointPermit {
+        EndpointPermit {
+            _permit: permit,
+            endpoint: endpoint.to_string(),
+            holder: None,
+            budget: Arc::clone(&self.inner),
+        }
     }
 
     /// How many tasks are waiting for a slot on `endpoint` right now.
@@ -206,9 +254,49 @@ impl std::fmt::Debug for EndpointBudget {
 }
 
 /// One slot on an endpoint, released when this is dropped.
-#[derive(Debug)]
 pub struct EndpointPermit {
     _permit: OwnedSemaphorePermit,
+    endpoint: String,
+    /// The caller token of the worker this slot is for, once tagged.
+    holder: Option<String>,
+    budget: Arc<Inner>,
+}
+
+impl EndpointPermit {
+    /// Record that the worker with caller token `holder` holds this slot,
+    /// until the permit is dropped — what [`EndpointBudget::is_held_by`]
+    /// answers from.
+    pub fn held_by(mut self, holder: impl Into<String>) -> Self {
+        let holder = holder.into();
+        self.budget
+            .holders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(holder.clone(), self.endpoint.clone());
+        self.holder = Some(holder);
+        self
+    }
+}
+
+impl std::fmt::Debug for EndpointPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EndpointPermit")
+            .field("endpoint", &self.endpoint)
+            .field("holder", &self.holder)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for EndpointPermit {
+    fn drop(&mut self) {
+        if let Some(holder) = self.holder.take() {
+            self.budget
+                .holders
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&holder);
+        }
+    }
 }
 
 /// Counts one waiter for as long as it is alive.

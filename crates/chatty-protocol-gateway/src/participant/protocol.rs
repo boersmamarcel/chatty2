@@ -160,14 +160,33 @@ pub struct DelegatedTask {
     /// `None` for a caller that presented no bearer — a desktop parent
     /// delegating to a local worker. A hosted worker refuses such a task.
     pub bearer: Option<TaskBearer>,
+    /// The caller token of the broker worker that asked for this task, when
+    /// one did ([`CALLER_HEADER`]). Stays with the broker: a runner reads it
+    /// to tell a worker delegating on its own model endpoint from any other
+    /// caller (AGE-628), and it is not part of the task frame.
+    pub caller: Option<String>,
 }
+
+/// The header a broker worker's `invoke_agent` puts its caller token in, on
+/// a call back into a broker. chatty-core's `invoke_agent_tool` spells it
+/// too; a test there keeps the two the same.
+pub const CALLER_HEADER: &str = "x-chatty-broker-caller";
+
+/// The environment variable a runner hands each worker its caller token in.
+pub const CALLER_ENV: &str = "CHATTY_BROKER_CALLER";
 
 impl DelegatedTask {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             bearer: None,
+            caller: None,
         }
+    }
+
+    pub fn with_caller(mut self, caller: Option<String>) -> Self {
+        self.caller = caller;
+        self
     }
 
     pub fn with_bearer(mut self, bearer: Option<TaskBearer>) -> Self {
@@ -288,6 +307,15 @@ pub enum BrokerFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AGE-628: the worker's `invoke_agent` (chatty-core) and the broker
+    /// spell the caller token's header and variable the same way.
+    #[test]
+    fn the_caller_token_is_spelled_alike_on_both_sides() {
+        use chatty_core::tools::invoke_agent_tool::{BROKER_CALLER_ENV, BROKER_CALLER_HEADER};
+        assert_eq!(CALLER_ENV, BROKER_CALLER_ENV);
+        assert_eq!(CALLER_HEADER, BROKER_CALLER_HEADER);
+    }
 
     #[test]
     fn participant_frames_use_the_documented_wire_names() {

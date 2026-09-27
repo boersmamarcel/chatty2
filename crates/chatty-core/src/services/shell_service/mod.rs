@@ -785,12 +785,20 @@ impl ShellSession {
         status.code().unwrap_or(-1)
     }
 
-    /// Check if the current session process is running inside a sandbox
+    /// Whether the shell the next command will run in is inside a sandbox.
+    ///
+    /// Starts the shell first (or respawns one that exited), so the answer
+    /// is about the process that will actually run the command: a sandboxed
+    /// spawn that fails falls back to an unsandboxed shell, which
+    /// `bwrap --version` alone cannot tell (AGE-627). A shell that cannot be
+    /// started at all reads as unsandboxed.
     pub async fn is_sandboxed(&self) -> bool {
-        let process = self.process.lock().await;
-        process
-            .as_ref()
-            .map_or(Self::can_sandbox(), |p| p.is_sandboxed)
+        let mut process = self.process.lock().await;
+        if let Err(e) = self.ensure_started(&mut process).await {
+            warn!(error = ?e, "Shell did not start; treating it as unsandboxed");
+            return false;
+        }
+        process.as_ref().is_some_and(|p| p.is_sandboxed)
     }
 
     /// Ensure the shell is running, spawning it if necessary.
