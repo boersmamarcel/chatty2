@@ -51,6 +51,9 @@ jobs:
         id: filter
         with:
           filters: |
+            workflow_scripts:
+              - '.github/**'
+              - 'scripts/**'
             rust:
               - '**/*.rs'
               - '**/Cargo.toml'
@@ -83,6 +86,14 @@ jobs:
               - 'docs/research/resume-spike-template.md'
               - '.github/workflows/ci.yml'
               - 'Makefile'
+
+      # Gated: AGE-705's decision table is pure bash with no dependency on
+      # the rest of the tree, so only run it when a workflow or script
+      # actually changed (merge_group has no base to diff, so it always runs
+      # there, matching the `rust` output's convention above).
+      - name: Test PR nurse decision logic (AGE-705)
+        if: github.event_name == 'merge_group' || steps.filter.outputs.workflow_scripts == 'true'
+        run: bash scripts/pr-nurse-decide-test.sh
 
   test:
     needs: changes

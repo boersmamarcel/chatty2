@@ -71,7 +71,11 @@ For low-risk work filed in Linear project **Chatty auto-ship** or **Chatty tech 
    fixes the check without committing; the workflow validates the tree (no conflict
    markers, none of `.github/workflows/`, `RESERVED.md`, `scripts/check-*.sh`,
    `.cursor/rules/` touched) and pushes a `nurse:` commit with the same token. After
-   two nurse commits on one PR it disarms auto-merge and labels `blocked:human`.
+   two nurse commits on one PR, `scripts/pr-nurse-decide.sh` (AGE-705) decides what
+   happens next from CI on that second push: still pending, it waits; green, it
+   clears the attempt budget and leaves auto-merge armed; red, it disarms auto-merge
+   and labels `blocked:human`. Removing `blocked:human` by hand also resets the
+   budget, so the next run does not immediately re-label it.
    Arming auto-merge is the only way into care; the nurse never merges here.
 4. If Actions performed the squash (`GITHUB_TOKEN` does not emit
    `pull_request.closed`), `ship-auto-merge` dispatches `prepare-release`
