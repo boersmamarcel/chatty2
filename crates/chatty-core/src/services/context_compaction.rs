@@ -28,6 +28,9 @@ use rig_core::completion::message::{AssistantContent, Text, ToolResultContent};
 use rig_core::message::UserContent;
 use tracing::warn;
 
+use crate::models::token_usage::{ApiCallUsage, ModelRef};
+use crate::services::llm_service::{UsageSemantics, normalize_usage};
+
 // ── Tunables ──────────────────────────────────────────────────────────────────
 
 /// The task is carried verbatim up to this many characters; a longer one is
@@ -113,16 +116,71 @@ pub const COMPACTION_HEADER: &str = "[CONTEXT COMPACTED]";
 // ── The summariser seam ───────────────────────────────────────────────────────
 
 /// One tool-free model call that turns a prompt into text: the agent's
-/// utility agent in production, a scripted mock model in tests.
+/// utility agent in production, a scripted mock model in tests. Returns the
+/// text with the call's usage, so the call is counted with the turn it ran
+/// in (AGE-683).
 pub trait Summarizer: Send + Sync {
-    fn summarize<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
+    fn summarize<'a>(
+        &'a self,
+        prompt: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<(String, ApiCallUsage)>>;
 }
 
+/// A bare agent: its usage is read as OpenAI-compatible (the shape every
+/// provider chatty talks to speaks) and names no model.
 impl Summarizer for rig_agent::Agent {
-    fn summarize<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
-        use rig_agent::completion::Prompt;
-        Box::pin(async move { Ok(self.prompt(prompt.to_string()).await?) })
+    fn summarize<'a>(
+        &'a self,
+        prompt: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<(String, ApiCallUsage)>> {
+        Box::pin(summarize_with(
+            self,
+            prompt,
+            UsageSemantics::InputIncludesCache,
+            None,
+        ))
     }
+}
+
+/// The production summariser: the agent's tool-free utility agent, whose
+/// usage names the model that actually served the call (AGE-682), which is
+/// not necessarily the model the agent's own turns run on.
+pub struct UtilitySummarizer {
+    pub agent: rig_agent::Agent,
+    pub semantics: UsageSemantics,
+    pub model: ModelRef,
+}
+
+impl Summarizer for UtilitySummarizer {
+    fn summarize<'a>(
+        &'a self,
+        prompt: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<(String, ApiCallUsage)>> {
+        Box::pin(summarize_with(
+            &self.agent,
+            prompt,
+            self.semantics,
+            Some(self.model.clone()),
+        ))
+    }
+}
+
+async fn summarize_with(
+    agent: &rig_agent::Agent,
+    prompt: &str,
+    semantics: UsageSemantics,
+    model: Option<ModelRef>,
+) -> anyhow::Result<(String, ApiCallUsage)> {
+    use rig_agent::completion::Prompt;
+    let started = std::time::Instant::now();
+    let response = agent.prompt(prompt.to_string()).extended_details().await?;
+    let usage = ApiCallUsage {
+        model,
+        at: Some(std::time::SystemTime::now()),
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..normalize_usage(semantics, 0, &response.usage)
+    };
+    Ok((response.output, usage))
 }
 
 // ── Building the summary ──────────────────────────────────────────────────────
@@ -149,6 +207,8 @@ pub struct SummaryInputs<'a> {
 pub struct Summary {
     pub message: Message,
     pub prose: String,
+    /// The summarising call's usage, when one was made and answered.
+    pub usage: Option<ApiCallUsage>,
 }
 
 /// Build the message that replaces `history[..covered]`.
@@ -163,6 +223,7 @@ pub async fn build_summary(inputs: SummaryInputs<'_>) -> Summary {
     };
     let last_command = last_command_result(covered);
 
+    let mut usage = None;
     let prose = match inputs.summarizer {
         Some(summarizer) => {
             let prompt = summary_prompt(
@@ -171,7 +232,10 @@ pub async fn build_summary(inputs: SummaryInputs<'_>) -> Summary {
                 &render_transcript(covered, inputs.transcript_max_chars),
             );
             match tokio::time::timeout(SUMMARY_TIMEOUT, summarizer.summarize(&prompt)).await {
-                Ok(Ok(text)) => clean_prose(&text),
+                Ok(Ok((text, call))) => {
+                    usage = Some(call);
+                    clean_prose(&text)
+                }
                 Ok(Err(e)) => {
                     warn!(error = %e, "compaction: summary call failed; using the deterministic summary");
                     None
@@ -203,6 +267,7 @@ pub async fn build_summary(inputs: SummaryInputs<'_>) -> Summary {
             content: vec![UserContent::Text(Text::new(text))],
         },
         prose,
+        usage,
     }
 }
 

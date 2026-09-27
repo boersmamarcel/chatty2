@@ -205,6 +205,9 @@ pub struct AgentClient {
     /// from history (e.g. after switching to a text-only model mid-conversation)
     /// fails as a clear, model-visible note instead of a provider 400.
     supports_images: bool,
+    /// The model id sent to the provider, which the stream's usage records
+    /// name (AGE-682).
+    model_id: String,
 }
 
 impl AgentClient {
@@ -1491,7 +1494,13 @@ impl AgentClient {
         // waits on a summary call mid-turn.
         if unattended {
             agent.context_shaper.enable_compaction(
-                Some(std::sync::Arc::new(agent.utility.clone())),
+                Some(std::sync::Arc::new(
+                    crate::services::context_compaction::UtilitySummarizer {
+                        agent: agent.utility.clone(),
+                        semantics: agent.provider.usage_semantics(),
+                        model: agent.model_ref(),
+                    },
+                )),
                 exec_settings
                     .as_ref()
                     .and_then(|s| s.workspace_dir.as_ref())
@@ -1510,6 +1519,15 @@ impl AgentClient {
             shell_session: shell_session_out,
             invoke_agent_progress_slot,
         })
+    }
+
+    /// The model this agent's requests are spent on, as a usage line names
+    /// it (AGE-682). The utility agent is built on the same model.
+    pub fn model_ref(&self) -> crate::models::token_usage::ModelRef {
+        crate::models::token_usage::ModelRef {
+            provider: self.provider.clone(),
+            model_id: self.model_id.clone(),
+        }
     }
 
     /// The provider this agent is built against — the seam usage semantics

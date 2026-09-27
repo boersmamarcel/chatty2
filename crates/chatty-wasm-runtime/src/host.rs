@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -14,7 +15,7 @@ use wasmtime_wasi::{
 
 use crate::bindings::chatty::module::billing::SessionInfo;
 use crate::bindings::chatty::module::types::{CompletionResponse, Message};
-use crate::limits::ResourceLimits;
+use crate::limits::{MAX_FILE_READ_BYTES, ResourceLimits};
 
 // ---------------------------------------------------------------------------
 // LlmProvider trait
@@ -127,27 +128,41 @@ pub trait BillingProvider: Send + Sync {
 /// Static configuration supplied by a WASM module alongside its binary.
 ///
 /// The manifest is read during loading; its key-value pairs are returned to
-/// the guest when it calls the `config::get` host import.
+/// the guest when it calls the `config::get` host import, and its file root
+/// is the only directory `file::read-bytes` may read from.
 #[derive(Debug, Clone, Default)]
 pub struct ModuleManifest {
     /// Human-readable module name used as a prefix in log messages.
     pub name: String,
     /// Arbitrary key-value configuration the module declared.
     config: std::collections::HashMap<String, String>,
+    /// The directory `file::read-bytes` resolves paths against. `None`
+    /// means the module was granted no files and every read fails.
+    weights_root: Option<PathBuf>,
 }
 
 impl ModuleManifest {
-    /// Create a new manifest with the given name and no config entries.
+    /// Create a new manifest with the given name, no config entries and no
+    /// file root.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             config: Default::default(),
+            weights_root: None,
         }
     }
 
     /// Add or overwrite a configuration key-value pair.
     pub fn with_config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.insert(key.into(), value.into());
+        self
+    }
+
+    /// Grant the guest read access to the files under `root` (and nothing
+    /// else) through `file::read-bytes`. A config key named `weights_root`
+    /// grants nothing: the root is host-set, never guest-visible config.
+    pub fn with_weights_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.weights_root = Some(root.into());
         self
     }
 
@@ -530,37 +545,99 @@ impl crate::bindings::chatty::module::billing::Host for ModuleState {
 
 impl crate::bindings::chatty::module::file::Host for ModuleState {
     fn read_bytes(&mut self, path: String) -> Result<Vec<u8>, String> {
-        // Resolve weights-root from the module's own config.
-        let root = self
-            .manifest
-            .get_config("weights_root")
-            .ok_or_else(|| "file::read_bytes: `weights_root` not configured".to_string())?;
-
-        // Sandbox: reject absolute paths and any `..` component.
-        if Path::new(&path).is_absolute() {
-            return Err(format!("file::read_bytes: absolute path rejected: {path}"));
-        }
-        if path.split('/').any(|seg| seg == "..") {
-            return Err(format!("file::read_bytes: `..` component rejected: {path}"));
-        }
-
-        let full = Path::new(&root).join(&path);
+        let root = self.manifest.weights_root.clone().ok_or_else(|| {
+            "file::read_bytes: this module was granted no file root ([files] root)".to_string()
+        })?;
+        let relative = sandboxed_relative_path(&path)?;
 
         debug!(
             module = %self.manifest.name,
-            path = %full.display(),
+            root = %root.display(),
+            path = %relative.display(),
             "file::read_bytes"
         );
 
-        let result = self.before_deadline("file-read-bytes", {
-            let full = full.clone();
-            move || std::fs::read(&full).map_err(|e| format!("file::read_bytes: {e}"))
+        let result = self.before_deadline("file-read-bytes", move || {
+            read_inside_root(&root, &relative, MAX_FILE_READ_BYTES)
         });
         if let Err(ref e) = result {
-            warn!(module = %self.manifest.name, path = %full.display(), error = %e, "file::read_bytes failed");
+            warn!(module = %self.manifest.name, path = %path, error = %e, "file::read_bytes failed");
         }
         result
     }
+}
+
+/// A guest-supplied `file::read-bytes` path as a plain relative path.
+///
+/// `/` and `\` both separate components (so a Windows-style path means the
+/// same thing on every host); empty and `.` components are dropped. Rejected:
+/// an empty path, a leading separator (absolute), a `:` anywhere (a Windows
+/// drive or stream), and any `..` component.
+fn sandboxed_relative_path(path: &str) -> Result<PathBuf, String> {
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with('/') || Path::new(path).has_root() {
+        return Err(format!("file::read_bytes: absolute path rejected: {path}"));
+    }
+    if normalized.contains(':') {
+        return Err(format!(
+            "file::read_bytes: drive or stream path rejected: {path}"
+        ));
+    }
+    let mut relative = PathBuf::new();
+    for component in normalized.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                return Err(format!("file::read_bytes: `..` component rejected: {path}"));
+            }
+            name => relative.push(name),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(format!("file::read_bytes: empty path rejected: {path:?}"));
+    }
+    Ok(relative)
+}
+
+/// Read `root/relative`, refusing anything that resolves outside `root`.
+///
+/// Both sides are canonicalized, so a symlink (at any component) that leads
+/// out of the root is refused while one that stays inside is followed. Only
+/// regular files are read, and a file over `cap` bytes is refused from its
+/// metadata before any of it is read. Error text never names host paths:
+/// it goes back to the guest.
+fn read_inside_root(root: &Path, relative: &Path, cap: u64) -> Result<Vec<u8>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("file::read_bytes: the file root is unavailable: {e}"))?;
+    let resolved = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|e| format!("file::read_bytes: {e}"))?;
+    if !resolved.starts_with(&root) {
+        return Err("file::read_bytes: path resolves outside the file root".to_string());
+    }
+    let file = std::fs::File::open(&resolved).map_err(|e| format!("file::read_bytes: {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("file::read_bytes: {e}"))?;
+    if !metadata.is_file() {
+        return Err("file::read_bytes: not a regular file".to_string());
+    }
+    let too_large =
+        |bytes: u64| format!("file::read_bytes: file is {bytes} bytes, over the {cap}-byte cap");
+    if metadata.len() > cap {
+        return Err(too_large(metadata.len()));
+    }
+    // The file may grow between the metadata check and the read.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("file::read_bytes: {e}"))?;
+    if bytes.len() as u64 > cap {
+        return Err(too_large(bytes.len() as u64));
+    }
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -755,5 +832,93 @@ mod tests {
         });
         let state = make_state(provider);
         assert_eq!(state.manifest.name, "test-module");
+    }
+
+    #[test]
+    fn guest_paths_are_plain_relative_paths() {
+        let ok = |p: &str| sandboxed_relative_path(p).expect(p);
+        assert_eq!(ok("a.bin"), PathBuf::from("a.bin"));
+        assert_eq!(ok("sub/a.bin"), Path::new("sub").join("a.bin"));
+        // Windows separators mean the same thing on every host.
+        assert_eq!(ok("sub\\a.bin"), Path::new("sub").join("a.bin"));
+        assert_eq!(ok("./sub//a.bin"), Path::new("sub").join("a.bin"));
+
+        for bad in [
+            "",
+            ".",
+            "/etc/passwd",
+            "\\etc\\passwd",
+            "C:\\Windows\\win.ini",
+            "C:a.bin",
+            "a.bin:stream",
+            "..",
+            "../secret",
+            "sub/../../secret",
+            "sub\\..\\..\\secret",
+        ] {
+            assert!(
+                sandboxed_relative_path(bad).is_err(),
+                "`{bad}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_are_capped_before_reading() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("small"), b"12345").unwrap();
+        assert_eq!(
+            read_inside_root(root.path(), Path::new("small"), 5).unwrap(),
+            b"12345"
+        );
+        let err = read_inside_root(root.path(), Path::new("small"), 4).unwrap_err();
+        assert!(err.contains("over the 4-byte cap"), "{err}");
+    }
+
+    #[test]
+    fn directories_are_not_read() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        let err = read_inside_root(root.path(), Path::new("sub"), 1024).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_followed_only_inside_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("real"), b"in").unwrap();
+        std::fs::write(outside.path().join("secret"), b"out").unwrap();
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("inner")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape-dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("escape"))
+            .unwrap();
+
+        assert_eq!(
+            read_inside_root(root.path(), Path::new("inner"), 1024).unwrap(),
+            b"in"
+        );
+        for escape in ["escape", "escape-dir/secret"] {
+            let err = read_inside_root(root.path(), Path::new(escape), 1024).unwrap_err();
+            assert!(err.contains("outside the file root"), "{escape}: {err}");
+            assert!(
+                !err.contains(&*outside.path().to_string_lossy()),
+                "a guest-visible error must not name host paths: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_weights_root_config_key_grants_no_files() {
+        use crate::bindings::chatty::module::file::Host;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.bin"), b"x").unwrap();
+        let provider: Arc<dyn LlmProvider> = Arc::new(ErrorProvider);
+        let manifest = ModuleManifest::new("m")
+            .with_config("weights_root", root.path().to_string_lossy().to_string());
+        let mut state = ModuleState::new(manifest, provider, None, &ResourceLimits::default());
+        let err = state.read_bytes("a.bin".to_string()).unwrap_err();
+        assert!(err.contains("no file root"), "{err}");
     }
 }

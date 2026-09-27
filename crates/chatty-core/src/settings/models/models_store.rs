@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::providers_store::ProviderType;
-use crate::models::token_usage::TokenPricing;
+use crate::models::token_usage::{ModelRef, PriceBook, TokenPricing};
 
 /// Default API version for Azure OpenAI
 pub const AZURE_DEFAULT_API_VERSION: &str = "2025-03-01-preview";
@@ -132,7 +132,7 @@ impl ModelConfig {
     /// when the model has no input *and* output price — a turn on such a
     /// model carries no cost rather than a made-up one (AGE-351). The cache
     /// rates are optional and fall back to the input rate inside
-    /// [`TokenUsage::calculate_cost`](crate::models::token_usage::TokenUsage::calculate_cost).
+    /// [`price`](crate::models::token_usage::price).
     pub fn token_pricing(&self) -> Option<TokenPricing> {
         match (
             self.cost_per_million_input_tokens,
@@ -147,6 +147,15 @@ impl ModelConfig {
             _ => None,
         }
     }
+
+    /// The model as a usage line names it (AGE-682): the provider plus the
+    /// model id sent to it.
+    pub fn model_ref(&self) -> ModelRef {
+        ModelRef {
+            provider: self.provider_type.clone(),
+            model_id: self.model_identifier.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -157,6 +166,18 @@ pub struct ModelsModel {
 impl ModelsModel {
     pub fn new() -> Self {
         Self { models: Vec::new() }
+    }
+
+    /// The local price book (AGE-682): every model in the roster that has
+    /// prices, at its current prices.
+    pub fn price_book(&self) -> PriceBook {
+        let mut book = PriceBook::default();
+        for model in &self.models {
+            if let Some(pricing) = model.token_pricing() {
+                book.insert(model.model_ref(), pricing);
+            }
+        }
+        book
     }
 
     pub fn add_model(&mut self, config: ModelConfig) {

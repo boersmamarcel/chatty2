@@ -1,9 +1,9 @@
 use crate::chatty::views::footer::progress_circle::ProgressCircle;
 use crate::settings::controllers::extensions_controller;
-use crate::settings::models::DiscoveredModulesModel;
 use crate::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::marketplace_state::MarketplaceState;
+use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
@@ -133,19 +133,29 @@ fn installed_extensions_group() -> SettingGroup {
                         let status_icon = if ext.enabled { "🟢" } else { "⏸" };
 
                         // For WASM modules: look up discovered module metadata for
-                        // execution_mode and wasm_file presence.
-                        let (discovered_exec_mode, has_wasm_file) = if is_wasm_module {
+                        // execution_mode, wasm_file presence, and the registry's
+                        // load failure, if any.
+                        let (discovered_exec_mode, has_wasm_file, load_error) = if is_wasm_module {
                             cx.try_global::<DiscoveredModulesModel>()
                                 .and_then(|dm| {
-                                    dm.modules.iter().find(|m| m.name == ext.id).map(|m| {
-                                        let has_wasm =
-                                            m.wasm_file != "remote" && !m.wasm_file.is_empty();
-                                        (m.execution_mode.clone(), has_wasm)
-                                    })
+                                    dm.modules
+                                        .iter()
+                                        .find(|m| m.name == ext.id || m.directory_name == ext.id)
+                                        .map(|m| {
+                                            let has_wasm =
+                                                m.wasm_file != "remote" && !m.wasm_file.is_empty();
+                                            let load_error = match &m.status {
+                                                ModuleLoadStatus::Error(reason) => {
+                                                    Some(reason.clone())
+                                                }
+                                                _ => None,
+                                            };
+                                            (m.execution_mode.clone(), has_wasm, load_error)
+                                        })
                                 })
                                 .unwrap_or_default()
                         } else {
-                            (String::new(), false)
+                            (String::new(), false, None)
                         };
                         let effective_exec_mode = if is_wasm_module
                             && (discovered_exec_mode.is_empty() || discovered_exec_mode == "local")
@@ -183,7 +193,7 @@ fn installed_extensions_group() -> SettingGroup {
                             }
                         };
 
-                        h_flex()
+                        let row = h_flex()
                             .w_full()
                             .items_center()
                             .justify_between()
@@ -309,7 +319,23 @@ fn installed_extensions_group() -> SettingGroup {
                                                 }
                                             }),
                                     ),
-                            )
+                            );
+
+                        // The module registry's scan failure for this module
+                        // (invalid module.toml, broken .wasm, duplicate name).
+                        v_flex()
+                            .w_full()
+                            .child(row)
+                            .when_some(load_error, |el, reason| {
+                                el.child(
+                                    div()
+                                        .pl_6()
+                                        .pb_1()
+                                        .text_xs()
+                                        .text_color(cx.theme().danger)
+                                        .child(format!("Failed to load: {reason}")),
+                                )
+                            })
                     }))
                 })
                 .into_any_element()

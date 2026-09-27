@@ -21,8 +21,9 @@
 //! let mut registry = ModuleRegistry::new(provider, ResourceLimits::default())?;
 //!
 //! // Discover and load all modules under `.chatty/modules/`
-//! let loaded = registry.scan_directory(".chatty/modules")?;
-//! println!("Loaded modules: {:?}", loaded);
+//! let report = registry.scan_directory(".chatty/modules")?;
+//! println!("Loaded modules: {:?}", report.loaded_names());
+//! println!("Failed: {:?}", report.failed);
 //! # Ok(())
 //! # }
 //! ```
@@ -30,5 +31,7 @@
 pub mod manifest;
 mod registry;
 
-pub use manifest::{ModuleCapabilities, ModuleManifest, ModuleProtocols, ModuleResourceLimits};
-pub use registry::{ModuleHandle, ModuleRegistry};
+pub use manifest::{
+    ExecutionMode, ModuleCapabilities, ModuleManifest, ModuleProtocols, ModuleResourceLimits,
+};
+pub use registry::{ModuleHandle, ModuleRegistry, ScanReport};

@@ -12,7 +12,7 @@ use crate::factories::AgentClient;
 use crate::factories::agent_factory::{AgentBuildContext, ollama_think};
 use crate::models::history_compat;
 use crate::models::message_types::{SystemTrace, ToolSource, TraceItem};
-use crate::models::token_usage::{ConversationTokenUsage, TokenPricing, TokenUsage};
+use crate::models::token_usage::{ConversationTokenUsage, ModelRef, TokenPricing, TokenUsage};
 use crate::repositories::ConversationData;
 use crate::services::AgentTaskSnapshot;
 use crate::services::shell_service::ShellSession;
@@ -136,6 +136,9 @@ pub struct Conversation {
     /// has no prices, in which case turns carry no cost (AGE-351). Bound
     /// with the agent, so it follows a model switch.
     pricing: Option<TokenPricing>,
+    /// The bound model, which a turn's own usage lines are spent on
+    /// (AGE-682). Bound with the agent, like `pricing`.
+    model_ref: ModelRef,
     /// Whether the bound model's `extra_params.think` is `"false"`: picks
     /// the empty-completion error text (AGE-404). Bound with the agent.
     think_disabled: bool,
@@ -223,6 +226,7 @@ impl Conversation {
             tool_call_count: 0,
             context_tokens: 0,
             pricing: model_config.token_pricing(),
+            model_ref: model_config.model_ref(),
             think_disabled: ollama_think(model_config) == Some(false),
             created_at: now,
             updated_at: now,
@@ -349,6 +353,7 @@ impl Conversation {
             tool_call_count: data.tool_call_count,
             context_tokens: data.context_tokens,
             pricing: model_config.token_pricing(),
+            model_ref: model_config.model_ref(),
             think_disabled: ollama_think(model_config) == Some(false),
             created_at,
             updated_at,
@@ -853,6 +858,7 @@ impl Conversation {
         self.agent = agent;
         self.model_id = model_config.id.clone();
         self.pricing = model_config.token_pricing();
+        self.model_ref = model_config.model_ref();
         self.think_disabled = ollama_think(model_config) == Some(false);
         self.agent_workspace_dir = agent_workspace_dir;
         self.updated_at = SystemTime::now();
@@ -866,6 +872,11 @@ impl Conversation {
     /// What a turn on the bound model is costed at, if it has prices.
     pub fn pricing(&self) -> Option<&TokenPricing> {
         self.pricing.as_ref()
+    }
+
+    /// The bound model: what a turn's own usage is spent on (AGE-682).
+    pub fn model_ref(&self) -> &ModelRef {
+        &self.model_ref
     }
 
     /// Whether the bound model's thinking channel is switched off
@@ -918,7 +929,10 @@ impl Conversation {
 
     /// Deserialize token usage from JSON string
     pub fn deserialize_token_usage(json: &str) -> Result<ConversationTokenUsage> {
-        serde_json::from_str(json).context("Failed to deserialize token usage")
+        let mut usage: ConversationTokenUsage =
+            serde_json::from_str(json).context("Failed to deserialize token usage")?;
+        usage.forget_unattributed_costs();
+        Ok(usage)
     }
 
     /// Get the current streaming message content (if any)

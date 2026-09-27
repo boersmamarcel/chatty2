@@ -17,3 +17,11 @@ a2a = true
 [resources]
 max_memory_mb = 32
 max_execution_ms = 5000
+
+# Optional: string values the module reads with `config::get`.
+# [config]
+# greeting = "hello"
+
+# Optional: the only directory `file::read-bytes` may read, relative to this one.
+# [files]
+# root = "weights"

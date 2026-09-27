@@ -893,6 +893,7 @@ mod tests {
             StreamChunk::ApprovalResolved { .. } => "ApprovalResolved",
             StreamChunk::ClarificationRequested { .. } => "ClarificationRequested",
             StreamChunk::ApiCallUsage(_) => "ApiCallUsage",
+            StreamChunk::CompactionUsage(_) => "CompactionUsage",
             StreamChunk::TurnUsage(_) => "TokenUsage",
             StreamChunk::TurnMessages(_) => "TurnMessages",
             StreamChunk::Done => "Done",
@@ -1002,7 +1003,7 @@ mod tests {
             .send(InvokeAgentProgress::Finished {
                 success: true,
                 result: Some("done".into()),
-                usage: None,
+                usage: Vec::new(),
             })
             .expect("receiver is alive");
 

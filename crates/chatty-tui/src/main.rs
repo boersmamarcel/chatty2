@@ -1151,7 +1151,7 @@ fn discover_module_agents(
                     description: manifest.description,
                     tools: manifest.capabilities.tools,
                     supports_a2a: manifest.protocols.a2a,
-                    execution_mode: manifest.execution_mode,
+                    execution_mode: manifest.execution_mode.to_string(),
                 });
             }
             Ok(_) => {}
