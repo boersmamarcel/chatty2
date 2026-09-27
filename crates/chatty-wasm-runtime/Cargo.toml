@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 description = "Wasmtime embedding and host-side WIT interface for chatty WASM modules"
 
+[features]
+# Test assets for suites that load real modules: `test_support::fixture_path`
+# and the scripted `test_support::FakeLlm` (AGE-596).
+test-support = []
+
 [dependencies]
 wasmtime = { version = "30", features = ["component-model"] }
 wasmtime-wasi = "30"
@@ -16,3 +21,7 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[[test]]
+name = "fixtures"
+required-features = ["test-support"]

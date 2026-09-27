@@ -7,25 +7,25 @@
 //!
 //! # Prerequisites
 //!
-//! The echo-agent WASM must be built and placed at
-//! `modules/echo-agent/echo_agent.wasm` before running these tests:
+//! The echo-agent WASM must be built and staged before running these tests:
 //!
 //! ```sh
-//! make wasm-modules
+//! scripts/build-wasm-fixtures.sh
 //! ```
 //!
-//! The file is git-ignored, so a fresh checkout does not have it. Every test
-//! here checks for it first and, if it is missing, fails immediately (before
-//! any WASM is loaded) with the absolute path it looked at and the build
-//! command. Set `ECHO_AGENT_WASM` to use a module built elsewhere.
+//! The file is build output, so a fresh checkout does not have it. Every test
+//! here looks it up first and, if it is missing, fails immediately (before any
+//! WASM is loaded) naming the path and the script. Set `ECHO_AGENT_WASM` to use
+//! a module built elsewhere.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
+use chatty_wasm_runtime::test_support::fixture_path;
 use chatty_wasm_runtime::{
     ChatRequest, CompletionResponse, LlmProvider, Message, ResourceLimits, Role,
 };
@@ -65,11 +65,11 @@ impl LlmProvider for MockLlmProvider {
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
-/// Return the path to `modules/echo-agent/`, or an actionable error if the
-/// compiled WASM is not there.
+/// Return the directory holding the echo-agent's `module.toml` and `.wasm`.
 ///
-/// Checks `ECHO_AGENT_WASM` env var first; falls back to the canonical
-/// workspace-relative path.
+/// Checks `ECHO_AGENT_WASM` first; falls back to the fixture staged by
+/// `scripts/build-wasm-fixtures.sh`, which panics naming that script when it
+/// has not been built.
 fn find_echo_agent_dir() -> Result<PathBuf, String> {
     // Allow explicit override for CI or unusual layouts.
     if let Ok(wasm) = std::env::var("ECHO_AGENT_WASM") {
@@ -88,36 +88,11 @@ fn find_echo_agent_dir() -> Result<PathBuf, String> {
         };
     }
 
-    // Default: CARGO_MANIFEST_DIR → crates/chatty-protocol-gateway
-    //          → parent → crates/ → parent → workspace root
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = PathBuf::from(manifest_dir)
-        .parent() // crates/chatty-protocol-gateway → crates/
-        .and_then(|p| p.parent()) // crates/ → workspace root
-        .map(|p| p.to_path_buf())
-        .expect("CARGO_MANIFEST_DIR has a workspace root two levels up");
-
-    let dir = workspace_root.join("modules").join("echo-agent");
-    let wasm = dir.join("echo_agent.wasm");
-
-    if dir.join("module.toml").exists() && wasm.exists() {
-        Ok(dir)
-    } else {
-        Err(missing_wasm_message(&wasm, &workspace_root))
-    }
-}
-
-/// The error a test fails with when the WASM fixture is missing: the absolute
-/// path that was checked and the exact command that produces it.
-fn missing_wasm_message(wasm: &Path, workspace_root: &Path) -> String {
-    format!(
-        "echo-agent WASM not found at {}\n\
-         It is git-ignored and must be built once per checkout:\n  \
-         cd {} && make wasm-modules\n\
-         (or set ECHO_AGENT_WASM to a built echo_agent.wasm)",
-        wasm.display(),
-        workspace_root.display()
-    )
+    let wasm = fixture_path("echo-agent");
+    Ok(wasm
+        .parent()
+        .expect("a staged fixture lives in its own directory")
+        .to_path_buf())
 }
 
 /// Build a registry with only the echo-agent loaded (no RwLock wrapper).
@@ -182,21 +157,6 @@ macro_rules! require_echo_agent {
             Err(msg) => panic!("{msg}"),
         };
     };
-}
-
-#[test]
-fn missing_wasm_message_names_path_and_build_command() {
-    let root = Path::new("/some/checkout");
-    let wasm = root.join("modules/echo-agent/echo_agent.wasm");
-    let msg = missing_wasm_message(&wasm, root);
-    assert!(
-        msg.contains("/some/checkout/modules/echo-agent/echo_agent.wasm"),
-        "message must name the absolute path checked: {msg}"
-    );
-    assert!(
-        msg.contains("cd /some/checkout && make wasm-modules"),
-        "message must give the exact build command: {msg}"
-    );
 }
 
 // ---------------------------------------------------------------------------

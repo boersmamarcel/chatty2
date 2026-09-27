@@ -1,0 +1,10 @@
+[module]
+name = "log-flood"
+version = "0.1.0"
+description = "Adversarial test fixture: log-flood"
+wasm = "log-flood.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

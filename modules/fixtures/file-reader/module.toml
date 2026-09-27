@@ -1,0 +1,10 @@
+[module]
+name = "file-reader"
+version = "0.1.0"
+description = "Adversarial test fixture: file-reader"
+wasm = "file-reader.wasm"
+
+[capabilities]
+tools = []
+chat = true
+agent = true

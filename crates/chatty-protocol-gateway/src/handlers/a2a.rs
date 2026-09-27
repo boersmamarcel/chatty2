@@ -143,7 +143,7 @@ async fn forward_remote_a2a_jsonrpc(
     let client = reqwest::Client::new();
     let mut req_builder = client.post(&url).json(&body);
     if let Some(hive_client) = state.hive_client.as_ref() {
-        if let Some(token) = hive_client.token() {
+        if let Some(token) = hive_client.access_token().await {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
         } else {
             tracing::warn!(
