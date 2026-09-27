@@ -20,6 +20,17 @@ chatty-tui  ──depends on──► chatty-core (without it)
 
 The other workspace crates (WASM runtime, module registry, protocol gateway, module
 SDK, Hive clients, research crates) are listed in [system-overview.md](system-overview.md).
+One of them sits *below* chatty-core:
+
+| Crate | Purpose |
+|:------|:--------|
+| **chatty-fabric** | The broker's pure state (ADR-0020): who is on the fabric, which runs are in flight, the edge log, and the `Transport` trait `invoke_agent`/`list_agents` call through |
+
+Both chatty-core and chatty-protocol-gateway depend on chatty-fabric, so it depends
+on neither, and never on axum, wasmtime, hive-client, gpui or reqwest
+(`crates/chatty-fabric/tests/no_heavy_deps.rs` fails the build if it does). chatty-core
+payloads (`InvokeAgentProgress`, conversations, usage) cross it as `serde_json::Value`;
+chatty-core converts them at its edge (`services::fabric_transport`, from BI-4).
 
 ## The `gpui-globals` feature
 

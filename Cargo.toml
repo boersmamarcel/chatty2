@@ -7,6 +7,7 @@ members = [
     "crates/chatty-wasm-runtime",
     "crates/chatty-module-registry",
     "crates/chatty-protocol-gateway",
+    "crates/chatty-fabric",
     "crates/hive-client",
     # Research / self-improving agent crates (AGE-5 / AGE-26); Stage B → harbor-chatty
     "crates/chatty-trace",

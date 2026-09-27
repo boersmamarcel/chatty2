@@ -96,6 +96,9 @@ tiktoken-rs.workspace = true
 # Agent memory
 memvid-core.workspace = true
 
+# The broker's pure state and the `Transport` seam (ADR-0020, AGE-633).
+chatty-fabric = { path = "../chatty-fabric" }
+
 # Hive registry client
 hive-client = { path = "../hive-client" }
 # The agent's persistent shell runs on its PTY (services::shell_service).

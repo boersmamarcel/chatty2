@@ -22,11 +22,11 @@ use tracing::{debug, info, warn};
 
 use serde_json::Value;
 
-use super::origin::AgentOrigin;
 use super::protocol::{
     BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
     TaskState,
 };
+use chatty_fabric::AgentOrigin;
 
 /// One update on an open task, as the HTTP side consumes it.
 ///
