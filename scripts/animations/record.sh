@@ -256,9 +256,14 @@ PY
   fi
   local gif="$OUT_DIR/$name.gif"
   # The window manager can leave a black strip inside the captured region;
-  # crop to the app's own pixels (bounding box of the non-black area).
-  local crop
-  crop="$(convert "$RUN_DIR/final.png" -fuzz 2% -trim -format '%w:%h:%X:%Y' info: 2>/dev/null | tr -d '+')"
+  # crop to the app's own pixels (bounding box of the non-black area). The
+  # strip is in the screen capture, not the window, so measure on the video's
+  # last frame. The 1px black border makes -trim remove black whatever the
+  # theme's corner colour is; the offsets are shifted back by that pixel.
+  local crop last_frame="$RUN_DIR/last_frame.png"
+  ffmpeg -loglevel error -y -sseof -1 -i "$mp4" -frames:v 1 "$last_frame" 2>/dev/null || true
+  crop="$(convert "$last_frame" -bordercolor black -border 1 -fuzz 2% -trim -format '%w %h %X %Y' info: 2>/dev/null \
+    | tr -d '+' | awk '{ printf "%d:%d:%d:%d", $1, $2, $3 - 1, $4 - 1 }')"
   [[ -n "$crop" ]] || crop="iw:ih:0:0"
   ffmpeg -loglevel error -y -i "$mp4" -filter_complex \
     "[0:v]crop=$crop,fps=$FPS,scale=$GIF_WIDTH:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=200:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \

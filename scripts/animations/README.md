@@ -16,6 +16,11 @@ own Chatty profile is never touched. The MP4, logs and the profile it used are
 left under `target/animations/<scenario>/` for inspection (`final.png` there is
 the last frame).
 
+Recordings use the app's default **light** theme (`profile/general_settings.json`,
+`"dark_mode": false`), so they read well on the README, the docs site and the
+light marketing page. A scenario can override it with its own
+`profile/general_settings.json`.
+
 ## Which binary
 
 Pass `--app` (or set `CHATTY_BIN`). Without it the script looks for
