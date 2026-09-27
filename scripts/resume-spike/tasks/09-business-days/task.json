@@ -1,0 +1,6 @@
+{
+  "title": "Days between dates",
+  "kind": "requirement-change",
+  "task": "Implement days_between(start, end) in dates.py: both are ISO dates such as '2024-03-01'; return the number of days from start to end, negative when end is before start. Raise ValueError for a malformed date. Add tests.",
+  "follow_up": "Requirement change: add a keyword argument business_only=False. When it is true, count only the Monday-to-Friday days in the half-open range [start, end); when end is before start, count [end, start) and make it negative. The default behaviour does not change. Add tests."
+}

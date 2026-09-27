@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::ClarificationAnswer;
+use chatty_core::models::token_usage::ConversationTokenUsage;
+use chatty_core::repositories::ConversationData;
 use chatty_core::services::StreamSurface;
 use chatty_core::services::team::Team;
 use chatty_core::services::turn_budget::{Deadline, TurnBudget};
@@ -24,6 +26,7 @@ use chatty_core::session::{
     TurnKind,
 };
 use chatty_core::settings::models::ExecutionSettingsModel;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -95,6 +98,9 @@ pub struct HeadlessRunner {
     pub(super) answer_file: Option<bool>,
     /// What the run has spent, and the `--usage-file` it goes to.
     pub(super) usage: UsageRecorder,
+    /// Where the conversation goes when the run ends
+    /// (`--save-conversation`, AGE-650).
+    save_conversation: Option<PathBuf>,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -143,6 +149,7 @@ impl HeadlessRunner {
             deadline: None,
             answer_file: None,
             usage: UsageRecorder::default(),
+            save_conversation: None,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
@@ -228,6 +235,90 @@ impl HeadlessRunner {
 
     /// Build the agent (with the session's store handles) and its conversation.
     pub async fn init_conversation(&mut self) -> Result<()> {
+        let ctx = self.agent_build_context().await?;
+        self.session
+            .create_conversation(
+                uuid::Uuid::new_v4().to_string(),
+                "New Chat".to_string(),
+                &self.config.model_config,
+                &self.config.provider_config,
+                ctx,
+            )
+            .await
+            .context("Failed to create conversation")?;
+        self.is_ready = true;
+        Ok(())
+    }
+
+    /// Build the agent and restore its conversation from `path` (`--restore`,
+    /// AGE-650): the JSON array of messages a captured conversation carries
+    /// (RC-0), which `--save-conversation` writes. The next message is the
+    /// next turn on that history.
+    pub async fn restore_conversation(&mut self, path: &Path) -> Result<()> {
+        let history = std::fs::read_to_string(path)
+            .with_context(|| format!("--restore: cannot read {}", path.display()))?;
+        chatty_core::models::Conversation::deserialize_history(&history)
+            .with_context(|| format!("--restore: {} is not a message array", path.display()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let data = ConversationData {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "Restored".to_string(),
+            model_id: self.config.model_config.id.clone(),
+            message_history: history,
+            system_traces: "[]".to_string(),
+            token_usage: serde_json::to_string(&ConversationTokenUsage::new())?,
+            attachment_paths: "[]".to_string(),
+            message_timestamps: "[]".to_string(),
+            message_feedback: "[]".to_string(),
+            regeneration_records: "[]".to_string(),
+            created_at: now,
+            updated_at: now,
+            working_dir: None,
+            agent_task_snapshot: None,
+            mode: None,
+            tool_call_count: 0,
+            context_tokens: 0,
+        };
+        let ctx = self.agent_build_context().await?;
+        self.session
+            .restore_conversation(
+                data,
+                &self.config.model_config,
+                &self.config.provider_config,
+                ctx,
+            )
+            .await
+            .context("Failed to restore conversation")?;
+        self.is_ready = true;
+        Ok(())
+    }
+
+    /// Write the whole conversation to `path` when the run ends
+    /// (`--save-conversation`, AGE-650).
+    pub fn set_save_conversation(&mut self, path: Option<PathBuf>) {
+        self.save_conversation = path;
+    }
+
+    /// Write the conversation's messages to the `--save-conversation` path,
+    /// if the run has one: the same JSON array `--restore` reads.
+    pub(super) fn save_conversation(&self) -> Result<()> {
+        let (Some(path), Some(conversation)) = (
+            self.save_conversation.as_deref(),
+            self.session.conversation(),
+        ) else {
+            return Ok(());
+        };
+        let json = serde_json::to_string(&conversation.messages())?;
+        std::fs::write(path, json)
+            .with_context(|| format!("--save-conversation: cannot write {}", path.display()))
+    }
+
+    /// The agent's build context, with the session's store handles still to
+    /// be filled in by the session.
+    async fn agent_build_context(&self) -> Result<AgentBuildContext> {
         let mcp_tools = match self.config.mcp_service {
             Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
             None => None,
@@ -257,26 +348,13 @@ impl HeadlessRunner {
             },
         )
         .context("the run's agent spec does not build")?;
-        let ctx = AgentBuildContext {
+        Ok(AgentBuildContext {
             mcp_tools,
             team_skill: self.config.team.as_ref().and_then(Team::skill),
             unattended: true,
             answer_file: self.answer_file,
             ..built.context
-        };
-
-        self.session
-            .create_conversation(
-                uuid::Uuid::new_v4().to_string(),
-                "New Chat".to_string(),
-                &self.config.model_config,
-                &self.config.provider_config,
-                ctx,
-            )
-            .await
-            .context("Failed to create conversation")?;
-        self.is_ready = true;
-        Ok(())
+        })
     }
 
     /// Send a message and start streaming the response. A no-op while a

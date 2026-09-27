@@ -1,0 +1,6 @@
+{
+  "title": "Run-length encoding",
+  "kind": "review-finding",
+  "task": "Implement encode(s) and decode(s) in rle.py for run-length encoding: encode('aaabcc') is '3a1b2c' and decode reverses it. encode's input is letters only. Add tests.",
+  "follow_up": "Review finding: runs of ten or more are mishandled: encode('a' * 12) must be '12a' and decode('12a') must give it back. Also decode must raise ValueError for malformed input such as 'a', '3', '0a' or '3a2'. Add tests."
+}

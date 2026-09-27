@@ -1,0 +1,6 @@
+{
+  "title": "Reverse-Polish calculator",
+  "kind": "review-finding",
+  "task": "Implement evaluate(expression) in rpn.py: evaluate a reverse-Polish expression of space-separated integers and the operators + - * /, where / is true division. '3 4 + 2 *' is 14. Add tests.",
+  "follow_up": "Review finding on evaluate: malformed input fails with a bare IndexError or KeyError. Raise ValueError for an unknown token, for an operator with fewer than two operands, and for an expression that does not leave exactly one value (the empty expression included); let ZeroDivisionError through for division by zero. Add a test for each case."
+}

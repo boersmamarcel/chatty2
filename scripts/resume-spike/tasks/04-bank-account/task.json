@@ -1,0 +1,6 @@
+{
+  "title": "Bank account",
+  "kind": "requirement-change",
+  "task": "Fix Account.withdraw in bank.py: it must raise ValueError when the amount is not positive or exceeds the balance, and otherwise subtract the amount and return the new balance. deposit must also raise ValueError for an amount that is not positive. Add tests.",
+  "follow_up": "Requirement change: add Account.transfer(other, amount), which moves money from this account to another Account and returns this account's new balance. It follows withdraw's rules, and a refused transfer changes neither balance. Add tests."
+}

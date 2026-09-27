@@ -1,0 +1,6 @@
+{
+  "title": "Anagram groups",
+  "kind": "review-finding",
+  "task": "Implement group_anagrams(words) in anagrams.py: return a list of groups, each a list of the words that are anagrams of each other; a word with no anagram forms a group of its own. Add tests.",
+  "follow_up": "Review finding: 'Listen' and 'Silent!' are not grouped, and the output order is unpredictable. Compare words ignoring case and any character that is not a letter, keep the words as given, sort the words within each group, and sort the groups by their first word. Duplicate words stay in the output. Add tests."
+}

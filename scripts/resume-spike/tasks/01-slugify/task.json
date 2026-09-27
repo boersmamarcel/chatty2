@@ -1,0 +1,6 @@
+{
+  "title": "Slugify",
+  "kind": "review-finding",
+  "task": "Implement slugify(text) in slug.py: lowercase the text, replace each run of whitespace with a single '-', and drop every character that is not a lowercase ASCII letter, a digit or '-'. Add tests for it under tests/.",
+  "follow_up": "Review finding on slugify: 'Hello -- World!' becomes 'hello----world' and ' Hi ' becomes '-hi-'. Collapse any run of '-' into one and strip leading and trailing '-', so those give 'hello-world' and 'hi'. Add a test for each."
+}

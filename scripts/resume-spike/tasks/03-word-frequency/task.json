@@ -1,0 +1,6 @@
+{
+  "title": "Word frequency",
+  "kind": "review-finding",
+  "task": "Implement top_words(text, n) in words.py: split the text into words (runs of ASCII letters and apostrophes), count them, and return the n most common as a list of (word, count) tuples, most common first. Add tests.",
+  "follow_up": "Review finding on top_words: counting is case-sensitive ('The' and 'the' are counted apart) and words with equal counts come out in an arbitrary order. Count case-insensitively, report words in lowercase, and break ties alphabetically. Add tests for both."
+}

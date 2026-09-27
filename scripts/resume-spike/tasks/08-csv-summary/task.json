@@ -1,0 +1,6 @@
+{
+  "title": "CSV summary",
+  "kind": "requirement-change",
+  "task": "Implement summarize(path) in summary.py: read a CSV file with a header row and return a dict mapping each column whose every value is a number to the sum of that column, as a float. Columns with any non-numeric value are left out. Add tests using data/sample.csv.",
+  "follow_up": "Requirement change: summarize must now return, for each numeric column, a dict {'sum': ..., 'mean': ..., 'count': ...}, and blank cells are skipped: they neither count nor make the column non-numeric. A column with no values at all is left out. Update the tests."
+}
