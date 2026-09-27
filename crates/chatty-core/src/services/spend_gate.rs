@@ -53,6 +53,55 @@ pub trait SpendGate: Send + Sync {
     async fn check(&self) -> Result<(), CapExceeded>;
 }
 
+/// A per-task dollar cap: an agent spec's `budget.cap_usd` (PL-D2). Refuses
+/// once what the task has spent reaches the cap; the host reports that spend
+/// with [`set_spent`](Self::set_spent), priced on read, never stored.
+///
+/// The refusal is the same [`CapExceeded`] the hosted monthly cap uses, with
+/// `month_to_date` carrying the task's spend so far.
+#[derive(Clone, Debug)]
+pub struct TaskSpendGate {
+    cap_usd: f64,
+    spent_usd: std::sync::Arc<std::sync::Mutex<f64>>,
+}
+
+impl TaskSpendGate {
+    pub fn new(cap_usd: f64) -> Self {
+        Self {
+            cap_usd,
+            spent_usd: Default::default(),
+        }
+    }
+
+    pub fn cap_usd(&self) -> f64 {
+        self.cap_usd
+    }
+
+    /// What the task has spent so far, in USD.
+    pub fn set_spent(&self, usd: f64) {
+        *self.spent_usd.lock().unwrap_or_else(|e| e.into_inner()) = usd;
+    }
+
+    fn spent(&self) -> f64 {
+        *self.spent_usd.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[async_trait]
+impl SpendGate for TaskSpendGate {
+    async fn check(&self) -> Result<(), CapExceeded> {
+        let spent = self.spent();
+        if spent >= self.cap_usd {
+            Err(CapExceeded {
+                month_to_date_usd: spent,
+                cap_usd: self.cap_usd,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// A gate with a fixed answer, for tests: what a hosted leader sees when its
 /// tenant is under or over the cap, without a usage ledger behind it.
 /// Test-only: enable `chatty-core/test-support` from a dev-dependency.
@@ -87,6 +136,22 @@ impl SpendGate for FixedSpendGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_task_gate_refuses_once_the_task_has_spent_its_cap() {
+        let gate = TaskSpendGate::new(2.0);
+        assert_eq!(gate.check().await, Ok(()));
+        gate.set_spent(1.99);
+        assert_eq!(gate.check().await, Ok(()));
+        gate.set_spent(2.0);
+        assert_eq!(
+            gate.check().await,
+            Err(CapExceeded {
+                month_to_date_usd: 2.0,
+                cap_usd: 2.0
+            })
+        );
+    }
 
     #[test]
     fn a_refusal_serialises_to_the_three_fields_hive_uses() {

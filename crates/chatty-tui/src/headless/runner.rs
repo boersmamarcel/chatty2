@@ -13,9 +13,7 @@
 //! the human-readable log and nothing else.
 
 use anyhow::{Context, Result};
-use chatty_core::factories::agent_factory::{
-    AgentBuildContext, AgentServices, gated_exec_settings,
-};
+use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::models::token_usage::ConversationTokenUsage;
@@ -232,12 +230,12 @@ impl HeadlessRunner {
     /// answer-file heuristics need to check too (AGE evidence: FinanceAgent
     /// trials that only got the instruction via `--preamble`).
     pub(super) fn role_preamble(&self) -> Option<&str> {
-        self.config.role.preamble.as_deref()
+        self.config.spec.agent.preamble.as_deref()
     }
 
     /// Build the agent (with the session's store handles) and its conversation.
     pub async fn init_conversation(&mut self) -> Result<()> {
-        let ctx = self.agent_build_context().await;
+        let ctx = self.agent_build_context().await?;
         self.session
             .create_conversation(
                 uuid::Uuid::new_v4().to_string(),
@@ -284,7 +282,7 @@ impl HeadlessRunner {
             tool_call_count: 0,
             context_tokens: 0,
         };
-        let ctx = self.agent_build_context().await;
+        let ctx = self.agent_build_context().await?;
         self.session
             .restore_conversation(
                 data,
@@ -320,26 +318,16 @@ impl HeadlessRunner {
 
     /// The agent's build context, with the session's store handles still to
     /// be filled in by the session.
-    async fn agent_build_context(&self) -> AgentBuildContext {
+    async fn agent_build_context(&self) -> Result<AgentBuildContext> {
         let mcp_tools = match self.config.mcp_service {
             Some(ref svc) => chatty_core::services::gather_mcp_tools(svc).await,
             None => None,
         };
-        AgentBuildContext {
-            mcp_tools,
-            role: self.config.role.clone(),
-            team_skill: self.config.team.as_ref().and_then(Team::skill),
-            unattended: true,
-            answer_file: self.answer_file,
-            // Ungated: see `ChatEngine::build_agent_context`.
-            ask_user_enabled: self.execution_settings.ask_user_enabled,
-            instructions_dir: self
-                .execution_settings
-                .workspace_dir
-                .as_ref()
-                .map(std::path::PathBuf::from),
-            ..AgentBuildContext::from_services(AgentServices {
-                exec_settings: gated_exec_settings(&self.execution_settings),
+        let built = AgentBuildContext::from_spec(
+            &self.config.spec,
+            AgentServices {
+                // Ungated: `from_spec` narrows them by the spec, then gates.
+                exec_settings: Some(self.execution_settings.clone()),
                 user_secrets: self.config.user_secrets.clone(),
                 memory_service: self.config.memory_service.clone(),
                 skill_service: Some(self.skill_service.clone()),
@@ -357,8 +345,16 @@ impl HeadlessRunner {
                     None => self.config.module_settings.virtual_agent_names(),
                 },
                 remote_agents: self.config.remote_agents.clone(),
-            })
-        }
+            },
+        )
+        .context("the run's agent spec does not build")?;
+        Ok(AgentBuildContext {
+            mcp_tools,
+            team_skill: self.config.team.as_ref().and_then(Team::skill),
+            unattended: true,
+            answer_file: self.answer_file,
+            ..built.context
+        })
     }
 
     /// Send a message and start streaming the response. A no-op while a

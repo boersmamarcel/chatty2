@@ -68,38 +68,55 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 Out of the box every sub-agent is the same worker, `local-agent`: your default model with the parent's tools. You can instead declare **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
 
-Declare them in `module_settings.json` next to your other settings ([where that is](./advanced.md)), under `virtual_agents`. There is no settings page for this yet, so edit the file and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
+Declare each worker as an **agent spec**: a small TOML file named after the worker, in your project's `.chatty/agents/` folder (or in Chatty's data folder under `chatty/agents/` to share it across projects — [where that is](./advanced.md)):
+
+```toml
+# .chatty/agents/local-coder.toml
+[agent]
+name = "local-coder"
+model = "qwen3:14b"
+preamble = "You are the coder. Make the smallest change that makes the task's check pass, run it, and report the files you touched."
+
+[tools]
+profile = "coder"
+
+[budget]
+max_agent_turns = 30
+```
+
+```toml
+# .chatty/agents/local-reviewer.toml
+[agent]
+name = "local-reviewer"
+model = "gemma3:27b"
+preamble = "You are the reviewer. Read the diff, run the tests, and report what you found; never edit the tree."
+
+[tools]
+profile = "reviewer"
+```
+
+Then list the workers by name in `module_settings.json`, next to your other settings. There is no settings page for this yet, so edit the file and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
 
 ```json
 {
   "enabled": true,
-  "virtual_agents": [
-    {
-      "name": "local-coder",
-      "model": "qwen3:14b",
-      "tools": "coder",
-      "preamble": "You are the coder. Make the smallest change that makes the task's check pass, run it, and report the files you touched.",
-      "max_agent_turns": 30
-    },
-    {
-      "name": "local-reviewer",
-      "model": "gemma3:27b",
-      "tools": "reviewer",
-      "preamble": "You are the reviewer. Read the diff, run the tests, and report what you found; never edit the tree."
-    }
-  ],
+  "virtual_agents": ["local-coder", "local-reviewer"],
   "team": { "verification": "python3 -m pytest -q" }
 }
 ```
 
+A `module_settings.json` that still describes workers inline (the format before agent specs) no longer loads; move each entry into its own spec file.
+
 | Field | What it does |
 |-------|--------------|
-| `name` | What the parent addresses; also the branch name, `sub-agent/<name>`. |
-| `model` | This worker's model, matched the way `chatty-tui --model` matches (id, name, or part of the id). Leave it out to use the default model. A worker on a different model server is queued on that server's budget, not the parent's. |
-| `tools` | A **role**: `coordinator`, `coder` or `reviewer`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
-| `preamble` | Standing instructions, added to the worker's system prompt. Its first sentence is what the parent reads on the card, so lead with the role. |
-| `max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
-| `disable_tools` | The older, coarser switch: tool groups to remove (`shell`, `fs-write`, `git`, …). Ignored when `tools` is set. |
+| `agent.name` | What the parent addresses; also the branch name, `sub-agent/<name>`. Must match the file name. |
+| `agent.model` | This worker's model, matched the way `chatty-tui --model` matches (id, name, or part of the id). Leave it out to use the default model. A worker on a different model server is queued on that server's budget, not the parent's. |
+| `tools.profile` | A **role**: `coordinator`, `coder` or `reviewer`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
+| `agent.preamble` | Standing instructions, added to the worker's system prompt. Its first sentence is what the parent reads on the card, so lead with the role. |
+| `budget.max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
+| `tools.disable` | Tool groups to remove on top of the role (`shell`, `fs-write`, `git`, …). |
+
+A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (`local-coder`, `local-reviewer`, `coder-reviewer-leader`). `chatty-tui --agent <name>` runs the terminal app as any spec.
 
 The three roles:
 
@@ -117,7 +134,7 @@ Every worker still needs a way to run its side-effect tools without asking you, 
 
 ## Teams
 
-`--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
+`--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`, which names the leader's spec and the workers' specs. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
 
 One team ships built in, `coder-reviewer` — a leader that only delegates, a coder, and a reviewer who checks the diff against the default branch before the leader merges it:
 

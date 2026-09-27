@@ -53,31 +53,37 @@ It has to be a git repository: a worker that edits files gets its own branch, an
 
 ### 2. Declare the worker
 
-Named workers live in your module settings file, next to the rest of Chatty's settings ([where that is on your platform](./advanced.md#where-chatty-stores-data)). On Linux:
+A named worker is an **agent spec**: a small TOML file named after the worker. Put it in the project, where it is found first:
+
+```bash
+mkdir -p .chatty/agents
+cat > .chatty/agents/local-reviewer.toml <<'EOF'
+[agent]
+name = "local-reviewer"
+model = "qwen2.5-coder:14b"
+preamble = "You are the reviewer. Read the code you are pointed at, run the tests, and report what you found as a numbered list; never edit files."
+
+[tools]
+profile = "reviewer"
+EOF
+```
+
+Then list it in your module settings file, next to the rest of Chatty's settings ([where that is on your platform](./advanced.md#where-chatty-stores-data)). On Linux:
 
 ```bash
 mkdir -p ~/.config/chatty
 cat > ~/.config/chatty/module_settings.json <<'EOF'
-{
-  "virtual_agents": [
-    {
-      "name": "local-reviewer",
-      "model": "qwen2.5-coder:14b",
-      "tools": "reviewer",
-      "preamble": "You are the reviewer. Read the code you are pointed at, run the tests, and report what you found as a numbered list; never edit files."
-    }
-  ]
-}
+{ "virtual_agents": ["local-reviewer"] }
 EOF
 ```
 
-If the file already exists, add the `virtual_agents` array to it rather than replacing it. There is no settings page for this yet.
+If the file already exists, add the `virtual_agents` list to it rather than replacing it. There is no settings page for this yet.
 
 Four fields, and each one matters:
 
-- **`name`** is how the leader will address it. Keep the `local-` prefix by convention: the leader's tools list where each agent runs, and `local` means this machine.
+- **`name`** is how the leader will address it, and the file's name. Keep the `local-` prefix by convention: the leader's tools list where each agent runs, and `local` means this machine.
 - **`model`** is the worker's own model. It does not have to be the leader's.
-- **`tools`** is the role. `reviewer` can read, search, look at diffs and run commands — enough to run a test suite — and cannot write, commit or delegate. The other two roles are `coder` and `coordinator`; [Sub-agents](./sub-agents.md#named-workers-and-roles) has the full table.
+- **`profile`** is the role. `reviewer` can read, search, look at diffs and run commands — enough to run a test suite — and cannot write, commit or delegate. The other two roles are `coder` and `coordinator`; [Sub-agents](./sub-agents.md#named-workers-and-roles) has the full table.
 - **`preamble`** is the standing instruction. Its first sentence is what the leader sees on the worker's card, so lead with the role.
 
 ### 3. Run a leader that can delegate

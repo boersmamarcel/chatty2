@@ -165,6 +165,87 @@ pub struct ExecutionSettingsModel {
     pub terminal_access: bool,
 }
 
+/// The tool group names `--enable`/`--disable`/`--only` and an agent spec's
+/// `tools.disable` recognise, in one place.
+pub const TOOL_GROUPS: &[&str] = &[
+    "shell",
+    "fs-read",
+    "fs-write",
+    "fetch",
+    "git",
+    "code-exec",
+    "docker-exec",
+    "ask-user",
+    "terminal",
+];
+
+/// [`TOOL_GROUPS`] as one line, for error messages.
+pub const VALID_TOOL_GROUPS: &str =
+    "shell, fs-read, fs-write, fetch, git, code-exec, docker-exec, ask-user, terminal";
+
+/// The group a tool-group name names. Callers spell groups several ways —
+/// the Harbor benchmark adapter passes `--disable ask_user` (the tool's own
+/// name), and a spec's `disable` may say `fs_write` — and an unknown name is
+/// a hard error, so accept any case, `_` for `-`, and the name of the one
+/// tool a group stands for.
+pub fn canonical_tool_group(name: &str) -> String {
+    let group = name.trim().to_ascii_lowercase().replace('_', "-");
+    match group.as_str() {
+        "shell-execute" => "shell".to_string(),
+        "execute-code" => "code-exec".to_string(),
+        "terminal-read" => "terminal".to_string(),
+        _ => group,
+    }
+}
+
+/// Flip one named tool group on `settings`, so the group vocabulary (and
+/// its docker-exec/code-exec coupling) is defined in exactly one place.
+pub fn set_tool_group(
+    settings: &mut ExecutionSettingsModel,
+    name: &str,
+    on: bool,
+) -> anyhow::Result<()> {
+    let canonical = canonical_tool_group(name);
+    match canonical.as_str() {
+        // A stray empty entry (`--enable shell,`) names nothing.
+        "" => {}
+        "shell" => settings.enabled = on,
+        "fs-read" => settings.filesystem_read_enabled = on,
+        "fs-write" => settings.filesystem_write_enabled = on,
+        "fetch" => settings.fetch_enabled = on,
+        "git" => settings.git_enabled = on,
+        "code-exec" => settings.execute_code_enabled = on,
+        "docker-exec" => {
+            if on {
+                // Docker execution implies code-exec is on too.
+                settings.execute_code_enabled = true;
+            }
+            settings.docker_code_execution_enabled = on;
+        }
+        "ask-user" => settings.ask_user_enabled = on,
+        "terminal" => settings.terminal_access = on,
+        _ => anyhow::bail!("Unknown tool group '{name}' (valid: {VALID_TOOL_GROUPS})"),
+    }
+    Ok(())
+}
+
+/// Whether the named tool group is on in `settings`, or `None` for a name
+/// that is not a group (an empty one included).
+pub fn tool_group_enabled(settings: &ExecutionSettingsModel, name: &str) -> Option<bool> {
+    Some(match canonical_tool_group(name).as_str() {
+        "shell" => settings.enabled,
+        "fs-read" => settings.filesystem_read_enabled,
+        "fs-write" => settings.filesystem_write_enabled,
+        "fetch" => settings.fetch_enabled,
+        "git" => settings.git_enabled,
+        "code-exec" => settings.execute_code_enabled,
+        "docker-exec" => settings.docker_code_execution_enabled,
+        "ask-user" => settings.ask_user_enabled,
+        "terminal" => settings.terminal_access,
+        _ => return None,
+    })
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
