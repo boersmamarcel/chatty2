@@ -8,6 +8,8 @@ mod headless;
 // `#[cfg(unix)]` too.
 #[cfg(unix)]
 mod participant;
+#[cfg(test)]
+mod spec_golden;
 mod ui;
 
 use anyhow::{Context, Result, bail};
