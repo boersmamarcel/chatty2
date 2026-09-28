@@ -60,8 +60,18 @@ const DEV_JWT_SECRET: &str = "dev-secret-change-in-production";
 /// | `HIVE_E2E_RUNNER_URL` | `http://localhost:8081` |
 /// | `HIVE_E2E_FIXTURES` | `<workspace>/target/wasm-fixtures` |
 /// | `HIVE_E2E_JWT_SECRET` | hive's compose default |
+/// | `CHATTY_HIVE_ROOT_KEY` | none: required (the stack's dev root public key) |
+///
+/// `CHATTY_HIVE_ROOT_KEY` is the key chatty itself reads
+/// ([`hive_client::trust`]): every `HiveRegistryClient` the suite builds for
+/// the local stack, or a proxy in front of it, trusts it. It is required so
+/// that the refusal rows (6.1, 6.2, 6.6) cannot pass merely because no root
+/// is trusted at all. `scripts/hive-e2e.sh` reads it from the registry's
+/// startup log (`root_public_key=<hex>`).
 pub struct Stack {
     pub registry: String,
+    /// The registry root public key (hex) chatty trusts for this stack.
+    pub root_key: String,
     pub runner: String,
     pub fixtures: PathBuf,
     pub jwt_secret: String,
@@ -78,10 +88,24 @@ impl Stack {
         };
         let workspace_fixtures =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm-fixtures");
+        let registry = env("HIVE_E2E_BASE_URL", "http://localhost:8080")
+            .trim_end_matches('/')
+            .to_string();
+        let root_key = std::env::var(hive_client::trust::ROOT_KEY_ENV).unwrap_or_default();
+        assert!(
+            !root_key.trim().is_empty(),
+            "set {} to the stack's dev root public key (scripts/hive-e2e.sh reads it from \
+             the registry's `root_public_key=` startup log line)",
+            hive_client::trust::ROOT_KEY_ENV
+        );
+        assert!(
+            hive_client::trust::is_local_registry(&registry),
+            "{registry} is not a local registry, so chatty ignores {}",
+            hive_client::trust::ROOT_KEY_ENV
+        );
         Self {
-            registry: env("HIVE_E2E_BASE_URL", "http://localhost:8080")
-                .trim_end_matches('/')
-                .to_string(),
+            registry,
+            root_key,
             runner: env("HIVE_E2E_RUNNER_URL", "http://localhost:8081")
                 .trim_end_matches('/')
                 .to_string(),

@@ -153,8 +153,21 @@ publisher_key_id}`) beside the module; the registry hashes the `.wasm` bytes it 
 to compile against that record at every load and refuses a mismatch (`hash mismatch …`,
 shown as `Failed to load:`). A module without a record — copied in by hand — loads as
 `TrustLevel::Local` (`ModuleRegistry::trust_level`), and Settings → Plugins marks it
-*copied in by hand*. Signature enforcement (refusing unsigned downloads) is PL-H5,
-AGE-608.
+*copied in by hand*.
+
+**Signed installs (PL-H5).** Every registry download is verified against a registry
+root public key chatty holds, never one the registry sends (`hive_client::verify`, which
+mirrors hive's `hive-verify` byte for byte; `crates/hive-client/tests/vectors/` are
+hive's shared vectors). The root certifies the publisher's key, the publisher's key signs
+a canonical manifest `{capabilities, name, sha256, version, wit_version}`, and the
+manifest's `sha256` must match the downloaded bytes and its `name`/`version` the module
+asked for. A download missing any of the four `X-Hive-*` chain headers, or failing any
+link, is refused; `module.toml` takes its tools from the signed capabilities. Which root
+key is trusted (`hive_client::trust`): the compiled production key
+(`PRODUCTION_ROOT_PUBLIC_KEY`, empty until pinned, so the production registry is refused
+until then), or `CHATTY_HIVE_ROOT_KEY` for a **local** (loopback) registry such as the
+compose stack; the override is ignored for any other host. A registry with no trusted
+root refuses every download before the request (no trust on first use).
 
 ### Resource limits
 
