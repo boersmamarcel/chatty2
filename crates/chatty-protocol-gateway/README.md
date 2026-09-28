@@ -20,9 +20,9 @@ there is no gRPC, no WebSocket (except MCP SSE), and no binary framing:
 | MCP JSON-RPC | `POST /mcp/{module}` | `application/json` |
 | MCP SSE stream | `GET /mcp/{module}/sse` | `text/event-stream` |
 | MCP SSE message | `POST /mcp/{module}/sse?sessionId=…` | `application/json` |
-| A2A JSON-RPC | `POST /a2a/{agent}` | `application/json` |
-| A2A streaming | `POST /a2a/{agent}` (method: `message/stream`) | `text/event-stream` |
-| Agent card (per agent) | `GET /a2a/{agent}/.well-known/agent.json` | `application/json` |
+| A2A JSON-RPC | `POST /a2a/{module}` | `application/json` |
+| A2A streaming | `POST /a2a/{module}` (method: `message/stream`) | `text/event-stream` |
+| Agent card (per module) | `GET /a2a/{module}/.well-known/agent.json` | `application/json` |
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
 | Participant connection | broker-made `socketpair` per worker (`open_connection`) | newline-delimited JSON, v2 |
 
@@ -32,8 +32,16 @@ there is no gRPC, no WebSocket (except MCP SSE), and no binary framing:
   (`localhost`, `127.0.0.0/8`, `[::1]`), or whose `Origin` is present and not
   loopback (`null` included), gets **403**. Binding to 127.0.0.1 does not stop
   DNS rebinding: a browser page that re-resolves its own name to 127.0.0.1
-  reaches the socket, and from there every module's `llm::complete` and every
-  virtual agent. A request without `Host` (not a browser's) is served.
+  reaches the socket, and from there every module's `llm::complete`. A
+  request without `Host` (not a browser's) is served.
+- **The `/a2a/{name}` surface is modules and the remote-runner forward only
+  (BI-7, ADR-0020).** Once a worker calls over its own connection (BI-4), a
+  `{name}` that is a role — a registered participant or a virtual agent —
+  or the aggregated card when this gateway has any role at all, is refused
+  with **403** `{"error":"fabric: roles are reached over the worker
+  connection"}`, logged as a refusal row on the edge log. There is no
+  `loopback_roles` setting to bring the old path back: see [Local
+  participants](#local-participants).
 - **Request bodies up to 10 MiB** (`MAX_REQUEST_BYTES`); a larger one is a
   **413** before any handler runs.
 - **`[protocols] mcp`.** A plugin is served over MCP only when its manifest
@@ -70,11 +78,14 @@ Two transports, one dispatcher:
 ### 2 · A2A (Agent-to-Agent)
 
 Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `message/stream`,
-`tasks/get`) for participants and virtual agents; the agent's loop runs in
-its own process. Every text part of `message.parts` reaches the agent, joined
-by newlines. A module whose Hive metadata says `execution_mode = "remote"` is
-forwarded to the Hive runner until PL-H8b removes that path; a local plugin
-has no A2A route.
+`tasks/get`), but only for the remote-runner forward now (BI-7, ADR-0020): a
+module whose Hive metadata says `execution_mode = "remote"` is forwarded to
+the Hive runner over this shape until PL-H8b removes that path. A local
+plugin has no A2A route (PL-U3). A role — a registered participant or a
+virtual agent — is refused here with **403**; it answers `message/send` and
+`message/stream` over the connection the broker made for its caller instead
+(see [Local participants](#local-participants)), which is where the frame
+shapes below actually apply.
 
 **`message/send`** returns a complete JSON-RPC response:
 
@@ -105,15 +116,22 @@ HTTP client               │   chatty-protocol-gateway     │
                           │                              │
 POST /mcp/{m}        ────►│ mcp.rs handler               ├──► ModuleRegistry
                           │                              │    (wasmtime instances)
-POST /a2a/{agent}    ────►│ a2a.rs handler               │
-GET  /.well-known/…  ────►│ a2a.rs handler               │
-                          │            │                 │
-                          │            ▼                 │
-                          │ a2a_participant.rs           ├──► ParticipantRegistry
-                          └──────────────────────────────┘         ▲
-                                                                   │ socketpair per child
-                                                          child processes
+POST /a2a/{module}   ────►│ a2a.rs handler  ─────────────┼──► remote runner (PL-H8b)
+GET  /.well-known/…  ────►│ a2a.rs handler  (403 once     │
+                          │  this gateway has a role)     │
+                          └──────────────────────────────┘
+
+                          ┌──────────────────────────────┐
+worker (child process,    │  socketpair per worker        │
+ own connection)     ◄───►│  (open_connection, BrokerCalls)├──► ParticipantRegistry
+                          └──────────────────────────────┘
 ```
+
+A role — a registered participant or a virtual agent — is never reached from
+the HTTP side any more (BI-7): `a2a.rs` refuses `{name}` when it names one,
+before routing anything. `a2a_participant.rs`'s `submit`/`spawn` are shared
+building blocks `BrokerCalls` (the connection's call path, `participant/
+calls.rs`) runs a worker's task on, not an HTTP handler.
 
 The gateway holds a single `ModuleRegistry` (behind an `Arc<RwLock<…>>`, read
 only to look a module up) whose modules each sit behind their own lock, and a
@@ -122,9 +140,10 @@ its `plugin::list-tools` and `plugin::invoke-tool` exports.
 
 ## Local participants
 
-A worker on a broker-made connection that publishes an agent card and
-answers tasks is addressable at `/a2a/{name}`, with the same JSON-RPC methods
-and SSE frames as any A2A agent.
+A worker registers over a connection the broker made for it and is reached
+over that same connection — `invoke_agent`, `list_agents` and the frames
+below — never over loopback HTTP (BI-7, ADR-0020): `/a2a/{name}` refuses a
+role with 403.
 
 **The connection is the identity** (ADR-0020). The broker admits a node —
 `Directory::admit` names it `<spec>-<n>`, never reusing a name — creates a
@@ -264,9 +283,10 @@ same generalization (AGE-307; the hosted broker adopts it with HS-4).
 `ProtocolGateway::with_virtual_agent` publishes one agent that is not a
 connected process but a factory. A task addressed to it starts a worker on a
 connection the broker made for it, waits for that worker's `hello`, routes the
-task to it, and reaps it. To the caller it is an A2A agent like any other, which is the point:
-`invoke_agent` replaces `sub_agent` without the parent learning a second
-fan-out path.
+task to it, and reaps it. To its caller — over the caller's own connection,
+or the root's direct handle — it is reached exactly like a registered
+participant, which is the point: `invoke_agent` replaces `sub_agent` without
+the parent learning a second fan-out path.
 
 `LocalRunner` is the implementation that spawns a `chatty-tui` child. It is
 not the only one: hive's `VmRunner` leases a Firecracker microVM per task

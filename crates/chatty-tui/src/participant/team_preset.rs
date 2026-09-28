@@ -86,7 +86,7 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
 
     let output = ListAgentsTool::new(vec![])
         .with_local_workers(module_settings.roster_names(None))
-        .with_gateway_port(broker.port)
+        .with_transport(broker.transport())
         .call(&mut ToolContext::new(), ListAgentsToolArgs {})
         .await
         .expect("list_agents succeeds");
@@ -121,8 +121,9 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
         "the team file replaces module settings' roster for the run"
     );
 
-    InvokeAgentTool::new(vec![], Some(broker.port))
+    InvokeAgentTool::new(vec![])
         .with_local_agents([CODER, REVIEWER])
+        .with_transport(broker.transport())
         .call(
             &mut ToolContext::new(),
             InvokeAgentArgs {

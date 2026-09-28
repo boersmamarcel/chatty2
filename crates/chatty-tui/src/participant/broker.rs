@@ -692,9 +692,8 @@ mod tests {
         );
         let broker: Arc<dyn chatty_core::services::lazy_broker::LazyBroker> = Arc::new(pending);
 
-        let invoke_agent_tool =
-            chatty_core::tools::invoke_agent_tool::InvokeAgentTool::new(vec![], None)
-                .with_lazy_broker(broker.clone());
+        let invoke_agent_tool = chatty_core::tools::invoke_agent_tool::InvokeAgentTool::new(vec![])
+            .with_lazy_broker(broker.clone());
         let outcome = {
             use rig_agent::tool::{Tool, ToolContext};
             invoke_agent_tool
@@ -792,13 +791,17 @@ mod tests {
     /// Reviewer probe (AGE-376 review): the runner must be reachable with
     /// *no* worker ever having registered — `local-agent` is virtual, so
     /// nothing is in the participant registry until a task arrives, and the
-    /// only thing standing behind `/a2a/local-agent/...` at that point is
-    /// `state.runners` (`handlers/a2a.rs::module_agent_card`). Replacing
-    /// `gateway.with_virtual_agent(...)` with `drop(runner)` makes this
-    /// fail with a 404, which is how this was confirmed to actually pin
-    /// runner registration rather than passing vacuously.
+    /// only thing standing behind it is `state.runners`. Reached over the
+    /// root's direct handle now (ADR-0020, BI-7), never over loopback:
+    /// replacing `gateway.with_virtual_agent(...)` with `drop(runner)`
+    /// makes `local-agent` absent from the directory, which is how this was
+    /// confirmed to actually pin runner registration rather than passing
+    /// vacuously.
     #[tokio::test]
     async fn the_runner_serves_local_agents_card_with_no_worker_registered() {
+        use chatty_fabric::{CallEvent, CallRequest};
+        use futures::StreamExt;
+
         let module_settings = ModuleSettingsModel::default();
         let (_dir, socket) = test_socket();
         let broker = Broker::start_at(
@@ -811,26 +814,28 @@ mod tests {
         .await
         .expect("the broker starts");
 
-        let client = chatty_core::services::http_client::default_client(5);
-        let url = format!(
-            "http://127.0.0.1:{}/a2a/{}/.well-known/agent.json",
-            broker.port, LOCAL_AGENT_NAME
-        );
-        let response = client
-            .get(&url)
-            .send()
+        let mut stream = broker
+            .transport()
+            .call(CallRequest::ListAgents)
             .await
-            .expect("the gateway answers the card request");
+            .expect("the root's direct handle answers list_agents");
+        let directory = loop {
+            match stream.next().await.expect("a result event") {
+                Ok(CallEvent::Result(directory)) => break directory,
+                Ok(_) => continue,
+                Err(error) => panic!("list_agents failed: {error}"),
+            }
+        };
+        let names: Vec<&str> = directory
+            .as_array()
+            .expect("the directory is a JSON array")
+            .iter()
+            .filter_map(|agent| agent["name"].as_str())
+            .collect();
         assert!(
-            response.status().is_success(),
-            "GET {url} returned {}",
-            response.status()
+            names.contains(&LOCAL_AGENT_NAME),
+            "local-agent is not in the directory: {names:?}"
         );
-        let card: serde_json::Value = response
-            .json()
-            .await
-            .expect("the response body is the agent card JSON");
-        assert_eq!(card["name"], LOCAL_AGENT_NAME);
 
         broker.shutdown();
     }

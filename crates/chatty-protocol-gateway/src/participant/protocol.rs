@@ -297,10 +297,6 @@ pub struct DelegatedTask {
     /// `None` for a caller that presented no bearer — a desktop parent
     /// delegating to a local worker. A hosted worker refuses such a task.
     pub bearer: Option<TaskBearer>,
-    /// The [`CALLER_HEADER`] an HTTP caller sent, when it sent one. Stays
-    /// with the broker and is not part of the task frame; no permit depends
-    /// on it (a run's permit is released while it waits on its calls, BI-6).
-    pub caller: Option<String>,
     /// Whether the worker should capture its conversation at this task's
     /// terminal status (RC-0, AGE-649). Opt-in and off by default, so an
     /// ordinary task's frames are unchanged.
@@ -339,15 +335,11 @@ pub struct CallStamp {
     pub chain: CallChain,
 }
 
-/// The header an HTTP caller into the broker may name itself in (AGE-628).
-pub const CALLER_HEADER: &str = "x-chatty-broker-caller";
-
 impl DelegatedTask {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             bearer: None,
-            caller: None,
             capture_conversation: false,
             spawn_context: None,
             handoff: None,
@@ -394,11 +386,6 @@ impl DelegatedTask {
     /// The context the worker is spawned with (BI-5).
     pub fn with_spawn_context(mut self, context: Option<SpawnContext>) -> Self {
         self.spawn_context = context;
-        self
-    }
-
-    pub fn with_caller(mut self, caller: Option<String>) -> Self {
-        self.caller = caller;
         self
     }
 

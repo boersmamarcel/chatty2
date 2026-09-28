@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
@@ -167,17 +166,6 @@ impl Gateway {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
-    }
-
-    /// An `A2aAgentConfig` for `/a2a/{name}`, as `invoke_agent` builds one.
-    pub fn a2a_agent(&self, name: &str) -> A2aAgentConfig {
-        A2aAgentConfig {
-            name: name.to_string(),
-            url: self.url(&format!("/a2a/{name}")),
-            api_key: None,
-            enabled: true,
-            skills: vec![],
-        }
     }
 }
 

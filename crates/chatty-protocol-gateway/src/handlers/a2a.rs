@@ -9,15 +9,23 @@
 //! Routes:
 //! - `GET  /a2a/{agent}/.well-known/agent.json` — per-agent card
 //! - `POST /a2a/{agent}` — A2A JSON-RPC (`message/send`, `message/stream`,
-//!   `tasks/get`); a `message/send` whose `message.taskId` names a task
-//!   parked in `input-required` answers it instead of starting a new one
+//!   `tasks/get`)
 //! - `GET  /.well-known/agent.json` — aggregated gateway agent card
+//!
+//! **Scope (BI-7, ADR-0020).** A worker calls `invoke_agent`/`list_agents`
+//! over the connection the broker made for it (BI-4), never over this HTTP
+//! side, so from here on `{agent}` naming a role (a registered participant
+//! or a virtual agent) is refused with 403: identity comes from the
+//! connection, and nothing on this machine may task a role, reach a handle
+//! or read the swarm directory over loopback instead. A module name and
+//! `forward_remote_a2a_jsonrpc` (PL-H8b) are unaffected — this route is the
+//! only way a remote module is reached.
 
 use axum::{
     Json,
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -26,7 +34,6 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
-use crate::participant::{CALLER_HEADER, DelegatedTask, TaskBearer};
 use chatty_fabric::AgentOrigin;
 
 use super::a2a_participant;
@@ -44,18 +51,7 @@ pub(crate) async fn agent_card(
     State(state): State<GatewayState>,
 ) -> impl IntoResponse {
     if is_role(&state, &module_name) {
-        state.routes.count_role();
-    }
-    if let Some(card) = state.participants.card(&module_name) {
-        return (StatusCode::OK, Json(a2a_participant::card_to_json(&card))).into_response();
-    }
-
-    if let Some(runner) = state.runners.get(&module_name) {
-        return (
-            StatusCode::OK,
-            Json(a2a_participant::card_to_json(&runner.agent_card())),
-        )
-            .into_response();
+        return refuse_role(&state, &module_name);
     }
 
     module_not_found_json(&module_name)
@@ -67,6 +63,16 @@ pub(crate) async fn agent_card(
 
 pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> impl IntoResponse {
     state.routes.count_directory();
+
+    // Nothing is on this gateway's roster (no participant socket, no
+    // virtual agent published): there is no swarm directory to protect, so
+    // a bare `ProtocolGateway` — a module-only gateway, or a test that never
+    // registers anything — keeps answering as it always has. The moment a
+    // role exists, reading it over loopback is exactly what BI-7 refuses.
+    if has_any_role(&state) {
+        return refuse(&state, "directory");
+    }
+
     let mut agents: Vec<Value> = Vec::new();
 
     // Every agent on this card says where it came from (ADR-0011 C5): a
@@ -96,12 +102,40 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
         "gateway": true,
         "agents": agents,
     }))
+    .into_response()
 }
 
 /// Whether `name` is one of the broker's roles — a connected participant or
 /// a virtual agent — rather than a module.
 fn is_role(state: &GatewayState, name: &str) -> bool {
     state.participants.is_registered(name) || state.runners.contains_key(name)
+}
+
+/// Whether this gateway has any role at all: a connected participant, or a
+/// published virtual agent. The swarm directory has nothing to disclose
+/// when this is false (BI-7).
+fn has_any_role(state: &GatewayState) -> bool {
+    !state.runners.is_empty() || !state.participants.agents().is_empty()
+}
+
+/// A loopback request named `what` (a role, a node, a handle or the
+/// directory): refused with 403, counted, and logged as a refusal (BI-7).
+/// Roles are reached over the worker's connection now (ADR-0020, BI-4), and
+/// there is no `loopback_roles` option to bring the old path back.
+fn refuse(state: &GatewayState, what: &str) -> Response {
+    state.calls.log_loopback_refusal(what);
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "fabric: roles are reached over the worker connection" })),
+    )
+        .into_response()
+}
+
+/// [`refuse`] for a named role, counting it on [`crate::gateway::RouteCounter`]
+/// exactly as a served role request always has.
+fn refuse_role(state: &GatewayState, name: &str) -> Response {
+    state.routes.count_role();
+    refuse(state, name)
 }
 
 /// Tag one agent card with its origin.
@@ -217,11 +251,10 @@ async fn forward_remote_a2a_jsonrpc(
 pub(crate) async fn a2a_jsonrpc(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
-    headers: HeaderMap,
     Json(body): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if is_role(&state, &module_name) {
-        state.routes.count_role();
+        return refuse_role(&state, &module_name);
     }
     if body.jsonrpc != "2.0" {
         return json_rpc_error(
@@ -232,26 +265,16 @@ pub(crate) async fn a2a_jsonrpc(
         );
     }
 
-    // The caller's bearer goes with the task to whichever worker runs it
-    // (AGE-371): the broker validates nothing here — a hosted worker checks
-    // it as the tenant boundary, a local one ignores it.
-    let bearer = caller_bearer(&headers);
-    // Which broker worker is asking, if one is (AGE-628).
-    let caller = headers
-        .get(CALLER_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        .map(str::to_string);
-
+    // No role is served here any more (BI-7), so nothing on this route
+    // carries a caller's bearer to a worker's task frame, or the deleted
+    // `x-chatty-broker-caller` header: identity comes from a worker's own
+    // connection, not from a claim on this route. A module and the remote
+    // runner it may forward to (PL-H8b) never read either.
     match body.method.as_str() {
-        "message/send" => {
-            handle_message_send(&module_name, body.id, body.params, bearer, caller, &state).await
-        }
-        "message/stream" => {
-            handle_message_stream(&module_name, body.id, body.params, bearer, caller, &state)
-                .await
-                .into_response()
-        }
+        "message/send" => handle_message_send(&module_name, body.id, body.params, &state).await,
+        "message/stream" => handle_message_stream(&module_name, body.id, body.params, &state)
+            .await
+            .into_response(),
         "tasks/get" => handle_tasks_get(&module_name, body.id, body.params).await,
         method => json_rpc_error(
             StatusCode::OK,
@@ -263,15 +286,13 @@ pub(crate) async fn a2a_jsonrpc(
 }
 
 // ---------------------------------------------------------------------------
-// message/send: route to a participant, a virtual agent or the remote runner
+// message/send: a role's parked task, or the remote runner
 // ---------------------------------------------------------------------------
 
 async fn handle_message_send(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
-    bearer: Option<TaskBearer>,
-    caller: Option<String>,
     state: &GatewayState,
 ) -> axum::response::Response {
     let params = match params {
@@ -287,38 +308,17 @@ async fn handle_message_send(
     };
 
     // A message addressed to a task the broker holds open is the answer to
-    // a question that task asked (AGE-306), not a new task. Only an id the
-    // broker minted itself can match, so a client that puts its own id on a
-    // fresh message still starts a task.
+    // a question that task asked (AGE-306), not a new task — but a role's
+    // parked task is answered over its connection now (BI-5), never over
+    // loopback: `owns_task` is address-agnostic (any URL naming a task id
+    // it owns would reach it), so this is refused exactly as addressing the
+    // role directly is (BI-7), not routed.
     if let Some(task_id) = params
         .pointer("/message/taskId")
         .and_then(|v| v.as_str())
         .filter(|task_id| state.participants.owns_task(task_id))
     {
-        tracing::info!(task = task_id, "A2A: answering a parked task");
-        return a2a_participant::message_input(&state.participants, id, task_id, &params);
-    }
-
-    let content = prompt_text(&params);
-
-    // A registered process shadows a module of the same name: it is live,
-    // and a module is not.
-    if state.participants.is_registered(module_name) {
-        tracing::info!(
-            participant = module_name,
-            "A2A: routing to a local participant"
-        );
-        let task = DelegatedTask::new(content).with_bearer(bearer);
-        return a2a_participant::message_send(&state.participants, module_name, id, task).await;
-    }
-
-    if let Some(runner) = state.runners.get(module_name) {
-        tracing::info!(agent = module_name, "A2A: starting a worker");
-        let task = DelegatedTask::new(content)
-            .with_bearer(bearer)
-            .with_caller(caller)
-            .with_spawn_context(Some(root_spawn_context(state, runner.as_ref())));
-        return a2a_participant::runner_message_send(runner.as_ref(), id, task).await;
+        return refuse(state, task_id);
     }
 
     // Remote routing: if the registry says this module is `remote`/`remote_only`,
@@ -361,8 +361,6 @@ async fn handle_message_stream(
     module_name: &str,
     id: Option<Value>,
     params: Option<Value>,
-    bearer: Option<TaskBearer>,
-    caller: Option<String>,
     state: &GatewayState,
 ) -> axum::response::Response {
     let params = match params {
@@ -376,26 +374,6 @@ async fn handle_message_stream(
             );
         }
     };
-
-    let content = prompt_text(&params);
-
-    if state.participants.is_registered(module_name) {
-        tracing::info!(
-            participant = module_name,
-            "A2A stream: routing to a local participant"
-        );
-        let task = DelegatedTask::new(content).with_bearer(bearer);
-        return a2a_participant::message_stream(&state.participants, module_name, id, task);
-    }
-
-    if let Some(runner) = state.runners.get(module_name) {
-        tracing::info!(agent = module_name, "A2A stream: starting a worker");
-        let task = DelegatedTask::new(content)
-            .with_bearer(bearer)
-            .with_caller(caller)
-            .with_spawn_context(Some(root_spawn_context(state, runner.as_ref())));
-        return a2a_participant::runner_message_stream(runner.as_ref(), id, task).await;
-    }
 
     let task_id = format!("task-{}", crate::gateway::new_id());
     let module_name = module_name.to_string();
@@ -465,60 +443,4 @@ async fn handle_tasks_get(
         INVALID_PARAMS,
         format!("task '{}' not found (stateless gateway)", task_id),
     )
-}
-
-// ---------------------------------------------------------------------------
-/// The context a worker started over HTTP is spawned with: the root's
-/// (BI-5). Only the root reaches a role over loopback; a worker's calls
-/// travel over its connection, where the broker knows who is calling.
-fn root_spawn_context(
-    state: &GatewayState,
-    runner: &dyn crate::participant::VirtualAgent,
-) -> chatty_fabric::SpawnContext {
-    use crate::participant::spawn_context;
-    spawn_context::derive(&spawn_context::root(&state.runners, runner), runner)
-}
-
-// Helper: the caller's `Authorization: Bearer` token, if any (AGE-371)
-// ---------------------------------------------------------------------------
-
-/// What the A2A client put in `Authorization`, as a task bearer. Anything
-/// that is not a bearer scheme is treated as no token: the worker that gets
-/// the task decides what an absent bearer means, not this router.
-fn caller_bearer(headers: &HeaderMap) -> Option<TaskBearer> {
-    headers
-        .get(header::AUTHORIZATION)?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty())
-        .map(TaskBearer::new)
-}
-
-// ---------------------------------------------------------------------------
-// Helper: the prompt out of A2A `message/send` / `message/stream` params
-// ---------------------------------------------------------------------------
-
-/// Every text part of `message.parts`, joined by newlines (a part is text
-/// when its `kind` or `type` says so, or it has only a `text`); or a plain
-/// `message.text`, which several clients send.
-fn prompt_text(params: &Value) -> String {
-    if let Some(parts) = params.pointer("/message/parts").and_then(Value::as_array) {
-        let texts: Vec<&str> = parts
-            .iter()
-            .filter(|part| {
-                let kind = part.get("kind").or_else(|| part.get("type"));
-                kind.is_none_or(|kind| kind == "text")
-            })
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect();
-        if !texts.is_empty() {
-            return texts.join("\n");
-        }
-    }
-    params
-        .pointer("/message/text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
 }

@@ -55,7 +55,7 @@ async fn benford_analyst_is_listed_and_reached_like_any_local_agent() {
 
     let output = ListAgentsTool::new(vec![])
         .with_local_workers(names.clone())
-        .with_gateway_port(broker.port)
+        .with_transport(broker.transport())
         .call(&mut ToolContext::new(), ListAgentsToolArgs {})
         .await
         .expect("list_agents succeeds");
@@ -83,8 +83,9 @@ async fn benford_analyst_is_listed_and_reached_like_any_local_agent() {
         output.agents
     );
 
-    InvokeAgentTool::new(vec![], Some(broker.port))
+    InvokeAgentTool::new(vec![])
         .with_local_agents(names)
+        .with_transport(broker.transport())
         .call(
             &mut ToolContext::new(),
             InvokeAgentArgs {
