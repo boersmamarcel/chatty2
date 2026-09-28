@@ -362,6 +362,66 @@ async fn sandbox_1_4_slow_host_wall_clock_timeout_fires() {
 }
 
 // ---------------------------------------------------------------------------
+// AGE-706 (PL-H1b) - `sleep`: a guest that sleeps through WASI (`wasi:clocks`
+// subscribe + `wasi:io/poll`, i.e. `std::thread::sleep`) blocks inside the
+// host's poll, where no epoch check runs. The host cuts such a wait short at
+// the call deadline, so a 5 s sleep under a 500 ms budget ends in
+// `deadline exceeded` well before the sleep would have.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasi_sleep_past_deadline_is_interrupted() {
+    let limits = ResourceLimits {
+        max_execution_ms: 500,
+        ..ResourceLimits::default()
+    };
+    let mut m = load("sleep", ModuleManifest::new("sleep"), limits);
+    let start = Instant::now();
+    let result = m.run("sleep", "5000").await;
+    let elapsed = start.elapsed();
+
+    let err = result.expect_err("a 5 s sleep under a 500 ms budget must not complete");
+    assert!(
+        matches!(
+            call_error(&err),
+            CallError::DeadlineExceeded {
+                max_execution_ms: 500
+            }
+        ),
+        "expected `deadline exceeded`, got: {err:#} (elapsed {elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "expected the sleep to be cut off within 1 s, measured {elapsed:?}"
+    );
+
+    // The module stays usable: the next call gets a fresh budget.
+    let ok = m.run("sleep", "1").await;
+    assert_eq!(ok.expect("a 1 ms sleep completes"), "slept 1 ms");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasi_short_sleep_is_allowed() {
+    let limits = ResourceLimits {
+        max_execution_ms: 500,
+        ..ResourceLimits::default()
+    };
+    let mut m = load("sleep", ModuleManifest::new("sleep"), limits);
+    let start = Instant::now();
+    let result = m.run("sleep", "50").await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        result.expect("a 50 ms sleep within a 500 ms budget completes"),
+        "slept 50 ms"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(50),
+        "the guest really slept, measured {elapsed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 1.5 - `fuel-meter` called 10 times: fuel is a per-call budget, refilled
 // before every call, so a long-lived module never runs dry.
 // ---------------------------------------------------------------------------
