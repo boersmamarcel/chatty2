@@ -29,6 +29,7 @@ tools = [
     ("read_skill", "memory", "read_skill_tool.rs", "Always available"),
     ("list_agents", "agents", "list_agents_tool.rs", "Always available"),
     ("invoke_agent", "agents", "invoke_agent_tool.rs", "Always available"),
+    ("send_message", "agents", "send_message_tool.rs", "Delegated workers only (a broker-made connection); messages the owner"),
     ("list_mcp_services", "mcp", "list_mcp_tool.rs", "When MCP enabled"),
     ("fetch", "web", "fetch_tool.rs", "HTTP fetch"),
     ("read_file", "filesystem", "filesystem_tool.rs", "fs_read"),

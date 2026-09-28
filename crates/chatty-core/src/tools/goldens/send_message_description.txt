@@ -1,0 +1,4 @@
+Send a short message to the agent that gave you your current task, without waiting for a reply. The call returns at once. `pending` means the message was accepted: that agent reads it the next time it continues, and it neither interrupts that agent nor starts any work by itself. `refused` gives the reason: `not_on_tree` (you cannot message that name), `over_allowance` (more text than that agent can take for now; the whole message is refused, never shortened) or `recipient_ended` (that agent has finished). Your final answer reaches that agent as it always does.
+
+to: The recipient's name. The agent that gave you your current task is named `root`.
+text: The message. At most 8 KB per run of the recipient.

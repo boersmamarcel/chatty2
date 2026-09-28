@@ -76,6 +76,8 @@ pub(crate) struct AgentDef {
     /// Declare `swarm.delegates_to`: a sub-leader, which delegates in turn
     /// over its connection to the root broker (BI-5).
     pub sub_leader: bool,
+    /// The spec's `[tools] profile`, e.g. `coder`.
+    pub profile: Option<&'static str>,
 }
 
 impl AgentDef {
@@ -85,11 +87,17 @@ impl AgentDef {
             model: model.to_string(),
             endpoint,
             sub_leader: false,
+            profile: None,
         }
     }
 
     pub fn sub_leader(mut self) -> Self {
         self.sub_leader = true;
+        self
+    }
+
+    pub fn profile(mut self, profile: &'static str) -> Self {
+        self.profile = Some(profile);
         self
     }
 }
@@ -185,6 +193,7 @@ impl SwarmKit {
                 if agent.sub_leader {
                     spec.swarm.delegates_to = vec!["*".to_string()];
                 }
+                spec.tools.profile = agent.profile.map(str::to_string);
                 spec
             })
             .collect();
@@ -1310,6 +1319,245 @@ async fn cancel_reaps_the_subtree() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(subtree(&kit).is_empty(), "nothing new was started either");
+}
+
+// ---------------------------------------------------------------------------
+// Tree messages (TM-1, AGE-654; fabric spec 5 invariants 3 and 7)
+// ---------------------------------------------------------------------------
+
+const SENDER: &str = "kit-sender";
+const SENDER_MODEL: &str = "kit/sender";
+const SIBLING: &str = "kit-sibling";
+const SIBLING_MODEL: &str = "kit/sibling";
+
+/// The tool results a request carries, in order: what the worker's tools
+/// handed its model.
+fn tool_results(request: &RecordedRequest) -> Vec<serde_json::Value> {
+    request.json()["messages"]
+        .as_array()
+        .expect("a chat request has messages")
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| {
+            let content = message["content"].as_str().expect("a tool result is text");
+            serde_json::from_str(content).unwrap_or_else(|_| serde_json::json!(content))
+        })
+        .collect()
+}
+
+/// The names of the tools a request offered the model.
+fn offered_tools(request: &RecordedRequest) -> Vec<String> {
+    request.json()["tools"]
+        .as_array()
+        .expect("the request offers tools")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The edge log's message rows, as `(from, to, bytes, outcome)`.
+fn message_rows(kit: &SwarmKit) -> Vec<(String, String, u64, String)> {
+    std::fs::read_to_string(kit.broker().edge_log_path())
+        .expect("the edge log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON row"))
+        .filter(|row| row["kind"] == "message")
+        .map(|row| {
+            (
+                row["from"].as_str().unwrap().to_string(),
+                row["to"].as_str().unwrap().to_string(),
+                row["bytes"].as_u64().unwrap(),
+                row["outcome"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Invariant 3: a worker's message to a sibling — another worker of the
+/// same owner, live at the time — is refused as `not_on_tree`, and the
+/// sibling's model never sees it. The same worker's message to its owner
+/// is accepted, so the refusal is about the recipient, not the tool.
+#[tokio::test]
+async fn sibling_refused() {
+    const SECRET: &str = "the sibling must never read this";
+    let sibling = format!("{SIBLING}-0");
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(SENDER, SENDER_MODEL, Endpoint::Sse),
+            AgentDef::new(SIBLING, SIBLING_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(
+            SENDER_MODEL,
+            [
+                Reply::tool_call(
+                    "send_message",
+                    serde_json::json!({ "to": sibling, "text": SECRET }),
+                ),
+                Reply::tool_call(
+                    "send_message",
+                    serde_json::json!({ "to": "root", "text": "halfway there" }),
+                ),
+                Reply::text("Sent."),
+            ],
+        ),
+        // The sibling sits on its first model call long enough for the
+        // sender to run in full, then reads a file and answers: two
+        // requests after the message was sent.
+        Script::new().route(
+            SIBLING_MODEL,
+            [
+                Reply::Delay(8_000),
+                Reply::tool_call("read_file", serde_json::json!({ "path": "README.md" })),
+                Reply::text("The sibling finished."),
+            ],
+        ),
+    )
+    .await;
+
+    let sibling_run = kit.run_leader_to(SIBLING, "read the readme");
+    let sender_run = async {
+        // The sibling is up and mid-call before the sender starts.
+        let deadline = std::time::Instant::now() + DEADLINE;
+        while kit.ndjson.requests_for(SIBLING_MODEL).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the sibling never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let run = kit.run_leader_to(SENDER, "tell someone").await;
+        assert!(
+            kit.participants().is_registered(&sibling),
+            "the sibling was still live when the message was sent"
+        );
+        run
+    };
+    let (sibling_run, sender_run) = tokio::join!(sibling_run, sender_run);
+
+    let out = sender_run.output.as_ref().expect("the sender's delegation");
+    assert_eq!(out.response, "Sent.");
+    let sender = kit.sse.requests_for(SENDER_MODEL);
+    assert_eq!(sender.len(), 3);
+    assert_eq!(
+        tool_results(&sender[2]),
+        [
+            serde_json::json!({ "status": "refused", "reason": "not_on_tree" }),
+            serde_json::json!({ "status": "pending", "id": "msg-1" }),
+        ]
+    );
+
+    let out = sibling_run
+        .output
+        .as_ref()
+        .expect("the sibling's delegation");
+    assert_eq!(out.response, "The sibling finished.");
+    let requests = kit.ndjson.requests_for(SIBLING_MODEL);
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(
+            !String::from_utf8_lossy(&request.body).contains(SECRET),
+            "the sibling's model saw the refused message"
+        );
+    }
+
+    assert_eq!(
+        message_rows(&kit),
+        [
+            (
+                format!("{SENDER}-0"),
+                sibling,
+                SECRET.len() as u64,
+                "refused: not_on_tree".to_string()
+            ),
+            (
+                format!("{SENDER}-0"),
+                "root".to_string(),
+                "halfway there".len() as u64,
+                "pending".to_string()
+            ),
+        ]
+    );
+}
+
+/// Anything but the owner is `not_on_tree`: a name nobody has, the sender's
+/// own name, and a name that looks like a leader's.
+#[tokio::test]
+async fn unknown_recipient_refused() {
+    let me = format!("{WORKER}-0");
+    let kit = SwarmKit::start(
+        vec![AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse)],
+        Script::new().route(
+            WORKER_MODEL,
+            [
+                Reply::tool_call(
+                    "send_message",
+                    serde_json::json!({ "to": "nobody-7", "text": "hello?" }),
+                ),
+                Reply::tool_call(
+                    "send_message",
+                    serde_json::json!({ "to": me, "text": "note to self" }),
+                ),
+                Reply::tool_call(
+                    "send_message",
+                    serde_json::json!({ "to": "leader-0", "text": "hello?" }),
+                ),
+                Reply::text("Nobody answered."),
+            ],
+        ),
+        Script::new(),
+    )
+    .await;
+
+    let run = kit.run_leader("message someone").await;
+    assert_eq!(
+        run.output.as_ref().expect("the delegation").response,
+        "Nobody answered."
+    );
+    let requests = kit.sse.requests_for(WORKER_MODEL);
+    let refused = serde_json::json!({ "status": "refused", "reason": "not_on_tree" });
+    assert_eq!(
+        tool_results(requests.last().unwrap()),
+        [refused.clone(), refused.clone(), refused]
+    );
+    let outcomes: Vec<String> = message_rows(&kit).into_iter().map(|row| row.3).collect();
+    assert_eq!(outcomes, ["refused: not_on_tree"; 3]);
+}
+
+/// A `coder` with an empty `delegates_to` is offered `send_message` — it
+/// needs a connection, not delegation rights — and no `invoke_agent`; and
+/// the message reaches its owner's pending list.
+#[tokio::test]
+async fn leaf_worker_has_send_message() {
+    let kit = SwarmKit::start(
+        vec![AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse).profile("coder")],
+        Script::new().route(
+            WORKER_MODEL,
+            [
+                Reply::tool_call(
+                    "send_message",
+                    serde_json::json!({ "to": "root", "text": "tests pass" }),
+                ),
+                Reply::text("Done."),
+            ],
+        ),
+        Script::new(),
+    )
+    .await;
+
+    let run = kit.run_leader("fix it").await;
+    assert_eq!(
+        run.output.as_ref().expect("the delegation").response,
+        "Done."
+    );
+    let requests = kit.sse.requests_for(WORKER_MODEL);
+    let tools = offered_tools(&requests[0]);
+    assert!(tools.iter().any(|t| t == "send_message"), "{tools:?}");
+    assert!(!tools.iter().any(|t| t == "invoke_agent"), "{tools:?}");
+    assert!(!tools.iter().any(|t| t == "list_agents"), "{tools:?}");
+    assert_eq!(
+        tool_results(&requests[1]),
+        [serde_json::json!({ "status": "pending", "id": "msg-1" })]
+    );
 }
 
 // ---------------------------------------------------------------------------

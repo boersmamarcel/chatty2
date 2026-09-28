@@ -224,6 +224,13 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
                 .to_string(),
         );
     }
+    if tools.send_message {
+        tool_sections.push(
+            "- **send_message** (send a short message to the agent that gave you your task; \
+             it reads it when it next continues, and your final answer still reaches it)"
+                .to_string(),
+        );
+    }
     // read_skill is always present
     if allows("read_skill") {
         tool_sections
