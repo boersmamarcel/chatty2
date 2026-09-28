@@ -36,6 +36,8 @@ mod one_kind_of_agent;
 #[cfg(test)]
 pub(crate) mod stand_in;
 #[cfg(test)]
+mod swarm_forwarding;
+#[cfg(test)]
 pub(crate) mod swarm_kit;
 #[cfg(test)]
 mod team_preset;

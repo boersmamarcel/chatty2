@@ -22,6 +22,7 @@ mod handoff;
 mod origin;
 mod pending;
 mod permit;
+mod swarm;
 mod task_table;
 mod transport;
 
@@ -37,6 +38,7 @@ pub use permit::{
     ChildCall, DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit, RunPermit, RunPermitState,
     WeakRunPermit,
 };
+pub use swarm::{FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
     CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome, InvokeAgentParams,

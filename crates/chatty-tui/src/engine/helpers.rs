@@ -161,6 +161,8 @@ pub(crate) fn delegation_line(
                 "Agent failed.".to_string()
             }
         }),
+        // A nested run's batch is not a line of this delegation (TB-1).
+        InvokeAgentProgress::Swarm(_) => String::new(),
     }
 }
 

@@ -98,10 +98,28 @@
 //!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
 //! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 //! ```
+//!
+//! # A nested run's events (TB-1, AGE-663)
+//!
+//! A task a worker's call started — a run nested under the root's callee —
+//! is sent with `"swarmEvents":true` when the root is listening. Its worker
+//! then reports its turns and tool events as `event` frames beside the
+//! usual ones, and the broker forwards them to the root tagged with the
+//! node and chain from its own task table (see
+//! [`chatty_fabric::SwarmEvent`]). An `event` frame names no node or chain:
+//! whatever else it carries is dropped when it is parsed, and an item that
+//! is not the worker's to report (text, usage, the end) is ignored. A
+//! task without the flag gets no `event` frames, so its wire is unchanged.
+//!
+//! ```text
+//! broker      → {"v":2,"type":"task","taskId":"task-…","text":"read it","swarmEvents":true}
+//! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"read_file"}
+//! participant → {"v":2,"type":"event","taskId":"task-…","event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}
+//! ```
 
 use chatty_fabric::{
     CallChain, CallError, CallRequest, ConversationScope, HandoffContract, NodeName, Remaining,
-    SpawnContext,
+    SpawnContext, SwarmItem,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -306,6 +324,9 @@ pub struct DelegatedTask {
     /// hands the task over, and a worker reads it back here. Unlimited for
     /// a task no broker call started.
     pub budget: Remaining,
+    /// Ask the worker for its turns and tool events as `event` frames (TB-1):
+    /// set by the broker on a nested run whose root is listening.
+    pub swarm_events: bool,
 }
 
 /// What a broker call stamps on the task it starts (DP-2).
@@ -332,7 +353,14 @@ impl DelegatedTask {
             handoff: None,
             call: None,
             budget: Remaining::default(),
+            swarm_events: false,
         }
+    }
+
+    /// Ask the worker for its `event` frames (TB-1).
+    pub fn with_swarm_events(mut self, swarm_events: bool) -> Self {
+        self.swarm_events = swarm_events;
+        self
     }
 
     /// The handoff contract the worker's answer must meet (TD-2).
@@ -490,6 +518,10 @@ pub enum ParticipantFrame {
         task: String,
         input: TaskInput,
     },
+    /// One of the worker's own turns or tool events on a task sent with
+    /// `swarmEvents` (TB-1). The broker tags it; the frame cannot.
+    #[serde(rename_all = "camelCase")]
+    Event { task_id: String, event: SwarmItem },
 }
 
 /// A frame from the broker to a participant.
@@ -540,6 +572,10 @@ pub enum BrokerFrame {
         /// a task.
         #[serde(default, skip_serializing_if = "Remaining::is_unlimited")]
         budget: Box<Remaining>,
+        /// Report turns and tool events as `event` frames (TB-1). Absent on
+        /// the wire when `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        swarm_events: bool,
     },
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
@@ -674,6 +710,7 @@ mod tests {
             spawn_context: None,
             handoff: None,
             budget: Box::default(),
+            swarm_events: false,
         })
         .unwrap();
         assert_eq!(json["type"], "task");
@@ -687,6 +724,31 @@ mod tests {
             json.get("captureConversation").is_none(),
             "a task that does not ask for capture is the frame it was before AGE-649"
         );
+        assert!(
+            json.get("swarmEvents").is_none(),
+            "a task nobody forwards is the frame it was before TB-1"
+        );
+    }
+
+    /// TB-1: an `event` frame carries one item and nothing a worker could
+    /// tag it with.
+    #[test]
+    fn an_event_frame_drops_a_forged_tag_when_parsed() {
+        let line = r#"{"v":2,"type":"event","taskId":"t","root_task_id":"forged",
+                       "event":{"kind":"tool_call_started","id":"c1","name":"shell",
+                                "node":"root","chain":{"root_task_id":"forged","chain":["root"],"depth":0}}}"#;
+        let frame: ParticipantFrame = decode_frame(line).unwrap();
+        let ParticipantFrame::Event { task_id, event } = frame else {
+            panic!("expected an event frame");
+        };
+        assert_eq!(task_id, "t");
+        assert_eq!(
+            event,
+            SwarmItem::ToolCallStarted {
+                id: "c1".into(),
+                name: "shell".into()
+            }
+        );
     }
 
     #[test]
@@ -699,6 +761,7 @@ mod tests {
             spawn_context: None,
             handoff: None,
             budget: Box::default(),
+            swarm_events: false,
         })
         .unwrap();
         assert_eq!(json["bearer"], "eyJ.token");
@@ -730,6 +793,7 @@ mod tests {
             spawn_context: None,
             handoff: None,
             budget: Box::default(),
+            swarm_events: false,
         })
         .unwrap();
         assert_eq!(json["captureConversation"], true);
@@ -762,6 +826,7 @@ mod tests {
             spawn_context: None,
             handoff: None,
             budget: Box::new(budget.clone()),
+            swarm_events: false,
         })
         .unwrap();
         assert_eq!(
@@ -790,6 +855,7 @@ mod tests {
             spawn_context: None,
             handoff: None,
             budget: Box::default(),
+            swarm_events: false,
         };
         let printed = format!("{frame:?}");
         assert!(!printed.contains("secret-token"), "{printed}");

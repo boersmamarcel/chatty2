@@ -74,6 +74,15 @@
 //! past its deadline (plus [`deadline_grace`]) is stopped: the call ends
 //! with a failed result, never a hang.
 //!
+//! A root call hears about every run nested under it (TB-1): a run a
+//! node's call starts, whose root call is listening, is asked for its
+//! turns and tool events, and the broker forwards them — with the run's
+//! text summarised to its length, its usage and its end — to the root
+//! call's stream as [`CallEvent::Swarm`], tagged with the node and the
+//! chain from the task table. The root call flushes them at most once per
+//! [`FORWARD_INTERVAL`], one batch per node, and the last of them before
+//! its result.
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, every `send_message` call one message row, and every refused call
 //! one refusal row. A task row whose callee reported usage carries its
@@ -86,12 +95,14 @@ use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
     AgentOrigin, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream, ChildCall,
-    ConversationScope, EdgeKind, EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Message,
-    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, Remaining,
-    SendMessageParams, SpawnContext, Transport, UsagePricer, deadline_grace,
+    ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome,
+    InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal,
+    RefusalReason, Remaining, SendMessageParams, SpawnContext, SwarmBatcher, SwarmItem, Transport,
+    UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::protocol::{CallStamp, DelegatedTask, TaskInput, TaskState};
@@ -145,6 +156,86 @@ pub struct BrokerCalls {
     /// Prices a callee's reported usage for its task row (DP-3); `None`
     /// writes no price.
     pricer: Option<Arc<dyn UsagePricer>>,
+    /// Each root call in flight, by its root task id: where the runs
+    /// nested under it report (TB-1).
+    swarm: Swarm,
+}
+
+/// Root calls listening for their nested runs, by root task id.
+type Swarm = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Nested>>>>;
+
+/// One item a nested run reported, with the broker's tag.
+struct Nested {
+    node: String,
+    chain: CallChain,
+    item: SwarmItem,
+}
+
+/// A root call's end of [`Swarm`]; stops listening when dropped.
+struct Listening {
+    swarm: Swarm,
+    root_task_id: String,
+    nested: mpsc::UnboundedReceiver<Nested>,
+}
+
+impl Listening {
+    fn open(swarm: &Swarm, root_task_id: &str) -> Self {
+        let (tx, nested) = mpsc::unbounded_channel();
+        lock_swarm(swarm).insert(root_task_id.to_string(), tx);
+        Self {
+            swarm: swarm.clone(),
+            root_task_id: root_task_id.to_string(),
+            nested,
+        }
+    }
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        lock_swarm(&self.swarm).remove(&self.root_task_id);
+    }
+}
+
+/// A nested run's line to its root call: where it reports, and the tag the
+/// broker puts on what it reports.
+struct Reporting {
+    to: mpsc::UnboundedSender<Nested>,
+    chain: CallChain,
+    node: String,
+}
+
+impl Reporting {
+    fn send(&self, item: SwarmItem) {
+        let _ = self.to.send(Nested {
+            node: self.node.clone(),
+            chain: self.chain.clone(),
+            item,
+        });
+    }
+}
+
+/// When a call whose callee outran its deadline is stopped (DP-3), or
+/// never for a call without one.
+async fn sleep_until_cut(cut: Option<tokio::time::Instant>) {
+    match cut {
+        Some(cut) => tokio::time::sleep_until(cut).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next item a root call hears, or never for a call that does not
+/// listen.
+async fn next_nested(listening: &mut Option<Listening>) -> Option<Nested> {
+    match listening {
+        Some(listening) => listening.nested.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn lock_swarm(
+    swarm: &Swarm,
+) -> std::sync::MutexGuard<'_, HashMap<String, mpsc::UnboundedSender<Nested>>> {
+    swarm.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl BrokerCalls {
@@ -161,6 +252,7 @@ impl BrokerCalls {
             next_message: AtomicU64::new(0),
             policy: None,
             pricer: None,
+            swarm: Arc::default(),
         }
     }
 
@@ -409,7 +501,24 @@ impl BrokerCalls {
                 tokio::time::Instant::now() + left + deadline_grace(left)
             });
         let pricer = self.pricer.clone();
-        let task = DelegatedTask::new(params.prompt).with_call(stamp);
+        // A root call listens for the runs nested under it; a run a node's
+        // call starts reports to its root call, if that is listening
+        // (TB-1). Both are keyed by the chain the broker stamped.
+        let chain = stamp.as_ref().map(|stamp| stamp.chain.clone());
+        let mut listening = match (&caller, &chain) {
+            (Caller::Root, Some(chain)) => Some(Listening::open(&self.swarm, &chain.root_task_id)),
+            _ => None,
+        };
+        let reports_to = match (&caller, chain) {
+            (Caller::Node(_), Some(chain)) => lock_swarm(&self.swarm)
+                .get(&chain.root_task_id)
+                .cloned()
+                .map(|to| (to, chain)),
+            _ => None,
+        };
+        let task = DelegatedTask::new(params.prompt)
+            .with_call(stamp)
+            .with_swarm_events(reports_to.is_some());
         let agent = params.agent;
         // The caller's messages ride on this call's result (delivery point
         // a), taken when the result is made.
@@ -455,37 +564,71 @@ impl BrokerCalls {
                 }
             };
             edge.to = running.participant().to_string();
+            let reporting = reports_to.map(|(to, chain)| Reporting {
+                to,
+                chain,
+                node: running.participant().to_string(),
+            });
+            let report = |item: SwarmItem| {
+                if let Some(reporting) = reporting.as_ref() {
+                    reporting.send(item);
+                }
+            };
+            // The first flush is one interval in, so a node's batches are
+            // an interval apart from the call's start on.
+            let mut batcher = SwarmBatcher::new();
+            let mut flush = tokio::time::interval_at(
+                tokio::time::Instant::now() + FORWARD_INTERVAL,
+                FORWARD_INTERVAL,
+            );
+            flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
             let mut response = String::new();
             let mut end = None;
             loop {
-                let update = match cut {
-                    Some(cut) => match tokio::time::timeout_at(cut, running.updates.recv()).await {
-                        Ok(update) => update,
-                        Err(_) => {
-                            warn!(agent = %agent, "A called task ran past its deadline; stopping it");
-                            end = Some((
-                                TaskState::Failed,
-                                Some("deadline: the call ran past its deadline and was stopped".to_string()),
-                                None,
-                            ));
-                            break;
-                        }
+                let update = tokio::select! {
+                    update = running.updates.recv() => match update {
+                        Some(update) => update,
+                        None => break,
                     },
-                    None => running.updates.recv().await,
-                };
-                let Some(update) = update else {
-                    break;
+                    _ = sleep_until_cut(cut) => {
+                        warn!(agent = %agent, "A called task ran past its deadline; stopping it");
+                        end = Some((
+                            TaskState::Failed,
+                            Some("deadline: the call ran past its deadline and was stopped".to_string()),
+                            None,
+                        ));
+                        break;
+                    }
+                    Some(nested) = next_nested(&mut listening) => {
+                        batcher.push(&nested.node, &nested.chain, nested.item);
+                        continue;
+                    }
+                    _ = flush.tick(), if !batcher.is_empty() => {
+                        for batch in batcher.flush() {
+                            yield Ok(CallEvent::Swarm(batch));
+                        }
+                        continue;
+                    }
                 };
                 match update {
                     TaskUpdate::Artifact { text, .. } => {
                         if !text.is_empty() {
+                            report(SwarmItem::Text { bytes: text.len() as u64 });
                             response.push_str(&text);
                             yield Ok(CallEvent::Progress(json!({ "Text": text })));
                         }
                     }
+                    TaskUpdate::Event(item) => {
+                        if item.is_workers_to_report() {
+                            report(item);
+                        }
+                    }
                     TaskUpdate::Status { state, message, metadata, input } => {
                         if state.is_terminal() {
+                            if let Some(usage) = metadata.as_ref().and_then(|m| m.get("usage")) {
+                                report(SwarmItem::Usage { usage: usage.clone() });
+                            }
                             // Finished before the result, as the A2A path
                             // does before its terminal event: that commits
                             // the worker's tree, and the evidence read off
@@ -539,6 +682,21 @@ impl BrokerCalls {
                 .as_ref()
                 .zip(metadata.as_ref())
                 .and_then(|(pricer, metadata)| pricer.usd(metadata));
+            report(SwarmItem::Ended { state: state.to_string() });
+            // Every nested run ended before the callee did, so what they
+            // reported is all here: it goes out, on the next flush, before
+            // the result.
+            if let Some(listening) = listening.as_mut() {
+                while let Ok(nested) = listening.nested.try_recv() {
+                    batcher.push(&nested.node, &nested.chain, nested.item);
+                }
+            }
+            if !batcher.is_empty() {
+                flush.tick().await;
+                for batch in batcher.flush() {
+                    yield Ok(CallEvent::Swarm(batch));
+                }
+            }
             edge.end(state);
             yield Ok(CallEvent::Result(outcome(state, response, message, metadata, messages())));
             // `running` is dropped here, which reaps a spawned worker.
@@ -1399,3 +1557,7 @@ mod tests {
         assert_eq!(registry.open_runs(), 0, "every run released");
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "swarm_forwarding_tests.rs"]
+mod swarm_forwarding_tests;
