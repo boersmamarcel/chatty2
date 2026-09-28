@@ -258,8 +258,7 @@ impl ChattyApp {
                 // local roster — the one `list_agents` lists — or it is part
                 // of the default sub-agent's prompt (PL-U5).
                 let remote_agents: Vec<A2aAgentConfig> = cx
-                    .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>(
-                    )
+                    .try_global::<crate::settings::models::ExtensionsModel>()
                     .map(|m| {
                         m.all_a2a_agents()
                             .into_iter()

@@ -119,7 +119,8 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/cwd` | Show working directory | Yes | Yes |
 | `/cd [dir]` | Change per-chat working directory | Yes | Yes |
 | `/add-dir <dir>` | Add workspace directory | Yes | Yes |
-| `/agent [name] <prompt>` | Launch local sub-agent or named A2A agent | Yes | Yes |
+| `/agent [name] <prompt>` | Run an agent spec on the local roster or a named A2A agent, else a local sub-agent | Yes | Yes |
+| `/agents` | List the agents `/agent` and `invoke_agent` reach, and the spec files left out | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
@@ -819,6 +820,8 @@ cat > "$OUT/llms.txt" << EOF
 - [Rendering system](${SITE_BASE}/dev/architecture/rendering-system.html)
 - [Token tracking](${SITE_BASE}/dev/architecture/token-tracking.html)
 - [Agent memory](${SITE_BASE}/dev/architecture/agent-memory.html)
+- [Agents and specs](${SITE_BASE}/dev/architecture/agents-and-specs.html)
+- [Plugins](${SITE_BASE}/dev/architecture/plugins.html)
 
 ## Reference
 
