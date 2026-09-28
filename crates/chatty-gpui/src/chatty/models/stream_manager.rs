@@ -842,6 +842,9 @@ impl StreamManager {
             SessionEvent::TurnMessages(_)
             | SessionEvent::Delegation(_)
             | SessionEvent::PluginUsage(_) => {}
+            // Nested runs' batches (TB-1): the transcript's swarm tree
+            // renders them (TB-4).
+            SessionEvent::SwarmEvent(_) => {}
             SessionEvent::Error(error) => self.handle_chunk(conv_id, StreamChunk::Error(error), cx),
             // A cancelled turn still ends; `stop_stream` already reported a
             // user-pressed Stop, and a flag-only cancel ends as completed.

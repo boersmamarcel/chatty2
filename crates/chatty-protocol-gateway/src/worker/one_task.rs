@@ -184,13 +184,18 @@ impl WorkerConnection {
         let mapper = Arc::new(Mutex::new(
             TaskMapper::new(task_id.clone())
                 .with_capture_conversation(task.capture_conversation)
-                .with_handoff(task.handoff.clone()),
+                .with_handoff(task.handoff.clone())
+                .with_swarm_events(task.swarm_events),
         ));
 
         let sink: EventSink = {
             let mapper = mapper.clone();
             Arc::new(move |event: &SessionEvent| {
-                if let Some(frame) = lock(&mapper).map(event) {
+                let mut mapper = lock(&mapper);
+                if let Some(frame) = mapper.map(event) {
+                    let _ = frames_tx.send(frame);
+                }
+                if let Some(frame) = mapper.swarm_event(event) {
                     let _ = frames_tx.send(frame);
                 }
             })
@@ -379,6 +384,7 @@ async fn next_task(
                 capture_conversation,
                 spawn_context,
                 handoff,
+                swarm_events,
             } => {
                 return Ok(Some((
                     task_id,
@@ -386,7 +392,8 @@ async fn next_task(
                         .with_bearer(bearer)
                         .with_capture_conversation(capture_conversation)
                         .with_spawn_context(spawn_context)
-                        .with_handoff(handoff),
+                        .with_handoff(handoff)
+                        .with_swarm_events(swarm_events),
                 )));
             }
             BrokerFrame::Cancel { task_id } => {
@@ -471,7 +478,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event? {
                 CallEvent::Result(result) => return Ok(serde_json::from_value(result).unwrap()),
-                CallEvent::Progress(_) | CallEvent::InputRequired { .. } => {}
+                CallEvent::Progress(_) | CallEvent::InputRequired { .. } | CallEvent::Swarm(_) => {}
             }
         }
         panic!("call to {agent} ended without a result");
