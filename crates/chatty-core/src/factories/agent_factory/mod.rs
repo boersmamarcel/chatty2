@@ -218,6 +218,11 @@ pub struct AgentClient {
     /// tree messages waiting for it (TM-2); `None` for a worker, whose
     /// messages open its next task broker-side.
     run_inbox: Option<std::sync::Arc<dyn LazyBroker>>,
+    /// The same `invoke_agent` the model calls, for a delegation the user
+    /// asked for by name (`/agent <name> <prompt>`, AGE-744): it reaches the
+    /// same broker, so the swarm tree shows. `None` for a role that does not
+    /// delegate.
+    delegator: Option<crate::tools::invoke_agent_tool::InvokeAgentTool>,
 }
 
 impl AgentClient {
@@ -247,6 +252,12 @@ impl AgentClient {
     /// The `llm::complete` logs of this agent's plugins, by plugin name.
     pub fn plugin_usage(&self) -> &[(String, crate::services::plugin_llm::PluginUsage)] {
         &self.plugin_usage
+    }
+
+    /// This agent's `invoke_agent`, for a delegation the user names
+    /// (AGE-744); `None` for a role that does not delegate.
+    pub fn delegator(&self) -> Option<&crate::tools::invoke_agent_tool::InvokeAgentTool> {
+        self.delegator.as_ref()
     }
 
     /// The tree messages waiting for this agent, taken because its next run
@@ -1394,6 +1405,7 @@ impl AgentClient {
             invoke_agent_tool = invoke_agent_tool.with_handoff_ledger(ledger);
         }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
+        let delegator = role.delegates.then(|| invoke_agent_tool.clone());
 
         // Publish module tool (if an MCP server exposes `publish_module`)
         let publish_module_tool: Option<PublishModuleTool> = mcp_tools.as_ref().and_then(|servers| {
@@ -1577,6 +1589,7 @@ impl AgentClient {
         )
         .await?;
         agent.run_inbox = run_inbox;
+        agent.delegator = delegator;
         agent.plugin_usage = plugins
             .iter()
             .map(|plugin| (plugin.name.clone(), plugin.usage.clone()))

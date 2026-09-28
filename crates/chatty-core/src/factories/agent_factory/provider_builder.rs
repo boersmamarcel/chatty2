@@ -115,6 +115,7 @@ pub(super) async fn build_provider_agent(
         model_id: model_config.model_identifier.clone(),
         plugin_usage: Vec::new(),
         run_inbox: None,
+        delegator: None,
     })
 }
 

@@ -135,6 +135,7 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
         model_id: model_config.model_identifier.clone(),
         plugin_usage: Vec::new(),
         run_inbox: None,
+        delegator: None,
     }
 }
 

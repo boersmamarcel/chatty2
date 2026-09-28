@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use crate::chatty::services::broker_runner;
-use crate::chatty::services::lazy_gateway_broker::LazyGatewayBroker;
+use crate::chatty::services::lazy_gateway_broker::{self, LazyGatewayBroker};
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::{
     AgentConfigEvent, DiscoveredModuleEntry, DiscoveredModulesModel, GlobalAgentConfigNotifier,
@@ -416,6 +416,9 @@ pub fn refresh_runtime(cx: &mut App) {
             // virtual-agent runners to resolve one for.
             #[cfg_attr(not(unix), allow(unused_mut))]
             let mut gateway_workspace: Option<std::path::PathBuf> = None;
+            // What `LazyGatewayBroker` hands `invoke_agent`: the port, and
+            // the root's direct handle into this broker (AGE-744).
+            let mut started = None;
             let gateway_result = match registry_result {
                 Ok(registry) => {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
@@ -582,20 +585,23 @@ pub fn refresh_runtime(cx: &mut App) {
                         }
                     }
 
-                    gateway.start().await.map(|_| gateway)
+                    lazy_gateway_broker::start(&mut gateway, settings.gateway_port)
+                        .await
+                        .map(|gateway_started| {
+                            started = Some(gateway_started);
+                            gateway
+                        })
                 }
                 Err(err) => Err(err),
             };
 
-            let port = settings.gateway_port;
             let error_text = gateway_result.as_ref().err().map(|e| e.to_string());
             let _ = cx.update(|cx| {
                 apply_gateway_result(&settings, generation, gateway_result, gateway_workspace, cx);
             });
-            let _ = reply.send(match error_text {
-                None => Ok(port),
-                Some(error) => Err(error),
-            });
+            let _ = reply.send(started.ok_or_else(|| {
+                error_text.unwrap_or_else(|| "the gateway did not start".to_string())
+            }));
         }
     })
     .detach();

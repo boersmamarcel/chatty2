@@ -52,6 +52,12 @@ pub fn begin_turn<F: FnMut(SessionEvent)>(
 ) -> Result<impl Future<Output = ()> + use<F>> {
     Ok(match hosted {
         Some(remote) => {
+            // `/agent` delegates through this machine's broker (AGE-744); a
+            // hosted conversation's turns run on the server, which has none
+            // of this machine's agents.
+            if input.delegation.is_some() {
+                anyhow::bail!("`/agent` cannot delegate from a hosted conversation");
+            }
             // The server runs the stream, but the local session still has to
             // know a turn is running: it commits the user message now and
             // finalizes the reply later, so the conversation's own row

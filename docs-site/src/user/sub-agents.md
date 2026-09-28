@@ -22,6 +22,8 @@ When the workspace is a git repository, each spawned sub-agent works in its own 
 
 Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; the built-in `benford-analyst` is one), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
 
+On the desktop, `/agent` hands the task to the same local agents the assistant itself delegates to, so the delegation row — and the swarm tree below, when that agent delegates in turn — looks exactly as if the assistant had made the call. If the agent fails or stops before answering, the row ends with the error.
+
 Every local agent is a spec, whoever wrote it. The desktop lists them all on **Settings → Agents** — name, model, role, the plugins each runs with and what they may do, whether other agents may call it — along with any spec file that doesn't load and why. In the terminal, `/agents` prints the same list.
 
 ### The swarm tree (desktop)

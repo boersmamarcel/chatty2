@@ -2054,7 +2054,7 @@ const ROOT_MODEL: &str = "kit/root";
 
 /// The kit's running broker as the in-process root sees it: its direct
 /// handle, already started.
-struct StartedBroker(std::sync::Arc<dyn chatty_fabric::Transport>);
+pub(crate) struct StartedBroker(pub(crate) std::sync::Arc<dyn chatty_fabric::Transport>);
 
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for StartedBroker {
