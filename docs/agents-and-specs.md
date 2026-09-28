@@ -37,6 +37,14 @@ names (a `--team` names its own), or — when nothing is declared — `local-age
 it. A spec file that does not load is left out of the roster with a warning;
 Settings → Agents and `/agents` show it with its error.
 
+On the desktop, "the workspace" a conversation's own `list_agents`/`invoke_agent`/`/agent`
+resolve the roster from is its own working directory when it has one, else the shared
+default (`chatty_core::agent_spec::roster_workspace`) — the same value the broker itself
+resolves from when its gateway (re)builds. A conversation whose own resolved workspace
+does not match the workspace the *running* broker was actually built for gets no local
+agents rather than one it cannot reach (`roster_workspace_matches`, AGE-719): no broker
+running yet is not a disagreement, but a live one built for a different workspace is.
+
 ### `/agent` and `/agents`
 
 `/agent <name> <prompt>` resolves `<name>` the same way in both frontends

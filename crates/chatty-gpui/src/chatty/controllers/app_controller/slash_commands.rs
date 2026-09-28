@@ -5,25 +5,48 @@ use chatty_core::services::agent_command::{
 };
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 
-/// The local roster's specs, from the workspace (PL-U5): what module
-/// settings declare, else every exposed spec. A declared spec that does not
-/// load leaves it empty, so `/agent` falls through to the default sub-agent.
-fn local_roster(cx: &App) -> Vec<AgentSpec> {
-    let workspace = cx
-        .try_global::<ExecutionSettingsModel>()
-        .and_then(|settings| settings.workspace_dir.clone());
+/// The local roster's specs, from `workspace` (PL-U5): what module settings
+/// declare, else every exposed spec. A declared spec that does not load
+/// leaves it empty, so `/agent` falls through to the default sub-agent.
+///
+/// `workspace` is the same effective workspace `list_agents`/`invoke_agent`
+/// resolve for this conversation ([`workspace_for_active_conversation`]),
+/// so `/agent <name>` can never resolve a name those tools would refuse
+/// (AGE-719 — docs/agents-and-specs.md says all three read the roster the
+/// same way).
+fn local_roster(cx: &App, workspace: Option<&Path>) -> Vec<AgentSpec> {
     let declared = cx
         .try_global::<crate::settings::models::ModuleSettingsModel>()
         .map(|m| m.virtual_agents.clone())
         .unwrap_or_default();
-    chatty_core::agent_spec::load_roster(&declared, workspace.as_deref().map(std::path::Path::new))
-        .unwrap_or_else(|error| {
-            warn!(
-                error = format!("{error:#}"),
-                "The declared agent roster does not load"
-            );
-            Vec::new()
-        })
+    chatty_core::agent_spec::load_roster(&declared, workspace).unwrap_or_else(|error| {
+        warn!(
+            error = format!("{error:#}"),
+            "The declared agent roster does not load"
+        );
+        Vec::new()
+    })
+}
+
+/// The active conversation's own working directory when it has one, else
+/// the shared default (AGE-719): the same resolution `gateway_and_roster`
+/// uses to build a conversation's `local_agents`.
+fn workspace_for_active_conversation(cx: &App) -> Option<PathBuf> {
+    let default_workspace = cx
+        .try_global::<ExecutionSettingsModel>()
+        .and_then(|settings| settings.workspace_dir.clone());
+    let conv_workspace = cx.try_global::<ConversationsStore>().and_then(|store| {
+        store
+            .active_id()
+            .and_then(|id| store.get_conversation(id))
+            .and_then(|conv| conv.working_dir())
+            .cloned()
+    });
+    chatty_core::agent_spec::roster_workspace(
+        default_workspace.as_deref().map(Path::new),
+        conv_workspace.as_deref(),
+    )
+    .map(Path::to_path_buf)
 }
 
 impl ChattyApp {
@@ -266,7 +289,12 @@ impl ChattyApp {
                             .collect()
                     })
                     .unwrap_or_default();
-                match resolve_agent_command(&rest, &remote_agents, &local_roster(cx)) {
+                let workspace = workspace_for_active_conversation(cx);
+                match resolve_agent_command(
+                    &rest,
+                    &remote_agents,
+                    &local_roster(cx, workspace.as_deref()),
+                ) {
                     AgentCommandTarget::Remote { config, prompt } => {
                         self.launch_a2a_agent(config.name, prompt, cx)
                     }
