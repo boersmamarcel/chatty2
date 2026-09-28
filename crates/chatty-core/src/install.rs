@@ -1,15 +1,22 @@
 //! Extension install/uninstall service.
 //!
 //! Orchestrates downloading WASM modules from the Hive registry, writing them
-//! to the platform module directory, and updating the `ExtensionsModel`.
+//! to the configured module directory, and updating the `ExtensionsModel`.
+//!
+//! Install hardening (PL-H5a, AGE-703): a registry-supplied name and version
+//! are validated before anything touches the filesystem, the download is
+//! capped at [`hive_client::MAX_DOWNLOAD_BYTES`] while it streams, and every
+//! WASM install leaves an [`InstallRecord`] beside the module, which the
+//! module registry checks at every load.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel, InstalledExtension,
 };
 use crate::settings::models::mcp_store::McpServerConfig;
-use crate::settings::models::module_settings::default_module_dir;
+use chatty_module_registry::{INSTALL_RECORD_FILE, InstallRecord};
+use hive_client::HiveRegistryClient;
 use hive_client::models::DownloadResult;
 use thiserror::Error;
 
@@ -23,12 +30,93 @@ pub enum InstallError {
     Io(#[from] std::io::Error),
     #[error("invalid manifest: {0}")]
     BadManifest(String),
+    #[error("invalid module name {name:?}: {reason}")]
+    InvalidName { name: String, reason: &'static str },
+    #[error("invalid module version {version:?}: not semver ({reason})")]
+    InvalidVersion { version: String, reason: String },
 }
 
-/// Install a WASM module from a [`DownloadResult`] into the local module
-/// directory and register it in the extensions model.
+/// Longest module name the registry accepts.
+const MAX_NAME_LEN: usize = 50;
+
+/// Check `name` against the registry's own rule for module names,
+/// `^[a-z][a-z0-9-]{1,48}[a-z0-9]$` with no `--`, before it is joined into
+/// any path. A name that passes is a single, plain path component.
+pub fn validate_module_name(name: &str) -> Result<(), InstallError> {
+    let invalid = |reason| {
+        Err(InstallError::InvalidName {
+            name: name.to_string(),
+            reason,
+        })
+    };
+    if name.len() < 3 || name.len() > MAX_NAME_LEN {
+        return invalid("must be 3 to 50 characters");
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return invalid("only lowercase letters, digits and '-' are allowed");
+    }
+    if !name.as_bytes()[0].is_ascii_lowercase() {
+        return invalid("must start with a lowercase letter");
+    }
+    if name.ends_with('-') {
+        return invalid("must not end with '-'");
+    }
+    if name.contains("--") {
+        return invalid("must not contain '--'");
+    }
+    Ok(())
+}
+
+/// Check that `version` is semver (`1.2.3`, `1.0.0-rc.1`).
+pub fn validate_version(version: &str) -> Result<(), InstallError> {
+    semver::Version::parse(version)
+        .map(|_| ())
+        .map_err(|e| InstallError::InvalidVersion {
+            version: version.to_string(),
+            reason: e.to_string(),
+        })
+}
+
+/// Download `name@version`'s `.wasm` from the registry, the one way the
+/// desktop does it: the name and version are validated first, the body is
+/// capped at [`hive_client::MAX_DOWNLOAD_BYTES`] while it streams, then
+/// hive-client checks the hash and signature. `on_progress` gets
+/// `(bytes read, Content-Length or 0)` after each chunk.
+pub async fn download_wasm_module(
+    client: &HiveRegistryClient,
+    name: &str,
+    version: &str,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<DownloadResult, InstallError> {
+    validate_module_name(name)?;
+    validate_version(version)?;
+    let mut begun = client.begin_download(name, version).await?;
+    let total = begun.total_size;
+    let wasm = begun.read_body(|read| on_progress(read, total)).await?;
+    let download = client
+        .finalize_download(
+            wasm,
+            begun.registry_hash,
+            begun.signature,
+            begun.publisher_public_key,
+            name,
+            version,
+        )
+        .await?;
+    Ok(download)
+}
+
+/// Install a WASM module from a [`DownloadResult`] into `module_dir` (the
+/// configured `ModuleSettingsModel::module_dir`) and register it in the
+/// extensions model.
 ///
-/// Returns the `InstalledExtension` that was created.
+/// Writes `<module_dir>/<name>/{<name>.wasm, module.toml,
+/// .chatty-install.json}`. The name and version are validated before any
+/// write. Returns the `InstalledExtension` that was created.
+#[allow(clippy::too_many_arguments)]
 pub fn install_wasm_module(
     download: &DownloadResult,
     name: &str,
@@ -36,14 +124,16 @@ pub fn install_wasm_module(
     display_name: &str,
     description: &str,
     pricing_model: &str,
+    module_dir: &Path,
     extensions: &mut ExtensionsModel,
 ) -> Result<InstalledExtension, InstallError> {
+    validate_module_name(name)?;
+    validate_version(version)?;
     if extensions.is_installed(name) {
         return Err(InstallError::AlreadyInstalled(name.to_string()));
     }
 
-    let module_dir = default_module_dir();
-    let dest = PathBuf::from(&module_dir).join(name);
+    let dest = module_dir.join(name);
     std::fs::create_dir_all(&dest)?;
 
     // Write the .wasm binary
@@ -60,6 +150,14 @@ pub fn install_wasm_module(
         &download.manifest,
     );
     std::fs::write(dest.join("module.toml"), toml_content)?;
+
+    // Last, so a half-written install fails its hash check at load.
+    InstallRecord::new(
+        &download.wasm,
+        download.trust_level.clone(),
+        download.publisher_public_key.clone(),
+    )
+    .write(&dest)?;
 
     let ext = InstalledExtension {
         id: name.to_string(),
@@ -78,10 +176,11 @@ pub fn install_wasm_module(
     Ok(ext)
 }
 
-/// Install a remote module (no WASM download) — writes a `module.toml` that
-/// declares `execution_mode = "remote"` so the gateway routes calls to the
-/// hive-runner.  Removes any stale `.wasm` file left from a previous local
-/// install of the same module.
+/// Install a remote module (no WASM download) into `module_dir` — writes a
+/// `module.toml` that declares `execution_mode = "remote"` so the gateway
+/// routes calls to the hive-runner. Removes any stale `.wasm` and install
+/// record left from a previous local install of the same module.
+#[allow(clippy::too_many_arguments)]
 pub fn install_remote_module(
     name: &str,
     version: &str,
@@ -89,20 +188,24 @@ pub fn install_remote_module(
     description: &str,
     pricing_model: &str,
     version_manifest: &serde_json::Value,
+    module_dir: &Path,
     extensions: &mut ExtensionsModel,
 ) -> Result<InstalledExtension, InstallError> {
+    validate_module_name(name)?;
+    validate_version(version)?;
     if extensions.is_installed(name) {
         return Err(InstallError::AlreadyInstalled(name.to_string()));
     }
 
-    let module_dir = default_module_dir();
-    let dest = PathBuf::from(&module_dir).join(name);
+    let dest = module_dir.join(name);
     std::fs::create_dir_all(&dest)?;
 
-    // Remove any stale WASM binary left from a previous local install.
-    let wasm_path = dest.join(format!("{name}.wasm"));
-    if wasm_path.exists() {
-        std::fs::remove_file(&wasm_path)?;
+    // Remove any stale WASM binary and its record from a previous local install.
+    for stale in [format!("{name}.wasm"), INSTALL_RECORD_FILE.to_string()] {
+        let path = dest.join(stale);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
     }
 
     // Write module.toml with execution_mode = "remote" (no wasm field).
@@ -157,15 +260,21 @@ pub fn install_mcp_extension(
     Ok(ext)
 }
 
-/// Uninstall an extension by ID. Removes WASM files for module extensions.
-pub fn uninstall_extension(id: &str, extensions: &mut ExtensionsModel) -> Result<(), InstallError> {
+/// Uninstall an extension by ID. Removes a WASM module's directory under
+/// `module_dir` (only for an ID that is a valid module name).
+pub fn uninstall_extension(
+    id: &str,
+    module_dir: &Path,
+    extensions: &mut ExtensionsModel,
+) -> Result<(), InstallError> {
     // If it's a WASM module, clean up files on disk
     if let Some(ext) = extensions.find(id)
         && matches!(ext.kind, ExtensionKind::WasmModule)
     {
-        let module_dir = PathBuf::from(default_module_dir()).join(id);
-        if module_dir.exists() {
-            std::fs::remove_dir_all(&module_dir)?;
+        validate_module_name(id)?;
+        let dir = module_dir.join(id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
         }
     }
 
@@ -181,16 +290,13 @@ pub fn needs_update(ext: &InstalledExtension, latest_version: &str) -> bool {
     }
 }
 
-/// Returns the on-disk path for an installed WASM module.
-pub fn module_path(name: &str) -> PathBuf {
-    Path::new(&default_module_dir()).join(name)
-}
-
 /// Errors that can occur when changing a module's execution mode.
 #[derive(Debug, thiserror::Error)]
 pub enum SetExecutionModeError {
     #[error("Module '{0}' is not installed")]
     NotInstalled(String),
+    #[error(transparent)]
+    InvalidName(#[from] InstallError),
     #[error("Mode '{0}' is not valid; expected \"local\" or \"remote\"")]
     InvalidMode(String),
     #[error("Cannot switch to local: no WASM file found for module '{0}'")]
@@ -201,7 +307,8 @@ pub enum SetExecutionModeError {
     Toml(String),
 }
 
-/// Switch a WASM module's execution mode between `"local"` and `"remote"`.
+/// Switch the WASM module `name` under `module_dir` between `"local"` and
+/// `"remote"` execution.
 ///
 /// - `"local"` → module runs in the in-process WASM runtime. Requires a `.wasm`
 ///   file to be present in the module directory.
@@ -210,12 +317,17 @@ pub enum SetExecutionModeError {
 ///
 /// Rewrites only the `execution_mode` line of `module.toml`.  A rescan must
 /// be triggered afterwards to apply the new mode.
-pub fn set_module_execution_mode(name: &str, new_mode: &str) -> Result<(), SetExecutionModeError> {
+pub fn set_module_execution_mode(
+    name: &str,
+    new_mode: &str,
+    module_dir: &Path,
+) -> Result<(), SetExecutionModeError> {
     if new_mode != "local" && new_mode != "remote" {
         return Err(SetExecutionModeError::InvalidMode(new_mode.to_string()));
     }
+    validate_module_name(name)?;
 
-    let module_dir = PathBuf::from(default_module_dir()).join(name);
+    let module_dir = module_dir.join(name);
     if !module_dir.is_dir() {
         return Err(SetExecutionModeError::NotInstalled(name.to_string()));
     }
@@ -532,6 +644,7 @@ pub fn ensure_default_hive_mcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest as _;
 
     #[test]
     fn build_module_toml_minimal() {
@@ -603,10 +716,241 @@ mod tests {
         assert!(toml.contains("a2a = true"));
     }
 
+    // ── Install hardening (PL-H5a, AGE-703) ──────────────────────────────
+
+    use chatty_module_registry::ModuleRegistry;
+    use chatty_wasm_runtime::test_support::fixture_path;
+    use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
+    use hive_client::TrustLevel;
+
+    struct NoLlm;
+
+    impl LlmProvider for NoLlm {
+        fn complete(
+            &self,
+            _: &str,
+            _: Vec<Message>,
+            _: Option<String>,
+        ) -> Result<CompletionResponse, String> {
+            Err("no LLM in install tests".to_string())
+        }
+    }
+
+    fn download_of(wasm: Vec<u8>) -> DownloadResult {
+        DownloadResult {
+            wasm_hash: String::new(),
+            wasm,
+            trust_level: TrustLevel::Signed,
+            signature: None,
+            publisher_public_key: Some("ab".repeat(32)),
+            manifest: serde_json::json!({}),
+        }
+    }
+
+    fn install_into(
+        dir: &Path,
+        name: &str,
+        version: &str,
+    ) -> Result<InstalledExtension, InstallError> {
+        let mut extensions = ExtensionsModel::default();
+        install_wasm_module(
+            &download_of(b"\0asm".to_vec()),
+            name,
+            version,
+            name,
+            "",
+            "free",
+            dir,
+            &mut extensions,
+        )
+    }
+
+    /// Everything under `dir`, relative, sorted.
+    fn tree(dir: &Path) -> Vec<String> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                out.push(path.strip_prefix(root).unwrap().display().to_string());
+                if path.is_dir() {
+                    walk(root, &path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn install_refuses_path_escaping_names() {
+        let root = tempfile::tempdir().unwrap();
+        let modules = root.path().join("modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        let too_long = format!("a{}", "b".repeat(MAX_NAME_LEN));
+        for name in [
+            "../x",
+            "../../pwned",
+            "/abs",
+            "a/b",
+            "a--b",
+            "Upper",
+            "UPPER",
+            "a.b",
+            "ab-",
+            "1ab",
+            "ab",
+            "",
+            too_long.as_str(),
+        ] {
+            let result = install_into(&modules, name, "1.0.0");
+            assert!(
+                matches!(result, Err(InstallError::InvalidName { .. })),
+                "{name:?} was not refused as a name: {result:?}"
+            );
+        }
+        assert_eq!(
+            tree(root.path()),
+            vec!["modules".to_string()],
+            "nothing was written"
+        );
+
+        // The boundaries of the rule are accepted.
+        for name in [
+            "abc",
+            "a-b",
+            "a1-b2-c3",
+            &format!("a{}", "b".repeat(MAX_NAME_LEN - 1)),
+        ] {
+            validate_module_name(name).unwrap_or_else(|e| panic!("{name:?}: {e}"));
+        }
+    }
+
+    #[test]
+    fn install_refuses_non_semver_version() {
+        let modules = tempfile::tempdir().unwrap();
+        for version in ["1", "1.0", "v1.0.0", "latest", "../1.0.0", "1.0.0/../x", ""] {
+            let result = install_into(modules.path(), "echo-agent", version);
+            assert!(
+                matches!(result, Err(InstallError::InvalidVersion { .. })),
+                "{version:?} was not refused as a version: {result:?}"
+            );
+        }
+        assert!(tree(modules.path()).is_empty(), "nothing was written");
+        validate_version("1.0.0-rc.1+build.5").unwrap();
+    }
+
+    #[test]
+    fn install_uses_configured_module_dir() {
+        let configured = tempfile::tempdir().unwrap();
+        install_into(configured.path(), "echo-agent", "1.0.0").unwrap();
+        assert_eq!(
+            tree(configured.path()),
+            vec![
+                "echo-agent".to_string(),
+                "echo-agent/.chatty-install.json".to_string(),
+                "echo-agent/echo-agent.wasm".to_string(),
+                "echo-agent/module.toml".to_string(),
+            ]
+        );
+        let record = InstallRecord::read(&configured.path().join("echo-agent"))
+            .unwrap()
+            .expect("an install record");
+        assert_eq!(record.trust_level, TrustLevel::Signed);
+        assert_eq!(record.publisher_key_id, Some("ab".repeat(32)));
+        assert_eq!(record.sha256, hex::encode(sha2::Sha256::digest(b"\0asm")));
+
+        // Remote installs land there too, and uninstall removes from there.
+        let mut extensions = ExtensionsModel::default();
+        install_remote_module(
+            "remote-mod",
+            "1.0.0",
+            "Remote",
+            "",
+            "free",
+            &serde_json::json!({}),
+            configured.path(),
+            &mut extensions,
+        )
+        .unwrap();
+        assert!(configured.path().join("remote-mod/module.toml").is_file());
+        uninstall_extension("remote-mod", configured.path(), &mut extensions).unwrap();
+        assert!(!configured.path().join("remote-mod").exists());
+    }
+
+    #[tokio::test]
+    async fn download_capped_while_streaming() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = vec![0u8; (hive_client::MAX_DOWNLOAD_BYTES + 1) as usize];
+        Mock::given(method("GET"))
+            .and(path("/api/modules/echo-agent/1.0.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        let modules = tempfile::tempdir().unwrap();
+        let client = HiveRegistryClient::new(server.uri());
+
+        let mut read = 0;
+        let result = download_wasm_module(&client, "echo-agent", "1.0.0", |n, _| read = n).await;
+        assert!(
+            matches!(
+                result,
+                Err(InstallError::Client(
+                    hive_client::ClientError::TooLarge { .. }
+                ))
+            ),
+            "a 64 MiB + 1 byte body was not refused: {:?}",
+            result.map(|d| d.wasm.len())
+        );
+        assert!(read <= hive_client::MAX_DOWNLOAD_BYTES, "read {read} bytes");
+        assert!(tree(modules.path()).is_empty(), "nothing was written");
+    }
+
+    #[test]
+    fn tampered_module_refused_at_load() {
+        let modules = tempfile::tempdir().unwrap();
+        let wasm = std::fs::read(fixture_path("tool-args")).expect("the tool-args fixture");
+        let mut extensions = ExtensionsModel::default();
+        install_wasm_module(
+            &download_of(wasm),
+            "tool-args",
+            "1.0.0",
+            "Tool args",
+            "",
+            "free",
+            modules.path(),
+            &mut extensions,
+        )
+        .unwrap();
+        let dir = modules.path().join("tool-args");
+        let mut registry =
+            ModuleRegistry::new(std::sync::Arc::new(NoLlm), ResourceLimits::default()).unwrap();
+        registry.load(&dir).expect("the untouched install loads");
+        assert_eq!(registry.trust_level("tool-args"), Some(TrustLevel::Signed));
+        registry.unload("tool-args").unwrap();
+
+        // Flip one byte of the installed .wasm.
+        let wasm_path = dir.join("tool-args.wasm");
+        let mut bytes = std::fs::read(&wasm_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&wasm_path, bytes).unwrap();
+
+        let err = registry
+            .load(&dir)
+            .expect_err("a tampered module must not load");
+        assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
+        assert!(registry.get("tool-args").is_none());
+    }
+
     #[test]
     fn uninstall_nonexistent_is_noop() {
         let mut model = ExtensionsModel::default();
-        let result = uninstall_extension("nonexistent", &mut model);
+        let dir = tempfile::tempdir().unwrap();
+        let result = uninstall_extension("nonexistent", dir.path(), &mut model);
         assert!(result.is_ok());
     }
 

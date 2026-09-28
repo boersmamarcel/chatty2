@@ -1,4 +1,5 @@
 use chatty_core::services::lazy_broker::LazyBroker;
+use chatty_module_registry::TrustLevel;
 use chatty_protocol_gateway::ProtocolGateway;
 use gpui::Global;
 use std::sync::Arc;
@@ -29,6 +30,9 @@ pub struct DiscoveredModuleEntry {
     pub status: ModuleLoadStatus,
     /// `"local"`, `"remote"`, or `"remote_only"`.
     pub execution_mode: String,
+    /// The trust a loaded module loaded at (PL-H5a): its install record's,
+    /// or `Local` for one copied in by hand. `None` unless it loaded.
+    pub trust_level: Option<TrustLevel>,
 }
 
 pub struct DiscoveredModulesModel {

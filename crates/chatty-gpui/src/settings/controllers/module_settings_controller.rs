@@ -131,10 +131,13 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
         }
     };
 
-    let loaded = report
-        .loaded
-        .into_iter()
-        .map(|(dir, manifest)| discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded));
+    let loaded = report.loaded.into_iter().map(|(dir, manifest)| {
+        let trust_level = validation_registry.trust_level(&manifest.name);
+        DiscoveredModuleEntry {
+            trust_level,
+            ..discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded)
+        }
+    });
     let remote = report
         .remote
         .into_iter()
@@ -195,6 +198,7 @@ fn discovered_entry(
         a2a: manifest.protocols.a2a,
         status,
         execution_mode: manifest.execution_mode.to_string(),
+        trust_level: None,
     }
 }
 
@@ -214,6 +218,7 @@ fn invalid_manifest_entry(dir: &Path, status: ModuleLoadStatus) -> DiscoveredMod
         a2a: false,
         status,
         execution_mode: "local".to_string(),
+        trust_level: None,
     }
 }
 
@@ -762,6 +767,7 @@ mod module_mcp_sync_tests {
             a2a: true,
             status: ModuleLoadStatus::Loaded,
             execution_mode: "local".to_string(),
+            trust_level: None,
         }
     }
 }
@@ -786,6 +792,7 @@ mod refresh_runtime_tests {
             a2a: true,
             status: ModuleLoadStatus::Loaded,
             execution_mode: "local".to_string(),
+            trust_level: None,
         }
     }
 

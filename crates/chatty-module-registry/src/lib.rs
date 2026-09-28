@@ -28,8 +28,12 @@
 //! # }
 //! ```
 
+pub mod install_record;
 pub mod manifest;
 mod registry;
+
+pub use hive_client::TrustLevel;
+pub use install_record::{INSTALL_RECORD_FILE, InstallRecord};
 
 pub use manifest::{
     ExecutionMode, ModuleCapabilities, ModuleManifest, ModuleProtocols, ModuleResourceLimits,

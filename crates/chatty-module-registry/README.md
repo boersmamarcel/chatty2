@@ -14,12 +14,17 @@ and adds:
   modules — implemented and tested, but not called by any production code
   today; nothing hot-reloads a module yet
 - **Lifecycle** — load, unload, reload, enumerate currently loaded modules
+- **Install record** — a module chatty installed carries
+  `.chatty-install.json` (`InstallRecord`: sha256, trust level, publisher
+  key); every load re-hashes the `.wasm` against it and refuses a mismatch.
+  A module without one loads as `TrustLevel::Local`
 
 ## Public surface
 
 - [`ModuleRegistry`] — owns all loaded modules, exposes
   `scan_directory`, `load`, `unload`, `reload`, `get`, `get_mut`, `manifest`,
-  `module_names`, `len`, `is_empty`, and `watch`
+  `module_names`, `trust_level`, `len`, `is_empty`, and `watch`
+- [`InstallRecord`], [`INSTALL_RECORD_FILE`], [`TrustLevel`] (hive-client's)
 - [`ModuleManifest`] + [`ModuleCapabilities`], [`ModuleProtocols`],
   [`ModuleResourceLimits`]
 

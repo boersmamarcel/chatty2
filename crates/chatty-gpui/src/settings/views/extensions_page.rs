@@ -4,6 +4,7 @@ use crate::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::marketplace_state::MarketplaceState;
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use chatty_module_registry::TrustLevel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
@@ -23,6 +24,7 @@ pub fn extensions_page() -> SettingPage {
         .groups(vec![
             hive_account_group(),
             installed_extensions_group(),
+            local_modules_group(),
             marketplace_group(),
             add_custom_group(),
         ])
@@ -135,28 +137,36 @@ fn installed_extensions_group() -> SettingGroup {
                         // For WASM modules: look up discovered module metadata for
                         // execution_mode, wasm_file presence, and the registry's
                         // load failure, if any.
-                        let (discovered_exec_mode, has_wasm_file, load_error) = if is_wasm_module {
-                            cx.try_global::<DiscoveredModulesModel>()
-                                .and_then(|dm| {
-                                    dm.modules
-                                        .iter()
-                                        .find(|m| m.name == ext.id || m.directory_name == ext.id)
-                                        .map(|m| {
-                                            let has_wasm =
-                                                m.wasm_file != "remote" && !m.wasm_file.is_empty();
-                                            let load_error = match &m.status {
-                                                ModuleLoadStatus::Error(reason) => {
-                                                    Some(reason.clone())
-                                                }
-                                                _ => None,
-                                            };
-                                            (m.execution_mode.clone(), has_wasm, load_error)
-                                        })
-                                })
-                                .unwrap_or_default()
-                        } else {
-                            (String::new(), false, None)
-                        };
+                        let (discovered_exec_mode, has_wasm_file, load_error, trust_level) =
+                            if is_wasm_module {
+                                cx.try_global::<DiscoveredModulesModel>()
+                                    .and_then(|dm| {
+                                        dm.modules
+                                            .iter()
+                                            .find(|m| {
+                                                m.name == ext.id || m.directory_name == ext.id
+                                            })
+                                            .map(|m| {
+                                                let has_wasm = m.wasm_file != "remote"
+                                                    && !m.wasm_file.is_empty();
+                                                let load_error = match &m.status {
+                                                    ModuleLoadStatus::Error(reason) => {
+                                                        Some(reason.clone())
+                                                    }
+                                                    _ => None,
+                                                };
+                                                (
+                                                    m.execution_mode.clone(),
+                                                    has_wasm,
+                                                    load_error,
+                                                    m.trust_level.clone(),
+                                                )
+                                            })
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                (String::new(), false, None, None)
+                            };
                         let effective_exec_mode = if is_wasm_module
                             && (discovered_exec_mode.is_empty() || discovered_exec_mode == "local")
                         {
@@ -247,6 +257,9 @@ fn installed_extensions_group() -> SettingGroup {
                                                 .text_color(gpui::rgb(color))
                                                 .child(label),
                                         )
+                                    })
+                                    .when_some(trust_level, |el, trust| {
+                                        el.child(trust_badge(&trust, cx))
                                     }),
                             )
                             .child(
@@ -338,6 +351,105 @@ fn installed_extensions_group() -> SettingGroup {
                             })
                     }))
                 })
+                .into_any_element()
+        })])
+}
+
+/// The trust a loaded module has (PL-H5a): `Signed`/`Verified` from its
+/// install record, `Local` for one without a record.
+fn trust_badge(trust: &TrustLevel, cx: &App) -> Div {
+    let (label, color) = match trust {
+        TrustLevel::Local => ("Trust: local", cx.theme().muted_foreground),
+        TrustLevel::Signed => ("Trust: signed", gpui::rgb(0x16A34A).into()),
+        TrustLevel::Verified => ("Trust: verified", gpui::rgb(0x16A34A).into()),
+    };
+    div()
+        .text_xs()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(color)
+        .text_color(color)
+        .child(label)
+}
+
+// ── Local modules ──────────────────────────────────────────────────────────
+
+/// Modules in the module directory that were not installed from Hive (copied
+/// in by hand). They load as `TrustLevel::Local` (PL-H5a) and are listed
+/// here so they are visible as such, with the registry's load failure if
+/// they did not load.
+fn local_modules_group() -> SettingGroup {
+    SettingGroup::new()
+        .title("Local modules")
+        .description("Modules copied into the module directory by hand, not installed from Hive.")
+        .items(vec![SettingItem::render(|_options, _window, cx| {
+            let installed = cx.global::<ExtensionsModel>();
+            let local: Vec<_> = cx
+                .try_global::<DiscoveredModulesModel>()
+                .map(|dm| {
+                    dm.modules
+                        .iter()
+                        .filter(|m| {
+                            !installed.is_installed(&m.name)
+                                && !installed.is_installed(&m.directory_name)
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            v_flex()
+                .w_full()
+                .gap_2()
+                .when(local.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No hand-copied modules in the module directory."),
+                    )
+                })
+                .children(local.into_iter().map(|m| {
+                    let load_error = match &m.status {
+                        ModuleLoadStatus::Error(reason) => Some(reason.clone()),
+                        _ => None,
+                    };
+                    v_flex()
+                        .w_full()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(cx.theme().foreground)
+                                        .child(m.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("v{} · {}/", m.version, m.directory_name)),
+                                )
+                                .when_some(m.trust_level.clone(), |el, trust| {
+                                    el.child(trust_badge(&trust, cx))
+                                }),
+                        )
+                        .when_some(load_error, |el, reason| {
+                            el.child(
+                                div()
+                                    .pl_6()
+                                    .pb_1()
+                                    .text_xs()
+                                    .text_color(cx.theme().danger)
+                                    .child(format!("Failed to load: {reason}")),
+                            )
+                        })
+                }))
                 .into_any_element()
         })])
 }
