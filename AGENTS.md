@@ -36,7 +36,7 @@ crates/
 ├── chatty-module-registry/   # Module discovery, manifest, lifecycle
 ├── chatty-protocol-gateway/  # HTTP gateway: OpenAI / MCP / A2A protocols
 ├── chatty-fabric/            # Broker's pure state: Directory, TaskTable, EdgeLog, Transport trait,
-│                             #   EndpointBudget/RunPermit
+│                             #   EndpointBudget/RunPermit, swarm.rs (nested-run event forwarding)
 ├── chatty-module-sdk/        # SDK for `wasm32-wasip2` modules (standalone)
 ├── chatty-trace/             # Research: traces / ATIF / FeedbackFn (AGE-5, ships)
 ├── chatty-playbook/          # Research: ACE playbook (AGE-17, ships)
