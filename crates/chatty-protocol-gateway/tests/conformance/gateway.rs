@@ -8,10 +8,6 @@ use serde_json::{Value, json};
 
 use crate::harness::{Gateway, Module, record};
 
-fn chat(content: &str) -> Value {
-    json!({ "model": "m", "messages": [{ "role": "user", "content": content }] })
-}
-
 fn a2a_send(text: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -25,22 +21,26 @@ fn mcp_list() -> Value {
     json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} })
 }
 
-/// 3.10 — a protocol a module's `[protocols]` turns off is not served for
-/// it: `mcp = false` makes `/mcp/{m}` (and its `/sse`) a 404, and likewise
-/// for `openai_compat` and `a2a`. The protocols left on still answer.
+/// A `tools/call` of `tool` with `{"input": input}`.
+fn mcp_call(tool: &str, input: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": { "input": input } }
+    })
+}
+
+/// 3.10 — a plugin whose `[protocols]` turns MCP off is not served: `mcp =
+/// false` makes `/mcp/{m}` (and its `/sse`) a 404, while a plugin with it on
+/// answers. MCP is the only protocol a plugin is served on (PL-U3): neither
+/// has an OpenAI or A2A route.
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_10_disabled_protocol_is_404() {
     let gw = Gateway::start(
         vec![
-            Module::fixture("echo-agent")
-                .named("no-mcp")
-                .protocols(true, false, true),
-            Module::fixture("echo-agent")
-                .named("no-openai")
-                .protocols(false, true, true),
-            Module::fixture("echo-agent")
-                .named("no-a2a")
-                .protocols(true, true, false),
+            Module::fixture("echo").named("no-mcp").mcp(false),
+            Module::fixture("echo").named("with-mcp").mcp(true),
         ],
         vec![],
     )
@@ -50,35 +50,27 @@ async fn s3_10_disabled_protocol_is_404() {
     assert_eq!(status, StatusCode::NOT_FOUND, "/mcp/no-mcp: {body}");
     let sse = gw.http.get(gw.url("/mcp/no-mcp/sse")).send().await.unwrap();
     assert_eq!(sse.status(), StatusCode::NOT_FOUND, "/mcp/no-mcp/sse");
-    let (status, body) = gw.post("/v1/no-mcp/chat/completions", &chat("hi")).await;
-    assert_eq!(status, StatusCode::OK, "openai stays on: {body}");
+    let (status, body) = gw.post("/mcp/with-mcp", &mcp_list()).await;
+    assert_eq!(status, StatusCode::OK, "mcp on: {body}");
 
-    let (status, body) = gw.post("/v1/no-openai/chat/completions", &chat("hi")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "/v1/no-openai: {body}");
-    let routed =
-        json!({ "model": "module:no-openai", "messages": [{ "role": "user", "content": "hi" }] });
-    let (status, body) = gw.post("/v1/chat/completions", &routed).await;
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "model-routed no-openai: {body}"
-    );
-    let (status, body) = gw.post("/mcp/no-openai", &mcp_list()).await;
-    assert_eq!(status, StatusCode::OK, "mcp stays on: {body}");
-
-    let (status, body) = gw.post("/a2a/no-a2a", &a2a_send("hi")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "/a2a/no-a2a: {body}");
-    let card = gw
-        .http
-        .get(gw.url("/a2a/no-a2a/.well-known/agent.json"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(card.status(), StatusCode::NOT_FOUND, "no-a2a agent card");
+    for name in ["no-mcp", "with-mcp"] {
+        let (status, body) = gw.post(&format!("/a2a/{name}"), &a2a_send("hi")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "/a2a/{name}: {body}");
+        let card = gw
+            .http
+            .get(gw.url(&format!("/a2a/{name}/.well-known/agent.json")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(card.status(), StatusCode::NOT_FOUND, "{name} agent card");
+        let chat = json!({ "model": name, "messages": [{ "role": "user", "content": "hi" }] });
+        let (status, _) = gw.post(&format!("/v1/{name}/chat/completions"), &chat).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "/v1/{name}");
+    }
 }
 
-/// 3.11 — twenty concurrent requests to module B while module A is inside a
-/// 2 s `slow-host` call: B is not held up by A. Records B's p50/p95; B's
+/// 3.11 — twenty concurrent tool calls to plugin B while plugin A is inside
+/// a 2 s `slow-host` call: B is not held up by A. Records B's p50/p95; B's
 /// p95 must stay under 200 ms. Before PL-H4 one registry write lock
 /// serialized every call to every module (F10), so B waited out A; each
 /// module now has its own lock.
@@ -86,14 +78,14 @@ async fn s3_10_disabled_protocol_is_404() {
 async fn s3_11_slow_module_does_not_block_another() {
     const A_DELAY: Duration = Duration::from_secs(2);
     let gw = Gateway::start(
-        vec![Module::fixture("slow-host"), Module::shipped("echo-agent")],
+        vec![Module::fixture("slow-host"), Module::shipped("echo")],
         vec![FakeResponse::Delay(A_DELAY, "a done".into())],
     )
     .await;
 
     let slow = {
-        let (http, url) = (gw.http.clone(), gw.url("/v1/slow-host/chat/completions"));
-        tokio::spawn(async move { http.post(url).json(&chat("go")).send().await })
+        let (http, url) = (gw.http.clone(), gw.url("/mcp/slow-host"));
+        tokio::spawn(async move { http.post(url).json(&mcp_call("ask", "go")).send().await })
     };
     // Let A get into its guest call before B's burst starts.
     for _ in 0..100 {
@@ -102,13 +94,17 @@ async fn s3_11_slow_module_does_not_block_another() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(gw.llm.calls().len(), 1, "module A is inside its slow call");
+    assert_eq!(gw.llm.calls().len(), 1, "plugin A is inside its slow call");
 
     let burst = (0..20).map(|i| {
-        let (http, url) = (gw.http.clone(), gw.url("/v1/echo-agent/chat/completions"));
+        let (http, url) = (gw.http.clone(), gw.url("/mcp/echo"));
         async move {
             let started = Instant::now();
-            let resp = http.post(url).json(&chat(&format!("b{i}"))).send().await;
+            let resp = http
+                .post(url)
+                .json(&mcp_call("echo", &format!("b{i}")))
+                .send()
+                .await;
             let status = resp
                 .map(|r| r.status())
                 .unwrap_or_else(|e| panic!("B {i}: {e}"));
@@ -122,14 +118,14 @@ async fn s3_11_slow_module_does_not_block_another() {
     let (p50, p95) = (percentile(50), percentile(95));
     record(
         "3.11 s3_11_slow_module_does_not_block_another",
-        &format!("module B under a {A_DELAY:?} module-A call: p50 {p50:?}, p95 {p95:?}"),
+        &format!("plugin B under a {A_DELAY:?} plugin-A call: p50 {p50:?}, p95 {p95:?}"),
     );
 
-    let a = slow.await.unwrap().expect("module A answers");
+    let a = slow.await.unwrap().expect("plugin A answers");
     assert_eq!(a.status(), StatusCode::OK);
     assert!(
         p95 < Duration::from_millis(200),
-        "module B's p95 was {p95:?} (p50 {p50:?}) while module A ran a {A_DELAY:?} call"
+        "plugin B's p95 was {p95:?} (p50 {p50:?}) while plugin A ran a {A_DELAY:?} call"
     );
 }
 
@@ -186,31 +182,25 @@ async fn raw_post_status(gw: &Gateway, path: &str, body: Vec<u8>) -> u16 {
 }
 
 /// 3.12 — a 100 MiB request body is refused with a clean 413 on every
-/// protocol's POST route, and the gateway keeps serving.
+/// POST route (the MCP route a plugin is served on, and the A2A route an
+/// agent is), and the gateway keeps serving.
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_12_oversized_request_body_is_413() {
-    let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
+    let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
     // Built as bytes around one 100 MiB string: serializing it through
     // serde_json in a debug build costs seconds per route.
     let huge = "x".repeat(100 << 20);
     let wrap = |before: &str, after: &str| [before, huge.as_str(), after].concat().into_bytes();
     let bodies = [
         (
-            "/v1/echo-agent/chat/completions",
-            wrap(
-                r#"{"model":"m","messages":[{"role":"user","content":""#,
-                r#""}]}"#,
-            ),
-        ),
-        (
-            "/mcp/echo-agent",
+            "/mcp/echo",
             wrap(
                 r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"input":""#,
                 r#""}}}"#,
             ),
         ),
         (
-            "/a2a/echo-agent",
+            "/a2a/echo",
             wrap(
                 r#"{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"parts":[{"kind":"text","text":""#,
                 r#""}]}}}"#,
@@ -222,11 +212,9 @@ async fn s3_12_oversized_request_body_is_413() {
         assert_eq!(status, 413, "{path}: a 100 MiB body");
     }
 
-    let (status, body) = gw
-        .post("/v1/echo-agent/chat/completions", &chat("still here"))
-        .await;
+    let (status, body) = gw.post("/mcp/echo", &mcp_call("echo", "still here")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["choices"][0]["message"]["content"], "Echo: still here");
+    assert_eq!(body["result"]["content"][0]["text"], "still here");
 }
 
 /// 3.12 — `huge-output` returning 50 MiB is bounded: a clean error status
@@ -236,36 +224,35 @@ async fn s3_12_oversized_request_body_is_413() {
 async fn s3_12_huge_output_is_bounded() {
     let gw = Gateway::start(vec![Module::fixture("huge-output")], vec![]).await;
 
-    for (path, body) in [
-        ("/v1/huge-output/chat/completions", chat("50")),
-        ("/a2a/huge-output", a2a_send("50")),
-    ] {
-        let resp = gw.http.post(gw.url(path)).json(&body).send().await.unwrap();
-        let status = resp.status();
-        let bytes = resp.bytes().await.unwrap();
-        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned();
-        assert!(
-            bytes.len() < 1 << 20,
-            "{path}: {} bytes relayed ({status})",
-            bytes.len()
-        );
-        // A JSON-RPC route may carry the error in the body.
-        let is_error =
-            !status.is_success() || text.contains("\"error\"") || text.contains("failed");
-        assert!(
-            is_error,
-            "{path}: answered {status} without an error: {text}"
-        );
-    }
+    let path = "/mcp/huge-output";
+    let resp = gw
+        .http
+        .post(gw.url(path))
+        .json(&mcp_call("emit", "50"))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.bytes().await.unwrap();
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned();
+    assert!(
+        bytes.len() < 1 << 20,
+        "{path}: {} bytes relayed ({status})",
+        bytes.len()
+    );
+    // A JSON-RPC route may carry the error in the body.
+    let is_error = !status.is_success() || text.contains("\"error\"");
+    assert!(is_error, "{path}: answered {status} without an error: {text}");
 }
 
-/// POST a chat to echo-agent with the given `Host` and optional `Origin`.
-async fn chat_with_headers(gw: &Gateway, host: &str, origin: Option<&str>) -> StatusCode {
+/// POST an MCP `tools/list` to echo with the given `Host` and optional
+/// `Origin`.
+async fn list_with_headers(gw: &Gateway, host: &str, origin: Option<&str>) -> StatusCode {
     let mut req = gw
         .http
-        .post(gw.url("/v1/echo-agent/chat/completions"))
+        .post(gw.url("/mcp/echo"))
         .header(reqwest::header::HOST, host)
-        .json(&chat("rebind"));
+        .json(&mcp_list());
     if let Some(origin) = origin {
         req = req.header(reqwest::header::ORIGIN, origin);
     }
@@ -293,7 +280,7 @@ fn authority(gw: &Gateway) -> &str {
 /// what makes that assumption true.
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_13_non_loopback_host_or_origin_is_rejected() {
-    let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
+    let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
     let port = authority(&gw).rsplit(':').next().unwrap().to_string();
 
     let rebound_host = format!("evil.example:{port}");
@@ -304,7 +291,7 @@ async fn s3_13_non_loopback_host_or_origin_is_rejected() {
         (authority(&gw), Some(rebound_origin.as_str())),
         (authority(&gw), Some("null")),
     ] {
-        let status = chat_with_headers(&gw, host, origin).await;
+        let status = list_with_headers(&gw, host, origin).await;
         assert!(
             status == StatusCode::FORBIDDEN || status == StatusCode::MISDIRECTED_REQUEST,
             "Host {host}, Origin {origin:?}: answered {status}"
@@ -316,7 +303,7 @@ async fn s3_13_non_loopback_host_or_origin_is_rejected() {
 /// or without a loopback `Origin`.
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_13_loopback_host_is_served() {
-    let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
+    let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
     let port = authority(&gw).rsplit(':').next().unwrap().to_string();
 
     let localhost = format!("localhost:{port}");
@@ -326,17 +313,15 @@ async fn s3_13_loopback_host_is_served() {
         (localhost.as_str(), None),
         (localhost.as_str(), Some(origin.as_str())),
     ] {
-        let status = chat_with_headers(&gw, host, origin).await;
+        let status = list_with_headers(&gw, host, origin).await;
         assert_eq!(status, StatusCode::OK, "Host {host}, Origin {origin:?}");
     }
 }
 
-/// 3.14 — a participant claiming a module's name. Since ADR-0020 the name
+/// 3.14 — a participant claiming a plugin's name. Since ADR-0020 the name
 /// is not the participant's to claim: the broker names it `<spec>-<n>` and
-/// ignores the card's, so a participant whose card says `echo-agent` is
-/// served as `echo-agent-0` and the module keeps its own name on every
-/// protocol. (Were the two ever to coincide, a live participant is looked
-/// up first on the A2A routes — `docs/a2a-and-wasm-modules.md`.)
+/// ignores the card's, so a participant whose card says `echo` is served as
+/// `echo-0`, and `echo` stays the plugin, served over MCP only (PL-U3).
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_14_participant_cannot_take_a_modules_name() {
@@ -345,20 +330,20 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
         BrokerFrame, ParticipantCard, ParticipantConnection, TaskState, open_connection,
     };
 
-    let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
+    let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
     let card = ParticipantCard {
-        name: "echo-agent".into(),
-        description: "the participant, not the module".into(),
+        name: "echo".into(),
+        description: "the participant, not the plugin".into(),
         version: "0.1.0".into(),
         ..Default::default()
     };
-    let connection = open_connection(&gw.participants, "echo-agent").unwrap();
+    let connection = open_connection(&gw.participants, "echo").unwrap();
     connection.worker_end.set_nonblocking(true).unwrap();
     let stream = tokio::net::UnixStream::from_std(connection.worker_end).unwrap();
     let mut conn = ParticipantConnection::hello_over(stream, card)
         .await
         .expect("the broker welcomes the participant");
-    assert_eq!(conn.name(), "echo-agent-0", "the card's name is ignored");
+    assert_eq!(conn.name(), "echo-0", "the card's name is ignored");
     let participant = tokio::spawn(async move {
         let Some(BrokerFrame::Task { task_id, text, .. }) = conn.next_frame().await.unwrap() else {
             panic!("expected a task");
@@ -374,7 +359,7 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
 
     let client = A2aClient::new();
     let answer = client
-        .send_message(&gw.a2a_agent("echo-agent-0"), "hi")
+        .send_message(&gw.a2a_agent("echo-0"), "hi")
         .await
         .unwrap();
     assert_eq!(
@@ -383,38 +368,22 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
     );
     let participant = participant.await.unwrap();
 
-    // While the participant is connected, `echo-agent` is still the module
-    // on every protocol.
+    // While the participant is connected, `echo` is still the plugin: no
+    // agent of that name on A2A, and its tools on MCP.
     let card = gw
         .http
-        .get(gw.url("/a2a/echo-agent/.well-known/agent.json"))
+        .get(gw.url("/a2a/echo/.well-known/agent.json"))
         .send()
         .await
-        .unwrap()
-        .json::<Value>()
-        .await
         .unwrap();
-    assert_ne!(card["description"], "the participant, not the module");
-    let answer = client
-        .send_message(&gw.a2a_agent("echo-agent"), "hi")
-        .await
-        .unwrap();
-    assert_eq!(answer, "Echo: hi", "A2A still reaches the module");
-    let (status, body) = gw
-        .post("/v1/echo-agent/chat/completions", &chat("hi"))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["choices"][0]["message"]["content"], "Echo: hi",
-        "OpenAI still reaches the module"
-    );
-    let (status, body) = gw.post("/mcp/echo-agent", &mcp_list()).await;
+    assert_eq!(card.status(), StatusCode::NOT_FOUND, "no agent named `echo`");
+    let (status, body) = gw.post("/mcp/echo", &mcp_list()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
         body["result"]["tools"]
             .as_array()
             .is_some_and(|t| t.iter().any(|t| t["name"] == "echo")),
-        "MCP still reaches the module: {body}"
+        "MCP still reaches the plugin: {body}"
     );
     drop(participant);
 }

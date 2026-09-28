@@ -15,7 +15,7 @@ use crate::LlmProvider;
 use crate::bindings::chatty::plugin::types::{CompletionResponse, Message, ToolCall};
 
 /// Path of the staged `.wasm` for the fixture `name` (e.g. `"spin"`,
-/// `"echo-agent"`): `target/wasm-fixtures/<name>/<name>.wasm`. Its directory
+/// `"echo"`): `target/wasm-fixtures/<name>/<name>.wasm`. Its directory
 /// also holds the module's `module.toml`, so it loads through the registry too.
 ///
 /// # Panics

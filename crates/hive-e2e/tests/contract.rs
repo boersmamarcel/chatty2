@@ -14,14 +14,14 @@ use hive_client::{
     HiveRegistryClient, HiveSession, TokenPair, UsageCollector, UsageCollectorConfig,
 };
 use hive_e2e::{
-    SEEDED_VERSION, Stack, chat_via_gateway, flat_manifest, install_from_hive,
+    SEEDED_VERSION, Stack, send_via_gateway, flat_manifest, install_from_hive,
     local_module_registry, mint_session_token, module_dir, send, start_gateway, unique,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
 /// The fixture the seed script publishes and most rows download.
-const ECHO: &str = "echo-agent";
+const ECHO: &str = "echo";
 
 // ── 5.1 ───────────────────────────────────────────────────────────────────
 
@@ -401,8 +401,8 @@ async fn s5_02_published_manifest_sections_reach_the_installed_module() {
     let stack = Stack::from_env();
     let publisher = stack.publisher().await;
     let name = unique("caps-e2e");
-    let sections = "\n[capabilities]\ntools = [\"echo\", \"reverse\", \"count_words\"]\nchat = true\nagent = true\n\
-                    \n[protocols]\nopenai_compat = true\nmcp = true\na2a = true\n\
+    let sections = "\n[capabilities]\ntools = [\"echo\", \"reverse\", \"count_words\"]\n\
+                    \n[protocols]\nmcp = true\n\
                     \n[resources]\nmax_memory_mb = 32\nmax_execution_ms = 5000\n";
     stack
         .publish_ok(
@@ -516,7 +516,7 @@ async fn s5_03_expired_access_token_is_refreshed_and_usage_survives() {
 // ── 5.4 ───────────────────────────────────────────────────────────────────
 
 /// 5.4: a remote module chatty installed at 1.0.0 runs as 1.0.0 after 2.0.0
-/// is published. v1 is echo-agent ("Echo: …"), v2 is slow-host (the fake
+/// is published. v1 is echo ("Echo: …"), v2 is slow-host (the fake
 /// LLM's reply), so the answer says which ran. Red today: the runner always
 /// executes `latest_version` (F12) — PL-H8 (AGE-611) retires the runner's
 /// module routes; the row then moves to the hosted-plugin path (PL-S6).
@@ -554,11 +554,11 @@ async fn s5_04_remote_module_runs_the_installed_version() {
         .await;
 
     let gateway = start_gateway(Arc::clone(&client), &stack.runner).await;
-    let (status, content) = chat_via_gateway(&gateway, &name, "ping").await;
+    let (status, content) = send_via_gateway(&gateway, &name, "ping").await;
     assert_eq!(
         (status, content.as_str()),
         (StatusCode::OK, "Echo: ping"),
-        "F12 / PL-H8 (AGE-611): chatty installed {name}@1.0.0 (echo-agent), 2.0.0 (slow-host) \
+        "F12 / PL-H8 (AGE-611): chatty installed {name}@1.0.0 (echo), 2.0.0 (slow-host) \
          was published after; the runner must run 1.0.0"
     );
 }
@@ -680,16 +680,15 @@ async fn s5_07_paid_module_ledger_moves_by_the_reported_tokens_once() {
     let reply = module
         .lock()
         .await
-        .chat(chatty_wasm_runtime::ChatRequest {
-            messages: vec![chatty_wasm_runtime::Message {
-                role: chatty_wasm_runtime::Role::User,
-                content: "bill me".to_string(),
-            }],
-            conversation_id: String::new(),
+        .invoke_tool(chatty_wasm_runtime::ToolCallRequest {
+            name: "echo".to_string(),
+            arguments_json: r#"{"input":"bill me"}"#.to_string(),
+            call_id: "paid".to_string(),
+            caller: None,
         })
         .await
         .expect("the paid module runs");
-    assert_eq!(reply.content, "Echo: bill me");
+    assert_eq!(reply.content, "bill me");
 
     let settled = client
         .settle_session(&session.session_id, 30, 20)
@@ -882,7 +881,7 @@ async fn s5_10_remote_module_chat_reaches_the_runner_llm_upstream() {
         .expect("the remote install");
 
     let gateway = start_gateway(Arc::clone(&client), &stack.runner).await;
-    let (status, content) = chat_via_gateway(&gateway, &name, "hello").await;
+    let (status, content) = send_via_gateway(&gateway, &name, "hello").await;
     assert_eq!(
         (status, content.as_str()),
         (

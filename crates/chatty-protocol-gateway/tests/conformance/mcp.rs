@@ -41,16 +41,16 @@ fn call_text(body: &Value) -> &str {
 ///
 /// The gateway hands the guest the `arguments` object serialized once, which
 /// is what the WIT contract says `args` is ("JSON-encoded arguments") and
-/// what `s3_05_mcp_tool_args_receive_the_arguments_json` pins; echo-agent
+/// what `s3_05_mcp_tool_args_receive_the_arguments_json` pins; echo
 /// reads `input` out of it. (This row was red because echo-agent returned
 /// that JSON verbatim; PL-H4 fixed the module, not the gateway.)
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_05_mcp_session_echo_returns_input() {
-    let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
+    let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
 
     let init = rpc(
         &gw,
-        "echo-agent",
+        "echo",
         1,
         "initialize",
         json!({
@@ -66,13 +66,13 @@ async fn s3_05_mcp_session_echo_returns_input() {
     );
     let (status, _) = gw
         .post(
-            "/mcp/echo-agent",
+            "/mcp/echo",
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
         )
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let list = rpc(&gw, "echo-agent", 2, "tools/list", json!({})).await;
+    let list = rpc(&gw, "echo", 2, "tools/list", json!({})).await;
     let echo = list["result"]["tools"]
         .as_array()
         .and_then(|tools| tools.iter().find(|t| t["name"] == "echo"))
@@ -81,7 +81,7 @@ async fn s3_05_mcp_session_echo_returns_input() {
 
     let call = rpc(
         &gw,
-        "echo-agent",
+        "echo",
         3,
         "tools/call",
         json!({ "name": "echo", "arguments": { "input": "hi" } }),
@@ -98,7 +98,7 @@ async fn s3_05_mcp_tool_args_receive_the_arguments_json() {
     let gw = Gateway::start(
         vec![
             Module::fixture("tool-args"),
-            Module::shipped("benford-agent"),
+            Module::shipped("benford"),
         ],
         vec![],
     )
@@ -119,7 +119,7 @@ async fn s3_05_mcp_tool_args_receive_the_arguments_json() {
 
     let call = rpc(
         &gw,
-        "benford-agent",
+        "benford",
         2,
         "tools/call",
         json!({ "name": "compute_benford_distribution", "arguments": { "numbers": amounts() } }),
@@ -136,8 +136,8 @@ async fn s3_05_mcp_tool_args_receive_the_arguments_json() {
 async fn s3_06_mcp_rmcp_client_streamable_http() {
     let gw = Gateway::start(
         vec![
-            Module::shipped("echo-agent"),
-            Module::shipped("benford-agent"),
+            Module::shipped("echo"),
+            Module::shipped("benford"),
             Module::fixture("tool-args"),
         ],
         vec![],
@@ -145,9 +145,9 @@ async fn s3_06_mcp_rmcp_client_streamable_http() {
     .await;
 
     let cases = [
-        ("echo-agent", "reverse", json!({ "input": "abc" })),
+        ("echo", "reverse", json!({ "input": "abc" })),
         (
-            "benford-agent",
+            "benford",
             "compute_benford_distribution",
             json!({ "numbers": amounts() }),
         ),
@@ -195,11 +195,11 @@ async fn s3_06_mcp_rmcp_client_streamable_http() {
 /// its endpoint (before PL-H4 it sent the `endpoint` event and closed).
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_06_mcp_sse_stream_stays_open() {
-    let gw = Gateway::start(vec![Module::shipped("echo-agent")], vec![]).await;
+    let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
 
     let mut resp = gw
         .http
-        .get(gw.url("/mcp/echo-agent/sse"))
+        .get(gw.url("/mcp/echo/sse"))
         .send()
         .await
         .unwrap();

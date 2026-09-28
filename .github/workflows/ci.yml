@@ -128,7 +128,7 @@ jobs:
           # of clippy's. Bump again if the cache ever needs to be rebuilt.
           prefix-key: v1-rust
           shared-key: linux-ci
-          # `modules/benford-agent`, `crates/chatty-module-sdk` and
+          # `modules/benford`, `crates/chatty-module-sdk` and
           # `crates/hive-billing-sdk` each declare their own `[workspace]`
           # (AGE-600): they are not workspace members, so their `target/`
           # dirs live outside `.` and need their own cache entries. The
@@ -137,7 +137,7 @@ jobs:
           # `scripts/build-wasm-fixtures.sh`) and are already covered by `.`.
           workspaces: |
             .
-            modules/benford-agent
+            modules/benford
             crates/chatty-module-sdk
             crates/hive-billing-sdk
           # Deliberately no `cache-on-failure: true`: it also saves on
@@ -182,7 +182,7 @@ jobs:
         run: cargo binstall --no-confirm cargo-generate
 
       # AGE-600: the plugin path had rotted unnoticed because CI only ever
-      # built echo-agent. Generate a module from templates/module exactly the
+      # built echo. Generate a plugin from templates/module exactly the
       # way the tutorials tell an author to, then build it, so a change that
       # breaks the template is caught here instead of by the next author.
       # `modules/ci-generated` is git-ignored.
@@ -195,14 +195,14 @@ jobs:
           cargo build --manifest-path modules/ci-generated/Cargo.toml \
             --target wasm32-wasip2 --release
 
-      # benford-agent and the SDK crates are standalone (not workspace
+      # benford and the SDK crates are standalone (not workspace
       # members) so `cargo test --all-features` below never touches them;
       # both default to `wasm32-wasip2` via their own `.cargo/config.toml`,
       # which has no libtest runner, so the host target must be explicit
       # (AGE-600).
-      - name: Test benford-agent on the host target
+      - name: Test benford on the host target
         if: needs.changes.outputs.rust == 'true'
-        run: cargo test --manifest-path modules/benford-agent/Cargo.toml --target x86_64-unknown-linux-gnu
+        run: cargo test --manifest-path modules/benford/Cargo.toml --target x86_64-unknown-linux-gnu
 
       - name: Clippy chatty-module-sdk for wasm32-wasip2
         if: needs.changes.outputs.rust == 'true'
@@ -212,14 +212,11 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: cargo test --manifest-path crates/hive-billing-sdk/Cargo.toml --target x86_64-unknown-linux-gnu
 
-      # The gateway conformance suite (AGE-599) drives real third-party
-      # clients: the OpenAI Python package through `uv`, and the MCP
-      # Inspector through `npx`, which needs Node >= 22.19. Without these the
-      # tests print SKIP and pass without checking anything.
-      - name: Install uv (OpenAI Python client for the gateway conformance suite)
-        if: needs.changes.outputs.rust == 'true'
-        uses: astral-sh/setup-uv@v6
-
+      # The gateway conformance suite (AGE-599) drives a real third-party
+      # client: the MCP Inspector through `npx`, which needs Node >= 22.19.
+      # Without it the tests print SKIP and pass without checking anything.
+      # (The OpenAI Python client and its `uv` went with the OpenAI routes,
+      # PL-U3.)
       - name: Install Node 22 (MCP Inspector for the gateway conformance suite)
         if: needs.changes.outputs.rust == 'true'
         uses: actions/setup-node@v4

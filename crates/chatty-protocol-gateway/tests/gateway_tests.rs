@@ -106,61 +106,21 @@ async fn aggregated_agent_card_returns_200() {
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI endpoint tests
+// OpenAI routes: gone with 0.2.0's `chat` export (PL-U3)
 // ---------------------------------------------------------------------------
 
+/// A `chatty:plugin@0.3.0` plugin has tools and no loop, so there is nothing
+/// for an OpenAI chat completion to call: neither route exists any more.
 #[tokio::test]
-async fn openai_module_missing_returns_404() {
-    let (status, body) = post_json(
-        gateway_router(),
-        "/v1/nonexistent/chat/completions",
-        serde_json::json!({
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("nonexistent")
-    );
-}
-
-#[tokio::test]
-async fn openai_routed_invalid_model_format_returns_400() {
-    let (status, body) = post_json(
-        gateway_router(),
-        "/v1/chat/completions",
-        serde_json::json!({
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("module:")
-    );
-}
-
-#[tokio::test]
-async fn openai_routed_missing_module_returns_404() {
-    let (status, _) = post_json(
-        gateway_router(),
-        "/v1/chat/completions",
-        serde_json::json!({
-            "model": "module:nonexistent",
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+async fn openai_routes_are_gone() {
+    let request = serde_json::json!({
+        "model": "module:echo",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    for path in ["/v1/chat/completions", "/v1/echo/chat/completions"] {
+        let (status, _) = post_json(gateway_router(), path, request.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,13 +287,9 @@ async fn a2a_message_stream_missing_params_returns_error() {
 }
 
 #[tokio::test]
-async fn a2a_agent_card_includes_streaming_capability() {
-    // With an empty registry this will 404, but we can verify the
-    // aggregated card at least includes the expected shape.
+async fn aggregated_agent_card_is_marked_as_the_gateway() {
     let (status, body) = get_json(gateway_router(), "/.well-known/agent.json").await;
     assert_eq!(status, StatusCode::OK);
-    // The aggregated card itself doesn't have capabilities, but per-module
-    // cards do. We at least verify the endpoint works.
     assert_eq!(body["gateway"], true);
 }
 

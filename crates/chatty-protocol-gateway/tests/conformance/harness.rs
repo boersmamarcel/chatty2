@@ -19,32 +19,32 @@ use tokio::sync::RwLock;
 // Which modules a gateway loads
 // ---------------------------------------------------------------------------
 
-/// One module to load. The two real modules load from their shipped
+/// One module to load. The two real plugins load from their shipped
 /// `module.toml`; a fixture is staged under a manifest of its own, because
 /// the fixtures declare no `[protocols]` and would be unreachable once the
-/// gateway enforces those flags (PL-H4).
+/// gateway enforces the `mcp` flag (PL-H4).
 pub struct Module {
     fixture: &'static str,
     name: Option<&'static str>,
-    protocols: Option<[bool; 3]>,
+    mcp: Option<bool>,
 }
 
 impl Module {
-    /// `echo-agent` or `benford-agent`, exactly as shipped.
+    /// `echo` or `benford`, exactly as shipped.
     pub fn shipped(fixture: &'static str) -> Self {
         Self {
             fixture,
             name: None,
-            protocols: None,
+            mcp: None,
         }
     }
 
-    /// A PL-E1 fixture with every protocol enabled.
+    /// A PL-E1 fixture served over MCP.
     pub fn fixture(fixture: &'static str) -> Self {
         Self {
             fixture,
             name: None,
-            protocols: Some([true; 3]),
+            mcp: Some(true),
         }
     }
 
@@ -54,9 +54,9 @@ impl Module {
         self
     }
 
-    /// `[protocols]` as `openai_compat`, `mcp`, `a2a`.
-    pub fn protocols(mut self, openai_compat: bool, mcp: bool, a2a: bool) -> Self {
-        self.protocols = Some([openai_compat, mcp, a2a]);
+    /// `[protocols] mcp`, the one protocol a plugin is served on (PL-U3).
+    pub fn mcp(mut self, mcp: bool) -> Self {
+        self.mcp = Some(mcp);
         self
     }
 
@@ -68,7 +68,7 @@ impl Module {
             .parent()
             .expect("a fixture has a directory")
             .to_path_buf();
-        let (Some(protocols), name) = (self.protocols, self.name.unwrap_or(self.fixture)) else {
+        let (Some(mcp), name) = (self.mcp, self.name.unwrap_or(self.fixture)) else {
             assert!(self.name.is_none(), "a renamed module needs a manifest");
             return shipped;
         };
@@ -77,12 +77,10 @@ impl Module {
         std::fs::create_dir_all(&dir).expect("a module directory");
         let wasm_file = format!("{}.wasm", self.fixture);
         std::fs::copy(&wasm, dir.join(&wasm_file)).expect("the fixture wasm copies");
-        let [openai_compat, mcp, a2a] = protocols;
         let manifest = format!(
             "[module]\nname = \"{name}\"\nversion = \"0.1.0\"\n\
              description = \"conformance copy of {fixture}\"\nwasm = \"{wasm_file}\"\n\n\
-             [capabilities]\nchat = true\nagent = true\n\n\
-             [protocols]\nopenai_compat = {openai_compat}\nmcp = {mcp}\na2a = {a2a}\n",
+             [protocols]\nmcp = {mcp}\n",
             fixture = self.fixture,
         );
         std::fs::write(dir.join("module.toml"), manifest).expect("the manifest writes");
@@ -209,7 +207,7 @@ pub fn record(row: &str, line: &str) {
 }
 
 /// Run a client process to completion within `limit`. Its package fetch
-/// (uv, npx) is the only network a test here does.
+/// (npx) is the only network a test here does.
 pub async fn run_client(
     row: &str,
     mut command: tokio::process::Command,

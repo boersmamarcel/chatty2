@@ -1,28 +1,33 @@
-# echo-agent
+# echo
 
-Reference chatty WASM module — the canonical quickstart for module authors.
+Reference chatty plugin (`chatty:plugin@0.3.0`), the canonical quickstart for
+plugin authors.
 
-**Tutorial:** [echo-agent walkthrough](https://boersmamarcel.github.io/chatty2/dev/guides/tutorial-echo-agent.html)
+**Tutorial:** [write a plugin](https://boersmamarcel.github.io/chatty2/dev/start/tutorial-echo-agent.html)
 (mdBook) · full source in this directory.
 
-This module is both:
+This plugin is both:
 
-* **Reference implementation** — shows every SDK feature in ~130 lines.
-* **End-to-end integration test** — CI's whole-workspace `cargo test
+* **Reference implementation**: a whole plugin in ~80 lines.
+* **End-to-end integration test**: CI's whole-workspace `cargo test
   --all-features` run (after `scripts/build-wasm-fixtures.sh` builds this
-  module) includes `chatty-protocol-gateway`'s `echo_agent_e2e` suite against
-  it; there is no separate protocol-gateway-only CI job.
+  plugin) includes `chatty-protocol-gateway`'s `echo_plugin_e2e` suite
+  against it.
+
+A plugin contributes tools to an agent; it is never an agent itself and runs
+no loop of its own. An agent spec lists it under `[[plugins]]`, and the
+agent's model sees its tools as `echo__echo`, `echo__reverse` and
+`echo__count_words`.
 
 ---
 
 ## What it does
 
-| Feature | Behaviour |
-|---------|-----------|
-| **chat** | Echoes the last user message prefixed with `"Echo: "`. If the message contains `"use llm"`, calls the host LLM completion import instead. |
-| **tools** | `echo` — returns input unchanged · `reverse` — reverses characters · `count_words` — returns word count |
-| **agent card** | name `"echo-agent"`, skill `"echoing"` |
-| **logging** | Uses `chatty_module_sdk::log::*` at info/debug/warn/error levels |
+| Export | Behaviour |
+|--------|-----------|
+| **metadata** | name `"echo"`, version `0.2.0`, requests no capability (`logging`, which it uses, is always granted) |
+| **list-tools** | `echo`, `reverse`, `count_words`, each taking `{"input": string}` |
+| **invoke-tool** | `echo` returns the input unchanged · `reverse` reverses its characters · `count_words` returns the word count; an unknown tool is an `unknown-tool` error, bad arguments `invalid-arguments` |
 
 ---
 
@@ -41,23 +46,19 @@ rustup target add wasm32-wasip2
 ### Build
 
 ```sh
-cd modules/echo-agent
+cd modules/echo
 cargo build --target wasm32-wasip2 --release
 
-# Copy the WASM to the module directory so the registry can find it
-cp target/wasm32-wasip2/release/echo_agent.wasm .
+# Copy the WASM next to module.toml so the registry can find it
+cp target/wasm32-wasip2/release/echo.wasm .
 ```
-
-The resulting `echo_agent.wasm` should be under 1 MB.
 
 ### Verify
 
 ```sh
-# Check file size
-ls -lh echo_agent.wasm
-
-# Inspect the component model exports (requires wasm-tools)
-wasm-tools component wit echo_agent.wasm
+# Inspect the component's exports (requires wasm-tools): it exports
+# chatty:plugin/plugin@0.3.0 and imports only what it uses.
+wasm-tools component wit echo.wasm
 ```
 
 ---
@@ -65,12 +66,12 @@ wasm-tools component wit echo_agent.wasm
 ## Project layout
 
 ```
-modules/echo-agent/
+modules/echo/
 ├── Cargo.toml          # cdylib, standalone [workspace]
 ├── .cargo/config.toml  # sets default target to wasm32-wasip2
 ├── module.toml         # registry manifest (name, version, wasm path, …)
 ├── src/
-│   └── lib.rs          # ModuleExports implementation + export_module! macro
+│   └── lib.rs          # the Plugin implementation + export!
 └── README.md           # this file
 ```
 
@@ -84,80 +85,80 @@ The SDK exposes three layers:
 
 ```rust
 use chatty_module_sdk::{
-    AgentCard, ChatRequest, ChatResponse, Role, Skill, ToolDefinition,
+    export, Plugin, PluginMetadata, ToolCallRequest, ToolDefinition, ToolError, ToolResult,
 };
 ```
 
-These are Rust re-exports of the WIT types defined in `wit/chatty-module.wit`.
+Generated from `wit/chatty-plugin.wit`.
 
-### 2. Host imports
+### 2. Host imports, one per capability
 
 ```rust
-// Call the host-managed LLM
+// Capability `llm`: a completion on the calling agent's model
 let resp = chatty_module_sdk::llm::complete("", &messages, None)?;
 
-// Read a config value set in module.toml / registry
+// Capability `config`: a value from module.toml's [config]
 let val = chatty_module_sdk::config::get("my-key");
 
-// Structured logging (forwarded to tracing on the host)
+// Capability `logging` (always granted): forwarded to tracing on the host
 chatty_module_sdk::log::info("hello from wasm");
 ```
+
+A plugin names the capabilities it uses in
+`metadata().requested_capabilities`.
 
 ### 3. Trait + macro
 
 ```rust
-#[derive(Default)]
-pub struct MyAgent;
+pub struct MyPlugin;
 
-impl ModuleExports for MyAgent {
-    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> { ... }
-    fn invoke_tool(&self, name: String, args: String) -> Result<String, String> { ... }
-    fn list_tools(&self) -> Vec<ToolDefinition> { ... }
-    fn get_agent_card(&self) -> AgentCard { ... }
+impl Plugin for MyPlugin {
+    fn metadata() -> PluginMetadata { ... }
+    fn list_tools() -> Vec<ToolDefinition> { ... }
+    fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> { ... }
 }
 
-export_module!(MyAgent);   // wires trait → WIT guest exports
+export!(MyPlugin);   // wit-bindgen's generated export glue
 ```
 
 ---
 
-## Building your own module
+## Building your own plugin
 
 Use the cargo-generate template from the repository root:
 
 ```sh
-cargo generate --path templates/module --name my-agent
-cd my-agent
+cargo generate --path templates/module --name my-plugin
+cd my-plugin
 cargo build --target wasm32-wasip2 --release
-cp target/wasm32-wasip2/release/my_agent.wasm .
+cp target/wasm32-wasip2/release/my_plugin.wasm .
 ```
 
-Then copy the directory into your chatty modules folder and restart the
-registry.
+Then copy the directory into your chatty modules folder and list it in an
+agent spec (`[[plugins]] module = "my-plugin"`).
 
 ---
 
 ## Running the end-to-end tests
 
-After building the WASM (see [Build](#build)):
+After `scripts/build-wasm-fixtures.sh`:
 
 ```sh
 # From the workspace root
-cargo test -p chatty-protocol-gateway --test echo_agent_e2e
+cargo test -p chatty-protocol-gateway --test echo_plugin_e2e
 ```
 
-Do not add a name filter like `echo_agent`: most of `echo_agent_e2e.rs`'s
-step names don't contain that literal substring, so a filtered run silently
-covers only a couple of steps instead of the whole suite. The unfiltered
-`--test echo_agent_e2e` runs all 10 integration steps:
+The steps:
 
-1. Module registry discovers and loads echo-agent
-2. `list_tools()` returns 3 tools
-3. `invoke_tool("echo", r#"{"input":"hello"}"#)` → `"hello"`
-4. `invoke_tool("reverse", r#"{"input":"hello"}"#)` → `"olleh"`
-5. `chat(messages)` → `"Echo: …"`
-6. `agent_card()` → name + skills verified
-7. `GET /.well-known/agent.json` → echo-agent listed
-8. `POST /mcp/echo-agent` `tools/list` → JSON-RPC response with 3 tools
-9. `POST /v1/echo-agent/chat/completions` → OpenAI-format echo response
-10. `POST /a2a/echo-agent` `message/send` → A2A response
+1. The module registry discovers and loads echo
+2. `list_tools()` returns the three tools
+3. `invoke_tool(echo, {"input":"hello"})` → `"hello"`
+4. `invoke_tool(reverse, {"input":"hello"})` → `"olleh"`
+5. `metadata()` names the plugin and requests nothing
+6. `GET /.well-known/agent.json` does not list it: a plugin is not an agent
+7. `POST /mcp/echo` `tools/list` → three tools
+8. `POST /mcp/echo` `tools/call count_words` → `"3"`
+9. No OpenAI or A2A route answers for it
+
+`crates/chatty-tui/tests/plugins_headless.rs` runs it inside an agent:
+`chatty-tui --headless` with a spec listing `echo` calls `echo__reverse`.
