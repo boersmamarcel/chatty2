@@ -506,19 +506,6 @@ impl A2aClient {
         config: &A2aAgentConfig,
         prompt: &str,
     ) -> Result<BoxStream<'static, Result<A2aStreamEvent>>> {
-        self.send_message_stream_with_headers(config, prompt, &[])
-            .await
-    }
-
-    /// [`Self::send_message_stream`] with extra request headers, for a call
-    /// into this user's own broker (its caller token, AGE-628). Never for a
-    /// remote agent: the headers say something about this process.
-    pub async fn send_message_stream_with_headers(
-        &self,
-        config: &A2aAgentConfig,
-        prompt: &str,
-        extra_headers: &[(&str, &str)],
-    ) -> Result<BoxStream<'static, Result<A2aStreamEvent>>> {
         use reqwest::header;
 
         let url = config.url.trim_end_matches('/').to_string();
@@ -541,9 +528,6 @@ impl A2aClient {
         let mut req = self.http.post(&url).json(&body);
         if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
             req = req.bearer_auth(key);
-        }
-        for (name, value) in extra_headers {
-            req = req.header(*name, *value);
         }
 
         let resp = req

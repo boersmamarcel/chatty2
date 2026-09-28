@@ -172,11 +172,6 @@ pub struct InvokeAgentTool {
     /// delegation starts. `None` — the desktop, chatty-tui, any leader
     /// without a cap — means no check at all.
     spend_gate: Option<Arc<dyn SpendGate>>,
-    /// This process's caller token when a broker spawned it as a worker
-    /// ([`BROKER_CALLER_ENV`]), sent on calls to the broker's local agents so
-    /// the broker can tell a worker delegating on its own model endpoint
-    /// from any other caller (AGE-628).
-    broker_caller: Option<String>,
     /// A broker that has not necessarily started yet (BI-2, AGE-634).
     /// Consulted only when `gateway_base_url` is `None`: the production
     /// desktop/chatty-tui wiring hands this in instead of a pre-resolved
@@ -193,14 +188,6 @@ pub struct InvokeAgentTool {
     /// leader whose team names `handoffs` has one.
     handoff_ledger: Option<HandoffLedger>,
 }
-
-/// Where a broker hands a worker its caller token; the gateway's
-/// `participant::CALLER_ENV`.
-pub const BROKER_CALLER_ENV: &str = "CHATTY_BROKER_CALLER";
-
-/// The header the caller token rides in; the gateway's
-/// `participant::CALLER_HEADER`.
-pub const BROKER_CALLER_HEADER: &str = "x-chatty-broker-caller";
 
 impl InvokeAgentTool {
     pub fn new(
@@ -219,9 +206,6 @@ impl InvokeAgentTool {
             warn_outside_fleet: false,
             clarifications: None,
             spend_gate: None,
-            broker_caller: std::env::var(BROKER_CALLER_ENV)
-                .ok()
-                .filter(|token| !token.is_empty()),
             lazy_broker: None,
             transport: None,
             handoff_ledger: None,
@@ -462,7 +446,7 @@ impl Tool for InvokeAgentTool {
                 },
             });
             return self
-                .call_streaming(config, &prompt, args.include_trace, &[])
+                .call_streaming(config, &prompt, args.include_trace)
                 .await;
         }
 
@@ -495,12 +479,6 @@ impl Tool for InvokeAgentTool {
             };
 
             info!(agent = %local, "Delegating to a local worker through the broker");
-            let caller: Vec<(&str, &str)> = self
-                .broker_caller
-                .as_deref()
-                .map(|token| (BROKER_CALLER_HEADER, token))
-                .into_iter()
-                .collect();
             let config = A2aAgentConfig {
                 name: local.to_string(),
                 url: format!("{}/a2a/{}", base_url, local),
@@ -514,7 +492,7 @@ impl Tool for InvokeAgentTool {
                 source: ToolSource::Local,
             });
             return self
-                .call_streaming(&config, &prompt, args.include_trace, &caller)
+                .call_streaming(&config, &prompt, args.include_trace)
                 .await;
         }
 
@@ -553,7 +531,7 @@ impl Tool for InvokeAgentTool {
                 },
             });
             return self
-                .call_streaming(&config, &prompt, args.include_trace, &[])
+                .call_streaming(&config, &prompt, args.include_trace)
                 .await;
         }
 
@@ -585,13 +563,12 @@ impl InvokeAgentTool {
         config: &A2aAgentConfig,
         prompt: &str,
         include_trace: bool,
-        extra_headers: &[(&str, &str)],
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         use futures::StreamExt;
 
         let mut stream = self
             .client
-            .send_message_stream_with_headers(config, prompt, extra_headers)
+            .send_message_stream(config, prompt)
             .await
             .map_err(|e| {
                 let err_text = format!("⚠️ Failed to invoke agent '{}': {}", config.name, e);
