@@ -94,7 +94,7 @@ impl Broker {
     /// The worker's end of a connection this broker made for a node
     /// admitted as `spec`, and the name it was given.
     fn connect(&self, spec: &str) -> (UnixStream, String) {
-        let connection = open_connection(&self.participants, spec).expect("a connection");
+        let connection = open_connection(&self.participants, spec, None).expect("a connection");
         connection.worker_end.set_nonblocking(true).unwrap();
         (
             UnixStream::from_std(connection.worker_end).unwrap(),

@@ -131,6 +131,9 @@ impl Node {
 pub enum DirectoryError {
     #[error("unknown owner {0}")]
     UnknownOwner(NodeId),
+    /// A spawn named a caller no node was admitted under.
+    #[error("no node is named {0}")]
+    UnknownOwnerName(String),
     #[error("owner {owner} works for conversation {owner_scope}, not {requested}")]
     ScopeMismatch {
         owner: NodeId,
