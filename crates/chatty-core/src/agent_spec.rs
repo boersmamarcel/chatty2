@@ -1181,12 +1181,7 @@ cap_usd = 2.0
 
         // `invoke_agent` reaches it: `load_roster` (what a real task
         // dispatch loads the spec from) resolves the same spec by name.
-        let loaded = load_roster_from(
-            &["per-chat-agent".to_string()],
-            resolved,
-            None,
-        )
-        .unwrap();
+        let loaded = load_roster_from(&["per-chat-agent".to_string()], resolved, None).unwrap();
         assert_eq!(names(&loaded), ["per-chat-agent"]);
     }
 

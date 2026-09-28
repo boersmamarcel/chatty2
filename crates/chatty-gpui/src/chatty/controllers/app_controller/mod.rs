@@ -72,8 +72,11 @@ fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<St
     let discovered = cx.try_global::<crate::settings::models::DiscoveredModulesModel>();
     let broker_is_live = discovered.is_some_and(|d| d.gateway.is_some());
     let broker_workspace = discovered.and_then(|d| d.gateway_workspace.as_deref());
-    if !chatty_core::agent_spec::roster_workspace_matches(workspace, broker_workspace, broker_is_live)
-    {
+    if !chatty_core::agent_spec::roster_workspace_matches(
+        workspace,
+        broker_workspace,
+        broker_is_live,
+    ) {
         error!(
             conversation_workspace = ?workspace,
             broker_workspace = ?broker_workspace,
