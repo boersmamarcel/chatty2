@@ -11,13 +11,15 @@
 //!
 //! The pieces:
 //!
-//! * [`budget`] — how many workers may hold one model endpoint at a time.
 //! * [`protocol`] — the frames on the socket. Newline-delimited JSON, not
 //!   A2A: A2A is the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go,
 //!   and the way back down to a task parked on a question (AGE-306).
 //! * [`calls`] — the calls a worker makes over its connection, and the
-//!   root's direct handle, run as the node that made them (BI-4).
+//!   root's direct handle, run as the node that made them (BI-4). A
+//!   caller's endpoint permit (`chatty_fabric::RunPermit`) is released while
+//!   its calls are outstanding and re-acquired before the last result is
+//!   delivered (BI-6).
 //! * [`spawn_context`] — where a spawned worker starts: derived from, and
 //!   clamped to, the calling node's own context (BI-5).
 //! * [`listener`] — broker-made connections, the rule that a closed one
@@ -29,19 +31,17 @@
 //! * [`runner`] — spawning a chatty child and exposing it as a participant
 //!   (ADR-0011 C2).
 
-mod budget;
 mod calls;
 mod protocol;
 mod registry;
 pub mod spawn_context;
 mod virtual_agent;
 
-pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
 pub use calls::{BrokerCalls, Caller, DirectTransport};
 pub use protocol::{
-    BrokerFrame, CALLER_ENV, CALLER_HEADER, CallStamp, DelegatedTask, FrameError, InputAnswer,
-    InputQuestion, InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame,
-    ParticipantSkill, TaskBearer, TaskInput, TaskState, decode_frame, encode_frame,
+    BrokerFrame, CALLER_HEADER, CallStamp, DelegatedTask, FrameError, InputAnswer, InputQuestion,
+    InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame, ParticipantSkill,
+    TaskBearer, TaskInput, TaskState, decode_frame, encode_frame,
 };
 pub use registry::{
     AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, RunGuard,

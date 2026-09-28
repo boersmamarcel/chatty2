@@ -21,9 +21,10 @@ use std::sync::Arc;
 use chatty_core::services::virtual_agents::VirtualAgentSpec;
 use chatty_core::services::worker_tree;
 use chatty_core::tools::worker_executable;
+use chatty_fabric::EndpointBudget;
 use chatty_protocol_gateway::participant::{
-    EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
-    WorkspaceFactory, WorkspaceRequest,
+    LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace, WorkspaceFactory,
+    WorkspaceRequest,
 };
 use tracing::{info, warn};
 

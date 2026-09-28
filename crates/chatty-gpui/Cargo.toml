@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 chatty-core = { path = "../chatty-core", features = ["gpui-globals", "all-tools"] }
+chatty-fabric = { path = "../chatty-fabric" }
 chatty-module-registry = { path = "../chatty-module-registry" }
 chatty-protocol-gateway = { path = "../chatty-protocol-gateway" }
 chatty-terminal = { path = "../chatty-terminal" }
