@@ -64,7 +64,9 @@ async fn s3_10_disabled_protocol_is_404() {
             .unwrap();
         assert_eq!(card.status(), StatusCode::NOT_FOUND, "{name} agent card");
         let chat = json!({ "model": name, "messages": [{ "role": "user", "content": "hi" }] });
-        let (status, _) = gw.post(&format!("/v1/{name}/chat/completions"), &chat).await;
+        let (status, _) = gw
+            .post(&format!("/v1/{name}/chat/completions"), &chat)
+            .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "/v1/{name}");
     }
 }
@@ -242,7 +244,10 @@ async fn s3_12_huge_output_is_bounded() {
     );
     // A JSON-RPC route may carry the error in the body.
     let is_error = !status.is_success() || text.contains("\"error\"");
-    assert!(is_error, "{path}: answered {status} without an error: {text}");
+    assert!(
+        is_error,
+        "{path}: answered {status} without an error: {text}"
+    );
 }
 
 /// POST an MCP `tools/list` to echo with the given `Host` and optional
@@ -376,7 +381,11 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
         .send()
         .await
         .unwrap();
-    assert_eq!(card.status(), StatusCode::NOT_FOUND, "no agent named `echo`");
+    assert_eq!(
+        card.status(),
+        StatusCode::NOT_FOUND,
+        "no agent named `echo`"
+    );
     let (status, body) = gw.post("/mcp/echo", &mcp_list()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(

@@ -29,7 +29,11 @@ impl Plugin for Echo {
 
     fn list_tools() -> Vec<ToolDefinition> {
         vec![
-            tool("echo", "Returns the input string unchanged.", "String to echo"),
+            tool(
+                "echo",
+                "Returns the input string unchanged.",
+                "String to echo",
+            ),
             tool(
                 "reverse",
                 "Returns the input string with characters in reverse order.",
@@ -52,7 +56,9 @@ impl Plugin for Echo {
             "count_words" => |input| input.split_whitespace().count().to_string(),
             other => return Err(ToolError::unknown_tool(other)),
         };
-        Ok(ToolResult::text(run(&input_argument(&call.arguments_json)?)))
+        Ok(ToolResult::text(run(&input_argument(
+            &call.arguments_json,
+        )?)))
     }
 }
 

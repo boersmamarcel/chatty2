@@ -434,7 +434,10 @@ impl WasmModule {
 /// naming the world it does target (PL-D1: no older world is adapted).
 fn check_world(engine: &Engine, component: &Component) -> Result<()> {
     let ty = component.component_type();
-    let exports: Vec<String> = ty.exports(engine).map(|(name, _)| name.to_string()).collect();
+    let exports: Vec<String> = ty
+        .exports(engine)
+        .map(|(name, _)| name.to_string())
+        .collect();
     if exports.iter().any(|name| name == crate::PLUGIN_EXPORT) {
         return Ok(());
     }

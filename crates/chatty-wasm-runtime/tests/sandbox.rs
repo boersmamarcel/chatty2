@@ -78,7 +78,11 @@ fn call_error(err: &anyhow::Error) -> &CallError {
 async fn sandbox_1_1_good_fixtures_all_three_exports() {
     // echo: tools are echo/reverse/count_words; it requests nothing.
     {
-        let mut m = load("echo", ModuleManifest::new("echo"), ResourceLimits::default());
+        let mut m = load(
+            "echo",
+            ModuleManifest::new("echo"),
+            ResourceLimits::default(),
+        );
         let metadata = m.metadata().expect("metadata");
         assert_eq!(metadata.name, "echo");
         assert!(metadata.requested_capabilities.is_empty());
@@ -89,17 +93,28 @@ async fn sandbox_1_1_good_fixtures_all_three_exports() {
         assert!(m.last_invocation_metrics().is_some());
         // The guest's own error keeps its kind.
         let err = m.run("nope", "x").await.expect_err("no such tool");
-        let failure = err.downcast_ref::<ToolFailure>().expect("a guest tool error");
+        let failure = err
+            .downcast_ref::<ToolFailure>()
+            .expect("a guest tool error");
         assert_eq!(failure.kind, ToolErrorKind::UnknownTool);
         assert_eq!(format!("{failure}"), "unknown-tool: unknown tool: nope");
     }
 
     // benford: the two audit tools, deterministic, no host calls.
     {
-        let mut m = load("benford", ModuleManifest::new("benford"), ResourceLimits::default());
+        let mut m = load(
+            "benford",
+            ModuleManifest::new("benford"),
+            ResourceLimits::default(),
+        );
         let metadata = m.metadata().expect("metadata");
         assert_eq!(metadata.name, "benford");
-        let names: Vec<String> = m.list_tools().expect("list_tools").into_iter().map(|t| t.name).collect();
+        let names: Vec<String> = m
+            .list_tools()
+            .expect("list_tools")
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         assert_eq!(names, ["compute_benford_distribution", "chi_square_test"]);
         let out = m
             .invoke_tool(ToolCallRequest {
@@ -111,22 +126,47 @@ async fn sandbox_1_1_good_fixtures_all_three_exports() {
             })
             .await
             .expect("chi_square_test");
-        assert!(out.content.contains(r#""risk_level":"HIGH""#), "{}", out.content);
+        assert!(
+            out.content.contains(r#""risk_level":"HIGH""#),
+            "{}",
+            out.content
+        );
     }
 
     // tool-args: invoke_tool returns the raw arguments.
     {
-        let mut m = load("tool-args", ModuleManifest::new("tool-args"), ResourceLimits::default());
-        let out = m.invoke_tool(call("echo_args", "x")).await.expect("invoke_tool");
+        let mut m = load(
+            "tool-args",
+            ModuleManifest::new("tool-args"),
+            ResourceLimits::default(),
+        );
+        let out = m
+            .invoke_tool(call("echo_args", "x"))
+            .await
+            .expect("invoke_tool");
         assert_eq!(out.content, r#"{"input":"x"}"#);
         assert!(m.last_invocation_metrics().is_some());
     }
 
     // stateful: the tool counts calls in a static across invocations.
     {
-        let mut m = load("stateful", ModuleManifest::new("stateful"), ResourceLimits::default());
-        let first: u64 = m.run("count", "x").await.expect("count").parse().expect("numeric");
-        let second: u64 = m.run("count", "x").await.expect("count").parse().expect("numeric");
+        let mut m = load(
+            "stateful",
+            ModuleManifest::new("stateful"),
+            ResourceLimits::default(),
+        );
+        let first: u64 = m
+            .run("count", "x")
+            .await
+            .expect("count")
+            .parse()
+            .expect("numeric");
+        let second: u64 = m
+            .run("count", "x")
+            .await
+            .expect("count")
+            .parse()
+            .expect("numeric");
         assert_eq!(second, first + 1, "stateful must count across calls");
     }
 
@@ -134,7 +174,10 @@ async fn sandbox_1_1_good_fixtures_all_three_exports() {
     {
         let manifest = ModuleManifest::new("config-reader").with_config("greeting", "hi");
         let mut m = load("config-reader", manifest, ResourceLimits::default());
-        assert_eq!(m.run("get", "greeting").await.expect("get"), r#"Some("hi")"#);
+        assert_eq!(
+            m.run("get", "greeting").await.expect("get"),
+            r#"Some("hi")"#
+        );
     }
 
     // file-reader: returns the byte length of `file::read_bytes(<input>)`.
@@ -149,13 +192,21 @@ async fn sandbox_1_1_good_fixtures_all_three_exports() {
     // log-flood: logs N lines and reports the count; keep N small so the
     // test stays fast (the flood-volume behaviour is row 1.11's concern).
     {
-        let mut m = load("log-flood", ModuleManifest::new("log-flood"), ResourceLimits::default());
+        let mut m = load(
+            "log-flood",
+            ModuleManifest::new("log-flood"),
+            ResourceLimits::default(),
+        );
         assert_eq!(m.run("flood", "5").await.expect("flood"), "logged 5 lines");
     }
 
     // fuel-meter: burns N loop iterations and reports fuel consumed.
     {
-        let mut m = load("fuel-meter", ModuleManifest::new("fuel-meter"), ResourceLimits::default());
+        let mut m = load(
+            "fuel-meter",
+            ModuleManifest::new("fuel-meter"),
+            ResourceLimits::default(),
+        );
         let out = m.run("burn", "1000").await.expect("burn");
         assert!(out.starts_with("burned 1000 iterations"));
         let metrics = m.last_invocation_metrics().expect("metrics populated");
@@ -251,7 +302,7 @@ async fn cpu_bound_tool_hits_wall_clock_not_fuel() {
     };
     let mut m = load("spin", ModuleManifest::new("spin"), limits);
     let start = Instant::now();
-    let result = m.chat(user_req("x")).await;
+    let result = m.run("spin", "x").await;
     let elapsed = start.elapsed();
 
     let err = result.expect_err("a pure spin must still be stopped by the wall clock");
@@ -743,7 +794,9 @@ async fn sandbox_1_10_billing_with_and_without_provider() {
     )
     .expect("loading without a billing provider must succeed");
     let err = without.run("settle", "3 4").await.expect_err("no provider");
-    let failure = err.downcast_ref::<ToolFailure>().expect("a guest tool error");
+    let failure = err
+        .downcast_ref::<ToolFailure>()
+        .expect("a guest tool error");
     assert_eq!(failure.kind, ToolErrorKind::Denied, "{failure}");
 }
 
@@ -757,7 +810,11 @@ async fn sandbox_1_10_billing_with_and_without_provider() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_11_log_flood_is_not_queued_on_the_host() {
-    let mut m = load("log-flood", ModuleManifest::new("log-flood"), ResourceLimits::default());
+    let mut m = load(
+        "log-flood",
+        ModuleManifest::new("log-flood"),
+        ResourceLimits::default(),
+    );
     const N: usize = 20_000;
     let resp = m.run("flood", &N.to_string()).await.expect("log-flood");
     assert_eq!(resp, format!("logged {N} lines"));
@@ -781,7 +838,10 @@ async fn sandbox_1_12_bad_components_fail_to_load_with_a_named_cause() {
         Arc::new(FakeLlm::default()),
         ResourceLimits::default(),
     );
-    let message = format!("{:#}", wit01.err().expect("a 0.1.0 component must fail to load"));
+    let message = format!(
+        "{:#}",
+        wit01.err().expect("a 0.1.0 component must fail to load")
+    );
     assert_eq!(
         message,
         "module targets chatty:module@0.1.0; this chatty supports chatty:plugin@0.3.0 \
@@ -835,7 +895,10 @@ async fn sandbox_1_12_wit_0_2_module_is_refused_with_the_rebuild_message() {
         Arc::new(FakeLlm::default()),
         ResourceLimits::default(),
     );
-    let message = format!("{:#}", wit02.err().expect("a 0.2.0 component must fail to load"));
+    let message = format!(
+        "{:#}",
+        wit02.err().expect("a 0.2.0 component must fail to load")
+    );
     assert_eq!(
         message,
         "module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.3.0 \
@@ -900,7 +963,11 @@ async fn sandbox_1_14_wasi_surface_grants_nothing_by_default() {
     // relying on ambient host state they never declared. This test is a
     // placeholder pinning that expectation until a `wasi-probe` fixture (see
     // the AGE-596 comment) can assert it end to end.
-    let mut m = load("echo", ModuleManifest::new("echo"), ResourceLimits::default());
+    let mut m = load(
+        "echo",
+        ModuleManifest::new("echo"),
+        ResourceLimits::default(),
+    );
     let resp = m.run("echo", "hello").await.expect("echo");
     assert_eq!(
         resp, "hello",

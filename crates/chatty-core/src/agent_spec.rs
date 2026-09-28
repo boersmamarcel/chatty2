@@ -60,7 +60,10 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 
 /// The specs compiled into the binary: `(name, spec.toml)`.
 pub const PRESETS: &[(&str, &str)] = &[
-    ("benford-analyst", include_str!("../agents/benford-analyst.toml")),
+    (
+        "benford-analyst",
+        include_str!("../agents/benford-analyst.toml"),
+    ),
     (
         "coder-reviewer-leader",
         include_str!("../agents/coder-reviewer-leader.toml"),

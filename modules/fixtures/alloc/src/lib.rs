@@ -20,7 +20,8 @@ impl Plugin for Fixture {
     }
     fn list_tools() -> Vec<ToolDefinition> {
         let (name, description) = ("alloc".into(), "Allocates N MiB.".into());
-        let parameters_schema = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
+        let parameters_schema =
+            r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
         vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
@@ -28,8 +29,10 @@ impl Plugin for Fixture {
             return Err(ToolError::unknown_tool(&call.name));
         }
         let input = input(&call)?;
-        let mib: usize =
-            input.trim().parse().map_err(|e| ToolError::invalid_arguments(format!("bad MiB: {e}")))?;
+        let mib: usize = input
+            .trim()
+            .parse()
+            .map_err(|e| ToolError::invalid_arguments(format!("bad MiB: {e}")))?;
         let mut v: Vec<u8> = Vec::new();
         for _ in 0..mib {
             v.extend(std::iter::repeat_n(1u8, 1 << 20));

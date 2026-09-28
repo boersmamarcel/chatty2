@@ -116,14 +116,9 @@ async fn main() {
         "# S7 concurrency: {REQUESTS_PER_CLIENT} requests/client, MCP tools/call (no LLM call)"
     );
     for &clients in &[1usize, 8, 32] {
-        run_cell(
-            "one module (echo)",
-            base.clone(),
-            clients,
-            &["echo"],
-        )
-        .await
-        .report();
+        run_cell("one module (echo)", base.clone(), clients, &["echo"])
+            .await
+            .report();
     }
     for &clients in &[1usize, 8, 32] {
         run_cell(

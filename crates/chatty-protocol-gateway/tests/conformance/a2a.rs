@@ -39,7 +39,9 @@ async fn s3_07_a2a_message_send_all_parts_reach_the_agent() {
         let Some(BrokerFrame::Task { task_id, text, .. }) = conn.next_frame().await.unwrap() else {
             panic!("expected a task");
         };
-        conn.artifact(&task_id, "ok".to_string(), true).await.unwrap();
+        conn.artifact(&task_id, "ok".to_string(), true)
+            .await
+            .unwrap();
         conn.finish(&task_id, TaskState::Completed, None, None)
             .await
             .unwrap();
@@ -71,6 +73,9 @@ async fn s3_07_a2a_message_send_all_parts_reach_the_agent() {
 
     let (_conn, seen) = participant.await.unwrap();
     for part in ["part one", "part two"] {
-        assert!(seen.contains(part), "`{part}` did not reach the agent: {seen:?}");
+        assert!(
+            seen.contains(part),
+            "`{part}` did not reach the agent: {seen:?}"
+        );
     }
 }

@@ -178,7 +178,10 @@ async fn step_02_echo_is_discovered_and_loaded() {
         report.loaded_names().contains(&"echo"),
         "echo not discovered; found: {report:?}"
     );
-    assert!(registry.get("echo").is_some(), "echo not in registry after scan");
+    assert!(
+        registry.get("echo").is_some(),
+        "echo not in registry after scan"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -263,8 +266,13 @@ async fn step_09_well_known_agent_json_does_not_list_the_plugin() {
     let router = gateway_router_with_echo(&module_dir);
     let (status, body) = get_json(router, "/.well-known/agent.json").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let agents = body["agents"].as_array().expect("agents should be an array");
-    assert!(agents.is_empty(), "a plugin must not appear as an agent: {body}");
+    let agents = body["agents"]
+        .as_array()
+        .expect("agents should be an array");
+    assert!(
+        agents.is_empty(),
+        "a plugin must not appear as an agent: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

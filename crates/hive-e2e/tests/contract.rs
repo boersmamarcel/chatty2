@@ -14,8 +14,8 @@ use hive_client::{
     HiveRegistryClient, HiveSession, TokenPair, UsageCollector, UsageCollectorConfig,
 };
 use hive_e2e::{
-    SEEDED_VERSION, Stack, send_via_gateway, flat_manifest, install_from_hive,
-    local_module_registry, mint_session_token, module_dir, send, start_gateway, unique,
+    SEEDED_VERSION, Stack, flat_manifest, install_from_hive, local_module_registry,
+    mint_session_token, module_dir, send, send_via_gateway, start_gateway, unique,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};

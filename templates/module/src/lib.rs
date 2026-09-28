@@ -35,11 +35,13 @@ impl Plugin for MyPlugin {
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
         match call.name.as_str() {
             "greet" => {
-                let args: serde_json::Value = serde_json::from_str(&call.arguments_json)
-                    .map_err(|e| ToolError::invalid_arguments(format!("arguments are not JSON: {e}")))?;
-                let name = args["name"]
-                    .as_str()
-                    .ok_or_else(|| ToolError::invalid_arguments("missing string argument `name`"))?;
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments_json).map_err(|e| {
+                        ToolError::invalid_arguments(format!("arguments are not JSON: {e}"))
+                    })?;
+                let name = args["name"].as_str().ok_or_else(|| {
+                    ToolError::invalid_arguments("missing string argument `name`")
+                })?;
                 Ok(ToolResult::text(format!("Hello, {name}!")))
             }
             other => Err(ToolError::unknown_tool(other)),

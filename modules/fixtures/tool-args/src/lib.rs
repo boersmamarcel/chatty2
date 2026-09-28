@@ -6,12 +6,20 @@ struct Fixture;
 
 impl Plugin for Fixture {
     fn metadata() -> PluginMetadata {
-        let (name, version, description) = ("tool-args".into(), "0.1.0".into(), "Test fixture.".into());
-        PluginMetadata { name, version, description, requested_capabilities: vec![], config_keys: vec![] }
+        let (name, version, description) =
+            ("tool-args".into(), "0.1.0".into(), "Test fixture.".into());
+        PluginMetadata {
+            name,
+            version,
+            description,
+            requested_capabilities: vec![],
+            config_keys: vec![],
+        }
     }
     fn list_tools() -> Vec<ToolDefinition> {
         let (name, description) = ("echo_args".into(), "Returns its raw arguments.".into());
-        let parameters_schema = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
+        let parameters_schema =
+            r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
         vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {

@@ -1,6 +1,8 @@
 //! Fixture `slow-host`: the `ask` tool calls the host's `llm::complete` with `input`, so a slow
 //! provider stalls it in host time.
-use chatty_module_sdk::{export, Capability, Message, Role, Plugin, PluginMetadata, ToolCallRequest};
+use chatty_module_sdk::{
+    export, Capability, Message, Plugin, PluginMetadata, Role, ToolCallRequest,
+};
 use chatty_module_sdk::{ToolDefinition, ToolError, ToolResult};
 
 struct Fixture;
@@ -14,14 +16,16 @@ fn input(call: &ToolCallRequest) -> Result<String, ToolError> {
 
 impl Plugin for Fixture {
     fn metadata() -> PluginMetadata {
-        let (name, version, description) = ("slow-host".into(), "0.1.0".into(), "Test fixture.".into());
+        let (name, version, description) =
+            ("slow-host".into(), "0.1.0".into(), "Test fixture.".into());
         let requested_capabilities = vec![Capability::Llm];
         let config_keys = vec![];
         PluginMetadata { name, version, description, requested_capabilities, config_keys }
     }
     fn list_tools() -> Vec<ToolDefinition> {
         let (name, description) = ("ask".into(), "Asks the host model; returns its reply.".into());
-        let parameters_schema = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
+        let parameters_schema =
+            r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
         vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
@@ -30,7 +34,8 @@ impl Plugin for Fixture {
         }
         let input = input(&call)?;
         let messages = [Message::new(Role::User, input)];
-        let reply = chatty_module_sdk::llm::complete("", &messages, None).map_err(ToolError::failed)?;
+        let reply =
+            chatty_module_sdk::llm::complete("", &messages, None).map_err(ToolError::failed)?;
         Ok(ToolResult { content: reply.content, usage: reply.usage })
     }
 }

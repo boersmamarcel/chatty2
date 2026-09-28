@@ -19,8 +19,8 @@ use chatty_module_registry::ModuleRegistry;
 use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 
 use crate::handlers::a2a;
-use crate::handlers::mcp::{self, SseSessions};
 use crate::handlers::index;
+use crate::handlers::mcp::{self, SseSessions};
 use crate::participant::{BrokerCalls, DirectTransport, ParticipantRegistry, VirtualAgent};
 use chatty_fabric::{EdgeLog, Transport};
 

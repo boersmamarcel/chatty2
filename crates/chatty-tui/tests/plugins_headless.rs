@@ -102,10 +102,7 @@ fn headless_spec_calls_the_echo_plugin() {
     let daemon = FakeDaemon::scripted(Script::new().route(
         MODEL,
         [
-            Reply::tool_call(
-                "echo__reverse",
-                serde_json::json!({ "input": "hello" }),
-            ),
+            Reply::tool_call("echo__reverse", serde_json::json!({ "input": "hello" })),
             Reply::text("The reversed string is olleh."),
         ],
     ));
@@ -145,10 +142,7 @@ fn headless_spec_calls_the_echo_plugin() {
         .iter()
         .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
         .collect();
-    assert!(
-        tools.contains(&"echo__reverse".to_string()),
-        "{tools:?}"
-    );
+    assert!(tools.contains(&"echo__reverse".to_string()), "{tools:?}");
     assert!(
         String::from_utf8_lossy(&requests[1].body).contains("olleh"),
         "the plugin's result reaches the model"
@@ -247,7 +241,10 @@ fn benford_analyst_preset_gives_the_chi_square_verdict() {
     let distribution = tool_results(&requests[1].json());
     assert_eq!(distribution.len(), 1, "{distribution:?}");
     assert_eq!(distribution[0]["total_analyzed"], 9);
-    assert_eq!(distribution[0]["observed_counts"], serde_json::json!(counts));
+    assert_eq!(
+        distribution[0]["observed_counts"],
+        serde_json::json!(counts)
+    );
 
     // The verdict: the plugin's own chi-square test, handed to the model.
     let results = tool_results(&requests[2].json());

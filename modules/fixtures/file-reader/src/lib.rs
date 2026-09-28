@@ -13,14 +13,16 @@ fn input(call: &ToolCallRequest) -> Result<String, ToolError> {
 
 impl Plugin for Fixture {
     fn metadata() -> PluginMetadata {
-        let (name, version, description) = ("file-reader".into(), "0.1.0".into(), "Test fixture.".into());
+        let (name, version, description) =
+            ("file-reader".into(), "0.1.0".into(), "Test fixture.".into());
         let requested_capabilities = vec![Capability::File];
         let config_keys = vec![];
         PluginMetadata { name, version, description, requested_capabilities, config_keys }
     }
     fn list_tools() -> Vec<ToolDefinition> {
         let (name, description) = ("read".into(), "Reads a file below the granted root.".into());
-        let parameters_schema = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
+        let parameters_schema =
+            r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
         vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {

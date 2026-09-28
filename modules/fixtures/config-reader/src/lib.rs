@@ -13,14 +13,20 @@ fn input(call: &ToolCallRequest) -> Result<String, ToolError> {
 
 impl Plugin for Fixture {
     fn metadata() -> PluginMetadata {
-        let (name, version, description) = ("config-reader".into(), "0.1.0".into(), "Test fixture.".into());
+        let (name, version, description) =
+            ("config-reader".into(), "0.1.0".into(), "Test fixture.".into());
         let requested_capabilities = vec![Capability::Config];
-        let config_keys = vec![ConfigKey { name: "greeting".into(), description: "A greeting to read back.".into(), required: false }];
+        let config_keys = vec![ConfigKey {
+            name: "greeting".into(),
+            description: "A greeting to read back.".into(),
+            required: false,
+        }];
         PluginMetadata { name, version, description, requested_capabilities, config_keys }
     }
     fn list_tools() -> Vec<ToolDefinition> {
         let (name, description) = ("get".into(), "Reads a config key.".into());
-        let parameters_schema = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
+        let parameters_schema =
+            r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
         vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {

@@ -530,10 +530,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn plugin_with_a_tampered_install_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("echo-agent");
+        let dir = root.path().join("echo");
         std::fs::create_dir_all(&dir).unwrap();
-        let staged = fixture_path("echo-agent").parent().unwrap().to_path_buf();
-        for file in ["echo-agent.wasm", "module.toml"] {
+        let staged = fixture_path("echo").parent().unwrap().to_path_buf();
+        for file in ["echo.wasm", "module.toml"] {
             std::fs::copy(staged.join(file), dir.join(file)).unwrap();
         }
         chatty_module_registry::InstallRecord::new(
@@ -547,14 +547,10 @@ mod tests {
             module_roots: vec![root.path().to_path_buf()],
             ..PluginHost::default()
         };
-        let err = load_plugins(
-            &[plugin("echo-agent")],
-            &host,
-            &model(ProviderType::Ollama, "m"),
-        )
-        .await
-        .err()
-        .expect("a tampered plugin must not load");
+        let err = load_plugins(&[plugin("echo")], &host, &model(ProviderType::Ollama, "m"))
+            .await
+            .err()
+            .expect("a tampered plugin must not load");
         assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
     }
 
@@ -633,14 +629,7 @@ mod tests {
     async fn echo_plugin_reverse_runs_in_process() {
         let echo = load_one(plugin("echo")).await.expect("echo loads");
         let names: Vec<_> = echo.tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "echo__echo",
-                "echo__reverse",
-                "echo__count_words"
-            ]
-        );
+        assert_eq!(names, ["echo__echo", "echo__reverse", "echo__count_words"]);
         let reverse = tool_of(&echo, "echo__reverse");
         assert_eq!(reverse.definition().tool, "reverse");
         let out = reverse
@@ -819,10 +808,7 @@ mod tests {
         let daemon = FakeDaemon::scripted(Script::new().route(
             key,
             [
-                Reply::tool_call(
-                    "echo__reverse",
-                    serde_json::json!({ "input": "hello" }),
-                ),
+                Reply::tool_call("echo__reverse", serde_json::json!({ "input": "hello" })),
                 Reply::text("It is olleh."),
             ],
         ));
@@ -836,10 +822,7 @@ mod tests {
 
         let requests = daemon.requests();
         let tools = tool_names(&requests[0]);
-        assert!(
-            tools.contains(&"echo__reverse".to_string()),
-            "{tools:?}"
-        );
+        assert!(tools.contains(&"echo__reverse".to_string()), "{tools:?}");
         assert!(
             events.iter().any(|e| matches!(
                 e,

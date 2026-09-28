@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_compute_benford_distribution_basic() {
-        // Numbers with first digits: 1,4,8,2,5,8,2,4,7,8 → 1×1, 2×2, 1×4, 1×4... 
+        // Numbers with first digits: 1,4,8,2,5,8,2,4,7,8 → 1×1, 2×2, 1×4, 1×4...
         let args = r#"{"numbers": [1234, 4521, 891, 2340, 567, 8901, 234, 456, 789, 8123]}"#;
         let result = compute_benford_distribution(args).unwrap();
         assert!(result.contains("total_analyzed\":10"));
@@ -348,7 +348,10 @@ mod tests {
             total
         );
         let result = chi_square_test(&args).unwrap();
-        assert!(result.contains("LOW"), "Expected LOW risk for Benford-conforming data, got: {result}");
+        assert!(
+            result.contains("LOW"),
+            "Expected LOW risk for Benford-conforming data, got: {result}"
+        );
     }
 
     #[test]
@@ -363,7 +366,10 @@ mod tests {
             total
         );
         let result = chi_square_test(&args).unwrap();
-        assert!(result.contains("HIGH"), "Expected HIGH risk for skewed data, got: {result}");
+        assert!(
+            result.contains("HIGH"),
+            "Expected HIGH risk for skewed data, got: {result}"
+        );
     }
 
     #[test]
@@ -381,8 +387,7 @@ mod tests {
     #[test]
     fn test_round_trip_tool_args() {
         // Simulate the LLM calling compute_benford → extracting counts → calling chi_square.
-        let numbers_args =
-            r#"{"numbers": [1234, 4521, 891, 2340, 567, 8901, 234, 456, 789]}"#;
+        let numbers_args = r#"{"numbers": [1234, 4521, 891, 2340, 567, 8901, 234, 456, 789]}"#;
         let dist_result = compute_benford_distribution(numbers_args).unwrap();
 
         // Parse out observed_counts and total from the result.

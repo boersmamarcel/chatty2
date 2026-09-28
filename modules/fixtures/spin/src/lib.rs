@@ -21,7 +21,8 @@ impl Plugin for Fixture {
     }
     fn list_tools() -> Vec<ToolDefinition> {
         let (name, description) = ("spin".into(), "Never returns.".into());
-        let parameters_schema = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
+        let parameters_schema =
+            r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into();
         vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {

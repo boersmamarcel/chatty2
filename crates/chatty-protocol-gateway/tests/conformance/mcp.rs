@@ -96,10 +96,7 @@ async fn s3_05_mcp_session_echo_returns_input() {
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_05_mcp_tool_args_receive_the_arguments_json() {
     let gw = Gateway::start(
-        vec![
-            Module::fixture("tool-args"),
-            Module::shipped("benford"),
-        ],
+        vec![Module::fixture("tool-args"), Module::shipped("benford")],
         vec![],
     )
     .await;
@@ -197,12 +194,7 @@ async fn s3_06_mcp_rmcp_client_streamable_http() {
 async fn s3_06_mcp_sse_stream_stays_open() {
     let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
 
-    let mut resp = gw
-        .http
-        .get(gw.url("/mcp/echo/sse"))
-        .send()
-        .await
-        .unwrap();
+    let mut resp = gw.http.get(gw.url("/mcp/echo/sse")).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let mut seen = String::new();
     while !seen.contains("\n\n") {

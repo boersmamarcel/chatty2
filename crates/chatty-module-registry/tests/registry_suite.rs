@@ -269,8 +269,8 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
     // The fixture grows a Vec 1 MiB at a time, so N MiB needs roughly
     // 2N MiB of linear memory (see chatty-wasm-runtime's sandbox suite, row
     // 1.6): 4 MiB fits a 32 MiB cap, 40 MiB does not.
-    let resp = tool_text(&mut module, "alloc", "4")
-        .expect("4 MiB is within the manifest's 32 MiB cap");
+    let resp =
+        tool_text(&mut module, "alloc", "4").expect("4 MiB is within the manifest's 32 MiB cap");
     assert_eq!(resp, "allocated 4 MiB");
 
     let err = tool_text(&mut module, "alloc", "40")
