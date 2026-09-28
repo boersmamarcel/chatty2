@@ -1,20 +1,33 @@
 {
   "author": {
-    "id": "bd2b552e-8eca-4376-bfc9-248cf04d6ad3",
+    "id": "d9356b51-de0d-4773-b59f-f35dda12e962",
     "username": "e2e-seed-user"
   },
-  "category": "utility",
-  "created_at": "2026-09-27T14:30:02.522937Z",
-  "description": "e2e fixture module: echo-agent",
-  "display_name": "echo-agent",
-  "downloads": 4,
+  "category": "developer-tools",
+  "created_at": "2026-09-28T10:39:39.562999Z",
+  "description": "e2e fixture module: echo",
+  "display_name": "echo",
+  "downloads": 0,
   "execution_mode": "local",
   "homepage": null,
   "latest_version": "0.1.0",
   "license": "MIT",
-  "name": "echo-agent",
+  "manifest": {
+    "category": "developer-tools",
+    "description": "e2e fixture module: echo",
+    "display_name": "echo",
+    "execution_mode": null,
+    "homepage": null,
+    "license": "MIT",
+    "name": "echo",
+    "pricing_model": "free",
+    "support_email": null,
+    "tags": null,
+    "version": "0.1.0"
+  },
+  "name": "echo",
   "pricing_model": "free",
   "support_email": null,
   "tags": [],
-  "updated_at": "2026-09-27T14:30:02.522937Z"
+  "updated_at": "2026-09-28T10:39:39.562999Z"
 }
