@@ -161,19 +161,41 @@ impl PluginLimits {
     }
 }
 
-/// `[swarm]`: who it may call and who may call it (PL-D4; not enforced yet).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// `[swarm]`: who it may call and who may call it (PL-D4), as
+/// [`services::delegation_policy`](crate::services::delegation_policy)
+/// reads it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwarmSection {
-    /// Agents (names or globs) this agent may delegate to.
+    /// Agents (names or `*` globs) this agent may delegate to. Empty: it is
+    /// offered neither `invoke_agent` nor `list_agents`, whatever its tool
+    /// profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegates_to: Vec<String>,
-    /// Whether others may reach it over A2A.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Whether others may call it. Defaults to `true`.
+    #[serde(default = "exposed_default", skip_serializing_if = "is_exposed")]
     pub exposed: bool,
-    /// When set, only these callers (names or globs) may call it.
+    /// When set, only these callers (names or `*` globs) may call it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callers: Option<Vec<String>>,
+}
+
+impl Default for SwarmSection {
+    fn default() -> Self {
+        Self {
+            delegates_to: Vec::new(),
+            exposed: exposed_default(),
+            callers: None,
+        }
+    }
+}
+
+fn exposed_default() -> bool {
+    true
+}
+
+fn is_exposed(exposed: &bool) -> bool {
+    *exposed
 }
 
 impl SwarmSection {
@@ -588,6 +610,14 @@ cap_usd = 2.0
             AgentSpec::from_toml(&bare.to_toml().unwrap()).unwrap(),
             bare
         );
+
+        // `exposed` defaults to true; only `false` is written.
+        assert!(bare.swarm.exposed);
+        let mut hidden = bare.clone();
+        hidden.swarm.exposed = false;
+        let json = hidden.to_json().unwrap();
+        assert!(json.contains(r#""exposed":false"#), "{json}");
+        assert_eq!(AgentSpec::from_json(&json).unwrap(), hidden);
     }
 
     #[test]

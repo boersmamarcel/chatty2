@@ -598,6 +598,7 @@ mod tests {
             ask_user: false,
             terminal: false,
             terminal_run: false,
+            agents: false,
         }
     }
 
@@ -633,6 +634,7 @@ mod tests {
             ask_user: true,
             terminal: true,
             terminal_run: true,
+            agents: true,
         }
     }
 

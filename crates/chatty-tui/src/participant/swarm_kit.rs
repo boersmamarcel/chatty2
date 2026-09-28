@@ -76,6 +76,9 @@ pub(crate) struct AgentDef {
     /// Declare `swarm.delegates_to`: a sub-leader, which delegates in turn
     /// over its connection to the root broker (BI-5).
     pub sub_leader: bool,
+    /// The spec it runs as, with `model` laid over it; a bare one when
+    /// `None`.
+    pub spec: Option<AgentSpec>,
 }
 
 impl AgentDef {
@@ -85,6 +88,15 @@ impl AgentDef {
             model: model.to_string(),
             endpoint,
             sub_leader: false,
+            spec: None,
+        }
+    }
+
+    /// An agent that runs as `spec` (a preset, say) on `model`.
+    pub fn from_spec(spec: AgentSpec, model: &str, endpoint: Endpoint) -> Self {
+        Self {
+            spec: Some(spec.clone()),
+            ..Self::new(&spec.agent.name, model, endpoint)
         }
     }
 
@@ -180,7 +192,10 @@ impl SwarmKit {
         let specs: Vec<AgentSpec> = roster
             .iter()
             .map(|agent| {
-                let mut spec = AgentSpec::named(&agent.name);
+                let mut spec = agent
+                    .spec
+                    .clone()
+                    .unwrap_or_else(|| AgentSpec::named(&agent.name));
                 spec.agent.model = Some(agent.model.clone());
                 if agent.sub_leader {
                     spec.swarm.delegates_to = vec!["*".to_string()];
@@ -1014,13 +1029,13 @@ const GRANDCHILD: &str = "kit-grandchild";
 const GRANDCHILD_MODEL: &str = "kit/grandchild";
 
 /// Leader → middle worker → grandchild, on separate endpoints (BI-6 owns
-/// one shared budget-1 endpoint). The middle worker is a plain worker that
+/// one shared budget-1 endpoint). The middle worker is a sub-leader that
 /// reads the directory, then delegates over its connection; `grandchild`
 /// is its model's replies.
 async fn nested_kit(grandchild: Vec<Reply>) -> SwarmKit {
     SwarmKit::start(
         vec![
-            AgentDef::new(MIDDLE, MIDDLE_MODEL, Endpoint::Sse),
+            AgentDef::new(MIDDLE, MIDDLE_MODEL, Endpoint::Sse).sub_leader(),
             AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Ndjson),
         ],
         Script::new().route(

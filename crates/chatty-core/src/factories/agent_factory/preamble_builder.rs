@@ -165,8 +165,7 @@ pub(super) fn build_preamble(
     if mcp_mgmt_tools.is_enabled() {
         tool_sections.push("- **list_mcp_services**".to_string());
     }
-    // list_agents + invoke_agent are always present
-    if allows("list_agents") || allows("invoke_agent") {
+    if tools.agents && (allows("list_agents") || allows("invoke_agent")) {
         tool_sections
             .push("- **list_agents** / **invoke_agent** (discover and call agents)".to_string());
     }
@@ -1144,6 +1143,7 @@ mod tests {
         let role = AgentRole {
             preamble: Some("You are the reviewer. Never edit the tree.".to_string()),
             profile: None,
+            ..AgentRole::default()
         };
         let result = build_preamble(
             "Base prompt.",
@@ -1187,6 +1187,7 @@ mod tests {
         let blank = AgentRole {
             preamble: Some("   ".to_string()),
             profile: None,
+            ..AgentRole::default()
         };
         let with_blank = build_preamble(
             "Base prompt.",
@@ -1220,6 +1221,7 @@ mod tests {
                 &AgentRole {
                     preamble: None,
                     profile,
+                    ..AgentRole::default()
                 },
                 None,
             )
@@ -1245,6 +1247,7 @@ mod tests {
         let role = AgentRole {
             preamble: None,
             profile: super::super::tool_profile::tool_profile("reviewer"),
+            ..AgentRole::default()
         };
         let tools = ToolAvailability {
             git: true,

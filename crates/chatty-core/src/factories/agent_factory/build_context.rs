@@ -152,8 +152,8 @@ pub struct AgentBuildContext {
 ///
 /// Both halves are optional and independent — a role may be only a preamble,
 /// only a profile, or both. `Default` is "no role", which is every agent that
-/// is not a declared virtual agent's worker.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// is not built from a spec.
+#[derive(Clone, Debug, PartialEq)]
 pub struct AgentRole {
     /// Appended to the system prompt right after the base preamble, before
     /// the tool summary, so the worker knows what it is before it reads what
@@ -162,6 +162,21 @@ pub struct AgentRole {
     /// The tool allowlist the agent is built with. `None` leaves it every
     /// tool the execution settings allow.
     pub profile: Option<&'static ToolProfile>,
+    /// Whether it is offered `list_agents` and `invoke_agent` (PL-S2 DP-1).
+    /// A spec's non-empty `swarm.delegates_to` decides it, never the
+    /// profile; an agent with no role (the desktop's, a hosted one) keeps
+    /// them.
+    pub delegates: bool,
+}
+
+impl Default for AgentRole {
+    fn default() -> Self {
+        Self {
+            preamble: None,
+            profile: None,
+            delegates: true,
+        }
+    }
 }
 
 /// The services half of an [`AgentBuildContext`]: what a host gathers from
@@ -319,8 +334,9 @@ impl AgentBuildContext {
     /// `ask_user_enabled` / `instructions_dir` read the narrowed settings as
     /// every host does. `tools.profile` and `agent.preamble` become the
     /// role, `tools.skills` a line of the preamble, `budget.cap_usd` the
-    /// spend gate, and `plugins` the plugins the factory loads (PL-U2) from
-    /// `services.plugin_host`.
+    /// spend gate, `plugins` the plugins the factory loads (PL-U2) from
+    /// `services.plugin_host`, and a non-empty `swarm.delegates_to` the
+    /// delegation tools (DP-1).
     pub fn from_spec(spec: &AgentSpec, services: AgentServices) -> Result<SpecBuild, SpecErrors> {
         spec.validate(None)?;
         let mut services = services;
@@ -338,6 +354,7 @@ impl AgentBuildContext {
             role: AgentRole {
                 preamble: role_preamble(spec),
                 profile: spec.tools.profile.as_deref().and_then(tool_profile),
+                delegates: !spec.swarm.delegates_to.is_empty(),
             },
             spend_gate: task_spend
                 .clone()
@@ -572,6 +589,84 @@ cap_usd = 2.5
         assert_eq!(
             ctx.plugins, spec.plugins,
             "the factory loads the spec's plugins"
+        );
+    }
+
+    /// The tool names `spec` is built with: the tools of the first request
+    /// its agent sends to a fake model.
+    async fn tools_of(spec: &AgentSpec) -> Vec<String> {
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use crate::testing::fake_model::{FakeDaemon, Reply, Script};
+        use rig_agent::completion::Prompt;
+
+        let _ = crate::init_repositories();
+        let daemon = FakeDaemon::scripted(Script::new().route("dp1-model", [Reply::text("done")]));
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let built = AgentBuildContext::from_spec(
+            spec,
+            AgentServices {
+                exec_settings: Some(ExecutionSettingsModel {
+                    workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+                    fetch_enabled: false,
+                    ..ExecutionSettingsModel::default()
+                }),
+                local_agents: vec!["local-coder".to_string()],
+                ..AgentServices::default()
+            },
+        )
+        .expect("the spec builds");
+        let model = ModelConfig::new(
+            "dp1-model".to_string(),
+            "dp1-model".to_string(),
+            ProviderType::Ollama,
+            "dp1-model".to_string(),
+        );
+        let provider = ProviderConfig::new("Fake".to_string(), ProviderType::Ollama)
+            .with_base_url(daemon.base_url());
+        let agent = super::super::AgentClient::from_model_config_with_tools(
+            &model,
+            &provider,
+            built.context,
+        )
+        .await
+        .expect("the agent builds");
+        // Only the request matters: the fake answers every request as a
+        // stream, which a one-shot `prompt` need not parse.
+        let _ = agent.client.agent.prompt("go").await;
+        let request = daemon.requests().into_iter().next().expect("one request");
+        request.json()["tools"]
+            .as_array()
+            .expect("the request carries tools")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// DP-1: a profile no longer implies delegation. A `coordinator` with an
+    /// empty `delegates_to` has neither `invoke_agent` nor `list_agents`;
+    /// the same spec listing an agent has both, and so does a `coder` — the
+    /// spec decides, whatever the profile.
+    #[tokio::test]
+    async fn profile_alone_grants_no_delegation() {
+        let mut spec = AgentSpec::named("lead");
+        spec.tools.profile = Some("coordinator".to_string());
+        let tools = tools_of(&spec).await;
+        assert!(tools.contains(&"read_file".to_string()), "{tools:?}");
+        assert!(!tools.contains(&"invoke_agent".to_string()), "{tools:?}");
+        assert!(!tools.contains(&"list_agents".to_string()), "{tools:?}");
+
+        spec.swarm.delegates_to = vec!["local-coder".to_string()];
+        let tools = tools_of(&spec).await;
+        assert!(tools.contains(&"invoke_agent".to_string()), "{tools:?}");
+        assert!(tools.contains(&"list_agents".to_string()), "{tools:?}");
+
+        spec.tools.profile = Some("coder".to_string());
+        let tools = tools_of(&spec).await;
+        assert!(tools.contains(&"invoke_agent".to_string()), "{tools:?}");
+        assert!(
+            !tools.contains(&"write_todos".to_string()),
+            "the coder profile applies: {tools:?}"
         );
     }
 

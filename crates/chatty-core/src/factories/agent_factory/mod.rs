@@ -1242,6 +1242,7 @@ impl AgentClient {
             ask_user: false,       // set below alongside publish_module
             terminal: terminal_read_tool.is_some(),
             terminal_run: terminal_run_tool.is_some(),
+            agents: role.delegates,
         };
 
         // The profile decides what the prompt describes as well as what is
@@ -1300,7 +1301,7 @@ impl AgentClient {
                 Vec::new()
             };
 
-        // Create list_agents tool (always available)
+        // Create list_agents tool (registered when the role delegates)
         let mut list_agents_tool =
             ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone())
                 .with_local_workers(local_agents.iter().cloned());
@@ -1321,7 +1322,7 @@ impl AgentClient {
             list_agents_tool = list_agents_tool.with_transport(transport);
         }
 
-        // Create invoke_agent tool (always available). A lazy broker means
+        // Create invoke_agent tool (registered when the role delegates). A lazy broker means
         // the port is not actually live yet, so it must not also be handed
         // to `new` as if it already were.
         let eager_gateway_port = if lazy_broker.is_some() {
@@ -1503,8 +1504,8 @@ impl AgentClient {
             browser_tools: browser_tools,
             browser_use_tool: browser_use_tool,
             daytona_tool: daytona_tool,
-            list_agents_tool: list_agents_tool,
-            invoke_agent_tool: invoke_agent_tool,
+            list_agents_tool: role.delegates.then_some(list_agents_tool),
+            invoke_agent_tool: role.delegates.then_some(invoke_agent_tool),
             publish_module_tool: publish_module_tool,
             ask_user_tool: ask_user_tool,
             terminal_read_tool: terminal_read_tool,
@@ -1668,7 +1669,10 @@ mod tests {
             "read_skill must always be reserved to prevent MCP conflicts"
         );
         assert!(names.contains("list_tools"));
-        assert!(names.contains("list_agents"));
+        assert!(
+            !names.contains("list_agents"),
+            "only an agent that delegates has the agent tools (DP-1)"
+        );
     }
 
     #[test]

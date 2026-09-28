@@ -142,8 +142,9 @@ pub(super) struct NativeTools {
     pub browser_tools: Option<BrowserTools>,
     pub browser_use_tool: Option<BrowserUseTool>,
     pub daytona_tool: Option<DaytonaTool>,
-    pub list_agents_tool: ListAgentsTool,
-    pub invoke_agent_tool: InvokeAgentTool,
+    /// The delegation tools, `None` unless the agent may delegate (DP-1).
+    pub list_agents_tool: Option<ListAgentsTool>,
+    pub invoke_agent_tool: Option<InvokeAgentTool>,
     pub publish_module_tool: Option<PublishModuleTool>,
     pub ask_user_tool: Option<AskUserTool>,
     pub terminal_read_tool: Option<TerminalReadTool>,
@@ -181,8 +182,12 @@ impl NativeTools {
         b = add(b, profile, self.write_todos_tool);
         b = add(b, profile, self.update_todo_tool);
         b = add(b, profile, self.verify_completion_tool);
-        b = add(b, profile, self.list_agents_tool);
-        b = add(b, profile, self.invoke_agent_tool);
+        if let Some(t) = self.list_agents_tool {
+            b = add(b, profile, t);
+        }
+        if let Some(t) = self.invoke_agent_tool {
+            b = add(b, profile, t);
+        }
 
         if let Some(t) = self.ask_user_tool {
             b = add(b, profile, t);
