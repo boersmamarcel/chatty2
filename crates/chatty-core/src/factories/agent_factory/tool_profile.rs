@@ -42,6 +42,11 @@ const TODO_PLAN: &[&str] = &["write_todos", "update_todo", "verify_completion"];
 /// them through and `ToolAvailability::agents` gates them.
 pub(super) const AGENT_TOOLS: &[&str] = &["list_agents", "invoke_agent"];
 
+/// Messaging the agent that gave this one its task (tree messages, TM-1).
+/// Not delegation: every role has an owner to tell, so every profile keeps
+/// it, and it exists only for a worker with a broker-made connection.
+const MESSAGES: &[&str] = &["send_message"];
+
 /// Editing the workspace.
 const FS_WRITE: &[&str] = &[
     "write_file",
@@ -199,6 +204,7 @@ pub(super) fn narrow_availability(
         ask_user: keep(tools.ask_user, &["ask_user"]),
         terminal: keep(tools.terminal, &["terminal_read"]),
         terminal_run: keep(tools.terminal_run, &["terminal_run"]),
+        send_message: keep(tools.send_message, MESSAGES),
     }
 }
 
@@ -206,7 +212,7 @@ pub(super) fn narrow_availability(
 /// It edits nothing itself. It delegates only if its spec says whom to.
 pub static COORDINATOR: ToolProfile = ToolProfile {
     name: "coordinator",
-    groups: &[READ_SET, TODO_PLAN, GIT_MERGE],
+    groups: &[READ_SET, TODO_PLAN, GIT_MERGE, MESSAGES],
 };
 
 /// A worker that writes code: the read set plus everything needed to change
@@ -215,7 +221,7 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
     groups: &[
-        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, MEMORY,
+        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, MEMORY, MESSAGES,
     ],
 };
 
@@ -225,7 +231,7 @@ pub static CODER: ToolProfile = ToolProfile {
 /// judging plausibility. No writes, no commits.
 pub static REVIEWER: ToolProfile = ToolProfile {
     name: "reviewer",
-    groups: &[READ_SET, SHELL, DATA_QUERY],
+    groups: &[READ_SET, SHELL, DATA_QUERY, MESSAGES],
 };
 
 /// Every profile, in the order `--tools` documents them.
@@ -284,6 +290,7 @@ mod tests {
             terminal: true,
             terminal_run: true,
             agents: true,
+            send_message: true,
         }
     }
 
@@ -301,7 +308,13 @@ mod tests {
     /// prevent.
     #[test]
     fn each_profile_allows_its_own_tools_and_nothing_else() {
-        for tool in ["read_file", "search_code", "git_log", "ask_user"] {
+        for tool in [
+            "read_file",
+            "search_code",
+            "git_log",
+            "ask_user",
+            "send_message",
+        ] {
             for profile in TOOL_PROFILES {
                 assert!(profile.allows(tool), "{} lost {tool}", profile.name());
             }

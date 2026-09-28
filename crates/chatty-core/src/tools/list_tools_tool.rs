@@ -455,6 +455,14 @@ impl ListToolsTool {
             });
         }
 
+        if tools.send_message {
+            native_tools.push(ToolInfo {
+                name: "send_message".to_string(),
+                description: "Send a short message to the agent that gave you your current task, without waiting for a reply.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         // read_skill is always available — it's the on-demand companion to the slim
         // skill descriptions shown in the automatic context block.
         native_tools.push(ToolInfo {
@@ -599,6 +607,7 @@ mod tests {
             terminal: false,
             terminal_run: false,
             agents: false,
+            send_message: false,
         }
     }
 
@@ -635,6 +644,7 @@ mod tests {
             terminal: true,
             terminal_run: true,
             agents: true,
+            send_message: true,
         }
     }
 
@@ -785,6 +795,7 @@ mod tests {
             "daytona_run",
             "terminal_read",
             "terminal_run",
+            "send_message",
         ];
         for name in &expected {
             assert!(names.contains(&name.to_string()), "missing {name}");

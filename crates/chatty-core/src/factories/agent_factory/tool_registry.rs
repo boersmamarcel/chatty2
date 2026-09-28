@@ -38,6 +38,9 @@ pub struct ToolAvailability {
     pub terminal_run: bool,
     /// `list_agents` and `invoke_agent`: the agent may delegate (PL-S2 DP-1).
     pub agents: bool,
+    /// `send_message`: offered to every worker with a broker-made
+    /// connection, whatever its delegation rights (tree messages, TM-1).
+    pub send_message: bool,
 }
 
 pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<String> {
@@ -205,6 +208,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.terminal_run {
         names.insert(String::from("terminal_run"));
+    }
+    if tools.send_message {
+        names.insert(String::from("send_message"));
     }
 
     names
@@ -494,6 +500,7 @@ mod tests {
             terminal: true,
             terminal_run: true,
             agents: true,
+            send_message: true,
         };
         let names = active_native_tool_names(&all);
         // Every individual flag's tools should be present

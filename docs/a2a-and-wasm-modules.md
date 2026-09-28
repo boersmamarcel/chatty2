@@ -380,7 +380,7 @@ directory as `call` frames on its own connection, never over loopback HTTP:
 |---|---|---|
 | worker → broker | `call` | `id` (the worker's, unique on the connection), `method` (`invoke_agent`, `list_agents`, `send_message`), `params` |
 | broker → worker | `call_progress` | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
-| broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array |
+| broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array; for `send_message` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
 | broker → worker | `call_error` | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
 | broker → worker | `call_input_required` | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
 | worker → broker | `call_input` | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape as an `input` frame (BI-5) |
@@ -393,9 +393,9 @@ broker → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response
 
 The call says nothing about its caller: the broker runs it as the node the
 connection names (the permit's AGE-628 check, the edge log's `from`), and
-writes one edge-log row per `invoke_agent` call when it ends
-(`<data_dir>/chatty/fabric/edges-<pid>.jsonl`; `list_agents` is a directory
-read, not an edge, and writes none). Several calls can be in flight in one
+writes one edge-log row per `invoke_agent` call when it ends and one `message`
+row per `send_message` call (`<data_dir>/chatty/fabric/edges-<pid>.jsonl`;
+`list_agents` is a directory read, not an edge, and writes none). Several calls can be in flight in one
 task; replies match by `id`, in whatever order the calls finish. A callee
 whose task failed is a `call_result` with `success: false`, not a
 `call_error`, so the caller renders it exactly as a failed A2A task. When a
@@ -541,6 +541,41 @@ concluded, sets `include_trace: true` on the call. `InvokeAgentOutput.trace` is 
 worker's compacted tool-call trace — otherwise the field is absent from the JSON the
 model sees, so an ordinary delegation costs no more context than it did before this
 existed.
+
+### `send_message`
+
+A worker tells the agent that gave it its task something besides its final
+answer (tree messages, TM-1, AGE-654). The tool is registered for **every
+worker with a broker-made connection**, a leaf `coder` or `reviewer` with no
+`delegates_to` included — it needs an owner, not delegation rights — and every
+tool profile allows it. The root has no owner and no tool.
+
+```json
+{ "to": "root", "text": "the tests pass; starting on the docs" }
+```
+
+It travels as a `send_message` call on the worker's connection and returns at
+once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
+"reason": …}`. It never starts a run and never interrupts one.
+
+- **Recipient.** The broker reads the sender from the connection and its owner
+  from the directory; `to` must be that owner's name — `root` (`ROOT_NAME`) when
+  the root asked for the worker, which the `welcome` says and the `to`
+  parameter's description repeats. A sibling, the sender itself, a name nobody
+  has or a node of another conversation is `not_on_tree`; an owner that has
+  ended is `recipient_ended`. Messages to a worker's live handles come with
+  resumable conversations (RC-3).
+- **Bounds.** An accepted message waits on the recipient's
+  `chatty_fabric::PendingList`: at most 64 KB per recipient, and at most 8 KB
+  per sender per run of the recipient. A message over either bound is
+  `over_allowance` — refused whole, never truncated.
+- **Delivery** — on the recipient's next `invoke_agent` result, or at the start
+  of its next run — is TM-2's; until then accepted messages wait.
+- **Neutral description.** The description says what the tool does and names
+  neither relaying nor siblings (golden:
+  `crates/chatty-core/src/tools/goldens/send_message_description.txt`): the F3
+  gate counts messages that name another worker, and must count demand, not
+  instruction.
 
 ### `local-agent` — a chatty agent in its own process
 

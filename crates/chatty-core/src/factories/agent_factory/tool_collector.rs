@@ -12,9 +12,9 @@ use crate::tools::{
     GitCreateBranchTool, GitDiffTool, GitLogTool, GitMergeTool, GitStatusTool, GitSwitchBranchTool,
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
-    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool, UpdateTodoTool,
-    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, SendMessageTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool,
+    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -149,6 +149,7 @@ pub(super) struct NativeTools {
     pub ask_user_tool: Option<AskUserTool>,
     pub terminal_read_tool: Option<TerminalReadTool>,
     pub terminal_run_tool: Option<TerminalRunTool>,
+    pub send_message_tool: Option<SendMessageTool>,
     /// `load_tools`, under dynamic tool loading. Registered whatever the
     /// profile says: it is how the agent reaches the rest of its tools.
     pub load_tools_tool: Option<LoadToolsTool>,
@@ -190,6 +191,9 @@ impl NativeTools {
         }
 
         if let Some(t) = self.ask_user_tool {
+            b = add(b, profile, t);
+        }
+        if let Some(t) = self.send_message_tool {
             b = add(b, profile, t);
         }
         if let Some(t) = self.mcp_mgmt.list {
@@ -389,6 +393,7 @@ macro_rules! native_tools {
         ask_user_tool: $ask_user_tool:expr,
         terminal_read_tool: $terminal_read_tool:expr,
         terminal_run_tool: $terminal_run_tool:expr,
+        send_message_tool: $send_message_tool:expr,
         load_tools_tool: $load_tools_tool:expr,
         plugin_tools: $plugin_tools:expr $(,)?
     ) => {
@@ -446,6 +451,7 @@ macro_rules! native_tools {
             ask_user_tool: $ask_user_tool,
             terminal_read_tool: $terminal_read_tool,
             terminal_run_tool: $terminal_run_tool,
+            send_message_tool: $send_message_tool,
             load_tools_tool: $load_tools_tool,
             plugin_tools: $plugin_tools,
         }

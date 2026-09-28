@@ -139,6 +139,11 @@ pub struct AgentBuildContext {
     /// the broker's `welcome` and before the agent is built; the in-process
     /// root reaches its broker through [`LazyBroker::transport`] instead.
     pub fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
+    /// The name the broker's `welcome` gave this worker's owner, set with
+    /// [`Self::fabric_transport`]: what the worker's `send_message` names as
+    /// its recipient (tree messages, TM-1). `None` beside a transport means
+    /// the root owns it ([`chatty_fabric::ROOT_NAME`]).
+    pub fabric_owner: Option<String>,
     /// The spec's `[[plugins]]` (PL-U2, AGE-616): loaded by the factory, one
     /// instance per plugin for this agent, their tools registered beside the
     /// native ones. Empty for an agent that is not built from a spec.
@@ -301,6 +306,7 @@ impl AgentBuildContext {
             embedded_terminals: None,
             // Only a delegated worker has a connection to its broker.
             fabric_transport: None,
+            fabric_owner: None,
             // Only a spec lists plugins (`from_spec`).
             plugins: Vec::new(),
             plugin_host,
