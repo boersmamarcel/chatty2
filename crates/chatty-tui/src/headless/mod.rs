@@ -29,6 +29,7 @@ use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
 };
+use chatty_fabric::deadline_grace;
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -173,16 +174,6 @@ enum TimeBudget {
     Cut,
     /// The last pass is out; whatever it ends with ends the run.
     LastPass,
-}
-
-/// How long past the deadline a pass may run before headless stops it: a
-/// long tool call or model call can keep the budget hook from ever seeing
-/// the next call. A tenth of the budget, between 5 s and 2 min.
-fn deadline_grace(budget: std::time::Duration) -> std::time::Duration {
-    (budget / 10).clamp(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_secs(120),
-    )
 }
 
 /// Recovery prompt for a hallucinated tool name (AGE-497): `error_message` is

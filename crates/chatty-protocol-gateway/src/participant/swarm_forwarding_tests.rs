@@ -206,6 +206,7 @@ async fn root_call(calls: &BrokerCalls) -> (Vec<chatty_fabric::SwarmEvent>, Dura
             handle: None,
             include_trace: false,
             spawn_context: None,
+            remaining: Default::default(),
         }),
     );
     let mut batches = Vec::new();
