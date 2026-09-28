@@ -138,8 +138,8 @@ fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
 }
 
 /// What a spec declares, one fact per line: description, model and
-/// profile, plugins with the capabilities they request and are granted, and who it may
-/// call and be called by.
+/// profile, plugins with the capabilities they request and are granted,
+/// and who it may call and be called by.
 fn spec_details(spec: &AgentSpec, cx: &App) -> Vec<AnyElement> {
     let mut lines = Vec::new();
     if let Some(description) = spec.agent.description.as_deref() {
