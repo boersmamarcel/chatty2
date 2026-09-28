@@ -22,6 +22,8 @@ pub mod broker;
 #[cfg(test)]
 mod broker_delegation;
 #[cfg(test)]
+mod delegation;
+#[cfg(test)]
 mod equivalence;
 #[cfg(test)]
 mod input_required_chain;

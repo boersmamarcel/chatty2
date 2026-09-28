@@ -380,7 +380,7 @@ directory as `call` frames on its own connection, never over loopback HTTP:
 |---|---|---|
 | worker → broker | `call` | `id` (the worker's, unique on the connection), `method` (`invoke_agent`, `list_agents`, `send_message`), `params` |
 | broker → worker | `call_progress` | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
-| broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array |
+| broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array; for `send_message` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
 | broker → worker | `call_error` | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
 | broker → worker | `call_input_required` | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
 | worker → broker | `call_input` | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape as an `input` frame (BI-5) |
@@ -393,9 +393,9 @@ broker → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response
 
 The call says nothing about its caller: the broker runs it as the node the
 connection names (the permit's AGE-628 check, the edge log's `from`), and
-writes one edge-log row per `invoke_agent` call when it ends
-(`<data_dir>/chatty/fabric/edges-<pid>.jsonl`; `list_agents` is a directory
-read, not an edge, and writes none). Several calls can be in flight in one
+writes one edge-log row per `invoke_agent` call when it ends and one `message`
+row per `send_message` call (`<data_dir>/chatty/fabric/edges-<pid>.jsonl`;
+`list_agents` is a directory read, not an edge, and writes none). Several calls can be in flight in one
 task; replies match by `id`, in whatever order the calls finish. A callee
 whose task failed is a `call_result` with `success: false`, not a
 `call_error`, so the caller renders it exactly as a failed A2A task. When a
@@ -542,6 +542,41 @@ worker's compacted tool-call trace — otherwise the field is absent from the JS
 model sees, so an ordinary delegation costs no more context than it did before this
 existed.
 
+### `send_message`
+
+A worker tells the agent that gave it its task something besides its final
+answer (tree messages, TM-1, AGE-654). The tool is registered for **every
+worker with a broker-made connection**, a leaf `coder` or `reviewer` with no
+`delegates_to` included — it needs an owner, not delegation rights — and every
+tool profile allows it. The root has no owner and no tool.
+
+```json
+{ "to": "root", "text": "the tests pass; starting on the docs" }
+```
+
+It travels as a `send_message` call on the worker's connection and returns at
+once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
+"reason": …}`. It never starts a run and never interrupts one.
+
+- **Recipient.** The broker reads the sender from the connection and its owner
+  from the directory; `to` must be that owner's name — `root` (`ROOT_NAME`) when
+  the root asked for the worker, which the `welcome` says and the `to`
+  parameter's description repeats. A sibling, the sender itself, a name nobody
+  has or a node of another conversation is `not_on_tree`; an owner that has
+  ended is `recipient_ended`. Messages to a worker's live handles come with
+  resumable conversations (RC-3).
+- **Bounds.** An accepted message waits on the recipient's
+  `chatty_fabric::PendingList`: at most 64 KB per recipient, and at most 8 KB
+  per sender per run of the recipient. A message over either bound is
+  `over_allowance` — refused whole, never truncated.
+- **Delivery** — on the recipient's next `invoke_agent` result, or at the start
+  of its next run — is TM-2's; until then accepted messages wait.
+- **Neutral description.** The description says what the tool does and names
+  neither relaying nor siblings (golden:
+  `crates/chatty-core/src/tools/goldens/send_message_description.txt`): the F3
+  gate counts messages that name another worker, and must count demand, not
+  instruction.
+
 ### `local-agent` — a chatty agent in its own process
 
 `invoke_agent { "agent": "local-agent", "prompt": "…" }` asks the broker for a worker.
@@ -686,9 +721,9 @@ grants = ["llm"]                   # "http" / "file-write" would make every call
 limits = { max_execution_ms = 5000 }  # lowers the module's [resources], never raises them
 
 [swarm]
-delegates_to = ["local-coder"]     # non-empty: the worker runs a broker of its own
-exposed = true
-callers = ["coder-reviewer-leader"]
+delegates_to = ["local-coder"]     # whom it may call (names or * globs); empty = no agent tools
+exposed = true                     # others may call it (the default)
+callers = ["coder-reviewer-leader"]  # optional: only these may call it
 
 [budget]
 max_agent_turns = 30               # 0 = uncapped; the deadline applies
@@ -716,6 +751,9 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `tools.profile` | Optional. A named tool profile: `coordinator`, `coder` or `reviewer` — see below. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
+| `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
+| `swarm.exposed` | Optional, default `true`. `false`: no other agent may call it. |
+| `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. |
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
 | `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |
@@ -744,18 +782,19 @@ to the MCP server list — `/mcp/{module}` is for MCP clients outside chatty.
 
 **Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `tools.disable` removes
 whole tool *groups*, which is the wrong grain for a role — a reviewer wants `git_diff`
-but not `git_commit`, and a coder wants none of the agent tools. `tools.profile` names a profile
+but not `git_commit`. `tools.profile` names a profile
 instead: an allowlist of tool *names*, and the worker's whole tool set. Anything the
 profile does not name is dropped, MCP tools included, which is most of the point — a 4B
 coder used to be handed 53 tool schemas (~13k tokens) before it could read a file. A
 profile only ever removes tools: it cannot turn on a group the execution settings
-switched off.
+switched off. A profile does not decide delegation: `list_agents` and `invoke_agent`
+come with a non-empty `swarm.delegates_to`, on any profile or none, and no profile removes them.
 
 | Profile | What it can call |
 |---------|------------------|
-| `coordinator` | The read set below, plus the todo plan (`write_todos`, `update_todo`, `verify_completion`), `list_agents`, `invoke_agent` and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It delegates; it does not edit. |
-| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). No agent tools: a coder does not fan out further. |
-| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value. No writes, no commits, no delegation. |
+| `coordinator` | The read set below, plus the todo plan (`write_todos`, `update_todo`, `verify_completion`) and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It does not edit; the `coder-reviewer-leader` preset delegates because its spec lists `local-coder` and `local-reviewer`. |
+| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). |
+| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value. No writes, no commits. |
 
 The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
 `search_code`, `git_status`, `git_log`, `git_diff` (which takes a `base..head` `range`, so

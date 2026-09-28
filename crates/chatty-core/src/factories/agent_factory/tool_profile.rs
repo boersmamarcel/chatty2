@@ -37,8 +37,15 @@ const READ_SET: &[&str] = &[
 /// its leader and does not plan it again (AGE-479).
 const TODO_PLAN: &[&str] = &["write_todos", "update_todo", "verify_completion"];
 
-/// Delegation: what a leader needs and nothing else.
-const AGENT_TOOLS: &[&str] = &["list_agents", "invoke_agent"];
+/// Delegation. No profile names these: a spec's `swarm.delegates_to`
+/// decides whether an agent has them (PL-S2 DP-1), so every profile lets
+/// them through and `ToolAvailability::agents` gates them.
+pub(super) const AGENT_TOOLS: &[&str] = &["list_agents", "invoke_agent"];
+
+/// Messaging the agent that gave this one its task (tree messages, TM-1).
+/// Not delegation: every role has an owner to tell, so every profile keeps
+/// it, and it exists only for a worker with a broker-made connection.
+const MESSAGES: &[&str] = &["send_message"];
 
 /// Editing the workspace.
 const FS_WRITE: &[&str] = &[
@@ -96,9 +103,10 @@ impl ToolProfile {
         self.name
     }
 
-    /// Whether a tool of this name survives the profile.
+    /// Whether a tool of this name survives the profile. The delegation
+    /// tools always do: the spec decides those, not the profile.
     pub fn allows(&self, tool: &str) -> bool {
-        self.groups.iter().any(|group| group.contains(&tool))
+        AGENT_TOOLS.contains(&tool) || self.groups.iter().any(|group| group.contains(&tool))
     }
 
     /// Every name the profile allows, in declaration order.
@@ -173,6 +181,7 @@ pub(super) fn narrow_availability(
             ],
         ),
         compile_typst: keep(tools.compile_typst, &["compile_typst"]),
+        agents: keep(tools.agents, AGENT_TOOLS),
         execute_code: keep(tools.execute_code, CODE_EXEC),
         memory: keep(tools.memory, &["remember", "save_skill", "search_memory"]),
         search_web: keep(tools.search_web, &["search_web"]),
@@ -195,34 +204,34 @@ pub(super) fn narrow_availability(
         ask_user: keep(tools.ask_user, &["ask_user"]),
         terminal: keep(tools.terminal, &["terminal_read"]),
         terminal_run: keep(tools.terminal_run, &["terminal_run"]),
+        send_message: keep(tools.send_message, MESSAGES),
     }
 }
 
-/// A leader: read the repository, plan, delegate, and merge what a worker
-/// hands back. It edits nothing itself.
+/// A leader: read the repository, plan, and merge what a worker hands back.
+/// It edits nothing itself. It delegates only if its spec says whom to.
 pub static COORDINATOR: ToolProfile = ToolProfile {
     name: "coordinator",
-    groups: &[READ_SET, TODO_PLAN, AGENT_TOOLS, GIT_MERGE],
+    groups: &[READ_SET, TODO_PLAN, GIT_MERGE, MESSAGES],
 };
 
 /// A worker that writes code: the read set plus everything needed to change
 /// the tree and prove it builds, plus querying data files directly with SQL,
-/// plus building and consulting a playbook/skill memory (AGE-456). It does
-/// not delegate further.
+/// plus building and consulting a playbook/skill memory (AGE-456).
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
     groups: &[
-        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, MEMORY,
+        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, MEMORY, MESSAGES,
     ],
 };
 
 /// A worker that judges someone else's work: the read set plus a shell to run
 /// the tests with, plus the same data-query tool a coder used, so it can
 /// independently re-derive a claimed data-derived value instead of only
-/// judging plausibility. No writes, no commits, no delegation.
+/// judging plausibility. No writes, no commits.
 pub static REVIEWER: ToolProfile = ToolProfile {
     name: "reviewer",
-    groups: &[READ_SET, SHELL, DATA_QUERY],
+    groups: &[READ_SET, SHELL, DATA_QUERY, MESSAGES],
 };
 
 /// Every profile, in the order `--tools` documents them.
@@ -280,6 +289,8 @@ mod tests {
             ask_user: true,
             terminal: true,
             terminal_run: true,
+            agents: true,
+            send_message: true,
         }
     }
 
@@ -297,7 +308,13 @@ mod tests {
     /// prevent.
     #[test]
     fn each_profile_allows_its_own_tools_and_nothing_else() {
-        for tool in ["read_file", "search_code", "git_log", "ask_user"] {
+        for tool in [
+            "read_file",
+            "search_code",
+            "git_log",
+            "ask_user",
+            "send_message",
+        ] {
             for profile in TOOL_PROFILES {
                 assert!(profile.allows(tool), "{} lost {tool}", profile.name());
             }
@@ -315,7 +332,6 @@ mod tests {
             assert!(!REVIEWER.allows(tool));
         }
 
-        assert!(COORDINATOR.allows("invoke_agent"));
         assert!(!COORDINATOR.allows("write_file"));
         assert!(!COORDINATOR.allows("shell_execute"));
         assert!(!COORDINATOR.allows("git_commit"));
@@ -329,8 +345,6 @@ mod tests {
         assert!(CODER.allows("git_commit"));
         assert!(CODER.allows("git_merge"));
         assert!(CODER.allows("execute_code"));
-        assert!(!CODER.allows("invoke_agent"), "a coder does not delegate");
-        assert!(!CODER.allows("list_agents"));
 
         assert!(REVIEWER.allows("shell_execute"), "it runs the tests");
         assert!(REVIEWER.allows("git_diff"));
@@ -339,7 +353,15 @@ mod tests {
         assert!(!REVIEWER.allows("git_add"));
         assert!(!REVIEWER.allows("git_commit"));
         assert!(!REVIEWER.allows("git_merge"), "a reviewer merges nothing");
-        assert!(!REVIEWER.allows("invoke_agent"));
+
+        // Delegation is the spec's `delegates_to`, not the profile's (DP-1):
+        // no profile names the tools, and none takes them away.
+        for profile in TOOL_PROFILES {
+            assert!(!profile.tool_names().any(|tool| AGENT_TOOLS.contains(&tool)));
+            for tool in AGENT_TOOLS {
+                assert!(profile.allows(tool), "{} drops {tool}", profile.name());
+            }
+        }
 
         for tool in [
             "query_data",

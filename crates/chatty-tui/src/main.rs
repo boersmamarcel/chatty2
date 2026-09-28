@@ -825,13 +825,14 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             engine.note_task(message);
         }
         // A worker connects before it builds its agent (ADR-0020, BI-4): the
-        // broker's welcome comes first, so the agent's `invoke_agent` and
-        // `list_agents` hold the connection's transport from the start.
+        // broker's welcome comes first, so the agent's `invoke_agent`,
+        // `list_agents` and `send_message` hold the connection's transport
+        // from the start.
         #[cfg(unix)]
         let participant = match cli.participant_fd {
             Some(fd) => {
                 let connection = participant::connect(fd).await?;
-                engine.set_fabric_transport(connection.transport());
+                engine.set_fabric_transport(connection.transport(), connection.owner());
                 Some(connection)
             }
             None => None,
@@ -954,7 +955,8 @@ fn starts_a_broker(cli: &Cli) -> bool {
 
 /// The agent spec this process runs as (AGE-614): `--agent <name>`, a
 /// delegated worker's `--agent-json`, a `--team` leader's spec, or a bare
-/// one; then `--model`, `--tools` and `--preamble` over it, as an explicit
+/// one — the human's own agent, which may delegate to any agent it can
+/// reach (DP-1); then `--model`, `--tools` and `--preamble` over it, as an explicit
 /// flag beats a team's or a spec's value. Turn and time budgets are folded
 /// in by the caller, which weighs them against the team's.
 ///
@@ -976,7 +978,9 @@ fn run_spec(
     } else if let Some(team) = team {
         team.leader.clone()
     } else {
-        AgentSpec::named("chatty")
+        let mut spec = AgentSpec::named("chatty");
+        spec.swarm.delegates_to = vec!["*".to_string()];
+        spec
     };
     if let Some(model) = cli.model.as_deref() {
         spec.agent.model = Some(model.to_string());
