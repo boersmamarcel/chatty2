@@ -13,7 +13,7 @@ use super::artifact_card::ArtifactCard;
 use super::clarification::ClarificationSummary;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
-use super::swarm_tree::SwarmTreeCard;
+use super::swarm_tree::{SwarmFold, SwarmTreeCard};
 use super::table::render_table_preview_card;
 use super::types::Block;
 
@@ -22,11 +22,15 @@ pub type ActivityToggle = Rc<dyn Fn(u64, &mut App)>;
 /// Open one agent's transcript: the turn's message index and the node's name.
 pub type OpenSwarmTranscript = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
 
-/// What a swarm tree's lines do: fold the card (by block id) and open one
-/// agent's transcript.
+/// Fold one node of the tree under message `usize`, by name.
+pub type FoldSwarmTreeNode = Rc<dyn Fn(usize, String, SwarmFold, &mut App)>;
+
+/// What a swarm tree's lines do: fold the card (by block id), fold one of
+/// its nodes, and open one agent's transcript.
 #[derive(Clone)]
 pub struct SwarmActions {
     pub toggle: ActivityToggle,
+    pub fold_node: FoldSwarmTreeNode,
     pub open_node: OpenSwarmTranscript,
 }
 
@@ -128,6 +132,10 @@ pub fn render_typed_block(
                 let open_node = swarm.open_node.clone();
                 card = card.on_open_node(Rc::new(move |name, window, cx| {
                     open_node(message_index, name, window, cx)
+                }));
+                let fold_node = swarm.fold_node.clone();
+                card = card.on_fold(Rc::new(move |name, fold, cx| {
+                    fold_node(message_index, name, fold, cx)
                 }));
             }
             card.into_any_element()

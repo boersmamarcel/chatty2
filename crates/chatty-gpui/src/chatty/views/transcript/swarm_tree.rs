@@ -8,13 +8,21 @@
 //! [`adapt_swarm_tree`] and stores the result on the row, whose turn then
 //! carries a [`Block::SwarmTree`](super::Block::SwarmTree).
 //!
-//! [`SwarmTreeCard`] draws it: one line per agent — name, model, status and
-//! spend — under a header with the subtree's totals. A line opens that
-//! agent's transcript read-only in a sheet ([`AgentTranscript`]), built from
-//! what the broker forwarded: its tool calls, its answer's length and its
-//! spend. A nested run's text never crosses a hop, so the transcript says
-//! how long the answer was rather than showing it.
+//! [`SwarmTreeCard`] draws it: one line per agent — name, model (or the
+//! tool it is running), status and spend — under a header with the
+//! subtree's totals. A node with children folds with its twisty. A node
+//! with more than [`WIDE`] children shows its first [`SHOWN_WHEN_WIDE`] and
+//! every later one that is not done, then one "+N more done" line that
+//! unfolds the rest: a failure or a live run never hides, and rows keep
+//! their order while statuses change.
+//!
+//! A line opens that agent's transcript read-only in a sheet
+//! ([`AgentTranscript`]), built from what the broker forwarded: its tool
+//! calls, its answer's length and its spend (a nested run's text never
+//! crosses a hop). The transcript lists the agent's own sub-agents, each of
+//! which opens in the same sheet, and a breadcrumb leads back up the tree.
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -24,11 +32,17 @@ use chatty_core::services::swarm_trace::{
 };
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
 use super::GLYPH_OPACITY_MS;
 use crate::assets::CustomIcon;
+
+/// A node with more children than this shows only some of them.
+pub const WIDE: usize = 8;
+/// How many of a wide node's children always show, in order.
+pub const SHOWN_WHEN_WIDE: usize = 6;
 
 /// One agent of a [`SwarmTree`], as the transcript draws it.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,12 +56,8 @@ pub struct SwarmNodeView {
     pub status: NodeStatus,
     /// Edges below the tree's top node, which is depth 0.
     pub depth: usize,
-    /// One entry per ancestor between the top node and this one: whether
-    /// that ancestor has a later sibling, so its guide line runs past this
-    /// row.
-    pub guides: Vec<bool>,
-    /// The last of its parent's children: its elbow ends at the row.
-    pub last_child: bool,
+    /// Its parent's index in [`SwarmTree::nodes`]; `None` for the top.
+    pub parent: Option<usize>,
     /// Its own spend: what it reported less what its children did.
     pub tokens: u64,
     /// That spend priced at the model roster's rates; `None` while any line
@@ -60,11 +70,36 @@ pub struct SwarmNodeView {
     pub tool_calls: Vec<ToolCall>,
 }
 
-/// A delegation's subtree: its callee first, then every run under it, in
-/// the order a reader walks the tree.
-#[derive(Clone, Debug, PartialEq)]
+/// A delegation's subtree — its callee first, then every run under it in
+/// the order a reader walks the tree — and how the reader has folded it.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SwarmTree {
     pub nodes: Vec<SwarmNodeView>,
+    /// Nodes whose subtree the reader folded, by name.
+    pub folded: BTreeSet<String>,
+    /// Wide nodes whose "+N more" line the reader opened, by name.
+    pub unfolded: BTreeSet<String>,
+}
+
+/// One line of the drawn tree.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LineKind {
+    /// `nodes[ix]`.
+    Node(usize),
+    /// The children of `parent` a wide node keeps out of view.
+    More { parent: String, hidden: usize },
+}
+
+/// A line and where it sits: the guide rules in front of it and its elbow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeLine {
+    pub kind: LineKind,
+    pub depth: usize,
+    /// One entry per ancestor between the top and this line: whether that
+    /// ancestor's rule runs past this line to a later sibling.
+    pub guides: Vec<bool>,
+    /// The last line under its parent: its elbow ends here.
+    pub last: bool,
 }
 
 impl SwarmTree {
@@ -81,8 +116,127 @@ impl SwarmTree {
         self.nodes.iter().map(|n| n.cost).sum()
     }
 
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.nodes.iter().position(|n| n.name == name)
+    }
+
     pub fn node(&self, name: &str) -> Option<&SwarmNodeView> {
-        self.nodes.iter().find(|n| n.name == name)
+        self.index_of(name).map(|ix| &self.nodes[ix])
+    }
+
+    pub fn children(&self, ix: usize) -> impl Iterator<Item = usize> + '_ {
+        (ix + 1..self.nodes.len()).filter(move |&c| self.nodes[c].parent == Some(ix))
+    }
+
+    /// Every run under `ix`, at any depth.
+    pub fn descendants(&self, ix: usize) -> usize {
+        self.nodes[ix + 1..]
+            .iter()
+            .take_while(|n| n.depth > self.nodes[ix].depth)
+            .count()
+    }
+
+    /// The names from the top down to `name`, for a breadcrumb.
+    pub fn path(&self, name: &str) -> Vec<String> {
+        let mut path = Vec::new();
+        let mut at = self.index_of(name);
+        while let Some(ix) = at {
+            path.push(self.nodes[ix].name.clone());
+            at = self.nodes[ix].parent;
+        }
+        path.reverse();
+        path
+    }
+
+    /// The same tree with `previous`'s folds, for names it still has.
+    pub fn with_folds_of(mut self, previous: &SwarmTree) -> Self {
+        self.folded = previous.folded.clone();
+        self.unfolded = previous.unfolded.clone();
+        self
+    }
+
+    /// The same tree with `name` folded if it was open, or open if folded.
+    pub fn toggled(&self, name: &str) -> Self {
+        let mut next = self.clone();
+        if !next.folded.remove(name) {
+            next.folded.insert(name.to_string());
+        }
+        next
+    }
+
+    /// The same tree with every child of `name` shown.
+    pub fn unfolded_at(&self, name: &str) -> Self {
+        let mut next = self.clone();
+        next.unfolded.insert(name.to_string());
+        next
+    }
+
+    /// The children of `ix` that show, and how many do not: all of them,
+    /// unless it is wide and not unfolded.
+    fn shown_children(&self, ix: usize) -> (Vec<usize>, usize) {
+        let children: Vec<usize> = self.children(ix).collect();
+        if children.len() <= WIDE || self.unfolded.contains(&self.nodes[ix].name) {
+            return (children, 0);
+        }
+        let shown: Vec<usize> = children
+            .iter()
+            .enumerate()
+            .filter(|(pos, c)| {
+                *pos < SHOWN_WHEN_WIDE || self.nodes[**c].status != NodeStatus::Completed
+            })
+            .map(|(_, c)| *c)
+            .collect();
+        let hidden = children.len() - shown.len();
+        // "+1 more" hides nothing worth a line.
+        if hidden < 2 {
+            return (children, 0);
+        }
+        (shown, hidden)
+    }
+
+    /// The lines the card draws, top down.
+    pub fn lines(&self) -> Vec<TreeLine> {
+        let mut lines = Vec::new();
+        if !self.nodes.is_empty() {
+            self.push_lines(0, Vec::new(), true, &mut lines);
+        }
+        lines
+    }
+
+    fn push_lines(&self, ix: usize, guides: Vec<bool>, last: bool, lines: &mut Vec<TreeLine>) {
+        let depth = self.nodes[ix].depth;
+        lines.push(TreeLine {
+            kind: LineKind::Node(ix),
+            depth,
+            guides: guides.clone(),
+            last,
+        });
+        if self.folded.contains(&self.nodes[ix].name) {
+            return;
+        }
+        let child_guides = if depth == 0 {
+            Vec::new()
+        } else {
+            let mut g = guides;
+            g.push(!last);
+            g
+        };
+        let (shown, hidden) = self.shown_children(ix);
+        for (pos, child) in shown.iter().enumerate() {
+            let last = pos + 1 == shown.len() && hidden == 0;
+            self.push_lines(*child, child_guides.clone(), last, lines);
+        }
+        if hidden > 0 {
+            lines.push(TreeLine {
+                kind: LineKind::More {
+                    parent: self.nodes[ix].name.clone(),
+                    hidden,
+                },
+                depth: depth + 1,
+                guides: child_guides,
+                last: true,
+            });
+        }
     }
 }
 
@@ -105,41 +259,27 @@ pub fn delegation_callees(trace: &SwarmTrace, specs: &[String]) -> Vec<Option<No
         .collect()
 }
 
-/// The subtree under `top`, priced against `book`.
+/// The subtree under `top`, priced against `book`, nothing folded.
 pub fn adapt_swarm_tree(trace: &SwarmTrace, top: NodeId, book: &PriceBook) -> SwarmTree {
     let tree = trace.tree();
     let mut nodes = Vec::new();
-    // (node, depth, guides, last child)
-    let mut stack = vec![(top, 0usize, Vec::<bool>::new(), true)];
-    while let Some((id, depth, guides, last_child)) = stack.pop() {
+    // (node, depth, parent's index)
+    let mut stack = vec![(top, 0usize, None)];
+    while let Some((id, depth, parent)) = stack.pop() {
         let node = tree.get(id);
-        let tokens = node.usage.iter().map(UsageLine::tokens).sum();
-        let cost = price(&node.token_usage(), book);
-        let children = tree.children(id);
-        let child_guides = if depth == 0 {
-            Vec::new()
-        } else {
-            let mut g = guides.clone();
-            g.push(!last_child);
-            g
-        };
-        for (ix, child) in children.iter().enumerate().rev() {
-            stack.push((
-                *child,
-                depth + 1,
-                child_guides.clone(),
-                ix + 1 == children.len(),
-            ));
+        let ix = nodes.len();
+        for child in tree.children(id).iter().rev() {
+            stack.push((*child, depth + 1, Some(ix)));
         }
+        let cost = price(&node.token_usage(), book);
         nodes.push(SwarmNodeView {
             name: node.name.clone(),
             spec: node.spec.clone(),
             model: node.model.as_ref().map(|m| m.model_id.clone()),
             status: node.status.clone(),
             depth,
-            guides,
-            last_child,
-            tokens,
+            parent,
+            tokens: node.usage.iter().map(UsageLine::tokens).sum(),
             cost: (cost.unpriced_lines == 0).then_some(cost.usd),
             usage: node.usage.clone(),
             turns: node.turns,
@@ -147,7 +287,10 @@ pub fn adapt_swarm_tree(trace: &SwarmTrace, top: NodeId, book: &PriceBook) -> Sw
             tool_calls: node.tool_calls.clone(),
         });
     }
-    SwarmTree { nodes }
+    SwarmTree {
+        nodes,
+        ..SwarmTree::default()
+    }
 }
 
 /// What a node's status is called, in the line and in its transcript.
@@ -168,6 +311,23 @@ fn spend_label(tokens: u64, cost: Option<f64>) -> String {
         Some(usd) if usd > 0.0 => format!("{tokens} tok · {}", format_cost(usd)),
         _ => format!("{tokens} tok"),
     }
+}
+
+/// What a line says after the name: the tool a running agent is in, else
+/// its model.
+fn secondary_label(node: &SwarmNodeView) -> Option<String> {
+    let current = node
+        .status
+        .is_running()
+        .then(|| {
+            node.tool_calls
+                .iter()
+                .rev()
+                .find(|call| call.outcome == ToolOutcome::Running)
+        })
+        .flatten()
+        .map(|call| format!("{}…", call.name));
+    current.or_else(|| node.model.clone())
 }
 
 fn status_marker(key: &str, status: &NodeStatus, cx: &App) -> AnyElement {
@@ -205,13 +365,13 @@ fn status_marker(key: &str, status: &NodeStatus, cx: &App) -> AnyElement {
     }
 }
 
-/// Width of one level of indentation, guide line in its middle.
+/// Width of one level of indentation, guide rule in its middle.
 const INDENT: f32 = 16.;
 
-/// The guide lines in front of a line: one column per ancestor level, with
-/// a vertical rule where that ancestor's siblings continue, then the
-/// elbow into this node.
-fn guides(node: &SwarmNodeView, cx: &App) -> impl IntoElement {
+/// The guide rules in front of a line: one column per ancestor level, with
+/// a vertical rule where that ancestor's siblings continue, then the elbow
+/// into this line.
+fn guides(line: &TreeLine, cx: &App) -> impl IntoElement {
     // `border` all but vanishes on `group_box`; the rules have to read as
     // structure, not decoration.
     let rule = cx.theme().muted_foreground.opacity(0.35);
@@ -231,14 +391,14 @@ fn guides(node: &SwarmNodeView, cx: &App) -> impl IntoElement {
         .h_full()
         .flex_shrink_0()
         .children(
-            node.guides
+            line.guides
                 .iter()
                 .map(|continues| column().when(*continues, |c| c.child(vertical(relative(1.))))),
         )
-        .when(node.depth > 0, |row| {
+        .when(line.depth > 0, |row| {
             row.child(
                 column()
-                    .child(vertical(if node.last_child {
+                    .child(vertical(if line.last {
                         relative(0.5)
                     } else {
                         relative(1.)
@@ -256,8 +416,18 @@ fn guides(node: &SwarmNodeView, cx: &App) -> impl IntoElement {
         })
 }
 
+/// Opens an agent's transcript, by name.
 pub type OpenSwarmNode = Rc<dyn Fn(String, &mut Window, &mut App)>;
+/// Folds or unfolds a node (`Toggle`) or shows all of a wide node's
+/// children (`ShowAll`), by name.
+pub type FoldSwarmNode = Rc<dyn Fn(String, SwarmFold, &mut App)>;
 type SwarmToggle = Rc<dyn Fn(&mut App)>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwarmFold {
+    Toggle,
+    ShowAll,
+}
 
 /// The tree under a delegation row.
 #[derive(IntoElement)]
@@ -267,6 +437,7 @@ pub struct SwarmTreeCard {
     open: bool,
     on_toggle: Option<SwarmToggle>,
     on_open_node: Option<OpenSwarmNode>,
+    on_fold: Option<FoldSwarmNode>,
 }
 
 impl SwarmTreeCard {
@@ -277,6 +448,7 @@ impl SwarmTreeCard {
             open: true,
             on_toggle: None,
             on_open_node: None,
+            on_fold: None,
         }
     }
 
@@ -294,25 +466,75 @@ impl SwarmTreeCard {
         self.on_open_node = Some(f);
         self
     }
+
+    pub fn on_fold(mut self, f: FoldSwarmNode) -> Self {
+        self.on_fold = Some(f);
+        self
+    }
 }
 
-fn node_line(node: &SwarmNodeView, on_open: Option<OpenSwarmNode>, cx: &App) -> AnyElement {
+/// The fold control in front of a node with children; an empty slot of the
+/// same width in front of a leaf, so names line up.
+fn twisty(tree: &SwarmTree, ix: usize, on_fold: Option<FoldSwarmNode>, cx: &App) -> AnyElement {
+    let node = &tree.nodes[ix];
+    let slot = div().flex_shrink_0().size(px(16.));
+    if tree.children(ix).next().is_none() {
+        return slot.into_any_element();
+    }
+    let folded = tree.folded.contains(&node.name);
+    let name = node.name.clone();
+    slot.id(ElementId::Name(format!("swarm-fold-{name}").into()))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().muted))
+        .child(
+            Icon::new(if folded {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            })
+            .size_3()
+            .text_color(cx.theme().muted_foreground),
+        )
+        .when_some(on_fold, |slot, on_fold| {
+            slot.on_click(move |_, _, cx| {
+                // The line under it opens the transcript; this only folds.
+                cx.stop_propagation();
+                on_fold(name.clone(), SwarmFold::Toggle, cx)
+            })
+        })
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(if folded {
+                "Show its agents"
+            } else {
+                "Hide its agents"
+            })
+            .build(window, cx)
+        })
+        .into_any_element()
+}
+
+fn node_line(
+    tree: &SwarmTree,
+    ix: usize,
+    line: &TreeLine,
+    on_open: Option<OpenSwarmNode>,
+    on_fold: Option<FoldSwarmNode>,
+    cx: &App,
+) -> AnyElement {
+    let node = &tree.nodes[ix];
     let muted = cx.theme().muted_foreground;
     let name = node.name.clone();
     let tools = node.tool_calls.len();
-    // A running agent names what it is doing now; otherwise its model.
-    let current = node
-        .status
-        .is_running()
-        .then(|| {
-            node.tool_calls
-                .iter()
-                .rev()
-                .find(|call| call.outcome == ToolOutcome::Running)
-        })
-        .flatten()
-        .map(|call| format!("{}…", call.name));
-    let secondary = current.or_else(|| node.model.clone());
+    // A folded node says how much it hides.
+    let hidden = tree
+        .folded
+        .contains(&node.name)
+        .then(|| tree.descendants(ix))
+        .filter(|n| *n > 0);
     div()
         .id(ElementId::Name(format!("swarm-node-{name}").into()))
         .flex()
@@ -327,14 +549,8 @@ fn node_line(node: &SwarmNodeView, on_open: Option<OpenSwarmNode>, cx: &App) -> 
             let name = name.clone();
             row.on_click(move |_, window, cx| on_open(name.clone(), window, cx))
         })
-        .tooltip({
-            let name = name.clone();
-            move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(format!("Open {name}'s transcript"))
-                    .build(window, cx)
-            }
-        })
-        .child(guides(node, cx))
+        .child(guides(line, cx))
+        .child(twisty(tree, ix, on_fold, cx))
         .child(
             div()
                 .flex_shrink_0()
@@ -362,14 +578,22 @@ fn node_line(node: &SwarmNodeView, on_open: Option<OpenSwarmNode>, cx: &App) -> 
                         .text_color(cx.theme().foreground)
                         .child(node.name.clone()),
                 )
-                .when_some(secondary, |row, model| {
+                .when_some(hidden, |row, hidden| {
+                    row.child(div().flex_shrink_0().text_xs().text_color(muted).child(
+                        match hidden {
+                            1 => "1 agent".to_string(),
+                            n => format!("{n} agents"),
+                        },
+                    ))
+                })
+                .when_some(secondary_label(node), |row, secondary| {
                     row.child(
                         div()
                             .min_w_0()
                             .truncate()
                             .text_xs()
                             .text_color(muted)
-                            .child(model),
+                            .child(secondary),
                     )
                 }),
         )
@@ -409,6 +633,40 @@ fn node_line(node: &SwarmNodeView, on_open: Option<OpenSwarmNode>, cx: &App) -> 
                 } else {
                     spend_label(node.tokens, node.cost)
                 }),
+        )
+        .into_any_element()
+}
+
+fn more_line(
+    parent: &str,
+    hidden: usize,
+    line: &TreeLine,
+    on_fold: Option<FoldSwarmNode>,
+    cx: &App,
+) -> AnyElement {
+    let parent = parent.to_string();
+    div()
+        .id(ElementId::Name(format!("swarm-more-{parent}").into()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .h_7()
+        .pr_2()
+        .rounded_lg()
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
+        .when_some(on_fold, |row, on_fold| {
+            let parent = parent.clone();
+            row.on_click(move |_, _, cx| on_fold(parent.clone(), SwarmFold::ShowAll, cx))
+        })
+        .child(guides(line, cx))
+        .child(div().flex_shrink_0().size(px(16.)))
+        .child(
+            div()
+                .ml_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("+{hidden} more done · show all")),
         )
         .into_any_element()
 }
@@ -462,11 +720,22 @@ impl RenderOnce for SwarmTreeCard {
             )
             .child(Icon::new(chevron).size_3().text_color(muted));
 
-        let on_open = self.on_open_node.clone();
         let lines: Vec<AnyElement> = tree
-            .nodes
+            .lines()
             .iter()
-            .map(|node| node_line(node, on_open.clone(), cx))
+            .map(|line| match &line.kind {
+                LineKind::Node(ix) => node_line(
+                    &tree,
+                    *ix,
+                    line,
+                    self.on_open_node.clone(),
+                    self.on_fold.clone(),
+                    cx,
+                ),
+                LineKind::More { parent, hidden } => {
+                    more_line(parent, *hidden, line, self.on_fold.clone(), cx)
+                }
+            })
             .collect();
 
         div().id(self.id).w_full().child(
@@ -487,22 +756,12 @@ impl RenderOnce for SwarmTreeCard {
 /// named by its tool alone.
 fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let (marker, detail, detail_color) = match &call.outcome {
-        ToolOutcome::Running => (
-            status_marker(&call.id, &NodeStatus::Running, cx),
-            None,
-            muted,
-        ),
-        ToolOutcome::Done { result } => (
-            status_marker(&call.id, &NodeStatus::Completed, cx),
-            Some(result.clone()),
-            muted,
-        ),
-        ToolOutcome::Failed { error } => (
-            status_marker(&call.id, &NodeStatus::Failed, cx),
-            Some(error.clone()),
-            cx.theme().danger,
-        ),
+    let (status, detail, detail_color) = match &call.outcome {
+        ToolOutcome::Running => (NodeStatus::Running, None, muted),
+        ToolOutcome::Done { result } => (NodeStatus::Completed, Some(result.clone()), muted),
+        ToolOutcome::Failed { error } => {
+            (NodeStatus::Failed, Some(error.clone()), cx.theme().danger)
+        }
     };
     let detail = detail
         .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
@@ -522,7 +781,7 @@ fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(marker),
+                .child(status_marker(&call.id, &status, cx)),
         )
         .child(
             div()
@@ -558,22 +817,71 @@ fn answer_length(bytes: u64) -> String {
     }
 }
 
-/// One agent's transcript, read-only, for the sheet a tree line opens.
+/// One agent's transcript, read-only, for the sheet a tree line opens: a
+/// breadcrumb back up the tree, what the agent is and spent, its sub-agents
+/// (each opens here in turn) and its tool calls.
 #[derive(IntoElement)]
 pub struct AgentTranscript {
-    node: SwarmNodeView,
+    tree: std::sync::Arc<SwarmTree>,
+    ix: usize,
+    on_navigate: Option<OpenSwarmNode>,
 }
 
 impl AgentTranscript {
-    pub fn new(node: SwarmNodeView) -> Self {
-        Self { node }
+    pub fn new(tree: std::sync::Arc<SwarmTree>, ix: usize) -> Self {
+        Self {
+            tree,
+            ix,
+            on_navigate: None,
+        }
+    }
+
+    /// Where a crumb or a sub-agent leads.
+    pub fn on_navigate(mut self, f: OpenSwarmNode) -> Self {
+        self.on_navigate = Some(f);
+        self
     }
 }
 
 impl RenderOnce for AgentTranscript {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let node = self.node;
+        let tree = self.tree;
+        let node = tree.nodes[self.ix].clone();
         let muted = cx.theme().muted_foreground;
+        let navigate = self.on_navigate;
+
+        let path = tree.path(&node.name);
+        let mut crumbs = div().flex().flex_row().flex_wrap().items_center().gap_1();
+        for (pos, name) in path.iter().enumerate() {
+            if pos > 0 {
+                crumbs = crumbs.child(Icon::new(IconName::ChevronRight).size_3().text_color(muted));
+            }
+            if pos + 1 == path.len() {
+                crumbs = crumbs.child(
+                    div()
+                        .px_1()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child(name.clone()),
+                );
+            } else {
+                let target = name.clone();
+                let navigate = navigate.clone();
+                crumbs = crumbs.child(
+                    Button::new(ElementId::Name(format!("swarm-crumb-{name}").into()))
+                        .ghost()
+                        .xsmall()
+                        .label(name.clone())
+                        .on_click(move |_, window, cx| {
+                            if let Some(navigate) = &navigate {
+                                navigate(target.clone(), window, cx);
+                            }
+                        }),
+                );
+            }
+        }
+
         let fact = |label: &'static str, value: String| {
             div()
                 .flex()
@@ -597,6 +905,7 @@ impl RenderOnce for AgentTranscript {
             .flex()
             .flex_col()
             .gap_1()
+            .pt_3()
             .child(fact("Agent", node.spec.clone()))
             .child(fact(
                 "Model",
@@ -616,7 +925,7 @@ impl RenderOnce for AgentTranscript {
                 },
             ));
 
-        let section = |title: &'static str| {
+        let section = |title: String| {
             div()
                 .pt_4()
                 .pb_1()
@@ -642,12 +951,76 @@ impl RenderOnce for AgentTranscript {
                 .gap_3()
                 .text_xs()
                 .child(div().min_w_0().flex_1().truncate().child(model))
-                .child(div().text_color(muted).child(format!(
+                .child(div().flex_shrink_0().text_color(muted).child(format!(
                     "{} in · {} out · {} cached",
                     format_tokens(line.input_tokens),
                     format_tokens(line.output_tokens),
                     format_tokens(line.cache_read_tokens),
                 )))
+        });
+
+        let children: Vec<usize> = tree.children(self.ix).collect();
+        let sub_agents = children.iter().map(|&c| {
+            let child = &tree.nodes[c];
+            let target = child.name.clone();
+            let navigate = navigate.clone();
+            div()
+                .id(ElementId::Name(format!("swarm-sub-{}", child.name).into()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .h_7()
+                .px_1()
+                .rounded_lg()
+                .cursor_pointer()
+                .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
+                .on_click(move |_, window, cx| {
+                    if let Some(navigate) = &navigate {
+                        navigate(target.clone(), window, cx);
+                    }
+                })
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(status_marker(
+                            &format!("sub-{}", child.name),
+                            &child.status,
+                            cx,
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(child.name.clone()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(secondary_label(child).unwrap_or_default()),
+                )
+                .child(div().flex_shrink_0().text_xs().text_color(muted).child(
+                    if child.tokens == 0 {
+                        status_label(&child.status).to_string()
+                    } else {
+                        format!(
+                            "{} · {}",
+                            status_label(&child.status),
+                            spend_label(child.tokens, child.cost)
+                        )
+                    },
+                ))
+                .child(Icon::new(IconName::ChevronRight).size_3().text_color(muted))
         });
 
         let calls: Vec<AnyElement> = node.tool_calls.iter().map(|c| tool_line(c, cx)).collect();
@@ -658,12 +1031,17 @@ impl RenderOnce for AgentTranscript {
             .min_w_0()
             .flex()
             .flex_col()
+            .child(crumbs)
             .child(facts)
             .when(!node.usage.is_empty(), |this| {
-                this.child(section("Spend by model"))
+                this.child(section("Spend by model".into()))
                     .child(div().flex().flex_col().gap_1().children(usage))
             })
-            .child(section("Tool calls"))
+            .when(!children.is_empty(), |this| {
+                this.child(section(format!("Sub-agents · {}", children.len())))
+                    .child(div().flex().flex_col().children(sub_agents))
+            })
+            .child(section("Tool calls".into()))
             .when(has_calls, |this| {
                 this.child(div().flex().flex_col().gap_1().children(calls))
             })
@@ -690,7 +1068,7 @@ impl RenderOnce for AgentTranscript {
 mod tests {
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
-    use super::{SwarmTree, adapt_swarm_tree, delegation_callees};
+    use super::{LineKind, SHOWN_WHEN_WIDE, SwarmTree, WIDE, adapt_swarm_tree, delegation_callees};
     use chatty_core::models::message_types::ToolSource;
     use chatty_core::models::token_usage::{ModelRef, PriceBook, TokenPricing};
     use chatty_core::services::swarm_trace::{NodeStatus, SwarmTrace};
@@ -709,12 +1087,26 @@ mod tests {
         })
     }
 
+    fn started(spec: &str) -> SessionEvent {
+        SessionEvent::Delegation(InvokeAgentProgress::Started {
+            agent_name: spec.into(),
+            prompt: "go".into(),
+            source: ToolSource::Local,
+        })
+    }
+
     fn usage(model: &str, input: u32, output: u32) -> SwarmItem {
         SwarmItem::Usage {
             usage: json!({ "lines": [{
                 "model": { "provider": "ollama", "model_id": model },
                 "inputTokens": input, "outputTokens": output,
             }] }),
+        }
+    }
+
+    fn ended() -> SwarmItem {
+        SwarmItem::Ended {
+            state: "completed".into(),
         }
     }
 
@@ -726,11 +1118,7 @@ mod tests {
         let mut trace = SwarmTrace::new();
         for event in [
             SessionEvent::TurnStarted,
-            SessionEvent::Delegation(InvokeAgentProgress::Started {
-                agent_name: "reviewer".into(),
-                prompt: "review it".into(),
-                source: ToolSource::Local,
-            }),
+            started("reviewer"),
             batch(
                 "coder-0",
                 &coder,
@@ -746,9 +1134,7 @@ mod tests {
                     },
                     SwarmItem::Text { bytes: 42 },
                     usage("coder-model", 100, 20),
-                    SwarmItem::Ended {
-                        state: "completed".into(),
-                    },
+                    ended(),
                 ],
             ),
             batch(
@@ -785,6 +1171,25 @@ mod tests {
         book
     }
 
+    fn top(trace: &SwarmTrace, spec: &str) -> SwarmTree {
+        let top = delegation_callees(trace, &[spec.to_string()])[0].expect("a callee");
+        adapt_swarm_tree(trace, top, &PriceBook::default())
+    }
+
+    /// Each line as `(name or "+N", guides, last)`.
+    fn drawn(tree: &SwarmTree) -> Vec<(String, Vec<bool>, bool)> {
+        tree.lines()
+            .into_iter()
+            .map(|line| {
+                let label = match line.kind {
+                    LineKind::Node(ix) => tree.nodes[ix].name.clone(),
+                    LineKind::More { hidden, .. } => format!("+{hidden}"),
+                };
+                (label, line.guides, line.last)
+            })
+            .collect()
+    }
+
     #[test]
     fn swarm_tree_block_adapts() {
         let trace = scripted();
@@ -794,11 +1199,13 @@ mod tests {
 
         let names: Vec<&str> = tree.nodes.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["reviewer", "coder-0", "coder-1"]);
-        let depths: Vec<usize> = tree.nodes.iter().map(|n| n.depth).collect();
-        assert_eq!(depths, [0, 1, 1]);
+        let shape: Vec<(usize, Option<usize>)> =
+            tree.nodes.iter().map(|n| (n.depth, n.parent)).collect();
+        assert_eq!(shape, [(0, None), (1, Some(0)), (1, Some(0))]);
         // The first coder's elbow continues to its sibling; the last ends.
-        assert!(!tree.nodes[1].last_child);
-        assert!(tree.nodes[2].last_child);
+        let lines = drawn(&tree);
+        assert!(!lines[1].2);
+        assert!(lines[2].2);
 
         let reviewer = &tree.nodes[0];
         assert_eq!(reviewer.status, NodeStatus::Running);
@@ -821,18 +1228,14 @@ mod tests {
 
         assert_eq!(tree.running(), 2);
         assert_eq!(tree.tokens(), 120);
+        assert_eq!(tree.path("coder-1"), ["reviewer", "coder-1"]);
     }
 
     #[test]
     fn two_rows_for_the_same_spec_claim_their_own_callee() {
         let mut trace = SwarmTrace::new();
-        for _ in 0..2 {
-            trace.apply(&SessionEvent::Delegation(InvokeAgentProgress::Started {
-                agent_name: "coder".into(),
-                prompt: "go".into(),
-                source: ToolSource::Local,
-            }));
-        }
+        trace.apply(&started("coder"));
+        trace.apply(&started("coder"));
         let specs = [
             "coder".to_string(),
             "coder".to_string(),
@@ -845,37 +1248,74 @@ mod tests {
     }
 
     #[test]
-    fn a_grandchild_draws_its_parents_guide_line() {
+    fn a_grandchild_draws_its_parents_guide_line_and_folds_away() {
         let a = CallChain::root("t-1").extend("a").unwrap();
         let b = a.extend("b").unwrap();
         let c = b.extend("c").unwrap();
         let mut trace = SwarmTrace::new();
-        trace.apply(&SessionEvent::Delegation(InvokeAgentProgress::Started {
-            agent_name: "a".into(),
-            prompt: "go".into(),
-            source: ToolSource::Local,
-        }));
+        trace.apply(&started("a"));
         trace.apply(&batch("b-0", &b, vec![SwarmItem::TurnStarted]));
         trace.apply(&batch("c-0", &c, vec![SwarmItem::TurnStarted]));
         trace.apply(&batch("b-1", &b, vec![SwarmItem::TurnStarted]));
-        let top = delegation_callees(&trace, &["a".to_string()])[0].unwrap();
-        let tree = adapt_swarm_tree(&trace, top, &PriceBook::default());
-        let rows: Vec<(&str, Vec<bool>, bool)> = tree
-            .nodes
-            .iter()
-            .map(|n| (n.name.as_str(), n.guides.clone(), n.last_child))
-            .collect();
+        let tree = top(&trace, "a");
         assert_eq!(
-            rows,
+            drawn(&tree),
             [
-                ("a", vec![], true),
-                ("b-0", vec![], false),
+                ("a".into(), vec![], true),
+                ("b-0".into(), vec![], false),
                 // b-0 has a later sibling, so its rule runs past c-0.
-                ("c-0", vec![true], true),
-                ("b-1", vec![], true),
+                ("c-0".into(), vec![true], true),
+                ("b-1".into(), vec![], true),
             ]
         );
-        // Unpriced spend has no cost.
-        assert!(tree.nodes.iter().all(|n| n.cost.is_none() || n.tokens == 0));
+        assert_eq!(tree.path("c-0"), ["a", "b-0", "c-0"]);
+        assert_eq!(tree.descendants(1), 1);
+
+        let folded = tree.toggled("b-0");
+        let names: Vec<String> = drawn(&folded).into_iter().map(|l| l.0).collect();
+        assert_eq!(names, ["a", "b-0", "b-1"]);
+        assert_eq!(folded.toggled("b-0").lines(), tree.lines());
+        // A rebuilt tree keeps the reader's folds.
+        assert_eq!(
+            top(&trace, "a").with_folds_of(&folded).lines(),
+            folded.lines()
+        );
+    }
+
+    #[test]
+    fn a_wide_node_keeps_its_live_and_failed_children_in_view() {
+        let lead = CallChain::root("t-1").extend("lead").unwrap();
+        let worker = lead.extend("w").unwrap();
+        let mut trace = SwarmTrace::new();
+        trace.apply(&started("lead"));
+        let total = WIDE + 4;
+        for n in 0..total {
+            let mut inner = vec![SwarmItem::TurnStarted];
+            match n {
+                // One late failure, one late runner: neither may hide.
+                n if n == total - 3 => inner.push(SwarmItem::Ended {
+                    state: "failed".into(),
+                }),
+                n if n == total - 1 => {}
+                _ => inner.push(ended()),
+            }
+            trace.apply(&batch(&format!("w-{n}"), &worker, inner));
+        }
+        let tree = top(&trace, "lead");
+        let lines = drawn(&tree);
+        let names: Vec<&str> = lines.iter().map(|l| l.0.as_str()).collect();
+        let mut expected: Vec<String> = (0..SHOWN_WHEN_WIDE).map(|n| format!("w-{n}")).collect();
+        expected.insert(0, "lead".into());
+        expected.push(format!("w-{}", total - 3));
+        expected.push(format!("w-{}", total - 1));
+        let hidden = total - SHOWN_WHEN_WIDE - 2;
+        expected.push(format!("+{hidden}"));
+        assert_eq!(names, expected);
+        // The "+N more" line is the last under its parent.
+        assert!(lines.last().unwrap().2);
+        assert!(!lines[lines.len() - 2].2);
+
+        let all = drawn(&tree.unfolded_at("lead"));
+        assert_eq!(all.len(), 1 + total);
     }
 }

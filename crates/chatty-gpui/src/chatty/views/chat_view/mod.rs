@@ -394,6 +394,10 @@ fn turn_fingerprint(
                 // Open (one line per agent) or folded to its header; each
                 // line's status and spend move while the swarm runs (TB-4).
                 activity_expanded.get(&id.0).hash(&mut hasher);
+                // Folded subtrees and opened "+N more" lines change the
+                // line count.
+                tree.folded.hash(&mut hasher);
+                tree.unfolded.hash(&mut hasher);
                 tree.nodes.len().hash(&mut hasher);
                 for node in &tree.nodes {
                     std::mem::discriminant(&node.status).hash(&mut hasher);
@@ -2604,6 +2608,14 @@ impl ChatView {
                     });
                 })
             },
+            fold_node: {
+                let entity = entity.clone();
+                Rc::new(move |msg_idx, name, fold, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.fold_swarm_node(msg_idx, &name, fold, cx)
+                    });
+                })
+            },
             open_node: {
                 let entity = entity.clone();
                 Rc::new(move |msg_idx, name, window, cx| {
@@ -3667,8 +3679,7 @@ mod fingerprint_tests {
                 model: Some("coder-model".into()),
                 status: status.clone(),
                 depth: usize::from(ix > 0),
-                guides: Vec::new(),
-                last_child: true,
+                parent: (ix > 0).then_some(0),
                 tokens,
                 cost: None,
                 usage: Vec::new(),
@@ -3679,7 +3690,10 @@ mod fingerprint_tests {
             .collect();
         turn_with(vec![Block::SwarmTree {
             id: BlockId(3),
-            tree: Arc::new(SwarmTree { nodes }),
+            tree: Arc::new(SwarmTree {
+                nodes,
+                ..SwarmTree::default()
+            }),
         }])
     }
 
@@ -3701,7 +3715,15 @@ mod fingerprint_tests {
         assert_ne!(fp(&running, None), fp(&grown, None));
         let spent = swarm(&[NodeStatus::Running, NodeStatus::Running], 120);
         assert_ne!(fp(&running, None), fp(&spent, None));
-        // Folding the card changes its height too.
+        // Folding a subtree, or the whole card, changes its height too.
+        let Block::SwarmTree { tree, .. } = &running.blocks[0] else {
+            unreachable!()
+        };
+        let folded_node = turn_with(vec![Block::SwarmTree {
+            id: BlockId(3),
+            tree: Arc::new(tree.toggled("coder-0")),
+        }]);
+        assert_ne!(fp(&running, None), fp(&folded_node, None));
         let mut folded = HashMap::new();
         folded.insert(3, false);
         assert_ne!(

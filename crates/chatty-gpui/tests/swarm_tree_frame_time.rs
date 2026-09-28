@@ -77,27 +77,30 @@ fn wire_lines(lines: &[(&str, u32, u32)]) -> serde_json::Value {
 }
 
 /// `lead` → four sub-leaders → fifteen workers: twenty runs on three levels
-/// under the root's delegation, one of them failed and one refused.
+/// under the root's delegation. The testers finish first, one of them
+/// failed, so a live frame shows failed, done and running runs at once; the
+/// writer has ten drafters, more than a node shows before it folds its
+/// finished ones into a "+N more" line.
 fn runs() -> (CallChain, Vec<(Run, usize)>) {
     let lead = CallChain::root("t-bench").extend("lead").unwrap();
     let mut runs = Vec::new();
     let teams: [(&str, &str, &str, usize, &str); 4] = [
-        ("researcher", "searcher", "web_search", 4, "qwen/qwen3-32b"),
-        (
-            "writer",
-            "drafter",
-            "write_file",
-            5,
-            "mistralai/devstral-small",
-        ),
-        ("reviewer", "checker", "read_file", 3, "qwen/qwen3-32b"),
         (
             "tester",
             "runner",
             "shell_execute",
-            3,
+            2,
             "mistralai/devstral-small",
         ),
+        ("researcher", "searcher", "web_search", 2, "qwen/qwen3-32b"),
+        (
+            "writer",
+            "drafter",
+            "write_file",
+            10,
+            "mistralai/devstral-small",
+        ),
+        ("reviewer", "checker", "read_file", 1, "qwen/qwen3-32b"),
     ];
     for (team_ix, (leader, worker, tool, size, worker_model)) in teams.into_iter().enumerate() {
         let leader_chain = lead.extend(leader).unwrap();
@@ -116,8 +119,7 @@ fn runs() -> (CallChain, Vec<(Run, usize)>) {
         ));
         for n in 0..size {
             let (outcome, end) = match (worker, n) {
-                ("runner", 2) => (Err("exit status 101: 2 tests failed"), "failed"),
-                ("checker", 2) => (Ok("skipped"), "rejected"),
+                ("runner", 1) => (Err("exit status 101: 2 tests failed"), "failed"),
                 _ => (Ok("ok"), "completed"),
             };
             runs.push((
@@ -519,9 +521,9 @@ fn swarm_tree_frame_time() {
     x(&["click", "900", "876"]);
     x(&["type", "Prepare the 0.5 release with the team"]);
     x(&["key", "Return"]);
-    thread::sleep(Duration::from_secs(4));
+    thread::sleep(Duration::from_millis(3500));
     shot("01-live.png");
-    thread::sleep(Duration::from_secs(8));
+    thread::sleep(Duration::from_secs(9));
     shot("02-settled.png");
     let tree = scroll_frames(&log);
     shot("03-scrolled.png");

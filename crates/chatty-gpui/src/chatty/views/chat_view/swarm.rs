@@ -1,16 +1,18 @@
 //! The chat view's half of the swarm tree (TB-4, AGE-666).
 //!
-//! `StreamManager` folds every event of a turn into a
-//! [`SwarmTrace`] and hands it here each time the swarm changes. The view
-//! remembers which delegation rows the running stream opened, cuts the
-//! subtree under each row's callee out of the trace and stores it on the
-//! row's `DisplayMessage`, where the adapter turns it into a
-//! `Block::SwarmTree`. A row whose callee delegated to no one keeps the
-//! plain delegation row it always had.
+//! `StreamManager` folds every event of a turn into a [`SwarmTrace`] and
+//! hands it here each time the swarm changes. The view remembers which
+//! delegation rows the running stream opened, cuts the subtree under each
+//! row's callee out of the trace and stores it on the row's
+//! `DisplayMessage`, where the adapter turns it into a `Block::SwarmTree`.
+//! A row whose callee delegated to no one keeps the plain delegation row it
+//! always had. The reader's folds live on the stored tree and carry over
+//! to each rebuilt one.
 //!
 //! A tree line opens that agent's transcript in a sheet. The sheet reads the
 //! row's current tree each time it draws, so a transcript opened on a
-//! running agent keeps up with it.
+//! running agent keeps up with it; its breadcrumb and sub-agent list move
+//! the sheet up and down the tree, and Escape or its close button leave.
 
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ use gpui_component::{ActiveTheme, WindowExt as _};
 
 use super::ChatView;
 use crate::chatty::views::transcript::{
-    AgentTranscript, SwarmTree, adapt_swarm_tree, delegation_callees,
+    AgentTranscript, SwarmFold, SwarmTree, adapt_swarm_tree, delegation_callees,
 };
 
 /// Wide enough for a tool row's headline and its result preview.
@@ -59,10 +61,13 @@ impl ChatView {
             if trace.tree().children(top).is_empty() {
                 continue;
             }
-            let tree = adapt_swarm_tree(trace, top, book);
             let Some(msg) = self.messages.get_mut(*idx) else {
                 continue;
             };
+            let mut tree = adapt_swarm_tree(trace, top, book);
+            if let Some(previous) = &msg.swarm_tree {
+                tree = tree.with_folds_of(previous);
+            }
             if msg.swarm_tree.as_deref() != Some(&tree) {
                 msg.swarm_tree = Some(Arc::new(tree));
                 changed = true;
@@ -98,6 +103,29 @@ impl ChatView {
         }
     }
 
+    /// Fold or unfold `name` in the tree under message `msg_idx`, or show
+    /// all of its children.
+    pub fn fold_swarm_node(
+        &mut self,
+        msg_idx: usize,
+        name: &str,
+        fold: SwarmFold,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(msg) = self.messages.get_mut(msg_idx) else {
+            return;
+        };
+        let Some(tree) = msg.swarm_tree.as_ref() else {
+            return;
+        };
+        let next = match fold {
+            SwarmFold::Toggle => tree.toggled(name),
+            SwarmFold::ShowAll => tree.unfolded_at(name),
+        };
+        msg.swarm_tree = Some(Arc::new(next));
+        cx.notify();
+    }
+
     /// Open `name`'s transcript, from the tree under message `msg_idx`.
     pub fn open_swarm_node(
         &mut self,
@@ -107,11 +135,10 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         let chat_view = cx.entity();
-        let title = name.clone();
         let transcript = cx.new(|cx| SwarmNodeTranscript::new(chat_view, msg_idx, name, cx));
         window.open_sheet(cx, move |sheet, _window, _cx| {
             sheet
-                .title(title.clone())
+                .title("Agent transcript")
                 .size(px(TRANSCRIPT_SHEET_WIDTH))
                 .child(transcript.clone())
         });
@@ -119,7 +146,8 @@ impl ChatView {
 }
 
 /// The sheet's body: one agent's transcript, redrawn whenever the chat view
-/// changes so a running agent's calls keep arriving.
+/// changes so a running agent's calls keep arriving. Which agent it shows
+/// moves with the breadcrumb and the sub-agent list.
 struct SwarmNodeTranscript {
     chat_view: WeakEntity<ChatView>,
     msg_idx: usize,
@@ -146,15 +174,26 @@ impl SwarmNodeTranscript {
 
 impl Render for SwarmNodeTranscript {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let node = self.chat_view.upgrade().and_then(|view| {
+        let tree = self.chat_view.upgrade().and_then(|view| {
             view.read(cx)
                 .messages
                 .get(self.msg_idx)
-                .and_then(|msg| msg.swarm_tree.as_ref())
-                .and_then(|tree| tree.node(&self.name).cloned())
+                .and_then(|msg| msg.swarm_tree.clone())
         });
-        match node {
-            Some(node) => AgentTranscript::new(node).into_any_element(),
+        let found = tree.and_then(|tree| tree.index_of(&self.name).map(|ix| (tree, ix)));
+        match found {
+            Some((tree, ix)) => {
+                let this = cx.entity().downgrade();
+                AgentTranscript::new(tree, ix)
+                    .on_navigate(std::rc::Rc::new(move |name, _window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.name = name;
+                            cx.notify();
+                        })
+                        .ok();
+                    }))
+                    .into_any_element()
+            }
             None => div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)

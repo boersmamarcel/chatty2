@@ -100,8 +100,8 @@ pub use session_changes::{
     file_change_from_tool, file_changes_from_turn, merge_file_changes,
 };
 pub use swarm_tree::{
-    AgentTranscript, OpenSwarmNode, SwarmNodeView, SwarmTree, SwarmTreeCard, adapt_swarm_tree,
-    delegation_callees,
+    AgentTranscript, FoldSwarmNode, OpenSwarmNode, SwarmFold, SwarmNodeView, SwarmTree,
+    SwarmTreeCard, adapt_swarm_tree, delegation_callees,
 };
 pub use table::{extract_table_preview, render_table_preview_card};
 pub use ticker::HeadlineTicker;
