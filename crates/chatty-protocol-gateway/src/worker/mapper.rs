@@ -82,6 +82,19 @@
 //! (`fabric-resumable-conversations` §4.1). Over the cap, the byte count
 //! rides under [`CONVERSATION_TOO_LARGE_METADATA_KEY`] instead — never a
 //! silently truncated conversation.
+//!
+//! # Typed handoffs (TD-2, AGE-693)
+//!
+//! A task whose role has a handoff schema carries it
+//! ([`with_handoff`](TaskMapper::with_handoff)). The mapper keeps the text of
+//! the turn's last model call and, at the terminal status of a task that
+//! completed, checks it against the schema: a valid handoff rides the
+//! status under [`HANDOFF_METADATA_KEY`]; an invalid one fails the task,
+//! the role and errors under [`HANDOFF_INVALID_METADATA_KEY`]. The one
+//! re-prompt the worker gets in between is its runner's (it reaches the
+//! mapper as a `FollowUp`, which is how the invalid answers are counted
+//! under [`HANDOFF_INVALID_COUNT_METADATA_KEY`]). A task without a schema
+//! keeps none of this, so its frames are the bytes they always were.
 
 use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
@@ -89,6 +102,10 @@ use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::services::a2a_client::{
     CONVERSATION_METADATA_KEY, CONVERSATION_TOO_LARGE_METADATA_KEY, TRACE_METADATA_KEY,
     USAGE_METADATA_KEY, usage_metadata,
+};
+use chatty_core::services::handoff::{
+    self, HANDOFF_INVALID_COUNT_METADATA_KEY, HANDOFF_INVALID_METADATA_KEY, HANDOFF_METADATA_KEY,
+    HandoffContract, HandoffOutcome,
 };
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
@@ -280,6 +297,13 @@ pub struct TaskMapper {
     /// is on. Untouched otherwise, so it never allocates for the common
     /// case.
     captured_messages: Vec<Value>,
+    /// The schema the task's final answer must match (TD-2).
+    handoff: Option<HandoffContract>,
+    /// The text of the latest model call, since its last tool event: what
+    /// the handoff is read from. Kept only when there is a schema.
+    final_text: String,
+    /// The handoff re-prompts the runner sent, each an invalid answer.
+    handoff_follow_ups: u32,
 }
 
 impl TaskMapper {
@@ -296,7 +320,43 @@ impl TaskMapper {
             open_calls: HashMap::new(),
             capture_conversation: false,
             captured_messages: Vec::new(),
+            handoff: None,
+            final_text: String::new(),
+            handoff_follow_ups: 0,
         }
+    }
+
+    /// Check the task's final answer against `handoff` (TD-2, AGE-693).
+    /// `None`, the default, keeps the frames exactly what they were.
+    pub fn with_handoff(mut self, handoff: Option<HandoffContract>) -> Self {
+        self.handoff = handoff;
+        self
+    }
+
+    /// Follow the last model call's text and count the handoff re-prompts,
+    /// when the task has a schema.
+    fn record_handoff_event(&mut self, event: &SessionEvent) {
+        if self.handoff.is_none() {
+            return;
+        }
+        match event {
+            SessionEvent::Text(text) => self.final_text.push_str(text),
+            SessionEvent::TurnStarted
+            | SessionEvent::ToolCallStarted { .. }
+            | SessionEvent::ToolCallResult { .. }
+            | SessionEvent::ToolCallError { .. } => self.final_text.clear(),
+            SessionEvent::FollowUp(prompt) if handoff::is_follow_up(prompt) => {
+                self.handoff_follow_ups += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// How the final answer measured up, for a task with a schema that
+    /// completed. A failed or cancelled task is not read.
+    fn handoff_outcome(&self) -> Option<HandoffOutcome> {
+        let contract = self.handoff.as_ref()?;
+        (self.state == TaskState::Completed).then(|| handoff::check(contract, &self.final_text))
     }
 
     /// Turn on conversation capture for this task (RC-0, AGE-649). Off by
@@ -341,6 +401,7 @@ impl TaskMapper {
     /// The frame for `event`, or `None` for the events that stay in the child.
     pub fn map(&mut self, event: &SessionEvent) -> Option<ParticipantFrame> {
         self.record_trace_event(event);
+        self.record_handoff_event(event);
         match event {
             SessionEvent::TurnStarted => Some(self.status(TaskState::Working, None)),
 
@@ -439,23 +500,63 @@ impl TaskMapper {
 
     /// The single terminal status for the whole delegation.
     pub fn terminal(&self) -> ParticipantFrame {
+        let handoff = self.handoff_outcome();
+        let (state, message) = match (&handoff, self.handoff.as_ref()) {
+            (Some(HandoffOutcome::Invalid { errors }), Some(contract)) => (
+                TaskState::Failed,
+                Some(format!(
+                    "handoff_invalid: {}: {}",
+                    contract.role,
+                    errors.join("; ")
+                )),
+            ),
+            _ => (self.state, self.failure.clone()),
+        };
         ParticipantFrame::Status {
             task_id: self.task_id.clone(),
-            state: self.state,
-            message: self.failure.clone(),
-            metadata: self.terminal_metadata(),
+            state,
+            message,
+            metadata: self.terminal_metadata(handoff),
             input: None,
         }
+    }
+
+    /// The handoff keys for the terminal status: the valid handoff, or the
+    /// role and errors of an invalid one, and how many answers failed.
+    fn handoff_metadata(&self, outcome: Option<HandoffOutcome>) -> Vec<(&'static str, Value)> {
+        let Some(contract) = self.handoff.as_ref() else {
+            return Vec::new();
+        };
+        let mut invalid = self.handoff_follow_ups;
+        let mut keys = Vec::new();
+        match outcome {
+            Some(HandoffOutcome::Valid(value)) => keys.push((HANDOFF_METADATA_KEY, value)),
+            Some(HandoffOutcome::Invalid { errors }) => {
+                invalid += 1;
+                keys.push((
+                    HANDOFF_INVALID_METADATA_KEY,
+                    json!({ "role": contract.role, "errors": errors }),
+                ));
+            }
+            None => {}
+        }
+        if invalid > 0 {
+            keys.push((HANDOFF_INVALID_COUNT_METADATA_KEY, json!(invalid)));
+        }
+        keys
     }
 
     /// Everything that rides on the terminal status's `metadata`: usage
     /// under `USAGE_METADATA_KEY` (ADR-0011) and, when this task made any
     /// tool calls, the compacted trace under [`TRACE_METADATA_KEY`]
-    /// (AGE-467). `None` when neither has anything to report.
-    fn terminal_metadata(&self) -> Option<Value> {
+    /// (AGE-467), and the handoff keys (TD-2). `None` when none has
+    /// anything to report.
+    fn terminal_metadata(&self, handoff: Option<HandoffOutcome>) -> Option<Value> {
         let trace = compact_trace(&self.trace);
         let conversation = self.conversation_metadata();
-        if self.usage.is_empty() && trace.is_none() && conversation.is_none() {
+        let handoff = self.handoff_metadata(handoff);
+        if self.usage.is_empty() && trace.is_none() && conversation.is_none() && handoff.is_empty()
+        {
             return None;
         }
 
@@ -468,6 +569,9 @@ impl TaskMapper {
         }
         if let Some((key, value)) = conversation {
             metadata.insert(key, value);
+        }
+        for (key, value) in handoff {
+            metadata.insert(key.to_string(), value);
         }
         Some(Value::Object(metadata))
     }

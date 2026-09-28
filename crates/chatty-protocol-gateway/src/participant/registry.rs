@@ -155,6 +155,9 @@ struct Inner {
     /// delivered. Weak: the node's worker owns it, so reaping the worker
     /// frees the slot at once, not when its connection is next read.
     permits: HashMap<String, WeakRunPermit>,
+    /// Where a copy of every line a connection reads or writes goes, when
+    /// someone asked for one ([`ParticipantRegistry::tap_wire`]).
+    wire_tap: Option<mpsc::UnboundedSender<String>>,
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -174,6 +177,22 @@ impl ParticipantRegistry {
     /// (BI-4). The gateway does this once it knows its virtual agents.
     pub fn install_calls(&self, calls: &Arc<BrokerCalls>) {
         self.lock().calls = Arc::downgrade(calls);
+    }
+
+    /// A copy of every frame line the connections opened from now on read
+    /// (`<- …`) and write (`-> …`), exactly as it crossed the socket. What
+    /// a test compares when it says a change leaves the wire byte-identical
+    /// (TD-2, AGE-693); nothing in the broker reads it.
+    pub fn tap_wire(&self) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.lock().wire_tap = Some(tx);
+        rx
+    }
+
+    /// The tap [`tap_wire`](Self::tap_wire) installed, if any.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn wire_tap(&self) -> Option<mpsc::UnboundedSender<String>> {
+        self.lock().wire_tap.clone()
     }
 
     /// What runs a connection's calls, while the gateway that installed it
@@ -385,6 +404,7 @@ impl ParticipantRegistry {
                 bearer: task.bearer,
                 capture_conversation: task.capture_conversation,
                 spawn_context: task.spawn_context,
+                handoff: task.handoff,
             })
             .is_err()
         {

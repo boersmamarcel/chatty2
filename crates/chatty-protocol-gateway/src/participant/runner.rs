@@ -34,7 +34,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chatty_fabric::{EndpointBudget, RunPermit, SpawnContext};
+use chatty_fabric::{EndpointBudget, HandoffContract, RunPermit, SpawnContext};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -158,6 +158,9 @@ pub struct LocalRunner {
     /// `None` leaves the runner unmetered.
     endpoint: Option<(String, EndpointBudget)>,
     registration_timeout: Duration,
+    /// The schema this role's answers must match, when the team names one
+    /// (TD-2, AGE-693). Every task this runner starts carries it.
+    handoff: Option<HandoffContract>,
 }
 
 impl LocalRunner {
@@ -178,7 +181,14 @@ impl LocalRunner {
             registry,
             endpoint: None,
             registration_timeout: REGISTRATION_TIMEOUT,
+            handoff: None,
         }
+    }
+
+    /// The handoff contract every worker of this role answers under (TD-2).
+    pub fn with_handoff(mut self, handoff: Option<HandoffContract>) -> Self {
+        self.handoff = handoff;
+        self
     }
 
     /// Rename the virtual agent callers address.
@@ -386,6 +396,8 @@ impl LocalRunner {
 
         self.await_registration(&mut worker).await?;
 
+        // The role's handoff contract rides the task (TD-2).
+        let task = task.with_handoff(self.handoff.clone());
         let (task_id, updates) = self
             .registry
             .submit_task(&name, task)

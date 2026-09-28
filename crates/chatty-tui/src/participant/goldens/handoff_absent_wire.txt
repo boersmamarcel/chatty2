@@ -1,0 +1,8 @@
+<- {"card":{"description":"A chatty agent delegated a task by the broker.","display_name":"chatty worker","name":"","skills":[{"description":"Run a self-contained task and report the result.","examples":[],"name":"delegate"}],"version":"<VERSION>"},"type":"hello","v":2}
+-> {"name":"kit-coder-0","owner":null,"scope":"root","type":"welcome","v":2}
+-> {"spawnContext":{"endpoint":"<SSE>","roster":["kit-coder"],"workspace_root":"<ROOT>/workspace"},"taskId":"<TASK>","text":"change the readme","type":"task","v":2}
+<- {"state":"working","taskId":"<TASK>","type":"status","v":2}
+<- {"message":"read_file","state":"working","taskId":"<TASK>","type":"status","v":2}
+<- {"message":"✓ read_file","state":"working","taskId":"<TASK>","type":"status","v":2}
+<- {"lastChunk":false,"taskId":"<TASK>","text":"Done.\n\n```json\n{\"files_changed\": [\"README.md\"]}\n```","type":"artifact","v":2}
+<- {"metadata":{"trace":"### read_file (ok)\ninput: {\"path\":\"README.md\"}\noutput: {\"content\":\"# Chatty\\n\",\"path\":\"README.md\",\"start_line\":null,\"end_line\":null,\"returned_start_line\":1,\"returned_end_line\":1,\"total_lines\":1,\"truncated\":false,\"next_start_line\":null,\"note\":null}","usage":{"cacheReadTokens":0,"cacheWriteTokens":0,"inputTokens":20,"lines":[{"at":"<CLOCK>","cacheReadTokens":0,"cacheWriteTokens":0,"durationMs":"<CLOCK>","inputTokens":20,"model":{"model_id":"kit/coder","provider":"open_router"},"outputTokens":10}],"outputTokens":10}},"state":"completed","taskId":"<TASK>","type":"status","v":2}
