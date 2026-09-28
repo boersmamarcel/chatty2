@@ -1,10 +1,13 @@
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use std::convert::Infallible;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use anyhow::{Context, Result};
+use tokio::runtime::RuntimeFlavor;
 use tracing::{debug, info, warn};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, EngineWeak, Store, Trap};
@@ -15,7 +18,9 @@ use crate::bindings::exports::chatty::plugin::plugin::{
     PluginMetadata, ToolCallRequest, ToolResult,
 };
 use crate::error::{CallError, ToolFailure};
-use crate::host::{BillingProvider, LlmProvider, ModuleManifest, ModuleState};
+use crate::host::{
+    BillingProvider, LlmProvider, ModuleManifest, ModuleState, add_deadline_clock_to_linker,
+};
 use crate::limits::{EPOCH_TICK, METADATA_CALL_MS, ResourceLimits};
 
 // ---------------------------------------------------------------------------
@@ -84,9 +89,10 @@ struct Instance {
 ///
 /// Every export call runs under the per-call [`ResourceLimits`]: fuel is
 /// refilled and an epoch deadline is set before each call, and the call runs
-/// off the async executor (`spawn_blocking` for `invoke_tool`, a scoped
-/// thread for the metadata exports), so a guest trap, panic or memory
-/// failure comes back as a [`CallError`] and never takes the host down.
+/// off the async executor (`block_in_place` or `spawn_blocking` for
+/// `invoke_tool`, see `call_blocking`; a scoped thread for the metadata
+/// exports), so a guest trap, panic or memory failure comes back as a
+/// [`CallError`] and never takes the host down.
 ///
 /// A call that traps drops its instance; the next call instantiates the
 /// component afresh (guest state such as statics starts over).
@@ -224,6 +230,9 @@ impl WasmModule {
         // for wasm32-wasip2 import WASI interfaces (e.g. wasi:io/poll) from
         // the host even when they don't actively use them.
         wasmtime_wasi::add_to_linker_sync(&mut linker).context("failed to add WASI to linker")?;
+        // ...with every clock wait capped at the call deadline (AGE-706).
+        add_deadline_clock_to_linker(&mut linker)
+            .context("failed to add the deadline-bounded WASI clock to linker")?;
 
         PluginWorld::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
@@ -352,8 +361,22 @@ impl WasmModule {
         self.last_metrics.clone()
     }
 
-    /// Run `call` on the blocking pool under the full per-call limits, and
+    /// Run `call` off the async executor under the full per-call limits, and
     /// record [`InvocationMetrics`] for it.
+    ///
+    /// Where the call runs (AGE-707): on a multi-threaded Tokio runtime it
+    /// runs in place, inside [`tokio::task::block_in_place`], which hands this
+    /// worker's other tasks to another thread first and lets WASI's sync
+    /// bindings `block_on`. That skips the thread hop per call PL-H1 paid
+    /// with `spawn_blocking`. On a current-thread runtime `block_in_place` is
+    /// not allowed, so the call still hops to `spawn_blocking`; with no Tokio
+    /// runtime at all the caller's thread is not a Tokio executor and the call
+    /// runs on it. Either way a panic in the call is caught and becomes
+    /// [`CallError::HostPanic`], and the instance it was using is dropped.
+    ///
+    /// Running in place means the awaiting task itself cannot make progress
+    /// (another branch of its `select!`, a timeout around this future) until
+    /// the call returns; the call's own deadline bounds that wait.
     async fn call_blocking<O, E>(
         &mut self,
         export: &'static str,
@@ -370,12 +393,21 @@ impl WasmModule {
         let limits = self.limits.clone();
         let start = Instant::now();
 
-        let joined = tokio::task::spawn_blocking(move || {
+        let run = move || {
             let budget = limits.max_execution_ms;
             let report = run_export(&mut instance, &limits, budget, call, size);
             (instance, report)
-        })
-        .await;
+        };
+        let joined = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if runtime.runtime_flavor() == RuntimeFlavor::CurrentThread => {
+                tokio::task::spawn_blocking(run)
+                    .await
+                    .map_err(|join| join.to_string())
+            }
+            Ok(_) => catch_unwind(AssertUnwindSafe(|| tokio::task::block_in_place(run)))
+                .map_err(|panic| panic_message(&*panic)),
+            Err(_) => catch_unwind(AssertUnwindSafe(run)).map_err(|panic| panic_message(&*panic)),
+        };
 
         let (result, fuel_consumed) = match joined {
             Ok((instance, report)) => {
@@ -384,7 +416,7 @@ impl WasmModule {
                 }
                 (report.result, report.fuel_consumed)
             }
-            Err(join) => (Err(host_panic(join.to_string())), 0),
+            Err(panic) => (Err(host_panic(panic)), 0),
         };
         self.last_metrics = Some(InvocationMetrics {
             execution_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -522,6 +554,12 @@ fn run_export<O, E>(
         let state = store.data_mut();
         state.deadline = Some(Instant::now() + Duration::from_millis(budget_ms));
         state.deadline_hit = false;
+        // A clock pollable the guest kept from an earlier call still holds
+        // that call's flag; give this call its own so it can't be marked.
+        match Arc::get_mut(&mut state.clock_deadline_hit) {
+            Some(hit) => *hit.get_mut() = false,
+            None => state.clock_deadline_hit = Arc::default(),
+        }
         state.limiter.memory_denied = false;
         state.stderr.clear();
     }
@@ -533,13 +571,14 @@ fn run_export<O, E>(
         .saturating_sub(store.get_fuel().unwrap_or(0));
     let state = store.data_mut();
     state.deadline = None;
+    let deadline_hit = state.deadline_hit || state.clock_deadline_hit.load(Ordering::Relaxed);
     let deadline = CallError::DeadlineExceeded {
         max_execution_ms: budget_ms,
     };
 
     let (result, trapped) = match outcome {
         Err(err) => (Err(classify_trap(&err, state, limits, budget_ms)), true),
-        Ok(_) if state.deadline_hit => (Err(deadline), false),
+        Ok(_) if deadline_hit => (Err(deadline), false),
         Ok(returned) => {
             let bytes = size(&returned);
             let result = if bytes as u64 > limits.max_output_bytes {
