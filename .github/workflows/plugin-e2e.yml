@@ -1,10 +1,10 @@
 name: Plugin e2e (nightly)
 
 # The chatty × Hive contract and trust suite (PL-E6, AGE-601; evaluation
-# plan §3 S5 + S6, §4 item 5). chatty2 `main` × hive `main`: hive's registry
-# and runner are built with chatty-wasm-runtime patched to this checkout, so
-# ABI drift between the two repos fails here rather than in production. The
-# stack is hive's docker compose `e2e` profile (Postgres, MinIO, registry,
+# plan §3 S5 + S6, §4 item 5). chatty2 `main` × hive `main`: this checkout's
+# WASM fixtures are published to hive's registry, whose `chatty:plugin@0.3.0`
+# export check makes WIT drift between the two repos fail here rather than in
+# production. The stack is hive's docker compose `e2e` profile (Postgres, MinIO, registry,
 # runner, a wiremock LLM upstream), seeded with this repo's WASM fixtures.
 #
 # Nightly and on demand only, never per PR: it needs a private hive checkout
@@ -84,7 +84,7 @@ jobs:
       - name: Build WASM modules and test fixtures
         run: scripts/build-wasm-fixtures.sh
 
-      - name: Build hive against this chatty2
+      - name: Build hive
         run: scripts/hive-e2e.sh build
 
       - name: Start the hive stack
