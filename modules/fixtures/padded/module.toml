@@ -5,6 +5,4 @@ description = "Adversarial test fixture: padded (~5 MiB binary, for cold-load me
 wasm = "padded.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["echo"]

@@ -14,18 +14,19 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use hive_billing_sdk::{require_session, report_usage, BillingSession};
+//! use chatty_module_sdk::{ToolCallRequest, ToolError, ToolResult};
+//! use hive_billing_sdk::{require_session, report_usage};
 //!
-//! fn chat(req: ChatRequest) -> Result<ChatResponse, String> {
+//! // Inside a plugin's `invoke_tool`:
+//! fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
 //!     // Verify session and reserve credits (5000 tokens estimated)
-//!     let session = require_session(5000)?;
-//!     
-//!     // ... do actual work: call LLM, process request ...
-//!     
+//!     let session = require_session(5000).map_err(ToolError::denied)?;
+//!
+//!     // ... do actual work: call the LLM, process the request ...
+//!
 //!     // Report actual usage
-//!     report_usage(session, actual_input, actual_output)?;
-//!     
-//!     Ok(response)
+//!     report_usage(&session, actual_input, actual_output).map_err(ToolError::failed)?;
+//!     Ok(result)
 //! }
 //! ```
 //!
@@ -279,10 +280,10 @@ fn verify_token(token: &str, secret: &str) -> Result<SessionClaims, String> {
 /// ```rust,ignore
 /// use hive_billing_sdk::require_session;
 ///
-/// fn chat(req: ChatRequest) -> Result<ChatResponse, String> {
+/// fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
 ///     // Reserve 5000 tokens
-///     let session = require_session(5000)?;
-///     
+///     let session = require_session(5000).map_err(ToolError::denied)?;
+///
 ///     // Token is verified — safe to proceed
 ///     // ...
 /// }
@@ -301,8 +302,6 @@ pub fn require_session(estimated_tokens: i64) -> Result<BillingSession, String> 
     let secret = get_secret()?;
     
     // Call the host import to acquire a session
-    // This is the WIT-generated binding from chatty-module-sdk
-    // We need to import the billing interface types here
     let session_info = billing_acquire_session(estimated_tokens)?;
     
     // Verify the JWT token
@@ -341,13 +340,13 @@ pub fn require_session(estimated_tokens: i64) -> Result<BillingSession, String> 
 /// ```rust,ignore
 /// use hive_billing_sdk::{require_session, report_usage};
 ///
-/// fn chat(req: ChatRequest) -> Result<ChatResponse, String> {
-///     let session = require_session(5000)?;
-///     
+/// fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+///     let session = require_session(5000).map_err(ToolError::denied)?;
+///
 ///     // ... do work ...
-///     
-///     report_usage(&session, 1200, 800)?;
-///     Ok(response)
+///
+///     report_usage(&session, 1200, 800).map_err(ToolError::failed)?;
+///     Ok(result)
 /// }
 /// ```
 ///
@@ -379,26 +378,19 @@ pub fn report_usage_simple(input_tokens: i64, output_tokens: i64) -> Result<(), 
 }
 
 // ---------------------------------------------------------------------------
-// WIT Import Bindings
+// Host imports (from chatty-module-sdk)
 // ---------------------------------------------------------------------------
 
-// Generate WIT bindings for the billing interface
-wit_bindgen::generate!({
-    world: "module",
-    path: "../../wit",
-});
+use chatty_module_sdk::billing::SessionInfo;
 
-// Import the generated billing types and functions
-use chatty::module::billing::{self, SessionInfo};
-
-/// Wrapper around the WIT billing::acquire-session import.
+/// The `billing::acquire-session` host import.
 fn billing_acquire_session(estimated_tokens: i64) -> Result<SessionInfo, String> {
-    billing::acquire_session(estimated_tokens)
+    chatty_module_sdk::billing::acquire_session(estimated_tokens)
 }
 
-/// Wrapper around the WIT billing::report-usage import.
+/// The `billing::report-usage` host import.
 fn billing_report_usage(input_tokens: i64, output_tokens: i64) -> Result<(), String> {
-    billing::report_usage(input_tokens, output_tokens)
+    chatty_module_sdk::billing::report_usage(input_tokens, output_tokens)
 }
 
 // Re-export for users who want direct access

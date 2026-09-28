@@ -1,52 +1,24 @@
-//! Benford's Law audit agent — agentic chatty WASM module.
+//! Benford's Law plugin — the two tools of a forensic Benford audit.
 //!
-//! Demonstrates a **full agentic tool-calling loop** running entirely inside
-//! WASM. Given a list of financial numbers, the agent:
-//!
-//! 1. Calls the host LLM with two tool definitions
-//! 2. The LLM asks to call `compute_benford_distribution` → executed locally
-//! 3. The LLM asks to call `chi_square_test` → executed locally
-//! 4. Tool results are fed back; the LLM writes the final audit report
-//!
-//! ## Usage
-//!
-//! From a conversation, via the `invoke_agent` tool (not the `/agent` slash
-//! command, which only dispatches by name to a *remote* agent registered in
-//! Settings → A2A Agents): ask the assistant to use `benford-agent`, and it
-//! calls `invoke_agent { "agent": "benford-agent", "prompt": "..." }` after
-//! finding it in `list_agents`.
-//!
-//! Via A2A HTTP (protocol gateway exposes `/a2a/benford-agent`):
-//!
-//! ```sh
-//! curl -X POST http://localhost:8420/a2a/benford-agent \
-//!   -H "Content-Type: application/json" \
-//!   -d '{"jsonrpc":"2.0","id":1,"method":"message/send",
-//!        "params":{"message":{"parts":[{"type":"text",
-//!          "text":"Analyze these invoice amounts: 1234 4521 891 2340 567 8901"}]}}}'
-//! ```
-//!
-//! ## Tools
+//! A `chatty:plugin@0.3.0` plugin: it contributes tools, never a loop of its
+//! own. The `benford-analyst` agent spec (a preset in chatty-core) loads it
+//! and its model decides when to call them:
 //!
 //! | Tool | Input | Output |
 //! |------|-------|--------|
 //! | `compute_benford_distribution` | `numbers: [f64]` | observed & expected first-digit frequencies, deviation per digit |
 //! | `chi_square_test` | `observed_counts: [u64]`, `total: u64` | χ² statistic, risk level (`LOW`/`MEDIUM`/`HIGH`), interpretation |
 //!
-//! Both tools are implemented in pure Rust with no external network calls —
-//! they run deterministically inside the WASM sandbox.
+//! Both tools are pure Rust with no host calls: they run deterministically
+//! inside the WASM sandbox and request no capability.
 
 use chatty_module_sdk::{
-    export_module, AgentCard, ChatRequest, ChatResponse, Message, ModuleExports, Role, Skill,
-    ToolDefinition,
+    export, Plugin, PluginMetadata, ToolCallRequest, ToolDefinition, ToolError, ToolResult,
 };
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-/// Maximum LLM ↔ tool-result turns before forcing a summary.
-const MAX_TURNS: usize = 6;
 
 /// Benford's Law expected first-digit frequencies (%) for digits 1–9.
 /// Source: log₁₀(1 + 1/d)
@@ -62,221 +34,25 @@ const BENFORDS_EXPECTED: [f64; 9] = [
     4.576,  // digit 9
 ];
 
-/// JSON tool schema passed to `llm::complete`.
-/// Using the OpenAI function-calling format which the host translates to
-/// provider-specific formats (Anthropic tool_use, Gemini functionDeclarations, etc.)
-const TOOLS_JSON: &str = r#"[
-  {
-    "name": "compute_benford_distribution",
-    "description": "Compute the first-digit frequency distribution of a list of financial numbers and compare it to Benford's Law. Returns observed frequencies, expected frequencies, and the signed deviation (observed − expected) for each digit 1–9, plus observed_counts and total for use by chi_square_test.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "numbers": {
-          "type": "array",
-          "items": { "type": "number" },
-          "description": "List of positive financial amounts to analyse (e.g. invoice totals, transaction values). Negative values and zero are ignored."
-        }
-      },
-      "required": ["numbers"]
-    }
-  },
-  {
-    "name": "chi_square_test",
-    "description": "Run a chi-square goodness-of-fit test comparing observed first-digit counts against Benford's Law expected distribution. Returns the χ² statistic, degrees of freedom (8), risk level (LOW / MEDIUM / HIGH), the most deviant digit, and a plain-English interpretation. Use the observed_counts and total values returned by compute_benford_distribution.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "observed_counts": {
-          "type": "array",
-          "items": { "type": "integer" },
-          "description": "Observed count for each first digit 1–9, exactly 9 integers (index 0 = digit 1)."
-        },
-        "total": {
-          "type": "integer",
-          "description": "Total number of valid observations (sum of observed_counts)."
-        }
-      },
-      "required": ["observed_counts", "total"]
-    }
-  }
-]"#;
-
-const SYSTEM_PROMPT: &str = "\
-You are a forensic financial auditor specialising in Benford's Law analysis. \
-Your task is to detect anomalies in financial datasets that may indicate fraud, \
-errors, or data manipulation.\n\
-\n\
-When given a list of financial numbers:\n\
-1. Call compute_benford_distribution to obtain the first-digit distribution and \
-   the observed_counts + total values.\n\
-2. Call chi_square_test using those observed_counts and total values.\n\
-3. Write a concise, professional audit report that includes:\n\
-   - The risk level and χ² statistic\n\
-   - Which digits deviate most from Benford's Law and by how much\n\
-   - A clear conclusion and recommended next steps\n\
-\n\
-Always call both tools before writing your report. Be specific and quantitative.";
-
 // ---------------------------------------------------------------------------
-// Agent implementation
+// Plugin implementation
 // ---------------------------------------------------------------------------
 
-/// Benford's Law audit agent.
-#[derive(Default)]
-pub struct BenfordAgent;
+/// The Benford's Law plugin.
+pub struct Benford;
 
-impl ModuleExports for BenfordAgent {
-    // -----------------------------------------------------------------------
-    // chat — full agentic tool-calling loop
-    // -----------------------------------------------------------------------
-
-    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
-        chatty_module_sdk::log::info("benford-agent: starting Benford's Law audit");
-
-        let user_content = req
-            .messages
-            .iter()
-            .rfind(|m| m.role == Role::User)
-            .map(|m| m.content.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Build the initial message history for the LLM.
-        let mut messages: Vec<Message> = vec![
-            Message {
-                role: Role::System,
-                content: SYSTEM_PROMPT.to_string(),
-            },
-            Message {
-                role: Role::User,
-                content: user_content,
-            },
-        ];
-
-        // ── Agentic loop ────────────────────────────────────────────────────
-        for turn in 0..MAX_TURNS {
-            chatty_module_sdk::log::debug(&format!(
-                "benford-agent: agentic turn {}/{}",
-                turn + 1,
-                MAX_TURNS
-            ));
-
-            let resp =
-                chatty_module_sdk::llm::complete("", &messages, Some(TOOLS_JSON))?;
-
-            // No tool calls → LLM produced the final audit report.
-            if resp.tool_calls.is_empty() {
-                chatty_module_sdk::log::info(
-                    "benford-agent: audit report generated — no more tool calls",
-                );
-                return Ok(ChatResponse {
-                    content: resp.content,
-                    tool_calls: vec![],
-                    usage: resp.usage,
-                });
-            }
-
-            // Log what the LLM wants to do.
-            for tc in &resp.tool_calls {
-                chatty_module_sdk::log::info(&format!(
-                    "benford-agent: LLM requested tool '{}' with args: {}",
-                    tc.name, tc.arguments
-                ));
-            }
-
-            // Record the assistant turn in history (include tool-call intent
-            // in the content so the LLM has context on the next turn).
-            let tool_call_summary = resp
-                .tool_calls
-                .iter()
-                .map(|tc| format!("{}({})", tc.name, tc.arguments))
-                .collect::<Vec<_>>()
-                .join("; ");
-
-            let assistant_content = if resp.content.is_empty() {
-                format!("[Calling tools: {}]", tool_call_summary)
-            } else {
-                format!("{}\n[Calling tools: {}]", resp.content, tool_call_summary)
-            };
-
-            messages.push(Message {
-                role: Role::Assistant,
-                content: assistant_content,
-            });
-
-            // Execute each requested tool locally and collect results.
-            let mut tool_result_lines: Vec<String> = Vec::new();
-            for tc in &resp.tool_calls {
-                let result = self
-                    .invoke_tool(tc.name.clone(), tc.arguments.clone())
-                    .unwrap_or_else(|e| {
-                        chatty_module_sdk::log::warn(&format!(
-                            "benford-agent: tool '{}' error: {}",
-                            tc.name, e
-                        ));
-                        format!(r#"{{"error": "{e}"}}"#)
-                    });
-
-                chatty_module_sdk::log::debug(&format!(
-                    "benford-agent: tool '{}' result: {}",
-                    tc.name, result
-                ));
-
-                tool_result_lines.push(format!("[{}] → {}", tc.name, result));
-            }
-
-            // Feed tool results back as a user message so the LLM can
-            // reference them on the next turn.
-            messages.push(Message {
-                role: Role::User,
-                content: format!("Tool results:\n{}", tool_result_lines.join("\n\n")),
-            });
-        }
-
-        // ── Fallback: max turns reached ─────────────────────────────────────
-        chatty_module_sdk::log::warn(
-            "benford-agent: max turns reached — requesting summary from LLM",
-        );
-        messages.push(Message {
-            role: Role::User,
-            content:
-                "Please now provide your complete audit findings and recommendations \
-                 based on all tool results above."
-                    .to_string(),
-        });
-
-        let final_resp = chatty_module_sdk::llm::complete("", &messages, None)?;
-        Ok(ChatResponse {
-            content: final_resp.content,
-            tool_calls: vec![],
-            usage: final_resp.usage,
-        })
-    }
-
-    // -----------------------------------------------------------------------
-    // invoke_tool — called by the host for MCP / direct tool invocation
-    //               (also called internally from the agentic loop above)
-    // -----------------------------------------------------------------------
-
-    fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
-        chatty_module_sdk::log::info(&format!("benford-agent: invoke_tool '{}'", name));
-
-        match name.as_str() {
-            "compute_benford_distribution" => compute_benford_distribution(&args),
-            "chi_square_test" => chi_square_test(&args),
-            _ => {
-                chatty_module_sdk::log::error(&format!("benford-agent: unknown tool '{}'", name));
-                Err(format!("unknown tool: {name}"))
-            }
+impl Plugin for Benford {
+    fn metadata() -> PluginMetadata {
+        PluginMetadata {
+            name: "benford".to_string(),
+            version: "0.2.0".to_string(),
+            description: "Benford's Law first-digit distribution and chi-square test".to_string(),
+            requested_capabilities: vec![],
+            config_keys: vec![],
         }
     }
 
-    // -----------------------------------------------------------------------
-    // list_tools — advertised via MCP tools/list and A2A agent card
-    // -----------------------------------------------------------------------
-
-    fn list_tools(&self) -> Vec<ToolDefinition> {
+    fn list_tools() -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
                 name: "compute_benford_distribution".to_string(),
@@ -284,13 +60,14 @@ impl ModuleExports for BenfordAgent {
                     "Compute the first-digit frequency distribution of financial numbers ",
                     "and compare it to Benford's Law. Returns observed frequencies, ",
                     "expected frequencies, per-digit deviation, observed_counts array, ",
-                    "and total count."
+                    "and total count (total_analyzed) for use by chi_square_test."
                 )
                 .to_string(),
                 parameters_schema: concat!(
                     r#"{"type":"object","properties":{"numbers":{"type":"array","#,
                     r#""items":{"type":"number"},"description":"List of positive "#,
-                    r#"financial amounts to analyse"}},"required":["numbers"]}"#
+                    r#"financial amounts to analyse; zero and negatives are ignored"}},"#,
+                    r#""required":["numbers"]}"#
                 )
                 .to_string(),
             },
@@ -299,7 +76,9 @@ impl ModuleExports for BenfordAgent {
                 description: concat!(
                     "Run a chi-square goodness-of-fit test on a first-digit distribution ",
                     "against Benford's Law. Returns the χ² statistic, degrees of freedom, ",
-                    "risk level (LOW / MEDIUM / HIGH), most deviant digit, and interpretation."
+                    "risk level (LOW / MEDIUM / HIGH), most deviant digit, and interpretation. ",
+                    "Use the observed_counts and total_analyzed that ",
+                    "compute_benford_distribution returned."
                 )
                 .to_string(),
                 parameters_schema: concat!(
@@ -313,46 +92,20 @@ impl ModuleExports for BenfordAgent {
         ]
     }
 
-    // -----------------------------------------------------------------------
-    // get_agent_card — returned by A2A GET /.well-known/agent.json
-    // -----------------------------------------------------------------------
-
-    fn get_agent_card(&self) -> AgentCard {
-        AgentCard {
-            name: "benford-agent".to_string(),
-            display_name: "Benford's Law Audit Agent".to_string(),
-            description: concat!(
-                "Forensic financial auditor that applies Benford's Law to detect ",
-                "anomalies in transaction datasets. Runs a full agentic tool-calling ",
-                "loop: computes first-digit distributions, performs a chi-square test, ",
-                "then synthesises a professional audit report via the host LLM. ",
-                "Exposed via MCP (tools) and A2A (message/send) protocols."
-            )
-            .to_string(),
-            version: "0.1.0".to_string(),
-            skills: vec![Skill {
-                name: "benford-analysis".to_string(),
-                description: concat!(
-                    "Analyse a list of financial amounts for Benford's Law conformance ",
-                    "and produce a risk-rated audit report with recommendations."
-                )
-                .to_string(),
-                examples: vec![
-                    "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
-                        .to_string(),
-                    "Run a Benford audit on Q4 transactions: 10234 5621 8901 3412 7654"
-                        .to_string(),
-                    "Check for fraud in these GL entries: 9823 1045 3278 6541 2109 7832"
-                        .to_string(),
-                ],
-            }],
-            tools: vec![],
-        }
+    fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+        chatty_module_sdk::log::info(&format!("benford: invoke_tool '{}'", call.name));
+        let run = match call.name.as_str() {
+            "compute_benford_distribution" => compute_benford_distribution,
+            "chi_square_test" => chi_square_test,
+            other => return Err(ToolError::unknown_tool(other)),
+        };
+        run(&call.arguments_json)
+            .map(ToolResult::text)
+            .map_err(ToolError::invalid_arguments)
     }
 }
 
-// Wire the trait implementation to the WIT guest exports.
-export_module!(BenfordAgent);
+export!(Benford);
 
 // ---------------------------------------------------------------------------
 // Tool implementations — pure Rust, no network, deterministic

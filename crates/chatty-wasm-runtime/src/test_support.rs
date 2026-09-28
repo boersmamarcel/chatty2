@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::LlmProvider;
-use crate::bindings::chatty::module::types::{CompletionResponse, Message, ToolCall};
+use crate::bindings::chatty::plugin::types::{CompletionResponse, Message, ToolCall};
 
 /// Path of the staged `.wasm` for the fixture `name` (e.g. `"spin"`,
 /// `"echo-agent"`): `target/wasm-fixtures/<name>/<name>.wasm`. Its directory
@@ -128,12 +128,14 @@ impl LlmProvider for FakeLlm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bindings::chatty::module::types::Role;
+    use crate::bindings::chatty::plugin::types::Role;
 
     fn user(content: &str) -> Vec<Message> {
         vec![Message {
             role: Role::User,
             content: content.to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
         }]
     }
 

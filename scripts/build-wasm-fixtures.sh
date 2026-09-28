@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build every WASM test fixture plus the two real modules, and stage them for
+# Build every WASM test fixture plus the two real plugins, and stage them for
 # the tests (AGE-596).
 #
 #   target/wasm-fixtures/<name>/<name>.wasm
@@ -23,13 +23,12 @@ mkdir -p "$out"
 # name → crate directory. The .wasm cargo writes is the package name with
 # `-`/`.` as `_`.
 crates=(
-  "echo-agent:modules/echo-agent"
-  "benford-agent:modules/benford-agent"
-  "wit-0.1:modules/fixtures/wit-0.1"
+  "echo:modules/echo"
+  "benford:modules/benford"
 )
 for dir in "$root"/modules/fixtures/*/; do
   name="$(basename "$dir")"
-  [[ -f "$dir/Cargo.toml" && "$name" != "wit-0.1" ]] && crates+=("$name:modules/fixtures/$name")
+  [[ -f "$dir/Cargo.toml" ]] && crates+=("$name:modules/fixtures/$name")
 done
 
 stage() {

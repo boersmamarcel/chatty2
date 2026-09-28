@@ -6,5 +6,3 @@ wasm = "wit-0.1.wasm"
 
 [capabilities]
 tools = []
-chat = true
-agent = true

@@ -1,0 +1,15 @@
+[module]
+name = "benford"
+version = "0.2.0"
+description = "Benford's Law first-digit distribution and chi-square test"
+wasm = "benford.wasm"
+
+[capabilities]
+tools = ["compute_benford_distribution", "chi_square_test"]
+
+[protocols]
+mcp = true
+
+[resources]
+max_memory_mb = 32
+max_execution_ms = 30000

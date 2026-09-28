@@ -6,5 +6,3 @@ wasm = "slow-host.wasm"
 
 [capabilities]
 tools = ["ask"]
-chat = true
-agent = true

@@ -17,19 +17,32 @@ use std::time::{Duration, Instant};
 
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
 use chatty_wasm_runtime::{
-    CallError, ChatRequest, Message, ModuleManifest, ResourceLimits, Role, WasmModule,
+    BillingProvider, CallError, ModuleManifest, ResourceLimits, SessionInfo, ToolCallRequest,
+    ToolErrorKind, ToolFailure, WasmModule,
 };
 
 /// 2x the plan's floor tolerance for timing assertions (plan: +/- 200 ms).
 const TOLERANCE: Duration = Duration::from_millis(400);
 
-fn user_req(content: &str) -> ChatRequest {
-    ChatRequest {
-        messages: vec![Message {
-            role: Role::User,
-            content: content.to_string(),
-        }],
-        conversation_id: "sandbox-suite".to_string(),
+/// A `tool-call-request` for `tool` with arguments `{"input": input}`.
+fn call(tool: &str, input: &str) -> ToolCallRequest {
+    ToolCallRequest {
+        name: tool.to_string(),
+        arguments_json: serde_json::json!({ "input": input }).to_string(),
+        call_id: "sandbox-suite".to_string(),
+        caller: None,
+    }
+}
+
+/// Every fixture's behaviour is one tool taking `{"input": string}`.
+trait RunTool {
+    /// Invoke `tool` with `input`; the result's content.
+    async fn run(&mut self, tool: &str, input: &str) -> anyhow::Result<String>;
+}
+
+impl RunTool for WasmModule {
+    async fn run(&mut self, tool: &str, input: &str) -> anyhow::Result<String> {
+        self.invoke_tool(call(tool, input)).await.map(|r| r.content)
     }
 }
 
@@ -55,141 +68,96 @@ fn call_error(err: &anyhow::Error) -> &CallError {
 // 1.1 - Load each good fixture; call all four exports.
 // ---------------------------------------------------------------------------
 
-/// A curated subset of the "good" fixtures whose `chat`/`invoke_tool` output
-/// is deterministic with a simple prompt (the adversarial fixtures — `spin`,
+/// A curated subset of the "good" fixtures whose tool output is
+/// deterministic with a simple input (the adversarial fixtures — `spin`,
 /// `panic`, `trap`, `slow-host`, `huge-output`, `threads` — are exercised by
-/// their own dedicated rows instead, since calling `chat` on them with a
-/// default prompt is either slow, non-deterministic, or the point of a later
-/// row).
+/// their own dedicated rows instead). The three exports are `metadata`,
+/// `list-tools` and `invoke-tool`; 0.2.0's `chat` and `get-agent-card` no
+/// longer exist (PL-U3).
 #[tokio::test(flavor = "multi_thread")]
-async fn sandbox_1_1_good_fixtures_all_four_exports() {
-    // echo-agent: chat echoes, tools are echo/reverse/count_words.
+async fn sandbox_1_1_good_fixtures_all_three_exports() {
+    // echo: tools are echo/reverse/count_words; it requests nothing.
     {
-        let mut m = load(
-            "echo-agent",
-            ModuleManifest::new("echo-agent"),
-            ResourceLimits::default(),
-        );
-        let card = m.agent_card().expect("agent_card");
-        assert_eq!(card.name, "echo-agent");
+        let mut m = load("echo", ModuleManifest::new("echo"), ResourceLimits::default());
+        let metadata = m.metadata().expect("metadata");
+        assert_eq!(metadata.name, "echo");
+        assert!(metadata.requested_capabilities.is_empty());
         let tools = m.list_tools().expect("list_tools");
         assert_eq!(tools.len(), 3);
-        let resp = m.chat(user_req("hello")).await.expect("chat");
-        assert_eq!(resp.content, "Echo: hello");
-        assert!(
-            m.last_invocation_metrics().is_some(),
-            "last_invocation_metrics must be populated after chat"
-        );
+        assert_eq!(m.run("reverse", "abc").await.expect("reverse"), "cba");
+        assert_eq!(m.run("count_words", "a b c").await.expect("count"), "3");
+        assert!(m.last_invocation_metrics().is_some());
+        // The guest's own error keeps its kind.
+        let err = m.run("nope", "x").await.expect_err("no such tool");
+        let failure = err.downcast_ref::<ToolFailure>().expect("a guest tool error");
+        assert_eq!(failure.kind, ToolErrorKind::UnknownTool);
+        assert_eq!(format!("{failure}"), "unknown-tool: unknown tool: nope");
+    }
+
+    // benford: the two audit tools, deterministic, no host calls.
+    {
+        let mut m = load("benford", ModuleManifest::new("benford"), ResourceLimits::default());
+        let metadata = m.metadata().expect("metadata");
+        assert_eq!(metadata.name, "benford");
+        let names: Vec<String> = m.list_tools().expect("list_tools").into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["compute_benford_distribution", "chi_square_test"]);
         let out = m
-            .invoke_tool("reverse", r#"{"input":"abc"}"#)
+            .invoke_tool(ToolCallRequest {
+                name: "chi_square_test".to_string(),
+                arguments_json: r#"{"observed_counts":[900,10,10,10,10,10,10,10,10],"total":980}"#
+                    .to_string(),
+                call_id: "c1".to_string(),
+                caller: None,
+            })
             .await
-            .expect("invoke_tool");
-        assert_eq!(out, "cba");
+            .expect("chi_square_test");
+        assert!(out.content.contains(r#""risk_level":"HIGH""#), "{}", out.content);
+    }
+
+    // tool-args: invoke_tool returns the raw arguments.
+    {
+        let mut m = load("tool-args", ModuleManifest::new("tool-args"), ResourceLimits::default());
+        let out = m.invoke_tool(call("echo_args", "x")).await.expect("invoke_tool");
+        assert_eq!(out.content, r#"{"input":"x"}"#);
         assert!(m.last_invocation_metrics().is_some());
     }
 
-    // benford-agent: a scripted single-turn LLM reply with no tool calls
-    // short-circuits the agentic loop immediately.
+    // stateful: the tool counts calls in a static across invocations.
     {
-        let llm = Arc::new(FakeLlm::new([FakeResponse::Text(
-            "Audit report: LOW risk.".to_string(),
-        )]));
-        let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
-        let mut m = WasmModule::from_file(
-            &engine,
-            &fixture_path("benford-agent"),
-            ModuleManifest::new("benford-agent"),
-            llm,
-            ResourceLimits::default(),
-        )
-        .expect("benford-agent loads");
-        let card = m.agent_card().expect("agent_card");
-        assert_eq!(card.name, "benford-agent");
-        let resp = m.chat(user_req("1234 4521 891")).await.expect("chat");
-        assert_eq!(resp.content, "Audit report: LOW risk.");
-        assert!(m.last_invocation_metrics().is_some());
-    }
-
-    // tool-args: chat echoes the prompt; invoke_tool returns raw args.
-    {
-        let mut m = load(
-            "tool-args",
-            ModuleManifest::new("tool-args"),
-            ResourceLimits::default(),
-        );
-        let resp = m.chat(user_req("ping")).await.expect("chat");
-        assert_eq!(resp.content, "ping");
-        let out = m
-            .invoke_tool("echo_args", r#"{"input":"x"}"#)
-            .await
-            .expect("invoke_tool");
-        assert_eq!(out, r#"{"input":"x"}"#);
-        assert!(m.last_invocation_metrics().is_some());
-    }
-
-    // stateful: chat counts calls in a static across invocations.
-    {
-        let mut m = load(
-            "stateful",
-            ModuleManifest::new("stateful"),
-            ResourceLimits::default(),
-        );
-        let first: u64 = m
-            .chat(user_req("x"))
-            .await
-            .expect("chat")
-            .content
-            .parse()
-            .expect("numeric count");
-        let second: u64 = m
-            .chat(user_req("x"))
-            .await
-            .expect("chat")
-            .content
-            .parse()
-            .expect("numeric count");
+        let mut m = load("stateful", ModuleManifest::new("stateful"), ResourceLimits::default());
+        let first: u64 = m.run("count", "x").await.expect("count").parse().expect("numeric");
+        let second: u64 = m.run("count", "x").await.expect("count").parse().expect("numeric");
         assert_eq!(second, first + 1, "stateful must count across calls");
     }
 
-    // config-reader: chat returns `config::get(<prompt>)`.
+    // config-reader: returns `config::get(<input>)`.
     {
         let manifest = ModuleManifest::new("config-reader").with_config("greeting", "hi");
         let mut m = load("config-reader", manifest, ResourceLimits::default());
-        let resp = m.chat(user_req("greeting")).await.expect("chat");
-        assert_eq!(resp.content, r#"Some("hi")"#);
+        assert_eq!(m.run("get", "greeting").await.expect("get"), r#"Some("hi")"#);
     }
 
-    // file-reader: chat returns the byte length of `file::read_bytes(<prompt>)`.
+    // file-reader: returns the byte length of `file::read_bytes(<input>)`.
     {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"hello").unwrap();
         let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
         let mut m = load("file-reader", manifest, ResourceLimits::default());
-        let resp = m.chat(user_req("a.bin")).await.expect("chat");
-        assert_eq!(resp.content, "5");
+        assert_eq!(m.run("read", "a.bin").await.expect("read"), "5");
     }
 
-    // log-flood: chat logs N lines and reports the count; keep N small so
-    // the test stays fast (the flood-volume behaviour is row 1.11's concern).
+    // log-flood: logs N lines and reports the count; keep N small so the
+    // test stays fast (the flood-volume behaviour is row 1.11's concern).
     {
-        let mut m = load(
-            "log-flood",
-            ModuleManifest::new("log-flood"),
-            ResourceLimits::default(),
-        );
-        let resp = m.chat(user_req("5")).await.expect("chat");
-        assert_eq!(resp.content, "logged 5 lines");
+        let mut m = load("log-flood", ModuleManifest::new("log-flood"), ResourceLimits::default());
+        assert_eq!(m.run("flood", "5").await.expect("flood"), "logged 5 lines");
     }
 
-    // fuel-meter: chat burns N loop iterations and reports fuel consumed.
+    // fuel-meter: burns N loop iterations and reports fuel consumed.
     {
-        let mut m = load(
-            "fuel-meter",
-            ModuleManifest::new("fuel-meter"),
-            ResourceLimits::default(),
-        );
-        let resp = m.chat(user_req("1000")).await.expect("chat");
-        assert!(resp.content.starts_with("burned 1000 iterations"));
+        let mut m = load("fuel-meter", ModuleManifest::new("fuel-meter"), ResourceLimits::default());
+        let out = m.run("burn", "1000").await.expect("burn");
+        assert!(out.starts_with("burned 1000 iterations"));
         let metrics = m.last_invocation_metrics().expect("metrics populated");
         assert!(metrics.fuel_consumed > 0, "fuel_consumed must be > 0");
     }
@@ -214,7 +182,7 @@ async fn sandbox_1_2_spin_default_limits_traps_on_fuel() {
     };
     let mut m = load("spin", ModuleManifest::new("spin"), limits);
     let start = Instant::now();
-    let result = m.chat(user_req("x")).await;
+    let result = m.run("spin", "x").await;
     let elapsed = start.elapsed();
 
     let err = result.expect_err("spin must trap once fuel is exhausted");
@@ -248,7 +216,7 @@ async fn sandbox_1_3_spin_wall_clock_timeout_fires() {
     };
     let mut m = load("spin", ModuleManifest::new("spin"), limits);
     let start = Instant::now();
-    let result = m.chat(user_req("x")).await;
+    let result = m.run("spin", "x").await;
     let elapsed = start.elapsed();
 
     let err = result.expect_err("expected a timeout error");
@@ -327,7 +295,7 @@ async fn sandbox_1_4_slow_host_wall_clock_timeout_fires() {
     .expect("slow-host loads");
 
     let start = Instant::now();
-    let result = m.chat(user_req("x")).await;
+    let result = m.run("ask", "x").await;
     let elapsed = start.elapsed();
 
     let err = result.expect_err("expected a timeout error");
@@ -357,7 +325,7 @@ async fn sandbox_1_5_fuel_meter_ten_calls_all_succeed() {
     };
     let mut m = load("fuel-meter", ModuleManifest::new("fuel-meter"), limits);
     for i in 1..=10 {
-        let result = m.chat(user_req("2100000")).await;
+        let result = m.run("burn", "2100000").await;
         assert!(
             result.is_ok(),
             "call {i}/10 should succeed (fuel should refill per call), got {result:?}"
@@ -395,10 +363,10 @@ async fn sandbox_1_6_alloc_within_cap_succeeds() {
         ResourceLimits::default(),
     );
     let resp = m
-        .chat(user_req("16"))
+        .run("alloc", "16")
         .await
         .expect("16 MiB is within the 256 MiB default cap");
-    assert_eq!(resp.content, "allocated 16 MiB");
+    assert_eq!(resp, "allocated 16 MiB");
 }
 
 /// 8 MiB (~16 MiB of linear memory, see above) against a manifest-set
@@ -412,10 +380,10 @@ async fn sandbox_1_6_alloc_within_tight_manifest_cap_succeeds() {
     let mut m32 = load("alloc", ModuleManifest::new("alloc"), limits32);
     for _ in 0..2 {
         let resp = m32
-            .chat(user_req("8"))
+            .run("alloc", "8")
             .await
             .unwrap_or_else(|e| panic!("8 MiB should succeed against a 32 MiB cap: {e:#}"));
-        assert_eq!(resp.content, "allocated 8 MiB");
+        assert_eq!(resp, "allocated 8 MiB");
     }
 }
 
@@ -428,7 +396,7 @@ async fn sandbox_1_6_alloc_over_default_cap_is_clean_error() {
     );
     // Over the 256 MiB default cap.
     let err = m
-        .chat(user_req("1024"))
+        .run("alloc", "1024")
         .await
         .expect_err("expected an error for an over-cap allocation");
     assert!(
@@ -438,8 +406,8 @@ async fn sandbox_1_6_alloc_over_default_cap_is_clean_error() {
     assert!(format!("{err:#}").contains("memory limit"), "{err:#}");
 
     // The failed call's instance is dropped; the module still serves.
-    let resp = m.chat(user_req("1")).await.expect("module recovers");
-    assert_eq!(resp.content, "allocated 1 MiB");
+    let resp = m.run("alloc", "1").await.expect("module recovers");
+    assert_eq!(resp, "allocated 1 MiB");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -451,7 +419,7 @@ async fn sandbox_1_6_alloc_over_manifest_cap_is_clean_error() {
     let mut m = load("alloc", ModuleManifest::new("alloc"), limits32);
     for mib in ["16", "40"] {
         let err = m
-            .chat(user_req(mib))
+            .run("alloc", mib)
             .await
             .expect_err("expected an error for an over-cap allocation");
         assert!(
@@ -479,7 +447,7 @@ async fn sandbox_1_7_panic_is_mapped_to_an_error_not_a_host_panic() {
     );
     // Awaited directly, as production callers do.
     let err = m
-        .chat(user_req("boom"))
+        .run("panic", "boom")
         .await
         .expect_err("a panicking guest must not return Ok");
     assert!(
@@ -503,7 +471,7 @@ async fn guest_panic_and_memory_limit_never_take_down_a_current_thread_host() {
         ModuleManifest::new("panic"),
         ResourceLimits::default(),
     );
-    let err = panicking.chat(user_req("boom")).await.unwrap_err();
+    let err = panicking.run("panic", "boom").await.unwrap_err();
     assert!(
         matches!(call_error(&err), CallError::GuestTrap(m) if m.contains("boom")),
         "{err:#}"
@@ -514,13 +482,13 @@ async fn guest_panic_and_memory_limit_never_take_down_a_current_thread_host() {
         ..ResourceLimits::default()
     };
     let mut alloc = load("alloc", ModuleManifest::new("alloc"), limits);
-    let err = alloc.chat(user_req("40")).await.unwrap_err();
+    let err = alloc.run("alloc", "40").await.unwrap_err();
     assert!(
         matches!(call_error(&err), CallError::MemoryLimit { .. }),
         "{err:#}"
     );
-    let resp = alloc.chat(user_req("1")).await.expect("module recovers");
-    assert_eq!(resp.content, "allocated 1 MiB");
+    let resp = alloc.run("alloc", "1").await.expect("module recovers");
+    assert_eq!(resp, "allocated 1 MiB");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -531,7 +499,7 @@ async fn sandbox_1_7_trap_then_reuse_reinstantiates() {
         ResourceLimits::default(),
     );
 
-    let trapped = m.chat(user_req("x")).await;
+    let trapped = m.run("trap", "x").await;
     let err = trapped.expect_err("unreachable must trap");
     assert!(
         matches!(call_error(&err), CallError::GuestTrap(_)),
@@ -546,9 +514,9 @@ async fn sandbox_1_7_trap_then_reuse_reinstantiates() {
     // The next calls run on a fresh instance: the metadata export works and
     // `invoke_tool` reaches the guest (its own "unknown tool" error, not a
     // "cannot enter instance" failure).
-    let card = m.agent_card().expect("agent_card after a trap");
-    assert_eq!(card.name, "trap");
-    let tool = m.invoke_tool("nope", "{}").await;
+    let metadata = m.metadata().expect("metadata after a trap");
+    assert_eq!(metadata.name, "trap");
+    let tool = m.run("nope", "").await;
     let tool_err = format!("{:#}", tool.expect_err("the fixture has no tools"));
     assert!(
         tool_err.contains("unknown tool: nope"),
@@ -556,7 +524,7 @@ async fn sandbox_1_7_trap_then_reuse_reinstantiates() {
     );
 
     // And trapping again is again a clean error.
-    assert!(m.chat(user_req("y")).await.is_err());
+    assert!(m.run("trap", "y").await.is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +541,7 @@ async fn output_cap_enforced() {
 
     // 2 MiB of output against the 1 MiB default cap.
     let err = m
-        .chat(user_req("2"))
+        .run("emit", "2")
         .await
         .expect_err("a 2 MiB reply must be rejected");
     assert!(
@@ -587,8 +555,8 @@ async fn output_cap_enforced() {
     assert!(format!("{err:#}").contains("output too large"), "{err:#}");
 
     // Under the cap passes, on the same module.
-    let ok = m.chat(user_req("0")).await.expect("an empty reply is fine");
-    assert!(ok.content.is_empty());
+    let ok = m.run("emit", "0").await.expect("an empty reply is fine");
+    assert!(ok.is_empty());
 
     // A lower cap applies to the metadata exports too.
     let mut tiny = load(
@@ -599,7 +567,7 @@ async fn output_cap_enforced() {
             ..ResourceLimits::default()
         },
     );
-    let err = tiny.agent_card().expect_err("the card is over 8 bytes");
+    let err = tiny.metadata().expect_err("the metadata is over 8 bytes");
     assert!(
         matches!(call_error(&err), CallError::OutputTooLarge { .. }),
         "expected `output too large`, got: {err:#}"
@@ -625,14 +593,14 @@ async fn sandbox_1_8_file_reader_rejects_escapes() {
     let read = |path: &'static str, root: std::path::PathBuf| async move {
         let manifest = ModuleManifest::new("file-reader").with_weights_root(root);
         let mut m = load("file-reader", manifest, ResourceLimits::default());
-        m.chat(user_req(path)).await
+        m.run("read", path).await
     };
 
     let ok = read("a.bin", tmp.path().to_path_buf()).await;
-    assert_eq!(ok.expect("in-root file reads").content, "5");
+    assert_eq!(ok.expect("in-root file reads"), "5");
     // A Windows-style separator names the same in-root file on every host.
     let ok = read("sub\\b.bin", tmp.path().to_path_buf()).await;
-    assert_eq!(ok.expect("`\\` is a separator").content, "2");
+    assert_eq!(ok.expect("`\\` is a separator"), "2");
 
     for path in [
         "../secret",
@@ -652,7 +620,7 @@ async fn sandbox_1_8_file_reader_rejects_escapes() {
     let manifest = ModuleManifest::new("file-reader")
         .with_config("weights_root", tmp.path().to_str().unwrap());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
-    let result = m.chat(user_req("a.bin")).await;
+    let result = m.run("read", "a.bin").await;
     assert!(
         result.is_err(),
         "a `weights_root` config key must not grant file access, got {result:?}"
@@ -671,7 +639,7 @@ async fn sandbox_1_8_file_reader_rejects_symlink_escape() {
     let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
     for path in ["link", "dir-link/secret"] {
-        let result = m.chat(user_req(path)).await;
+        let result = m.run("read", path).await;
         assert!(
             result.is_err(),
             "a symlink pointing outside the file root must not be followed (`{path}`), \
@@ -692,7 +660,7 @@ async fn sandbox_1_8_file_reader_rejects_oversized_file() {
 
     let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
-    let result = m.chat(user_req("big.bin")).await;
+    let result = m.run("read", "big.bin").await;
     let err = result.expect_err("a file above the read cap must be rejected");
     assert!(
         format!("{err:#}").contains("over the 268435456-byte cap"),
@@ -714,110 +682,98 @@ async fn sandbox_1_9_config_reader_with_and_without_config() {
     let with_config =
         ModuleManifest::new("config-reader").with_config("greeting", "configured-value");
     let mut m = load("config-reader", with_config, ResourceLimits::default());
-    let resp = m.chat(user_req("greeting")).await.expect("chat");
-    assert_eq!(resp.content, r#"Some("configured-value")"#);
+    let resp = m.run("get", "greeting").await.expect("get");
+    assert_eq!(resp, r#"Some("configured-value")"#);
 
     let without_config = ModuleManifest::new("config-reader");
     let mut m2 = load("config-reader", without_config, ResourceLimits::default());
-    let resp2 = m2.chat(user_req("greeting")).await.expect("chat");
-    assert_eq!(resp2.content, "None");
+    let resp2 = m2.run("get", "greeting").await.expect("get");
+    assert_eq!(resp2, "None");
 }
 
 // ---------------------------------------------------------------------------
 // 1.10 - billing import with and without a `BillingProvider`.
 //
-// GAP, not a code defect: none of the fixtures built by
-// `scripts/build-wasm-fixtures.sh` (PL-E1/AGE-596) call `billing::acquire-
-// session` / `billing::report-usage` — the asset table never listed a
-// billing-capable fixture, and `chatty-module-sdk` (unlike `hive-billing-
-// sdk`) doesn't even wrap the import. Worse: `BillingProvider`'s methods
-// return `chatty_wasm_runtime::bindings::chatty::module::billing::
-// SessionInfo`, but the `bindings` module is `pub(crate)` (lib.rs), so this
-// public trait cannot actually be implemented from outside the crate at
-// all — there is no way for this external, integration-level test to even
-// construct a fake `BillingProvider`. Both gaps are called out in the
-// comment left on AGE-596. This test only proves that loading without a
-// provider succeeds (real, if narrow); the "with a provider" half of the
-// row cannot be written until one of those two gaps is closed.
+// The `billing` fixture reports usage through `hive-billing-sdk`, which now
+// calls chatty-module-sdk's `billing` imports instead of generating bindings
+// of its own: the two crates link into one component (PL-E7 S8.5, PL-U3).
 // ---------------------------------------------------------------------------
 
+/// Records every `report-usage` it receives.
+#[derive(Default)]
+struct RecordingBilling(std::sync::Mutex<Vec<(i64, i64)>>);
+
+impl BillingProvider for RecordingBilling {
+    fn acquire_session(&self, _estimated_tokens: i64) -> Result<SessionInfo, String> {
+        Err("not used by this fixture".to_string())
+    }
+
+    fn report_usage(&self, input_tokens: i64, output_tokens: i64) -> Result<(), String> {
+        self.0.lock().unwrap().push((input_tokens, output_tokens));
+        Ok(())
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn sandbox_1_10_billing_without_provider_loads_and_runs() {
+async fn sandbox_1_10_billing_with_and_without_provider() {
     let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
 
-    // Without a billing provider: loads and runs fine (no fixture calls
-    // billing, so its absence is never observed by the guest).
-    let without = WasmModule::from_file(
+    // With a provider: the guest's report reaches it.
+    let billing = Arc::new(RecordingBilling::default());
+    let mut with = WasmModule::from_file_with_billing(
         &engine,
-        &fixture_path("tool-args"),
-        ModuleManifest::new("tool-args"),
+        &fixture_path("billing"),
+        ModuleManifest::new("billing"),
+        Arc::new(FakeLlm::default()),
+        Some(billing.clone()),
+        ResourceLimits::default(),
+    )
+    .expect("the billing fixture loads");
+    assert_eq!(with.run("settle", "3 4").await.expect("settle"), "settled");
+    assert_eq!(*billing.0.lock().unwrap(), [(3, 4)]);
+
+    // Without a provider: it loads, and the import refuses the call, which
+    // the tool reports as `denied`.
+    let mut without = WasmModule::from_file(
+        &engine,
+        &fixture_path("billing"),
+        ModuleManifest::new("billing"),
         Arc::new(FakeLlm::default()),
         ResourceLimits::default(),
-    );
-    assert!(
-        without.is_ok(),
-        "loading without a billing provider must succeed"
-    );
+    )
+    .expect("loading without a billing provider must succeed");
+    let err = without.run("settle", "3 4").await.expect_err("no provider");
+    let failure = err.downcast_ref::<ToolFailure>().expect("a guest tool error");
+    assert_eq!(failure.kind, ToolErrorKind::Denied, "{failure}");
 }
 
 // ---------------------------------------------------------------------------
-// 1.11 - `log-flood` with a progress receiver that isn't drained: bounded
-// memory, or a documented drop-vs-backpressure decision. This is one of the
-// plan's "decide and pin" rows: `progress_tx` is an `UnboundedSender`, so
-// today's answer is "no backpressure, no drop — the queue grows without
-// bound." Pinned, not ignored, with the open question in a comment.
+// 1.11 - `log-flood`: bounded memory, or a documented drop-vs-backpressure
+// decision. Decided by PL-U3: guest logs go to the host's `tracing`
+// subscriber only. The progress channel that queued every line for the
+// A2A module route (unbounded, the open question pinned here before) is
+// gone with that route, so there is no host-side queue to grow.
 // ---------------------------------------------------------------------------
 
-/// OPEN QUESTION (pin, not ignored): `set_progress_sender` takes an
-/// `UnboundedSender<String>`. An undrained receiver therefore imposes no
-/// backpressure and drops nothing — every log line queues up in host memory
-/// for as long as the channel lives. A module with a genuine log flood (not
-/// just this fixture's bounded one) can grow that queue without limit. This
-/// needs a decision: bound the channel and drop, bound it and block, or
-/// accept unbounded growth as someone else's problem (e.g. the gateway
-/// disconnecting). Pinning today's "everything queues" behaviour so a change
-/// here is visible.
 #[tokio::test(flavor = "multi_thread")]
-async fn sandbox_1_11_log_flood_backpressure_is_unbounded_today() {
-    let mut m = load(
-        "log-flood",
-        ModuleManifest::new("log-flood"),
-        ResourceLimits::default(),
-    );
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    m.set_progress_sender(tx);
-
+async fn sandbox_1_11_log_flood_is_not_queued_on_the_host() {
+    let mut m = load("log-flood", ModuleManifest::new("log-flood"), ResourceLimits::default());
     const N: usize = 20_000;
-    let resp = m
-        .chat(user_req(&N.to_string()))
-        .await
-        .expect("log-flood chat");
-    assert_eq!(resp.content, format!("logged {N} lines"));
-
-    // Nothing was drained during the call; all N lines must be sitting in
-    // the channel now (no drop, no backpressure).
-    let mut queued = 0usize;
-    while rx.try_recv().is_ok() {
-        queued += 1;
-    }
-    assert_eq!(
-        queued, N,
-        "OPEN QUESTION pinned: an undrained progress channel queues every \
-         log line with no bound (today: no drop, no backpressure)"
-    );
+    let resp = m.run("flood", &N.to_string()).await.expect("log-flood");
+    assert_eq!(resp, format!("logged {N} lines"));
 }
 
 // ---------------------------------------------------------------------------
-// 1.12 - `wit-0.1`, `core-module`, and truncated bytes: load fails with an
-// error that names the cause.
+// 1.12 - `wit-0.1`, `wit-0.2`, `core-module`, and truncated bytes: load
+// fails with an error that names the cause. A component on any world but
+// `chatty:plugin@0.3.0` gets the rebuild message (PL-U3: no adapter).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_12_bad_components_fail_to_load_with_a_named_cause() {
     let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
 
-    // A component built against the old `chatty:module@0.1.0` world: the
-    // 0.2.0 host linker cannot find the export it wants.
+    // A component built against the old `chatty:module@0.1.0` world.
     let wit01 = WasmModule::from_file(
         &engine,
         &fixture_path("wit-0.1"),
@@ -825,15 +781,11 @@ async fn sandbox_1_12_bad_components_fail_to_load_with_a_named_cause() {
         Arc::new(FakeLlm::default()),
         ResourceLimits::default(),
     );
-    let message = format!(
-        "{:#}",
-        wit01
-            .err()
-            .expect("version-mismatched component must fail to load")
-    );
-    assert!(
-        message.contains("chatty:module/agent@0.2.0"),
-        "error should name the missing 0.2.0 export, got: {message}"
+    let message = format!("{:#}", wit01.err().expect("a 0.1.0 component must fail to load"));
+    assert_eq!(
+        message,
+        "module targets chatty:module@0.1.0; this chatty supports chatty:plugin@0.3.0 \
+         — rebuild it with the current SDK"
     );
 
     // A plain core module (not a component) is rejected by the component
@@ -852,7 +804,7 @@ async fn sandbox_1_12_bad_components_fail_to_load_with_a_named_cause() {
     );
 
     // Truncated bytes fail to parse with a clear cause.
-    let bytes = std::fs::read(fixture_path("echo-agent")).expect("read echo-agent bytes");
+    let bytes = std::fs::read(fixture_path("echo")).expect("read echo bytes");
     let truncated = &bytes[..bytes.len() / 2];
     let trunc = WasmModule::from_bytes(
         &engine,
@@ -868,6 +820,26 @@ async fn sandbox_1_12_bad_components_fail_to_load_with_a_named_cause() {
     assert!(
         message.contains("parse") || message.contains("invalid") || message.contains("bounds"),
         "error should name a parse failure, got: {message}"
+    );
+}
+
+/// The 0.2.0 world everything before PL-U3 was built on is refused at load
+/// with the rebuild message, never adapted (PL-D1).
+#[tokio::test(flavor = "multi_thread")]
+async fn sandbox_1_12_wit_0_2_module_is_refused_with_the_rebuild_message() {
+    let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
+    let wit02 = WasmModule::from_file(
+        &engine,
+        &fixture_path("wit-0.2"),
+        ModuleManifest::new("wit-0.2"),
+        Arc::new(FakeLlm::default()),
+        ResourceLimits::default(),
+    );
+    let message = format!("{:#}", wit02.err().expect("a 0.2.0 component must fail to load"));
+    assert_eq!(
+        message,
+        "module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.3.0 \
+         — rebuild it with the current SDK"
     );
 }
 
@@ -891,19 +863,19 @@ async fn sandbox_1_13_threads_spawn_is_unsupported_today() {
         ResourceLimits::default(),
     );
     let resp = m
-        .chat(user_req("x"))
+        .run("spawn", "x")
         .await
-        .expect("threads chat must not trap");
+        .expect("the threads tool must not trap");
     assert!(
-        resp.content.contains("spawn: Err"),
+        resp.contains("spawn: Err"),
         "OPEN QUESTION pinned: thread spawn is rejected (Unsupported) rather than \
          allowed or trapping the load, got: {}",
-        resp.content
+        resp
     );
     assert!(
-        resp.content.contains("counter: 1"),
+        resp.contains("counter: 1"),
         "the guest's own atomic counter must still work single-threaded, got: {}",
-        resp.content
+        resp
     );
 }
 
@@ -928,14 +900,10 @@ async fn sandbox_1_14_wasi_surface_grants_nothing_by_default() {
     // relying on ambient host state they never declared. This test is a
     // placeholder pinning that expectation until a `wasi-probe` fixture (see
     // the AGE-596 comment) can assert it end to end.
-    let mut m = load(
-        "echo-agent",
-        ModuleManifest::new("echo-agent"),
-        ResourceLimits::default(),
-    );
-    let resp = m.chat(user_req("hello")).await.expect("chat");
+    let mut m = load("echo", ModuleManifest::new("echo"), ResourceLimits::default());
+    let resp = m.run("echo", "hello").await.expect("echo");
     assert_eq!(
-        resp.content, "Echo: hello",
+        resp, "hello",
         "a module with no declared WASI needs must still run normally"
     );
 }
