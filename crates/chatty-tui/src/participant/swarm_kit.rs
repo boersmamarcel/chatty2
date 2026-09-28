@@ -2445,12 +2445,17 @@ fn names_owner(request: &RecordedRequest, owner: &str) -> bool {
 #[tokio::test]
 async fn spawned_node_owned_by_spawner() {
     let kit = nested_kit(reading_grandchild()).await;
-    let run = kit.run_leader("ask the grandchild to read the readme").await;
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
     let out = run.output.as_ref().expect("the leader's call succeeded");
     assert!(out.success, "{out:?}");
 
     let middle = kit.sse.requests_for(MIDDLE_MODEL);
-    assert!(names_owner(&middle[0], "root"), "the root spawned the middle worker");
+    assert!(
+        names_owner(&middle[0], "root"),
+        "the root spawned the middle worker"
+    );
     let grandchild = kit.ndjson.requests_for(GRANDCHILD_MODEL);
     assert!(
         names_owner(&grandchild[0], &format!("{MIDDLE}-0")),
@@ -2480,7 +2485,9 @@ async fn worker_message_reaches_sub_leader() {
     ])
     .await;
 
-    let run = kit.run_leader("ask the grandchild to read the readme").await;
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
     let out = run.output.as_ref().expect("the leader's call succeeded");
     assert!(out.success, "{out:?}");
     assert_eq!(out.response, "The grandchild read it.");
@@ -2519,12 +2526,7 @@ async fn worker_message_reaches_sub_leader() {
                 "skip a level".len() as u64,
                 "refused: not_on_tree".to_string()
             ),
-            (
-                grandchild,
-                middle,
-                TEXT.len() as u64,
-                "pending".to_string()
-            ),
+            (grandchild, middle, TEXT.len() as u64, "pending".to_string()),
         ]
     );
 }
@@ -2565,9 +2567,10 @@ async fn messages_dropped_with_recipient_e2e() {
             .filter(|row| row.3 == outcome)
             .collect::<Vec<_>>()
     };
-    wait_until("the grandchild's message to wait for the sub-leader", || {
-        !rows_with("pending").is_empty()
-    })
+    wait_until(
+        "the grandchild's message to wait for the sub-leader",
+        || !rows_with("pending").is_empty(),
+    )
     .await;
 
     // The root gives up on the sub-leader mid-run: its node ends with the
