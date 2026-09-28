@@ -3,8 +3,9 @@
 //! Open-source client library for the Hive module registry.
 //!
 //! Provides [`HiveRegistryClient`] for browsing, searching and downloading
-//! modules from a Hive registry, with transparent offline caching and Ed25519
-//! signature verification.
+//! modules from a Hive registry, with transparent offline caching, and
+//! verifies every download against a registry root key it holds
+//! ([`trust`], [`verify`]).
 //!
 //! ## Quick start
 //!
@@ -62,6 +63,7 @@ pub mod credit_guard;
 pub mod error;
 pub mod models;
 pub mod session;
+pub mod trust;
 pub mod usage;
 pub mod verify;
 

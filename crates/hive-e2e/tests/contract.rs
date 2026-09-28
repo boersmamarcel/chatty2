@@ -143,14 +143,6 @@ fn note<T>(
 /// tests (`crates/hive-client/tests/registry_contract.rs`) replay still have
 /// the live registry's shape: the same JSON key paths, the same download
 /// headers. `HIVE_E2E_RECORD=1` re-records them instead.
-///
-/// Red today for `download_headers` only: AGE-704 (merged in hive) replaced
-/// `x-signature`/`x-publisher-public-key` with the `x-hive-manifest*`/
-/// `x-hive-publisher-certificate*` chain; hive-client (`client.rs::begin_download`)
-/// still reads the old pair. Consuming the new chain is AGE-608 (PL-H5), not
-/// this row's issue — `recorded/download_headers.json` is deliberately left
-/// on the old shape so hive-client's own per-PR `download` test keeps
-/// asserting what it actually implements.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_01_recorded_responses_match_the_live_registry() {

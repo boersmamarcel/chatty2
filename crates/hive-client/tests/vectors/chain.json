@@ -1,0 +1,17 @@
+{
+  "certificate": "{\"not_before\":1790000000,\"public_key\":\"66be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a\",\"publisher_id\":\"00000000-0000-4000-8000-000000000704\"}",
+  "certificate_signature": "sMpKMNbgXynrCgfw+R0+e3tPIX76XzM1kqIJEKm9O0Ff1xJuK0anEa3fwuzRaSud7yDOtNNmhQYpsHERfha/BQ==",
+  "comment": "AGE-704 chain vector. The two *_signing_key values are TEST-ONLY keys from fixed, publicly committed seeds (root: 32 x 0x0a, publisher: 32 x 0x0b). Never trust them anywhere. certificate and manifest are the exact signed bytes (canonical JSON, UTF-8); headers are the same values as the registry sends them on GET /api/modules/{name}/{version}.",
+  "headers": {
+    "X-Hive-Certificate-Signature": "sMpKMNbgXynrCgfw+R0+e3tPIX76XzM1kqIJEKm9O0Ff1xJuK0anEa3fwuzRaSud7yDOtNNmhQYpsHERfha/BQ==",
+    "X-Hive-Manifest": "eyJjYXBhYmlsaXRpZXMiOnsiYWdlbnQiOnRydWUsImNoYXQiOmZhbHNlLCJ0b29scyI6WyJlY2hvIiwicsOpc3Vtw6kiXX0sIm5hbWUiOiJ2ZWN0b3ItbW9kdWxlIiwic2hhMjU2IjoiMjRlYWYzNDM5YTYwYzk2NzY0YzRmMmM5MmEwYTgxYjUyYmQ0ZmU1ZDViOTFmMDkwMTg0YTBmNjQ4NmIxYmYyOSIsInZlcnNpb24iOiIxLjIuMy1yYy4xIiwid2l0X3ZlcnNpb24iOiIwLjIuMCJ9",
+    "X-Hive-Manifest-Signature": "AKbYegP+Mco/LfXNp/GOwx6/jzVRr2t2m6MiwiKdSuj6C9JH8+kDltls42f20zduNTr6Yyy+t8Es5yih+0OdCQ==",
+    "X-Hive-Publisher-Certificate": "eyJub3RfYmVmb3JlIjoxNzkwMDAwMDAwLCJwdWJsaWNfa2V5IjoiNjZiZTdlMzMyYzdhNDUzMzMyYmQ5ZDBhN2Y3ZGIwNTVmNWM1ZWYxYTA2YWRhNjZkOThiMzlmYjY4MTBjNDczYSIsInB1Ymxpc2hlcl9pZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDcwNCJ9"
+  },
+  "manifest": "{\"capabilities\":{\"agent\":true,\"chat\":false,\"tools\":[\"echo\",\"résumé\"]},\"name\":\"vector-module\",\"sha256\":\"24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29\",\"version\":\"1.2.3-rc.1\",\"wit_version\":\"0.2.0\"}",
+  "manifest_signature": "AKbYegP+Mco/LfXNp/GOwx6/jzVRr2t2m6MiwiKdSuj6C9JH8+kDltls42f20zduNTr6Yyy+t8Es5yih+0OdCQ==",
+  "root_public_key": "43a72e714401762df66b68c26dfbdf2682aaec9f2474eca4613e424a0fbafd3c",
+  "test_only_publisher_signing_key": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+  "test_only_root_signing_key": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+  "wasm_base64": "AGFzbQ0AAQA="
+}

@@ -23,6 +23,14 @@ pub enum ClientError {
     #[error("signature verification failed: {0}")]
     SignatureInvalid(String),
 
+    /// No registry root key is trusted for this registry, so nothing from it
+    /// can be verified (PL-H5). There is no trust-on-first-use.
+    #[error(
+        "no trusted root key for registry {registry}: downloads from it are refused \
+         (for a local registry, set CHATTY_HIVE_ROOT_KEY to its root public key)"
+    )]
+    NoTrustedRoot { registry: String },
+
     /// The download is larger than [`MAX_DOWNLOAD_BYTES`](crate::models::MAX_DOWNLOAD_BYTES)
     /// (declared up front or found while streaming); nothing past the cap
     /// was read.
