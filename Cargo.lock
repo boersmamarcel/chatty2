@@ -1977,6 +1977,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1997,6 +1999,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chatty-core",
+ "chatty-fabric",
  "chatty-module-registry",
  "chatty-protocol-gateway",
  "chatty-terminal",
