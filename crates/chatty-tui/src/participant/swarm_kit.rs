@@ -1711,3 +1711,60 @@ async fn one_broker_per_root() {
         "only the root binds a participant socket"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Endpoint permits per run (BI-6, AGE-638; ADR-0020 invariants 7–9)
+// ---------------------------------------------------------------------------
+
+/// Invariant 8: at budget 1, a sub-leader and its child on the same
+/// endpoint both complete. The sub-leader's run holds the endpoint's one
+/// permit while it talks to its model, lets go of it while its call to the
+/// child is outstanding, and gets it back before the child's answer reaches
+/// it.
+#[tokio::test]
+async fn nested_delegation_at_budget_one_completes() {
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Sse),
+        ],
+        Script::new()
+            .route(
+                LEAD_MODEL,
+                [
+                    Reply::tool_call(
+                        "invoke_agent",
+                        serde_json::json!({ "agent": GRANDCHILD, "prompt": "read the readme" }),
+                    ),
+                    Reply::text("The grandchild read it."),
+                ],
+            )
+            .route(GRANDCHILD_MODEL, reading_grandchild()),
+        Script::new(),
+    )
+    .await;
+    assert_eq!(
+        ModuleSettingsModel::default().default_endpoint_budget,
+        1,
+        "the case under test is the default budget of one"
+    );
+
+    let run = kit.run_leader("ask the grandchild to read the readme").await;
+
+    let out = run.output.as_ref().expect("the leader's call succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response, "The grandchild read it.");
+    // What the sub-leader's model was told the child said: the child's
+    // answer, not a refusal to start it.
+    let lead = kit.sse.requests_for(LEAD_MODEL);
+    assert_eq!(lead.len(), 2);
+    let told = String::from_utf8_lossy(&lead[1].body);
+    assert!(
+        told.contains("It says Chatty."),
+        "the sub-leader's call to its child on its own endpoint did not complete; \
+         its model was told: {told}"
+    );
+    // Both ran, and never at once.
+    assert_eq!(kit.sse.requests_for(GRANDCHILD_MODEL).len(), 2);
+    assert_eq!(kit.sse.max_concurrency(), 1);
+}
