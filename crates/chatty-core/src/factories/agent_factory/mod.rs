@@ -1358,16 +1358,9 @@ impl AgentClient {
             list_agents_tool = list_agents_tool.with_transport(transport);
         }
 
-        // Create invoke_agent tool (registered when the role delegates). A lazy broker means
-        // the port is not actually live yet, so it must not also be handed
-        // to `new` as if it already were.
-        let eager_gateway_port = if lazy_broker.is_some() {
-            None
-        } else {
-            gateway_port
-        };
+        // Create invoke_agent tool (registered when the role delegates).
         let mut invoke_agent_tool =
-            InvokeAgentTool::new(remote_agents, eager_gateway_port).with_local_agents(local_agents);
+            InvokeAgentTool::new(remote_agents).with_local_agents(local_agents);
         if let Some(broker) = lazy_broker {
             invoke_agent_tool = invoke_agent_tool.with_lazy_broker(broker);
         }

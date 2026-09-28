@@ -256,6 +256,33 @@ impl BrokerCalls {
         }
     }
 
+    /// Log a refusal of a loopback HTTP request naming `what` — a role, a
+    /// node, a handle or the swarm directory (BI-7). Nothing is on the tree
+    /// yet for a squatting attempt like this, so `from` is a description of
+    /// the peer, as `edge_log_schema_golden` already establishes for a
+    /// refusal that never became a node.
+    pub(crate) fn log_loopback_refusal(&self, what: &str) {
+        let Some(log) = self.edges.as_ref() else {
+            return;
+        };
+        let row = EdgeRow {
+            ts: EdgeRow::now_ms(),
+            kind: EdgeKind::Refusal,
+            from: "loopback caller".to_string(),
+            to: what.to_string(),
+            scope: None,
+            run: None,
+            chain: Vec::new(),
+            bytes: 0,
+            outcome: "refused: fabric: roles are reached over the worker connection".to_string(),
+            usd: None,
+        };
+        let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(error) = log.append(&row) {
+            warn!(%error, "Could not write a loopback-refusal edge-log row");
+        }
+    }
+
     /// Check every node's call against `policy` before anything is spawned.
     pub fn with_policy(mut self, policy: Option<Arc<dyn CallPolicy>>) -> Self {
         self.policy = policy;

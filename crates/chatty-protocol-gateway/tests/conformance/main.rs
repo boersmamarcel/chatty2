@@ -6,14 +6,15 @@
 //! `slow-host`, `huge-output`) and one scripted
 //! [`FakeLlm`](chatty_wasm_runtime::test_support::FakeLlm) behind every
 //! module's `llm::complete`. Where a row can be driven by a real client it
-//! is: rmcp and the MCP Inspector CLI (3.6), and chatty-core's `A2aClient`
-//! (3.7, 3.14).
+//! is: rmcp and the MCP Inspector CLI (3.6).
 //!
 //! PL-U3 (`chatty:plugin@0.3.0`) removed `chat`: a plugin has tools and no
 //! loop, so it is served over MCP only. Rows 3.1–3.4 (the OpenAI routes) and
 //! 3.8–3.9 (a module's A2A stream and disconnect) tested a concept that no
-//! longer exists and were removed; 3.7 now runs against a participant, the
-//! agents the A2A route still serves.
+//! longer exists and were removed. BI-7 (AGE-639) retired the A2A route's
+//! role-serving loopback path: 3.7 and 3.14 now assert the 403 refusal that
+//! replaced it (`crates/chatty-protocol-gateway/tests/loopback_scope.rs`'s
+//! `loopback_refuses_roles` is the general form both rows specialize).
 //!
 //! # Prerequisites
 //!

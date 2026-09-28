@@ -1,22 +1,29 @@
-//! S3 row 3.7: A2A `message/send` delivers every text part.
+//! S3 row 3.7: A2A `message/send` against a role.
 //!
-//! The A2A route serves agents (local participants and virtual agents),
-//! never a plugin (PL-U3), so the row runs against a participant; what it
-//! pins is the gateway's own part handling, which is the same for every
-//! agent. The module rows that were here — per-`contextId` history for a
-//! module (3.7), a module's stream lifecycle (3.8) and a disconnect during a
-//! module's call (3.9) — went with `chat`. A participant's stream lifecycle
-//! and a worker dying mid-task are `participant_socket.rs`'s
-//! `a_registered_participant_round_trips_a_task_with_progress_and_an_artifact`
-//! and `a_participant_that_dies_mid_task_fails_its_open_task`.
+//! Before BI-7, the A2A route served agents (local participants and virtual
+//! agents), never a plugin (PL-U3), and this row pinned the gateway's own
+//! multi-part message handling on that path. Since BI-7 a role is reached
+//! only over the connection the broker made for its caller, never over
+//! loopback HTTP: `message/send` against a registered participant is
+//! refused with 403, exactly as it is against any other role
+//! (`crates/chatty-protocol-gateway/tests/loopback_scope.rs`'s
+//! `loopback_refuses_roles` is the general form). The multi-part parsing
+//! this row used to exercise (`prompt_text`) went with the HTTP path itself
+//! — there is nothing left on this route to join parts for. The module rows
+//! that were here — per-`contextId` history for a module (3.7), a module's
+//! stream lifecycle (3.8) and a disconnect during a module's call (3.9) —
+//! went with `chat`. A participant's stream lifecycle and a worker dying
+//! mid-task, over the connection, are `participant::swarm_kit`'s coverage
+//! now; the loopback round trip this row itself drove is retired with it.
 
-/// 3.7 — `message/send` with a multi-part message: every text part reaches
-/// the agent, not only `parts[0]` (F11).
+/// 3.7 — `message/send` against a role (a multi-part message, to keep the
+/// row's original shape) is refused: a role answers over its own connection
+/// now, never over loopback (BI-7).
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn s3_07_a2a_message_send_all_parts_reach_the_agent() {
+async fn s3_07_a2a_message_send_to_a_role_is_refused() {
     use chatty_protocol_gateway::participant::{
-        BrokerFrame, ParticipantCard, ParticipantConnection, TaskState, open_connection,
+        ParticipantCard, ParticipantConnection, open_connection,
     };
     use reqwest::StatusCode;
     use serde_json::json;
@@ -31,22 +38,10 @@ async fn s3_07_a2a_message_send_all_parts_reach_the_agent() {
         name: "parts".into(),
         ..Default::default()
     };
-    let mut conn = ParticipantConnection::hello_over(stream, card)
+    let conn = ParticipantConnection::hello_over(stream, card)
         .await
         .expect("the broker welcomes the participant");
     let name = conn.name().to_string();
-    let participant = tokio::spawn(async move {
-        let Some(BrokerFrame::Task { task_id, text, .. }) = conn.next_frame().await.unwrap() else {
-            panic!("expected a task");
-        };
-        conn.artifact(&task_id, "ok".to_string(), true)
-            .await
-            .unwrap();
-        conn.finish(&task_id, TaskState::Completed, None, None)
-            .await
-            .unwrap();
-        (conn, text)
-    });
 
     let (status, body) = gw
         .post(
@@ -68,14 +63,11 @@ async fn s3_07_a2a_message_send_all_parts_reach_the_agent() {
             }),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["result"]["status"]["state"], "completed", "{body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["error"], "fabric: roles are reached over the worker connection",
+        "{body}"
+    );
 
-    let (_conn, seen) = participant.await.unwrap();
-    for part in ["part one", "part two"] {
-        assert!(
-            seen.contains(part),
-            "`{part}` did not reach the agent: {seen:?}"
-        );
-    }
+    drop(conn);
 }
