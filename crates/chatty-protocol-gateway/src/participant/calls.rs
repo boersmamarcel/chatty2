@@ -52,6 +52,19 @@
 //! budget-1 endpoint. A call dropped while it waits takes nothing and
 //! delivers nothing.
 //!
+//! Before an `invoke_agent` call spawns, submits or permits anything, the
+//! broker checks it (PL-S2): a node's call against the specs'
+//! [`CallPolicy`] (`delegates_to`, `exposed`, `callers`; DP-1's
+//! `may_call`), then every call against its [`CallChain`] (DP-2). The chain
+//! is the calling run's own, from the broker's task table, plus the callee:
+//! a call frame says nothing about where its caller is, and anything extra
+//! it carries is dropped when it is parsed. A call that would close a cycle
+//! or go deeper than [`MAX_DEPTH`](chatty_fabric::MAX_DEPTH) ends with
+//! [`CallError::Delegation`] and a refusal row; the model reads the typed
+//! reason. The root's calls are not checked against the policy: the root's
+//! own spec, which decides whether it has `invoke_agent` at all, is not the
+//! broker's to know.
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, every `send_message` call one message row, and every refused call
 //! one refusal row. `list_agents` reads the directory and is not an edge
@@ -62,16 +75,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    AgentOrigin, CallError, CallEvent, CallRequest, CallStream, ChildCall, ConversationScope,
-    EdgeKind, EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus,
-    NodeId, NodeState, PendingList, ROOT_NAME, RefusalReason, SendMessageParams, SpawnContext,
-    Transport,
+    AgentOrigin, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream, ChildCall,
+    ConversationScope, EdgeKind, EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Message,
+    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason,
+    SendMessageParams, SpawnContext, Transport,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use super::protocol::{DelegatedTask, TaskInput, TaskState};
+use super::protocol::{CallStamp, DelegatedTask, TaskInput, TaskState};
 use super::registry::{ParticipantRegistry, ROOT_SCOPE, TaskUpdate};
 use super::spawn_context;
 use super::virtual_agent::VirtualAgent;
@@ -116,6 +129,9 @@ pub struct BrokerCalls {
     /// result.
     pending: Arc<Mutex<HashMap<Recipient, PendingList>>>,
     next_message: AtomicU64,
+    /// The spec rules a node's call is checked against (PL-S2); `None`
+    /// checks only the chain.
+    policy: Option<Arc<dyn CallPolicy>>,
 }
 
 impl BrokerCalls {
@@ -130,7 +146,14 @@ impl BrokerCalls {
             edges,
             pending: Arc::default(),
             next_message: AtomicU64::new(0),
+            policy: None,
         }
+    }
+
+    /// Check every node's call against `policy` before anything is spawned.
+    pub fn with_policy(mut self, policy: Option<Arc<dyn CallPolicy>>) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Run `request` as `caller`. The stream is the call: progress, then one
@@ -138,13 +161,19 @@ impl BrokerCalls {
     pub fn call(&self, caller: Caller, request: CallRequest) -> CallStream {
         match request {
             CallRequest::InvokeAgent(params) => {
+                // Checked first: a refused call spawns nothing and does not
+                // touch the caller's permit either (PL-S2).
+                let (edge, stamp) = match self.admit(&caller, &params) {
+                    Ok(admitted) => admitted,
+                    Err(refused) => return refused,
+                };
                 // Released now, before the callee queues for a slot that
                 // may be this very one.
                 let child = match &caller {
                     Caller::Node(name) => self.registry.node_permit(name).map(|p| p.child_call()),
                     Caller::Root => None,
                 };
-                let call = self.invoke(caller, params);
+                let call = self.invoke(caller, params, edge, stamp);
                 match child {
                     Some(child) => gated(child, call),
                     None => call,
@@ -175,6 +204,7 @@ impl BrokerCalls {
             log: self.edges.clone(),
             from: caller.name().to_string(),
             to,
+            chain: vec![caller.name().to_string()],
             bytes,
             outcome: None,
         }
@@ -270,6 +300,7 @@ impl BrokerCalls {
                 log: self.edges.clone(),
                 from: message.from_name.as_str().to_string(),
                 to: name.to_string(),
+                chain: vec![message.from_name.as_str().to_string()],
                 bytes: message.bytes() as u64,
                 outcome: None,
             }
@@ -295,16 +326,47 @@ impl BrokerCalls {
         Value::Array(participants.chain(runners).collect())
     }
 
-    fn invoke(&self, caller: Caller, params: InvokeAgentParams) -> CallStream {
-        let registry = self.registry.clone();
-        let runner = self.runners.get(&params.agent).cloned();
+    /// Who may call whom, and how far, before anything is spawned,
+    /// submitted or permitted (PL-S2): the call's edge-log row and the stamp
+    /// for the run it starts, or its refusal, already logged. An agent
+    /// nobody serves is unknown, which [`invoke`](Self::invoke) says.
+    fn admit(
+        &self,
+        caller: &Caller,
+        params: &InvokeAgentParams,
+    ) -> Result<(EdgeGuard, Option<CallStamp>), CallStream> {
+        let caller_chain = self.caller_chain(caller);
         let mut edge = EdgeGuard {
             log: self.edges.clone(),
             from: caller.name().to_string(),
             to: params.agent.clone(),
+            chain: caller_chain.chain.clone(),
             bytes: params.prompt.len() as u64,
             outcome: None,
         };
+        if !self.runners.contains_key(&params.agent) && !self.registry.is_registered(&params.agent)
+        {
+            return Ok((edge, None));
+        }
+        match self.check(caller, caller_chain, &params.agent) {
+            Ok(stamp) => Ok((edge, Some(stamp))),
+            Err(refusal) => {
+                warn!(caller = %caller.name(), agent = %params.agent, %refusal, "Refused a call");
+                edge.refused(&refusal.to_string());
+                Err(futures::stream::iter([Err(CallError::Delegation(refusal))]).boxed())
+            }
+        }
+    }
+
+    fn invoke(
+        &self,
+        caller: Caller,
+        params: InvokeAgentParams,
+        mut edge: EdgeGuard,
+        stamp: Option<CallStamp>,
+    ) -> CallStream {
+        let registry = self.registry.clone();
+        let runner = self.runners.get(&params.agent).cloned();
         // A worker the call starts gets its context from the caller's own
         // (BI-5); a context that reaches outside it ends the call here.
         let spawn = match runner.as_ref() {
@@ -313,7 +375,7 @@ impl BrokerCalls {
             }
             _ => Ok(None),
         };
-        let task = DelegatedTask::new(params.prompt);
+        let task = DelegatedTask::new(params.prompt).with_call(stamp);
         let agent = params.agent;
         // The caller's messages ride on this call's result (delivery point
         // a), taken when the result is made.
@@ -428,6 +490,51 @@ impl BrokerCalls {
         .boxed()
     }
 
+    /// The chain `caller` calls from: the root's own, fresh, or the chain
+    /// of the run the node serves in the broker's task table. A node no
+    /// broker call started (one an A2A request over HTTP spawned) is the
+    /// root's callee.
+    fn caller_chain(&self, caller: &Caller) -> CallChain {
+        let root = || CallChain::root(uuid::Uuid::new_v4().to_string());
+        match caller {
+            Caller::Root => root(),
+            Caller::Node(name) => self.registry.run_chain(name).unwrap_or_else(|| {
+                let spec = self.caller_spec(name);
+                root().extend(&spec).unwrap_or_else(|_| root())
+            }),
+        }
+    }
+
+    /// The spec a node was admitted as; its name when it was never admitted.
+    fn caller_spec(&self, name: &str) -> String {
+        self.registry
+            .node_spec(name)
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Whether `caller`, at `chain`, may call `agent`: the specs first (a
+    /// node's call only), then the chain's cycle and depth. The run the call
+    /// starts is stamped with the chain it runs under.
+    fn check(&self, caller: &Caller, chain: CallChain, agent: &str) -> Result<CallStamp, Refusal> {
+        // A registered participant is addressed by its node name; the chain
+        // and the policy speak in specs.
+        let callee = self
+            .registry
+            .node_spec(agent)
+            .unwrap_or_else(|| agent.to_string());
+        let caller = match caller {
+            Caller::Root => None,
+            Caller::Node(name) => {
+                if let Some(policy) = self.policy.as_ref() {
+                    policy.may_call(&self.caller_spec(name), &callee)?;
+                }
+                Some(name.clone())
+            }
+        };
+        let chain = chain.extend(&callee)?;
+        Ok(CallStamp { caller, chain })
+    }
+
     /// The context a worker spawned for `caller` as `target` starts from:
     /// derived from the caller's own when the call brings none, clamped to
     /// it when it does (invariant 6). A node no runner recorded a context
@@ -533,6 +640,8 @@ struct EdgeGuard {
     log: Option<Arc<Mutex<EdgeLog>>>,
     from: String,
     to: String,
+    /// The caller's chain, spec names root first (DP-2).
+    chain: Vec<String>,
     bytes: u64,
     /// Set once the row is written.
     outcome: Option<String>,
@@ -562,7 +671,7 @@ impl EdgeGuard {
             to: self.to.clone(),
             scope: Some(ConversationScope::new(ROOT_SCOPE)),
             run: None,
-            chain: vec![self.from.clone()],
+            chain: self.chain.clone(),
             bytes: self.bytes,
             outcome,
         };
@@ -920,5 +1029,133 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// A virtual agent that counts the workers it was asked for and starts
+    /// none.
+    struct Counting {
+        name: String,
+        registry: ParticipantRegistry,
+        spawned: Arc<AtomicU64>,
+    }
+
+    impl VirtualAgent for Counting {
+        fn agent_name(&self) -> &str {
+            &self.name
+        }
+
+        fn agent_card(&self) -> super::super::protocol::ParticipantCard {
+            super::super::protocol::ParticipantCard {
+                name: self.name.clone(),
+                display_name: None,
+                description: String::new(),
+                version: String::new(),
+                skills: Vec::new(),
+            }
+        }
+
+        fn registry(&self) -> &ParticipantRegistry {
+            &self.registry
+        }
+
+        fn run_task(&self, _task: DelegatedTask) -> super::super::virtual_agent::WorkerFuture<'_> {
+            self.spawned.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(anyhow::anyhow!("nothing is spawned here")) })
+        }
+    }
+
+    /// Invariant 4 (DP-2): a worker at depth 4 sends a call frame whose
+    /// `params.metadata.chatty.call` claims depth 0 and an empty chain. The
+    /// broker parses the frame as the wire gives it, reads the caller's
+    /// chain from its own task table, and refuses the call at its real
+    /// depth — and a cycle as a cycle — with nothing spawned.
+    #[tokio::test]
+    async fn forged_chain_is_ignored() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let registry = ParticipantRegistry::new();
+        let spawned = Arc::new(AtomicU64::new(0));
+        let runners: BTreeMap<String, Arc<dyn VirtualAgent>> = ["kit-2", "kit-5"]
+            .into_iter()
+            .map(|name| {
+                let runner: Arc<dyn VirtualAgent> = Arc::new(Counting {
+                    name: name.to_string(),
+                    registry: registry.clone(),
+                    spawned: spawned.clone(),
+                });
+                (name.to_string(), runner)
+            })
+            .collect();
+        let calls = BrokerCalls::new(
+            registry.clone(),
+            Arc::new(runners),
+            Some(Arc::new(Mutex::new(log))),
+        );
+
+        // root → kit-1 → kit-2 → kit-3 → kit-4, as the runners record it.
+        let mut chain = CallChain::root("t-forged");
+        let mut owner: Option<String> = None;
+        let mut runs = Vec::new();
+        for spec in ["kit-1", "kit-2", "kit-3", "kit-4"] {
+            let node = registry.admit_under(spec, owner.as_deref());
+            chain = chain.extend(spec).unwrap();
+            runs.push(
+                registry
+                    .open_run(&node, owner.as_deref(), chain.clone())
+                    .expect("the node was admitted"),
+            );
+            owner = Some(node);
+        }
+        let deepest = owner.expect("four nodes");
+        assert_eq!(registry.open_runs(), 4);
+
+        for (agent, expected) in [
+            ("kit-5", Refusal::TooDeep { depth: 5, max: 4 }),
+            (
+                "kit-2",
+                Refusal::Cycle {
+                    chain: ["root", "kit-1", "kit-2", "kit-3", "kit-4"]
+                        .map(String::from)
+                        .to_vec(),
+                    callee: "kit-2".to_string(),
+                },
+            ),
+        ] {
+            let line = serde_json::json!({
+                "v": 2, "type": "call", "id": 1, "method": "invoke_agent",
+                "params": {
+                    "agent": agent, "prompt": "go on",
+                    "metadata": {"chatty": {"call": {
+                        "root_task_id": "forged", "chain": [], "depth": 0
+                    }}}
+                }
+            })
+            .to_string();
+            let super::super::protocol::ParticipantFrame::Call { request, .. } =
+                super::super::protocol::decode_frame(&line).expect("a call frame")
+            else {
+                panic!("not a call frame");
+            };
+            let events: Vec<_> = calls.call(node(&deepest), request).collect().await;
+            assert_eq!(events, [Err(CallError::Delegation(expected))], "{agent}");
+        }
+        assert_eq!(spawned.load(Ordering::SeqCst), 0, "nothing was spawned");
+
+        let rows: Vec<EdgeRow> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.kind, EdgeKind::Refusal);
+            assert_eq!(row.from, deepest);
+            assert_eq!(row.chain, ["root", "kit-1", "kit-2", "kit-3", "kit-4"]);
+        }
+        assert_eq!(rows[0].outcome, "too_deep: depth 5 > max 4");
+
+        drop(runs);
+        assert_eq!(registry.open_runs(), 0, "every run released");
     }
 }

@@ -22,7 +22,7 @@ use crate::handlers::a2a;
 use crate::handlers::index;
 use crate::handlers::mcp::{self, SseSessions};
 use crate::participant::{BrokerCalls, DirectTransport, ParticipantRegistry, VirtualAgent};
-use chatty_fabric::{EdgeLog, Transport};
+use chatty_fabric::{CallPolicy, EdgeLog, Transport};
 
 // ---------------------------------------------------------------------------
 // GatewayState
@@ -148,6 +148,9 @@ pub struct ProtocolGateway {
     runners: BTreeMap<String, Arc<dyn VirtualAgent>>,
     /// Where each call's edge-log row goes (BI-4); `None` writes none.
     edges: Option<Arc<Mutex<EdgeLog>>>,
+    /// The spec rules a node's call is checked against (PL-S2); `None`
+    /// checks only the call chain.
+    call_policy: Option<Arc<dyn CallPolicy>>,
     /// Built on first use, from the virtual agents published by then.
     calls: OnceLock<Arc<BrokerCalls>>,
     routes: RouteCounter,
@@ -173,6 +176,7 @@ impl ProtocolGateway {
             participant_task: None,
             runners: BTreeMap::new(),
             edges: None,
+            call_policy: None,
             calls: OnceLock::new(),
             routes: RouteCounter::default(),
         }
@@ -246,6 +250,14 @@ impl ProtocolGateway {
         self
     }
 
+    /// Check every node's `invoke_agent` against `policy` — the specs'
+    /// `delegates_to`, `exposed` and `callers` — before anything is spawned
+    /// (PL-S2). Set it before [`calls`](Self::calls) is first asked for.
+    pub fn with_call_policy(mut self, policy: Arc<dyn CallPolicy>) -> Self {
+        self.call_policy = Some(policy);
+        self
+    }
+
     /// The broker's call path: what runs a worker's calls over its
     /// connection, installed on the participant registry the first time it
     /// is asked for. Publish every virtual agent before this — the call path
@@ -253,11 +265,14 @@ impl ProtocolGateway {
     pub fn calls(&self) -> Arc<BrokerCalls> {
         self.calls
             .get_or_init(|| {
-                let calls = Arc::new(BrokerCalls::new(
-                    self.participants.clone(),
-                    Arc::new(self.runners.clone()),
-                    self.edges.clone(),
-                ));
+                let calls = Arc::new(
+                    BrokerCalls::new(
+                        self.participants.clone(),
+                        Arc::new(self.runners.clone()),
+                        self.edges.clone(),
+                    )
+                    .with_policy(self.call_policy.clone()),
+                );
                 self.participants.install_calls(&calls);
                 calls
             })

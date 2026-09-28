@@ -7,8 +7,15 @@
 //! caller. [`may_call`] is that rule and nothing else — pure, so the broker
 //! can ask it before anything is spawned.
 //!
-//! The other [`Refusal`]s are the call chain's and the budget's (DP-2, DP-3):
-//! they are defined here so every refusal a delegation can meet is one type.
+//! [`Refusal`] is `chatty_fabric`'s, because it crosses the fabric: the
+//! broker refuses a call before anything is spawned — by these rules
+//! ([`SpecPolicy`]), by the call chain's cycle and depth (DP-2), or by the
+//! budget (DP-3) — and the calling model reads the typed reason wherever
+//! the broker runs.
+
+use std::collections::BTreeMap;
+
+use chatty_fabric::{CallPolicy, Refusal};
 
 use crate::agent_spec::AgentSpec;
 
@@ -17,47 +24,6 @@ use crate::agent_spec::AgentSpec;
 pub struct CallerView<'a> {
     pub spec: &'a AgentSpec,
 }
-
-/// Why a delegation is refused before it starts.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Refusal {
-    /// The caller's `delegates_to` has no entry matching the callee.
-    NotListed { caller: String, callee: String },
-    /// The callee's spec sets `exposed = false`.
-    NotExposed { callee: String },
-    /// The callee's `callers` is set and does not match the caller.
-    CallerNotAllowed { caller: String, callee: String },
-    /// The callee is already on the call chain.
-    Cycle { chain: Vec<String>, callee: String },
-    /// The call would be deeper than the chain allows.
-    TooDeep { depth: u8, max: u8 },
-    /// The chain's remaining budget is spent: `turns`, `seconds` or `usd`.
-    BudgetSpent { what: &'static str },
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotListed { caller, callee } => {
-                write!(f, "not_listed: {caller} may not call {callee}")
-            }
-            Self::NotExposed { callee } => write!(f, "not_exposed: {callee} is not exposed"),
-            Self::CallerNotAllowed { caller, callee } => {
-                write!(
-                    f,
-                    "caller_not_allowed: {callee} does not accept calls from {caller}"
-                )
-            }
-            Self::Cycle { chain, callee } => {
-                write!(f, "cycle: {} → {callee}", chain.join(" → "))
-            }
-            Self::TooDeep { depth, max } => write!(f, "too_deep: depth {depth} > max {max}"),
-            Self::BudgetSpent { what } => write!(f, "budget_spent: {what}"),
-        }
-    }
-}
-
-impl std::error::Error for Refusal {}
 
 /// Whether `caller` may call `callee`, by their specs alone.
 pub fn may_call(caller: CallerView, callee: &AgentSpec) -> Result<(), Refusal> {
@@ -83,6 +49,49 @@ pub fn may_call(caller: CallerView, callee: &AgentSpec) -> Result<(), Refusal> {
         });
     }
     Ok(())
+}
+
+/// [`may_call`] over the specs a broker publishes, which is what the broker
+/// asks before a node's `invoke_agent` (DP-2). A name with no spec here —
+/// the default `local-agent`, a registered participant — is a bare spec:
+/// it lists nobody and is exposed to anyone.
+#[derive(Clone, Debug, Default)]
+pub struct SpecPolicy {
+    specs: BTreeMap<String, AgentSpec>,
+}
+
+impl SpecPolicy {
+    pub fn new(specs: impl IntoIterator<Item = AgentSpec>) -> Self {
+        Self {
+            specs: specs
+                .into_iter()
+                .map(|spec| (spec.agent.name.clone(), spec))
+                .collect(),
+        }
+    }
+
+    /// The policy over the specs a broker publishes as virtual agents.
+    pub fn for_agents(agents: &[crate::services::virtual_agents::VirtualAgentSpec]) -> Self {
+        Self::new(agents.iter().map(|agent| agent.spec.clone()))
+    }
+
+    fn spec(&self, name: &str) -> std::borrow::Cow<'_, AgentSpec> {
+        match self.specs.get(name) {
+            Some(spec) => std::borrow::Cow::Borrowed(spec),
+            None => std::borrow::Cow::Owned(AgentSpec::named(name)),
+        }
+    }
+}
+
+impl CallPolicy for SpecPolicy {
+    fn may_call(&self, caller: &str, callee: &str) -> Result<(), Refusal> {
+        may_call(
+            CallerView {
+                spec: &self.spec(caller),
+            },
+            &self.spec(callee),
+        )
+    }
 }
 
 /// Whether any of `patterns` matches `name`.
@@ -234,10 +243,46 @@ mod tests {
                 Refusal::TooDeep { depth: 5, max: 4 },
                 "too_deep: depth 5 > max 4",
             ),
-            (Refusal::BudgetSpent { what: "usd" }, "budget_spent: usd"),
+            (
+                Refusal::BudgetSpent {
+                    what: "usd".to_string(),
+                },
+                "budget_spent: usd",
+            ),
         ];
         for (refusal, text) in cases {
             assert_eq!(refusal.to_string(), text);
         }
+    }
+
+    /// The broker's view: names resolve to the published specs, and a name
+    /// with none is a bare spec.
+    #[test]
+    fn spec_policy_asks_may_call_by_name() {
+        let mut lead = spec("lead");
+        lead.swarm.delegates_to = vec!["local-*".to_string()];
+        let mut hidden = spec("local-hidden");
+        hidden.swarm.exposed = false;
+        let policy = SpecPolicy::new([lead, spec("local-coder"), hidden]);
+
+        assert_eq!(policy.may_call("lead", "local-coder"), Ok(()));
+        assert_eq!(
+            policy.may_call("lead", "local-hidden"),
+            Err(Refusal::NotExposed {
+                callee: "local-hidden".to_string()
+            })
+        );
+        assert_eq!(
+            policy.may_call("local-coder", "lead"),
+            Err(Refusal::NotListed {
+                caller: "local-coder".to_string(),
+                callee: "lead".to_string()
+            })
+        );
+        assert_eq!(
+            policy.may_call("lead", "local-unknown"),
+            Ok(()),
+            "an unpublished callee is exposed to anyone"
+        );
     }
 }

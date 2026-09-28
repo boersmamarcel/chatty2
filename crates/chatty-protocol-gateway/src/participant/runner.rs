@@ -43,7 +43,7 @@ use tracing::{debug, info};
 
 use super::listener::{LocalConnection, open_connection};
 use super::protocol::{DelegatedTask, ParticipantCard, ParticipantSkill};
-use super::registry::{ParticipantRegistry, TaskStream};
+use super::registry::{ParticipantRegistry, RunGuard, TaskStream};
 use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
 
 /// A worker's directory, and what to do with it once the worker is gone.
@@ -333,6 +333,13 @@ impl LocalRunner {
         if let Some(permit) = permit.as_ref() {
             self.registry.set_node_permit(&name, permit);
         }
+        // The run this task is, with the chain the broker stamped on it
+        // (DP-2): recorded before the worker exists, so its first call
+        // already extends it. Released when the worker is reaped.
+        let run = task.call.as_ref().and_then(|call| {
+            self.registry
+                .open_run(&name, call.caller.as_deref(), call.chain.clone())
+        });
 
         // Where it goes comes from the task's spawn context: the caller's
         // own tree and branch (BI-5). A task without one is the root's.
@@ -392,6 +399,7 @@ impl LocalRunner {
             stderr_tail,
             stderr_drain,
             _permit: permit,
+            _run: run,
         };
 
         self.await_registration(&mut worker).await?;
@@ -575,6 +583,8 @@ pub struct Worker {
     /// once it is reaped, so the next queued run is admitted by the same
     /// event that frees the process and its workspace.
     _permit: Option<RunPermit>,
+    /// The run this worker serves in the broker's task table (DP-2).
+    _run: Option<RunGuard>,
 }
 
 impl std::fmt::Debug for Worker {

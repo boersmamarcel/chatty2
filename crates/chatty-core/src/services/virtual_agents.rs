@@ -55,6 +55,9 @@ pub struct VirtualAgentSpec {
     /// (TD-2, AGE-693). Never set here: a team's `handoffs` are the
     /// broker's to attach, since module settings have none.
     pub handoff: Option<chatty_fabric::HandoffContract>,
+    /// The spec its workers run as: what the broker checks a call to or
+    /// from them against (PL-S2, [`SpecPolicy`](super::delegation_policy::SpecPolicy)).
+    pub spec: AgentSpec,
 }
 
 /// Resolve every virtual agent the broker should publish.
@@ -110,6 +113,7 @@ pub fn resolve_virtual_agents(
                 endpoint,
                 verification: verification_for(spec, module_settings),
                 handoff: None,
+                spec: spec.clone(),
             }
         })
         .collect()
