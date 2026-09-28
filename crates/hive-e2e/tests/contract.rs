@@ -26,8 +26,6 @@ const ECHO: &str = "echo";
 // ── 5.1 ───────────────────────────────────────────────────────────────────
 
 /// 5.1: every route hive-client calls answers something it deserializes.
-/// Red today: `list_categories` expects `Category.name`, the registry sends
-/// `slug` — PL-H7 (AGE-610).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_01_hive_client_deserializes_every_registry_route() {
@@ -77,11 +75,7 @@ async fn s5_01_hive_client_deserializes_every_registry_route() {
     let client = HiveRegistryClient::new(&stack.registry)
         .with_session(Arc::new(HiveSession::new(&stack.registry, Some(pair))));
     let r = client.search(ECHO).await;
-    note(
-        &mut breaks,
-        "search (GET /api/search) [new finding, proposed for PL-H7 (AGE-610): 500 on every query]",
-        r,
-    );
+    note(&mut breaks, "search (GET /api/search)", r);
     let r = client.list_modules(&ListParams::default()).await;
     note(&mut breaks, "list_modules (GET /api/modules)", r);
     let r = client.get_module(ECHO).await;
@@ -93,11 +87,7 @@ async fn s5_01_hive_client_deserializes_every_registry_route() {
         r,
     );
     let r = client.list_categories().await;
-    note(
-        &mut breaks,
-        "list_categories (GET /api/categories) [PL-H7 (AGE-610): Category.name vs slug]",
-        r,
-    );
+    note(&mut breaks, "list_categories (GET /api/categories)", r);
     let r = client.download(ECHO, SEEDED_VERSION).await;
     note(&mut breaks, "download (GET /api/modules/{n}/{v})", r);
     let r = client.get_credit_balance().await;
@@ -153,6 +143,14 @@ fn note<T>(
 /// tests (`crates/hive-client/tests/registry_contract.rs`) replay still have
 /// the live registry's shape: the same JSON key paths, the same download
 /// headers. `HIVE_E2E_RECORD=1` re-records them instead.
+///
+/// Red today for `download_headers` only: AGE-704 (merged in hive) replaced
+/// `x-signature`/`x-publisher-public-key` with the `x-hive-manifest*`/
+/// `x-hive-publisher-certificate*` chain; hive-client (`client.rs::begin_download`)
+/// still reads the old pair. Consuming the new chain is AGE-608 (PL-H5), not
+/// this row's issue — `recorded/download_headers.json` is deliberately left
+/// on the old shape so hive-client's own per-PR `download` test keeps
+/// asserting what it actually implements.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_01_recorded_responses_match_the_live_registry() {
@@ -393,8 +391,7 @@ fn uuid_key() -> String {
 // ── 5.2 ───────────────────────────────────────────────────────────────────
 
 /// 5.2: a module published with `[capabilities]`, `[protocols]` and
-/// `[resources]` is installed with them. Red today: the registry's manifest
-/// drops all three (F6), so the installer writes defaults — PL-H7 (AGE-610).
+/// `[resources]` is installed with them.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_02_published_manifest_sections_reach_the_installed_module() {
@@ -444,7 +441,7 @@ async fn s5_02_published_manifest_sections_reach_the_installed_module() {
         .collect();
     assert!(
         missing.is_empty(),
-        "F6 / PL-H7 (AGE-610): the published manifest's sections did not reach the installed \
+        "the published manifest's sections did not reach the installed \
          module.toml:\n{}\n--- installed {} ---\n{text}",
         missing.join("\n"),
         path.display()
@@ -566,7 +563,6 @@ async fn s5_04_remote_module_runs_the_installed_version() {
 // ── 5.5 ───────────────────────────────────────────────────────────────────
 
 /// 5.5: `latest_version` is the highest semver, not the last published.
-/// Red today — PL-H7 (AGE-610).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_05_latest_version_is_the_highest_semver() {
@@ -585,14 +581,14 @@ async fn s5_05_latest_version_is_the_highest_semver() {
     let (_, module) = stack.module_json(&name).await;
     assert_eq!(
         module["latest_version"], "2.0.0",
-        "PL-H7 (AGE-610): published 2.0.0 then 1.0.1; latest_version moved backwards"
+        "published 2.0.0 then 1.0.1; latest_version moved backwards"
     );
 }
 
 // ── 5.6 ───────────────────────────────────────────────────────────────────
 
 /// 5.6: a deleted version cannot be republished with different bytes
-/// (versions are immutable, API spec §5). Red today — PL-H7 (AGE-610).
+/// (versions are immutable, API spec §5).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_06_deleted_version_cannot_be_republished_with_other_bytes() {
@@ -621,8 +617,7 @@ async fn s5_06_deleted_version_cannot_be_republished_with_other_bytes() {
     assert_eq!(
         status,
         StatusCode::CONFLICT,
-        "PL-H7 (AGE-610): 1.0.0 was deleted, then republished with different bytes and \
-         accepted: {body}"
+        "1.0.0 was deleted, then republished with different bytes and accepted: {body}"
     );
 }
 
@@ -830,7 +825,7 @@ async fn s5_08_usage_queue_sends_more_than_100_events_in_batches() {
 // ── 5.9 ───────────────────────────────────────────────────────────────────
 
 /// 5.9: the registry refuses a core (non-component) wasm; chatty and the
-/// runner only load components. Red today — PL-H7 (AGE-610).
+/// runner only load components.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_09_registry_rejects_a_core_module_upload() {
@@ -847,7 +842,7 @@ async fn s5_09_registry_rejects_a_core_module_upload() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "PL-H7 (AGE-610): a core wasm module (not a component) was accepted: {body}"
+        "a core wasm module (not a component) was accepted: {body}"
     );
 }
 

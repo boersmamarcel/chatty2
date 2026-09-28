@@ -2,25 +2,25 @@
   "items": [
     {
       "manifest": {
-        "category": "utility",
-        "description": "e2e fixture module: echo-agent",
-        "display_name": "echo-agent",
+        "category": "developer-tools",
+        "description": "e2e fixture module: echo",
+        "display_name": "echo",
         "execution_mode": null,
         "homepage": null,
         "license": "MIT",
-        "name": "echo-agent",
+        "name": "echo",
         "pricing_model": "free",
         "support_email": null,
         "tags": null,
         "version": "0.1.0"
       },
-      "module_name": "echo-agent",
-      "published_at": "2026-09-27T14:30:02.525443Z",
-      "publisher_public_key": "e96c7696a878380acb581b7fba00c65c5f8ebdb785afb282a1e36d9d85314410",
-      "signature": "0G/LJSZZb0hK9CC5YXY2rNbSUrz0ijmb2EuJOlgTQxy2pG9Yue7dmM+UQEwLvd9h0rSBIMTblJbU9Z/UhTE9BQ==",
+      "module_name": "echo",
+      "published_at": "2026-09-28T10:39:39.562999Z",
+      "publisher_public_key": "9b9fd46a18e2ac70db57b3e007b94d6845b141874e22e0341d7a42e084710b72",
+      "signature": "VMFKA9/EhFX2QetiBg67TKxO7dydir27zxmlEb2V2ACUOeS2lMc4rvjwJ/SAin2VTi2JqV4H07Em90TxsYm8Bw==",
       "version": "0.1.0",
-      "wasm_hash": "ec279686520988884ced92874376b4288cee44f363f76292d06ee67a9fc1ed69",
-      "wasm_size_bytes": 108677
+      "wasm_hash": "b1df1fb5fee9fac05cbbeb8413719862744e7c497f953d35746ff43a70493f90",
+      "wasm_size_bytes": 172738
     }
   ],
   "page": 1,
