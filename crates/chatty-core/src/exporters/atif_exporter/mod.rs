@@ -8,6 +8,9 @@
 //! - Top-level `conversation_to_atif` and helpers that map each message,
 //!   tool call, attachment, and feedback record into the ATIF type system.
 //! - Schema versioning, metadata stamping, and tool-call ordering rules.
+//! - `export_swarm`: one document for a whole swarm, every step attributed
+//!   to its agent and every plugin tool call to its plugin (TB-2), and
+//!   `swarm_tree_from_atif`, which reads one back.
 //!
 //! # What does NOT live here
 //!
@@ -136,6 +139,8 @@ pub fn conversation_to_atif(
 
 mod steps;
 use steps::*;
+mod swarm;
+pub use swarm::{export_swarm, swarm_to_atif, swarm_tree_from_atif};
 
 #[cfg(test)]
 mod tests;

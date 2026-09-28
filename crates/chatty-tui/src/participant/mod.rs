@@ -38,6 +38,8 @@ mod swarm_forwarding;
 #[cfg(test)]
 pub(crate) mod swarm_kit;
 #[cfg(test)]
+mod swarm_trace;
+#[cfg(test)]
 mod team_preset;
 #[cfg(test)]
 mod typed_handoffs;

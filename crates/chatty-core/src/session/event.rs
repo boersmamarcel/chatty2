@@ -100,7 +100,9 @@ pub enum SessionEvent {
     /// worker (TB-1, AGE-663). At most one per node per
     /// [`FORWARD_INTERVAL`](chatty_fabric::FORWARD_INTERVAL); text arrives
     /// as its byte length only. It says what happened below the
-    /// delegation for a view of the tree; the delegation's own progress
+    /// delegation for a view of the tree, which
+    /// [`SwarmTrace`](crate::services::swarm_trace::SwarmTrace) builds
+    /// (TB-2); the delegation's own progress
     /// and usage still arrive as [`Delegation`](Self::Delegation), which is
     /// what the turn records and bills.
     SwarmEvent(chatty_fabric::SwarmEvent),

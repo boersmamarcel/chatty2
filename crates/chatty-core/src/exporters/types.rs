@@ -1,9 +1,12 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::models::token_usage::ModelRef;
+use crate::services::swarm_trace::{NodeStatus, UsageLine};
 
 /// Top-level ATIF (Agent Trajectory Interchange Format) export structure.
 ///
 /// Spec: <https://github.com/laude-institute/harbor/blob/main/docs/rfcs/0001-trajectory-format.md>
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifExport {
     pub schema_version: String,
     pub session_id: String,
@@ -16,7 +19,7 @@ pub struct AtifExport {
 }
 
 /// AgentSchema — identifies the agent system, not just the LLM model.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifAgent {
     pub name: String,
     pub version: String,
@@ -27,7 +30,7 @@ pub struct AtifAgent {
 }
 
 /// StepObject — a single interaction turn in the trajectory.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifStep {
     pub step_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,10 +45,22 @@ pub struct AtifStep {
     pub observation: Option<AtifObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<AtifStepMetrics>,
+    /// Who took the step, in a swarm export (TB-2). Absent from a single
+    /// conversation's export, where there is one agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<AtifStepExtra>,
+}
+
+/// Chatty-specific step data, carried in `steps[].extra`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtifStepExtra {
+    /// The node that took the step, as the swarm roster names it.
+    pub agent: String,
 }
 
 /// Message field — either a plain string or an array of ContentPart (v1.6 multimodal).
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
 pub enum AtifMessage {
     Text(String),
     Parts(Vec<AtifContentPart>),
@@ -61,7 +76,7 @@ impl Serialize for AtifMessage {
 }
 
 /// ContentPartSchema (v1.6) — text or image content.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AtifContentPart {
     #[serde(rename = "text")]
@@ -71,37 +86,49 @@ pub enum AtifContentPart {
 }
 
 /// ImageSourceSchema (v1.6) — image reference with MIME type.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifImageSource {
     pub media_type: String,
     pub path: String,
 }
 
 /// ToolCallSchema — a single tool invocation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifToolCall {
     pub tool_call_id: String,
     pub function_name: String,
     pub arguments: serde_json::Value,
+    /// The plugin a plugin tool's call belongs to (TB-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<AtifToolCallExtra>,
+}
+
+/// Chatty-specific tool call data, carried in `tool_calls[].extra`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtifToolCallExtra {
+    pub plugin: String,
 }
 
 /// ObservationSchema — results from tool calls or other actions.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifObservation {
     pub results: Vec<AtifObservationResult>,
 }
 
 /// ObservationResultSchema — a single result within an observation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifObservationResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// The call failed and `content` is its error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
 }
 
 /// MetricsSchema — per-step token usage and cost.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifStepMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
@@ -112,7 +139,7 @@ pub struct AtifStepMetrics {
 }
 
 /// FinalMetricsSchema — aggregate metrics for the entire trajectory.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifFinalMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_prompt_tokens: Option<u32>,
@@ -134,7 +161,7 @@ pub struct AtifFinalMetrics {
 /// is no way to tell a cached prompt from an uncached one. A field is `None`,
 /// not `0`, when the provider reported no cache activity — the two are
 /// different claims (AGE-278).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifFinalMetricsExtra {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u32>,
@@ -155,14 +182,38 @@ impl AtifFinalMetricsExtra {
 
 /// Custom extra block for Chatty-specific data (feedback, regenerations).
 /// The ATIF spec allows arbitrary data in `extra` fields.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifExtra {
+    #[serde(default)]
     pub feedback: Vec<Option<String>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regenerations: Vec<AtifRegeneration>,
+    /// Every agent of a swarm export, parents before children (TB-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<Vec<AtifSwarmAgent>>,
 }
 
-#[derive(Debug, Serialize)]
+/// One agent of a swarm export: a node of its `SwarmTrace`, less its tool
+/// calls, which are the export's steps.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtifSwarmAgent {
+    pub name: String,
+    pub spec: String,
+    /// The index of its parent in the roster; `None` for the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    pub turns: u32,
+    pub text_bytes: u64,
+    /// Its own spend, one line per model and plugin; never a price.
+    pub usage: Vec<UsageLine>,
+    pub status: NodeStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AtifRegeneration {
     pub message_index: usize,
     pub original_text: String,
