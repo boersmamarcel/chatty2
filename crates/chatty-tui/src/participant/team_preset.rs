@@ -77,7 +77,7 @@ async fn start_team_broker(
 async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_the_coder() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let (module_settings, agents, execution_settings) = team_settings(None);
-    assert_eq!(module_settings.virtual_agent_names(), [CODER, REVIEWER]);
+    assert_eq!(module_settings.roster_names(None), [CODER, REVIEWER]);
     assert_eq!(
         execution_settings.max_agent_turns, 50,
         "the preset's turn budget replaces the persisted default"
@@ -85,7 +85,7 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
     let broker = start_team_broker(dir.path(), &module_settings, &agents).await;
 
     let output = ListAgentsTool::new(vec![])
-        .with_local_workers(module_settings.virtual_agent_names())
+        .with_local_workers(module_settings.roster_names(None))
         .with_gateway_port(broker.port)
         .call(&mut ToolContext::new(), ListAgentsToolArgs {})
         .await
@@ -121,7 +121,7 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
         "the team file replaces module settings' roster for the run"
     );
 
-    InvokeAgentTool::new(vec![], vec![], Some(broker.port))
+    InvokeAgentTool::new(vec![], Some(broker.port))
         .with_local_agents([CODER, REVIEWER])
         .call(
             &mut ToolContext::new(),
@@ -178,7 +178,7 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
     let team = load_team("coder-reviewer", Some(workspace.path()), None).unwrap();
     assert_eq!(team.source, TeamSource::Dir(team_dir));
     let (module_settings, agents, execution_settings) = team_settings(Some(workspace.path()));
-    assert_eq!(module_settings.virtual_agent_names(), ["ws-coder"]);
+    assert_eq!(module_settings.roster_names(None), ["ws-coder"]);
     assert_eq!(
         module_settings.team.verification.as_deref(),
         Some("make test")

@@ -25,7 +25,7 @@ delegates to is a roster plus a skill file, e.g. `local-coder` on `qwen3:4b` and
 `team.verification` sits beside it and belongs to the whole roster: the runner runs it
 in each worker's worktree when the worker's task ends and puts its exit code into the
 evidence envelope the leader reads. Schema and the resolution rules:
-[A2A and WASM modules](../a2a-and-wasm-modules.md), "Named virtual agents" and "The
+[Agents and specs](../agents-and-specs.md), "Named virtual agents" and "The
 evidence envelope".
 
 ## Planned (product integration project)

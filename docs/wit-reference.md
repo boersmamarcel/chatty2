@@ -382,12 +382,21 @@ clamped down to the ceiling.
 | Limit | Default = ceiling | Enforcement | Error |
 |:------|:------------------|:------------|:------|
 | **Fuel** | 10¹² units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
-| **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm`, `file`, `billing`) stop waiting at the deadline | `deadline exceeded` |
+| **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm`, `file`, `billing`) and WASI clock waits (`sleep`) stop waiting at the deadline | `deadline exceeded` |
 | **Memory** | 256 MiB | Store memory limiter | `memory limit` |
 | **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
 
 `metadata` and `list-tools` get a fixed 1 s wall-clock budget regardless of the
 call's own `max_execution_ms`.
+
+A guest that sleeps through WASI (`std::thread::sleep`: a `wasi:clocks`
+subscription polled with `wasi:io/poll`) blocks inside the host, where no epoch
+check runs. The host's `wasi:clocks/monotonic-clock` therefore caps every
+subscription at the call's deadline (AGE-706): a wait that would end after the
+deadline fires at the deadline instead, and the call fails with `deadline
+exceeded`. A wait that ends in time is untouched. Clock subscriptions are the only
+waits a plugin can start (it gets no sockets, files or stdin), so every WASI wait is
+bounded this way.
 
 The fuel ceiling is sized so a CPU-bound guest is bounded by the 60 s wall clock, not
 by fuel (AGE-708/PL-D3b). An earlier ceiling of 10⁹ fuel — set before this was

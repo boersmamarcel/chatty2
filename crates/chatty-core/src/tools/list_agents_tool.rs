@@ -2,10 +2,11 @@
 //! (ADR-0011 C5).
 //!
 //! Two sources, one list. The static half is settings: remote A2A agents the
-//! user configured and WASM modules installed on disk. The live half is the
-//! broker's own aggregated card, read over HTTP — a worker that registered a
-//! minute ago is addressable and so belongs here, and only the broker knows
-//! it exists.
+//! user configured, and the agent specs the broker serves (PL-U5: one kind
+//! of local agent, a spec run by the harness; a WASM plugin is a tool inside
+//! one, never an agent). The live half is the broker's own aggregated card,
+//! read over HTTP or the fabric — a worker that registered a minute ago is
+//! addressable and so belongs here, and only the broker knows it exists.
 //!
 //! Every entry carries an [`AgentOrigin`], because "voucher-agent" and
 //! "local-agent" read the same to a model and one of them is somebody else's
@@ -39,21 +40,6 @@ pub struct A2aAgentSummary {
     pub skills: Vec<String>,
 }
 
-/// Summary of a locally installed WASM module agent, safe for display to the LLM.
-#[derive(Debug, Serialize, Clone)]
-pub struct LocalModuleAgentSummary {
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    /// Tools exposed by the module.
-    pub tools: Vec<String>,
-    /// Whether the module supports the A2A protocol (accessible via the protocol gateway).
-    pub supports_a2a: bool,
-    /// Module execution mode from the manifest (`local`, `remote`, `remote_only`).
-    #[serde(default)]
-    pub execution_mode: String,
-}
-
 /// One of the broker's local-worker agents, when the gateway publishes
 /// any (ADR-0011 C2; several, by name, under C10).
 #[derive(Debug, Serialize, Clone)]
@@ -72,8 +58,8 @@ pub struct AgentListing {
     pub name: String,
     /// Whose machine it runs on. See [`AgentOrigin`].
     pub origin: AgentOrigin,
-    /// `remote`, `module`, `worker` — how to think about what it is, not
-    /// where it is.
+    /// `remote` or `worker` — how to think about what it is, not where it
+    /// is.
     pub kind: &'static str,
     pub description: String,
     /// Present for a configured remote agent; the broker's own agents are
@@ -99,18 +85,16 @@ pub struct ListAgentsToolOutput {
     pub note: String,
 }
 
-/// Tool that lists all available agents: both remotely configured A2A agents and
-/// locally installed WASM module agents.
+/// Tool that lists all available agents: remotely configured A2A agents and the
+/// agent specs the broker serves.
 ///
 /// This gives the LLM visibility into what agents are available, including their
-/// names, URLs/types, and skills/tools. Each agent is invokable via the
-/// `/agent <name> <prompt>` command.
+/// names, URLs/types, and skills. Each agent is invokable via `invoke_agent`
+/// and the `/agent <name> <prompt>` command.
 #[derive(Clone)]
 pub struct ListAgentsTool {
     /// Snapshot of configured remote A2A agents taken at construction time.
     remote_agents: Vec<A2aAgentConfig>,
-    /// Locally installed WASM module agents with `agent = true`.
-    module_agents: Vec<LocalModuleAgentSummary>,
     /// The broker's local workers (ADR-0011 C2, named under C10), if the
     /// gateway is running.
     local_workers: Vec<LocalWorkerAgentSummary>,
@@ -131,23 +115,6 @@ impl ListAgentsTool {
     pub fn new(remote_agents: Vec<A2aAgentConfig>) -> Self {
         Self {
             remote_agents,
-            module_agents: Vec::new(),
-            local_workers: Vec::new(),
-            gateway_base_url: None,
-            lazy_broker: None,
-            transport: None,
-            http: reqwest::Client::new(),
-        }
-    }
-
-    /// Create a new `ListAgentsTool` that also reports local WASM module agents.
-    pub fn new_with_modules(
-        remote_agents: Vec<A2aAgentConfig>,
-        module_agents: Vec<LocalModuleAgentSummary>,
-    ) -> Self {
-        Self {
-            remote_agents,
-            module_agents,
             local_workers: Vec::new(),
             gateway_base_url: None,
             lazy_broker: None,
@@ -291,22 +258,6 @@ impl Tool for ListAgentsTool {
             );
         }
 
-        for module in &self.module_agents {
-            listings.insert(
-                module.name.clone(),
-                AgentListing {
-                    name: module.name.clone(),
-                    origin: AgentOrigin::Local,
-                    kind: "module",
-                    description: module.description.clone(),
-                    url: None,
-                    enabled: true,
-                    skills: module.tools.clone(),
-                    has_api_key: false,
-                },
-            );
-        }
-
         // The live half. A remote agent the user configured keeps its own
         // entry: the broker would report it as whatever it is to the broker,
         // and what the *user* did is the more informative label.
@@ -342,8 +293,9 @@ impl Tool for ListAgentsTool {
         );
 
         let note = if agents.is_empty() {
-            "No agents are available. Remote agents can be added via Settings → A2A Agents. \
-             Local WASM module agents are installed in the modules directory."
+            "No agents are available. Remote agents can be added via Settings → Extensions; \
+             local agents are agent specs in `.chatty/agents/<name>.toml`, served by the \
+             broker (Settings → Agents)."
                 .to_string()
         } else {
             "To invoke an agent, use the `invoke_agent` tool with the agent's name and a prompt. \
@@ -507,17 +459,6 @@ mod tests {
         }
     }
 
-    fn make_module_agent(name: &str) -> LocalModuleAgentSummary {
-        LocalModuleAgentSummary {
-            name: name.to_string(),
-            version: "0.1.0".to_string(),
-            description: format!("{name} module agent"),
-            tools: vec!["tool_a".to_string()],
-            supports_a2a: true,
-            execution_mode: "local".to_string(),
-        }
-    }
-
     async fn list(tool: &ListAgentsTool) -> ListAgentsToolOutput {
         tool.call(&mut ToolContext::new(), ListAgentsToolArgs {})
             .await
@@ -577,21 +518,29 @@ mod tests {
         assert!(!find(&output, "off-agent").enabled);
     }
 
-    /// Modules and the broker's worker are this machine's.
+    /// PL-U5: the roster's specs are this machine's workers, one kind of
+    /// local agent; nothing else is listed as local.
     #[tokio::test]
-    async fn a_module_and_the_local_worker_are_local() {
-        let tool = ListAgentsTool::new_with_modules(
-            vec![make_agent("remote", "https://example.com/a2a", true)],
-            vec![make_module_agent("echo")],
-        )
-        .with_local_workers(["local-agent"]);
+    async fn the_roster_s_specs_are_the_local_agents() {
+        let roster = crate::agent_spec::roster_names_from(&[], None, None);
+        let tool = ListAgentsTool::new(vec![make_agent("remote", "https://example.com/a2a", true)])
+            .with_local_workers(roster.iter().cloned());
 
         let output = list(&tool).await;
-        assert_eq!(output.total, 3);
-        assert_eq!(find(&output, "echo").origin, AgentOrigin::Local);
-        assert_eq!(find(&output, "echo").kind, "module");
-        assert_eq!(find(&output, "local-agent").origin, AgentOrigin::Local);
-        assert_eq!(find(&output, "local-agent").kind, "worker");
+        assert_eq!(output.total, roster.len() + 1);
+        for name in &roster {
+            assert_eq!(find(&output, name).origin, AgentOrigin::Local);
+            assert_eq!(find(&output, name).kind, "worker");
+        }
+        assert_eq!(find(&output, "benford-analyst").kind, "worker");
+        assert!(
+            output
+                .agents
+                .iter()
+                .all(|agent| agent.kind == "worker" || agent.kind == "remote"),
+            "{:?}",
+            output.agents
+        );
         assert_eq!(
             find(&output, "remote").origin,
             AgentOrigin::RemoteConfigured

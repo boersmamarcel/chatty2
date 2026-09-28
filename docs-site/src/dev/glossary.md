@@ -32,11 +32,11 @@
 
 **Sub-agent.** A delegated worker: a separate `chatty-tui` process with the parent's tool set that works on one task and reports back. The parent asks for one through `invoke_agent` against the broker's `local-agent`, and the worker reports over the broker's participant socket. Owning page: [Sub-agents](../user/sub-agents.md).
 
-**Broker.** The half of the protocol gateway that serves *local participants* — `chatty-tui` processes the broker spawns on a connection it made for each, and which answer delegated tasks at `/a2a/{name}` under the name the broker gave them (ADR-0011, ADR-0020). The desktop starts it from the module settings; a terminal leader starts its own with `--broker`. Unix only. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md#local-participants-adr-0011).
+**Broker.** The half of the protocol gateway that serves *local participants* — `chatty-tui` processes the broker spawns on a connection it made for each, and which answer delegated tasks at `/a2a/{name}` under the name the broker gave them (ADR-0011, ADR-0020). The desktop starts it from the module settings; a terminal leader starts its own with `--broker`. Unix only. Owning page: [Agents and specs](./architecture/agents-and-specs.md#local-participants-adr-0011).
 
 **Virtual agent.** A named worker the broker publishes — `local-agent` by default, or each agent spec `module_settings.virtual_agents` / a team's `agents` names: a name, an optional model, a tool profile or disabled groups, a preamble and its own budget. Roles live in specs, never on the `invoke_agent` call.
 
-**Agent spec.** The one declarative definition of an agent (AGE-614): `[agent]`, `[tools]`, `[[plugins]]`, `[swarm]`, `[budget]` in `<name>.toml` under `.chatty/agents/`, the data directory or the presets; `AgentBuildContext::from_spec` builds it. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
+**Agent spec.** The one declarative definition of an agent (AGE-614): `[agent]`, `[tools]`, `[[plugins]]`, `[swarm]`, `[budget]` in `<name>.toml` under `.chatty/agents/`, the data directory or the presets; `AgentBuildContext::from_spec` builds it. Owning page: [Agents and specs](./architecture/agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
 **Tool profile.** A named allowlist of tool *names* (`coordinator`, `coder`, `reviewer` in `tool_profile.rs`) that is a worker's whole tool set, MCP included; it only ever removes tools. Passed as `chatty-tui --tools`. Contrast tool *groups*, which `--enable` / `--disable` switch.
 
@@ -48,7 +48,7 @@
 
 **MCP.** Model Context Protocol: external tool servers configured under Settings → Extensions, started by `McpService`, and attached to the agent as tools. Their environment variables are shown to the model only through `masked_env()`. Owning page: [Extensions & MCP](../user/extensions.md); the shipped list is the [curated MCP catalog](./architecture/curated-mcp-catalog.md).
 
-**A2A.** Agent-to-Agent protocol. Remote agents configured in settings and local WASM modules are both reached with `invoke_agent` over A2A, the latter through the protocol gateway on `localhost:8420`. Owning page: [A2A and WASM modules](./architecture/a2a-and-wasm-modules.md).
+**A2A.** Agent-to-Agent protocol. Remote agents configured in settings and the local agent specs the broker serves are both reached with `invoke_agent` over A2A, the latter through the protocol gateway on `localhost:8420`. Owning page: [Agents and specs](./architecture/agents-and-specs.md).
 
 **WASM module (plugin).** A sandboxed `wasm32-wasip2` component targeting `chatty:plugin@0.3.0` (the SDK's `Plugin` trait), with a `module.toml`, run by `chatty-wasm-runtime` and discovered by `chatty-module-registry`. It contributes tools to the agent specs that list it and is never an agent itself. It can call the host LLM but never sees API keys. Owning pages: [Build a WASM plugin](./guides/build-wasm-module.md), [WIT interface](./architecture/wit-reference.md).
 

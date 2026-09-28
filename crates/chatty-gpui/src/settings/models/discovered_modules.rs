@@ -22,9 +22,7 @@ pub struct DiscoveredModuleEntry {
     pub description: String,
     pub wasm_file: String,
     pub tools: Vec<String>,
-    pub agent: bool,
     pub mcp: bool,
-    pub a2a: bool,
     pub status: ModuleLoadStatus,
     /// `"local"`, `"remote"`, or `"remote_only"`.
     pub execution_mode: String,
