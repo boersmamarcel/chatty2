@@ -12,8 +12,14 @@
 //! implements them over agent specs), the chain's, and the budget's (DP-3).
 //! It crosses the fabric as [`CallError::Delegation`](crate::CallError), so
 //! the calling model reads the typed reason wherever the broker is.
+//!
+//! A callee runs under the tighter of its own spec's budget and what its
+//! caller has left (DP-3, [`CallChain::budget`]): turns, time and dollars.
+//! What the caller has left is the chain's own budget for the calling run,
+//! narrowed by what the caller says it has spent — a caller can only ever
+//! lower it, never raise it.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +28,17 @@ use crate::directory::ROOT_NAME;
 /// The deepest a call may go: the root's callee is depth 1.
 pub const MAX_DEPTH: u8 = 4;
 
-/// What is left of the root's budget where a call is made (DP-3). `None`
-/// is no limit.
+/// How long past its deadline a run may go before it is stopped: a long
+/// tool call or model call can keep a run from ever seeing its deadline. A
+/// tenth of the `budget`, between 5 s and 2 min. A headless run stops its
+/// own pass this late; the broker ends a call whose callee is still going
+/// this late with a failed result (DP-3).
+pub fn deadline_grace(budget: Duration) -> Duration {
+    (budget / 10).clamp(Duration::from_secs(5), Duration::from_secs(120))
+}
+
+/// What is left of a budget where a call is made (DP-3). `None` is no
+/// limit.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Remaining {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +47,52 @@ pub struct Remaining {
     pub seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usd: Option<f64>,
+}
+
+impl Remaining {
+    /// No limit at all.
+    pub fn is_unlimited(&self) -> bool {
+        self.turns.is_none() && self.seconds.is_none() && self.usd.is_none()
+    }
+
+    /// Each limit the tighter of the two.
+    pub fn min(&self, other: &Remaining) -> Remaining {
+        fn tighter<T: PartialOrd>(a: Option<T>, b: Option<T>) -> Option<T> {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(if b < a { b } else { a }),
+                (a, b) => a.or(b),
+            }
+        }
+        Remaining {
+            turns: tighter(self.turns, other.turns),
+            seconds: tighter(self.seconds, other.seconds),
+            usd: tighter(self.usd, other.usd),
+        }
+    }
+
+    /// The first limit that is used up — `turns`, `seconds` or `usd` — if
+    /// any: nothing is left of it to hand a callee.
+    pub fn spent(&self) -> Option<&'static str> {
+        if self.turns == Some(0) {
+            Some("turns")
+        } else if self.seconds == Some(0) {
+            Some("seconds")
+        } else if self.usd.is_some_and(|usd| usd <= 0.0) {
+            Some("usd")
+        } else {
+            None
+        }
+    }
+
+    /// Refuse with [`Refusal::BudgetSpent`] when a limit is used up.
+    pub fn check(&self) -> Result<(), Refusal> {
+        match self.spent() {
+            Some(what) => Err(Refusal::BudgetSpent {
+                what: what.to_string(),
+            }),
+            None => Ok(()),
+        }
+    }
 }
 
 /// The chain one run was called through, as the broker stamped it.
@@ -89,6 +150,47 @@ impl CallChain {
             remaining: self.remaining.clone(),
         })
     }
+
+    /// What this chain leaves at `now`: its turns and dollars, and its
+    /// deadline as whole seconds left (rounded down, so a call made in the
+    /// last second reads as out of time).
+    pub fn left_at(&self, now: SystemTime) -> Remaining {
+        Remaining {
+            seconds: self
+                .deadline
+                .map(|d| d.duration_since(now).unwrap_or_default().as_secs()),
+            ..self.remaining.clone()
+        }
+    }
+
+    /// This chain (already [`extend`](Self::extend)ed to the callee) with
+    /// the budget the callee runs under (DP-3), or why the call may not be
+    /// made: nothing is left.
+    ///
+    /// What the caller has left is the chain's own budget at `now` narrowed
+    /// by `caller_left`, what the caller counts as left of it (its turns
+    /// and dollars already spent, delegated usage included). The callee
+    /// then gets the tighter of that and `callee_own`, its spec's own
+    /// budget: `turns = min(own, left)`, `deadline = min(now + own,
+    /// chain.deadline)`, `usd = min(own, left)`.
+    pub fn budget(
+        mut self,
+        caller_left: &Remaining,
+        callee_own: &Remaining,
+        now: SystemTime,
+    ) -> Result<CallChain, Refusal> {
+        let left = self.left_at(now).min(caller_left);
+        left.check()?;
+        let callee = left.min(callee_own);
+        self.deadline = callee
+            .seconds
+            .map(|seconds| now + Duration::from_secs(seconds));
+        self.remaining = Remaining {
+            seconds: None,
+            ..callee
+        };
+        Ok(self)
+    }
 }
 
 /// Why a delegation is refused before it starts. Serialises as
@@ -121,6 +223,12 @@ pub enum Refusal {
 /// may a node started as spec `caller` call spec `callee`?
 pub trait CallPolicy: Send + Sync {
     fn may_call(&self, caller: &str, callee: &str) -> Result<(), Refusal>;
+
+    /// Spec `callee`'s own budget (DP-3): its `max_agent_turns`,
+    /// `max_duration` in seconds and `cap_usd`. Unlimited by default.
+    fn budget(&self, _callee: &str) -> Remaining {
+        Remaining::default()
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +262,96 @@ mod tests {
             }),
             "a cycle reads as a cycle even past the limit"
         );
+    }
+
+    /// DP-3: the callee gets the tighter of its own budget and what the
+    /// caller has left; the caller's count only ever narrows the chain's.
+    #[test]
+    fn a_callee_runs_under_the_tighter_of_its_own_and_the_callers_budget() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut caller = CallChain::root("t").extend("a").unwrap();
+        caller.deadline = Some(now + Duration::from_secs(30));
+        caller.remaining = Remaining {
+            turns: Some(10),
+            seconds: None,
+            usd: Some(1.0),
+        };
+        let callee_own = Remaining {
+            turns: Some(50),
+            seconds: Some(3_600),
+            usd: Some(0.25),
+        };
+        let caller_left = Remaining {
+            turns: Some(2),
+            seconds: None,
+            usd: Some(5.0),
+        };
+        let callee = caller
+            .extend("b")
+            .unwrap()
+            .budget(&caller_left, &callee_own, now)
+            .unwrap();
+        assert_eq!(callee.deadline, Some(now + Duration::from_secs(30)));
+        assert_eq!(
+            callee.remaining,
+            Remaining {
+                turns: Some(2),
+                seconds: None,
+                usd: Some(0.25),
+            },
+            "a caller claiming more dollars than its chain has gets the chain's"
+        );
+        assert_eq!(callee.left_at(now).seconds, Some(30));
+    }
+
+    #[test]
+    fn a_spent_budget_refuses_by_what_is_spent() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let chain = CallChain::root("t").extend("a").unwrap();
+        for (left, what) in [
+            (
+                Remaining {
+                    turns: Some(0),
+                    ..Remaining::default()
+                },
+                "turns",
+            ),
+            (
+                Remaining {
+                    seconds: Some(0),
+                    ..Remaining::default()
+                },
+                "seconds",
+            ),
+            (
+                Remaining {
+                    usd: Some(-0.01),
+                    ..Remaining::default()
+                },
+                "usd",
+            ),
+        ] {
+            assert_eq!(
+                chain.clone().budget(&left, &Remaining::default(), now),
+                Err(Refusal::BudgetSpent {
+                    what: what.to_string()
+                })
+            );
+        }
+        let mut late = chain.clone();
+        late.deadline = Some(now);
+        assert_eq!(
+            late.budget(&Remaining::default(), &Remaining::default(), now),
+            Err(Refusal::BudgetSpent {
+                what: "seconds".to_string()
+            }),
+            "a chain past its deadline has no time to hand on"
+        );
+        let unlimited = chain
+            .budget(&Remaining::default(), &Remaining::default(), now)
+            .unwrap();
+        assert_eq!(unlimited.deadline, None);
+        assert!(unlimited.remaining.is_unlimited());
     }
 
     #[test]

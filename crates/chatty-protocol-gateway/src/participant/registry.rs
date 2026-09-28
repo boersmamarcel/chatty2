@@ -542,6 +542,7 @@ impl ParticipantRegistry {
             .outbound
             .send(BrokerFrame::Task {
                 task_id: task_id.clone(),
+                budget: Box::new(task.frame_budget()),
                 text: task.text,
                 bearer: task.bearer,
                 capture_conversation: task.capture_conversation,

@@ -26,11 +26,11 @@ mod swarm;
 mod task_table;
 mod transport;
 
-pub use delegation::{CallChain, CallPolicy, MAX_DEPTH, Refusal, Remaining};
+pub use delegation::{CallChain, CallPolicy, MAX_DEPTH, Refusal, Remaining, deadline_grace};
 pub use directory::{
     ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState, ROOT_NAME,
 };
-pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES};
+pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES, UsagePricer};
 pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
 pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, wrap_message};

@@ -110,6 +110,27 @@ There is no backward compatibility: a line persisted before AGE-682 loads with
 A context compaction's summary call (AGE-683) is counted with the turn it ran in, as its
 own `ApiCallUsage` naming the utility model that served it.
 
+### The local spend gate (DP-3)
+
+A task's own dollar budget is enforced in-process by `LocalSpendGate`
+(`services/spend_gate.rs`, production code). It holds the usage lines the run has seen so
+far — its own model calls and every callee's reported lines — and prices them on read with
+the same `price(lines, &PriceBook)` the display uses. Its cap is the spec's `[budget]
+cap_usd` (per task; **not** `TokenTrackingSettings.cap_usd`, the hosted monthly cap below),
+narrowed by what a caller had left when it delegated the run. With no cap the gate is
+inactive. A line whose model the book does not price adds nothing: the gate is inactive for
+that line, and the broker's edge-log row for that call says `usd: unpriced`.
+
+The gate is the dollar part of the run's `RunBudget` (`services/run_budget.rs`), which
+also counts tool turns and the clock. `invoke_agent` sends what is left with every call
+(`InvokeAgentParams.remaining`); the broker narrows the call chain with it and refuses a
+call whose turns, time or dollars are used up with `budget_spent: turns|seconds|usd` before
+anything is spawned. The callee runs under the tighter of its own spec's budget and what
+its caller left it, carried on its task frame (`budget`). chatty-tui's headless runner
+keeps the budget current (its turn cap and clock, the tool turns spent, its own usage
+lines, priced with the roster's book); `invoke_agent` records each callee's lines as the
+delegation ends.
+
 ## Research connection (GEPA / ACE)
 
 Context headroom and token cost feed optimizer economics ([cost model](research/cost-model.md))
@@ -224,7 +245,8 @@ pub struct TokenTrackingSettings {
 `cap_usd` (AGE-416 / ADR-0010) is only ever set by hive. Nothing in chatty2 reads it: the
 enforcement is a `SpendGate` (`services/spend_gate.rs`) that hive implements and sets on
 `AgentBuildContext.spend_gate`, which `invoke_agent` asks before it starts a delegation.
-With no gate — the desktop, chatty-tui — there is no check.
+With no gate — the desktop, chatty-tui — there is no check. A spec's per-task `cap_usd`
+is the local spend gate's, above, not this one.
 
 A delegation's spend is part of the conversation's total: `invoke_agent` reads the
 worker's `metadata.usage` lines off the terminal status and `AgentSession` records each

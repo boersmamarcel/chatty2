@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
+use chatty_core::models::token_usage::PriceBook;
 use chatty_core::services::delegation_policy::SpecPolicy;
 use chatty_core::services::plugin_llm::PluginLlmProvider;
 use chatty_core::services::virtual_agents::{VirtualAgentSpec, resolve_virtual_agents};
@@ -134,6 +135,14 @@ impl Broker {
             providers.to_vec(),
             tokio::runtime::Handle::current(),
         ));
+        // Each task row prices what its callee reported spending, at the
+        // models the lines name (DP-3, AGE-682).
+        let mut prices = PriceBook::default();
+        for model in models {
+            if let Some(pricing) = model.token_pricing() {
+                prices.insert(model.model_ref(), pricing);
+            }
+        }
         Self::serve(
             llm,
             socket_path(),
@@ -142,6 +151,7 @@ impl Broker {
             specs,
             workspace_dir,
             dirs::data_dir(),
+            Some(prices),
         )
         .await
     }
@@ -164,6 +174,28 @@ impl Broker {
         specs: Vec<VirtualAgentSpec>,
         workspace_dir: Option<String>,
     ) -> Result<Self> {
+        Self::start_priced_at(
+            socket,
+            executable,
+            default_budget,
+            specs,
+            workspace_dir,
+            None,
+        )
+        .await
+    }
+
+    /// As [`start_at`](Self::start_at), pricing each task row's reported
+    /// usage with `prices` (DP-3).
+    #[cfg(test)]
+    pub(crate) async fn start_priced_at(
+        socket: PathBuf,
+        executable: PathBuf,
+        default_budget: usize,
+        specs: Vec<VirtualAgentSpec>,
+        workspace_dir: Option<String>,
+        prices: Option<PriceBook>,
+    ) -> Result<Self> {
         let data_dir = socket.parent().map(std::path::Path::to_path_buf);
         Self::serve(
             Arc::new(NoopProvider),
@@ -173,6 +205,7 @@ impl Broker {
             specs,
             workspace_dir,
             data_dir,
+            prices,
         )
         .await
     }
@@ -190,7 +223,8 @@ impl Broker {
 
     /// Bind and serve: the gateway over a module registry whose
     /// `llm::complete()` goes to `provider`. Every call is logged to the
-    /// edge log under `data_dir`, when there is one.
+    /// edge log under `data_dir`, when there is one, with its callee's
+    /// reported usage priced by `prices`, when there are some.
     #[allow(clippy::too_many_arguments)]
     async fn serve(
         provider: Arc<dyn LlmProvider>,
@@ -200,6 +234,7 @@ impl Broker {
         specs: Vec<VirtualAgentSpec>,
         workspace_dir: Option<String>,
         data_dir: Option<PathBuf>,
+        prices: Option<PriceBook>,
     ) -> Result<Self> {
         let registry = ModuleRegistry::new(provider, ResourceLimits::default())
             .context("failed to build the module registry the broker gateway needs")?;
@@ -208,6 +243,9 @@ impl Broker {
         // anything is spawned (PL-S2).
         let mut gateway = ProtocolGateway::new(shared, 0)
             .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs)));
+        if let Some(prices) = prices {
+            gateway = gateway.with_usage_pricer(Arc::new(prices));
+        }
 
         let participants = gateway.participants();
         let listener = chatty_protocol_gateway::participant::bind(&socket)
