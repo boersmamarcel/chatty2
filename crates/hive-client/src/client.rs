@@ -368,25 +368,21 @@ impl HiveRegistryClient {
     /// Download the `.wasm` binary for a specific version.
     ///
     /// Performs integrity (SHA-256) and signature (Ed25519) verification.
-    /// Returns [`ClientError::SignatureInvalid`] on any mismatch.
+    /// Returns [`ClientError::SignatureInvalid`] on any mismatch, and
+    /// [`ClientError::TooLarge`] for a body over
+    /// [`MAX_DOWNLOAD_BYTES`](crate::MAX_DOWNLOAD_BYTES).
     ///
     /// For streaming with progress reporting, use [`begin_download`][Self::begin_download]
     /// and [`finalize_download`][Self::finalize_download] instead.
     pub async fn download(&self, name: &str, version: &str) -> Result<DownloadResult, ClientError> {
-        use futures_util::StreamExt as _;
-
+        let mut begun = self.begin_download(name, version).await?;
+        let wasm_vec = begun.read_body(|_| {}).await?;
         let BegunDownload {
             registry_hash,
             signature,
             publisher_public_key,
-            mut stream,
             ..
-        } = self.begin_download(name, version).await?;
-
-        let mut wasm_vec = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            wasm_vec.extend_from_slice(&chunk?[..]);
-        }
+        } = begun;
         self.finalize_download(
             wasm_vec,
             registry_hash,

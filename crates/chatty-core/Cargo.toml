@@ -104,7 +104,8 @@ chatty-fabric = { path = "../chatty-fabric" }
 hive-client = { path = "../hive-client" }
 # The `LlmProvider` a WASM plugin's `llm::complete` calls (services::plugin_llm).
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
-# A spec's plugins are resolved by their strict `module.toml` (tools::plugin_tool).
+# A spec's plugins are resolved by their strict `module.toml` (tools::plugin_tool);
+# install.rs writes the install record the registry checks at load (PL-H5a).
 chatty-module-registry = { path = "../chatty-module-registry" }
 semver.workspace = true
 # The agent's persistent shell runs on its PTY (services::shell_service).

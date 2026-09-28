@@ -19,8 +19,24 @@ pub const MAX_MEMORY_BYTES_CEILING: u64 = 256 * 1024 * 1024;
 /// Wall-clock ceiling for one guest call, host time included: 60 s.
 pub const MAX_EXECUTION_MS_CEILING: u64 = 60_000;
 
-/// Fuel ceiling for one guest call: 10⁹ units (about one per Wasm instruction).
-pub const MAX_FUEL_CEILING: u64 = 1_000_000_000;
+/// Fuel ceiling for one guest call: 10¹² units (about one per Wasm
+/// instruction).
+///
+/// PL-D3 originally set this to 10⁹. PL-H1's measurement showed a pure CPU
+/// loop exhausts 10⁹ fuel in about 130 ms, so the 60 s wall-clock ceiling
+/// ([`MAX_EXECUTION_MS_CEILING`]) never got to bite: a legitimately
+/// CPU-heavy tool (parsing, a large Benford's-law audit) was cut off by fuel
+/// long before host time ran out (AGE-708, PL-D3b, decided 2026-09-27).
+///
+/// Measured on this host (`fixture-spin`'s tight arithmetic loop, best of
+/// several runs under a busy load average of 20-40): Wasmtime fuel drains at
+/// roughly 1.5 x 10^10 units/s. At 10^12, a pure spin with the default
+/// budget runs for about a minute of fuel (measured: ~68 s) before it
+/// exhausts, so the 60 s wall clock fires first — a CPU-bound tool is now
+/// bounded by wall time, not by an arbitrarily tight fuel budget. Fuel stays
+/// the deterministic bound underneath that: it is refilled per call, and a
+/// manifest may still only lower this ceiling, never raise it.
+pub const MAX_FUEL_CEILING: u64 = 1_000_000_000_000;
 
 /// Ceiling on the size of one export's return value: 1 MiB.
 pub const MAX_OUTPUT_BYTES_CEILING: u64 = 1024 * 1024;
@@ -48,7 +64,7 @@ pub struct ResourceLimits {
     /// Wasmtime fuel units one call may consume (about one per Wasm
     /// instruction). Exhausting it fails the call with `fuel exhausted`.
     ///
-    /// Defaults to [`MAX_FUEL_CEILING`] (10⁹).
+    /// Defaults to [`MAX_FUEL_CEILING`] (10¹²).
     pub max_fuel: u64,
 
     /// Maximum linear-memory size the instance may grow to, in bytes. A
@@ -105,7 +121,7 @@ mod tests {
     #[test]
     fn defaults_are_the_ceilings() {
         let limits = ResourceLimits::default();
-        assert_eq!(limits.max_fuel, 1_000_000_000);
+        assert_eq!(limits.max_fuel, 1_000_000_000_000);
         assert_eq!(limits.max_memory_bytes, 256 * 1024 * 1024);
         assert_eq!(limits.max_execution_ms, 60_000);
         assert_eq!(limits.max_output_bytes, 1024 * 1024);
