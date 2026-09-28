@@ -709,6 +709,11 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             engine.add_system_message(summary);
             None
         }
+        Command::Swarm => {
+            let summary = engine.swarm_summary();
+            engine.add_system_message(summary);
+            None
+        }
         Command::Clear => Some(KeyAction::ClearConversation),
         Command::Compact => Some(KeyAction::CompactConversation),
         Command::Context => Some(KeyAction::ShowContext),

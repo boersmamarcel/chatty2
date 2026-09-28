@@ -44,6 +44,8 @@ mod swarm_trace;
 #[cfg(test)]
 mod team_preset;
 #[cfg(test)]
+mod tui_swarm;
+#[cfg(test)]
 mod typed_handoffs;
 
 use anyhow::{Context, Result, bail};
