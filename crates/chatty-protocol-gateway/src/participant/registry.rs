@@ -37,7 +37,7 @@ use super::protocol::{
     TaskState,
 };
 use chatty_fabric::{
-    AgentOrigin, ConversationScope, Directory, DirectoryError, NodeId, NodeName, NodeState,
+    AgentOrigin, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState,
     SpawnContext,
 };
 
@@ -302,6 +302,18 @@ impl ParticipantRegistry {
         self.lock().participants.contains_key(name)
     }
 
+    /// The node admitted as `name`, ended or not, and its owner's node —
+    /// `None` for the owner when the root owns it. `None` when no node was
+    /// ever admitted under that name.
+    pub(crate) fn node_and_owner(&self, name: &str) -> Option<(Node, Option<Node>)> {
+        let inner = self.lock();
+        let node = inner.directory.by_name(name)?.clone();
+        let owner = node
+            .owner()
+            .and_then(|owner| inner.directory.get(owner).cloned());
+        Some((node, owner))
+    }
+
     pub fn card(&self, name: &str) -> Option<ParticipantCard> {
         self.lock().participants.get(name).map(|p| p.card.clone())
     }
@@ -511,6 +523,29 @@ impl ParticipantRegistry {
     /// than taking the whole broker down with every participant on it.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
+impl ParticipantRegistry {
+    /// Admit a node as `spec` owned by the node named `owner`, or by the
+    /// root when `None`, and return its name. Admission under an owner is
+    /// the spawn request's (BI-5); tests of what an owner means start here.
+    pub(crate) fn admit_under(&self, spec: &str, owner: Option<&str>) -> String {
+        let mut inner = self.lock();
+        let owner = owner.map(|name| inner.directory.by_name(name).expect("the owner").id());
+        let node = inner
+            .directory
+            .admit(spec, owner, ConversationScope::new(ROOT_SCOPE))
+            .expect("admitted");
+        node.name().to_string()
+    }
+
+    /// Mark the node named `name` ended, as its connection closing does.
+    pub(crate) fn end_node(&self, name: &str) {
+        let mut inner = self.lock();
+        let id = inner.directory.by_name(name).expect("the node").id();
+        inner.directory.end(id).expect("ended");
     }
 }
 

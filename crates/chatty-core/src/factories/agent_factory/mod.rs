@@ -39,9 +39,9 @@ use crate::tools::{
     GitCreateBranchTool, GitDiffTool, GitLogTool, GitMergeTool, GitStatusTool, GitSwitchBranchTool,
     GlobSearchTool, InvokeAgentTool, ListAgentsTool, ListDirectoryTool, ListMcpTool, ListToolsTool,
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
-    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, ShellCdTool, ShellExecuteTool,
-    ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool, UpdateTodoTool,
-    VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, SendMessageTool, ShellCdTool,
+    ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool,
+    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -292,6 +292,7 @@ impl AgentClient {
             instructions_dir,
             embedded_terminals,
             fabric_transport,
+            fabric_owner,
             plugins,
             plugin_host,
         } = ctx;
@@ -1109,6 +1110,16 @@ impl AgentClient {
             }
         };
 
+        // Every worker with a connection to its broker can message its
+        // owner, whatever its delegation rights (tree messages, TM-1): a
+        // leaf coder has no `invoke_agent` but still has someone to tell.
+        let send_message_tool = fabric_transport.clone().map(|transport| {
+            SendMessageTool::new(
+                transport,
+                fabric_owner.unwrap_or_else(|| chatty_fabric::ROOT_NAME.to_string()),
+            )
+        });
+
         let tool_availability = ToolAvailability {
             fs_read: fs_read_tools.is_some(),
             doc_retriever: doc_retriever_tool.is_some(),
@@ -1242,6 +1253,7 @@ impl AgentClient {
             ask_user: false,       // set below alongside publish_module
             terminal: terminal_read_tool.is_some(),
             terminal_run: terminal_run_tool.is_some(),
+            send_message: send_message_tool.is_some(),
         };
 
         // The profile decides what the prompt describes as well as what is
@@ -1509,6 +1521,7 @@ impl AgentClient {
             ask_user_tool: ask_user_tool,
             terminal_read_tool: terminal_read_tool,
             terminal_run_tool: terminal_run_tool,
+            send_message_tool: send_message_tool,
             load_tools_tool: tool_loader.clone().map(LoadToolsTool::new),
             plugin_tools: {
                 let approvals = crate::tools::plugin_tool::PluginApprovals {

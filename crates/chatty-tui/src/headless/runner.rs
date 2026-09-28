@@ -104,6 +104,8 @@ pub struct HeadlessRunner {
     /// The connection a delegated worker's calls travel over (ADR-0020,
     /// BI-4), set before the agent is built.
     fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
+    /// The owner the broker's `welcome` named, set with `fabric_transport`.
+    fabric_owner: Option<String>,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -156,6 +158,7 @@ impl HeadlessRunner {
             usage: UsageRecorder::default(),
             save_conversation: None,
             fabric_transport: None,
+            fabric_owner: None,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
@@ -240,11 +243,18 @@ impl HeadlessRunner {
     }
 
     /// Reach local roles and the broker's directory over `transport` — a
-    /// worker's broker-made connection (ADR-0020, BI-4). Must come before
-    /// the agent is built: a worker connects first, then builds
-    /// (connect-then-build), so its tools hold the connection.
-    pub fn set_fabric_transport(&mut self, transport: Arc<dyn chatty_fabric::Transport>) {
+    /// worker's broker-made connection (ADR-0020, BI-4) — and message
+    /// `owner`, the name its `welcome` gave the worker's owner, over it
+    /// (tree messages). Must come before the agent is built: a worker
+    /// connects first, then builds (connect-then-build), so its tools hold
+    /// the connection.
+    pub fn set_fabric_transport(
+        &mut self,
+        transport: Arc<dyn chatty_fabric::Transport>,
+        owner: String,
+    ) {
         self.fabric_transport = Some(transport);
+        self.fabric_owner = Some(owner);
     }
 
     /// Build the agent (with the session's store handles) and its conversation.
@@ -373,6 +383,7 @@ impl HeadlessRunner {
             unattended: true,
             answer_file: self.answer_file,
             fabric_transport: self.fabric_transport.clone(),
+            fabric_owner: self.fabric_owner.clone(),
             ..built.context
         })
     }

@@ -128,6 +128,16 @@ impl WorkerConnection {
         self.connection.name()
     }
 
+    /// The name this worker's owner answers to, as the `welcome` gave it:
+    /// the node that asked for this worker, or [`chatty_fabric::ROOT_NAME`]
+    /// when the root did. Its `send_message` names it (tree messages).
+    pub fn owner(&self) -> String {
+        self.connection
+            .owner()
+            .map(|owner| owner.to_string())
+            .unwrap_or_else(|| chatty_fabric::ROOT_NAME.to_string())
+    }
+
     /// What this worker's `invoke_agent` and `list_agents` reach local
     /// roles and the broker's directory through (ADR-0020, BI-4).
     pub fn transport(&self) -> Arc<dyn Transport> {
