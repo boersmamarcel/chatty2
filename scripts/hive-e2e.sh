@@ -2,8 +2,7 @@
 # The chatty × Hive nightly (PL-E6, AGE-601), runnable locally the same way
 # `.github/workflows/plugin-e2e.yml` runs it.
 #
-#   scripts/hive-e2e.sh build    build hive-registry + hive-runner from $HIVE_DIR,
-#                                chatty-wasm-runtime patched to this checkout
+#   scripts/hive-e2e.sh build    build hive-registry + hive-runner from $HIVE_DIR
 #   scripts/hive-e2e.sh up       bring the compose stack up (e2e profile) and wait
 #   scripts/hive-e2e.sh seed     publish target/wasm-fixtures with hive's seed-e2e.sh
 #   scripts/hive-e2e.sh test     cargo test -p hive-e2e -- --ignored; writes the
@@ -49,24 +48,14 @@ compose() {
 
 build() {
   need_hive
-  # hive-runner pins chatty-wasm-runtime by rev from the `.git` URL; patch
-  # that source to this checkout so ABI drift between chatty2 main and hive
-  # fails here. `cargo update` moves the lock entry onto the patch (a patch
-  # alone is ignored while the lock still names the pinned version).
-  local patch="patch.\"https://github.com/boersmamarcel/chatty2.git\".chatty-wasm-runtime.path=\"$root/crates/chatty-wasm-runtime\""
+  # Neither binary links chatty2 code since PL-H8 (hive-runner's module routes
+  # are gone); the chatty2 side of the contract is the fixtures this checkout
+  # builds and the registry's `chatty:plugin@0.3.0` export check at publish.
   (
     cd "$HIVE_DIR"
-    locked="$(grep -A2 '^name = "chatty-wasm-runtime"' Cargo.lock |
-      grep -B1 'chatty2.git?rev=' | sed -n 's/^version = "\(.*\)"/\1/p' | head -1 || true)"
-    if [[ -n "$locked" ]]; then
-      cargo update --config "$patch" -p "chatty-wasm-runtime@$locked"
-    fi
-    CARGO_TARGET_DIR="$hive_target" cargo build --config "$patch" -p hive-registry -p hive-runner
-    cargo tree --config "$patch" -p hive-runner --depth 1 |
-      grep -F "chatty-wasm-runtime" | grep -qF "($root/crates/chatty-wasm-runtime)" ||
-      { echo "hive-e2e.sh: hive-runner is not built against $root/crates/chatty-wasm-runtime" >&2; exit 1; }
+    CARGO_TARGET_DIR="$hive_target" cargo build -p hive-registry -p hive-runner
   )
-  echo "[hive-e2e] built $bin_dir/hive-registry and $bin_dir/hive-runner against this checkout" >&2
+  echo "[hive-e2e] built $bin_dir/hive-registry and $bin_dir/hive-runner from $HIVE_DIR" >&2
 }
 
 up() {
