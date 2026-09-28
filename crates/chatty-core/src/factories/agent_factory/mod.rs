@@ -23,9 +23,9 @@ use rig_agent::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::context_shaper::ContextShaper;
-use crate::services::lazy_broker::LazyBroker;
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
+use crate::services::lazy_broker::LazyBroker;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::ToolLoading;

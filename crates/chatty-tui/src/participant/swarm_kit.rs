@@ -2120,7 +2120,9 @@ impl KitRoot {
 
 /// How often `needle` occurs in a request's body.
 fn occurrences(request: &RecordedRequest, needle: &str) -> usize {
-    String::from_utf8_lossy(&request.body).matches(needle).count()
+    String::from_utf8_lossy(&request.body)
+        .matches(needle)
+        .count()
 }
 
 /// `text` as `from` sent it, as its recipient reads it.

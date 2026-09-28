@@ -298,9 +298,14 @@ impl BrokerCalls {
         let agent = params.agent;
         // The caller's messages ride on this call's result (delivery point
         // a), taken when the result is made.
-        let inbox = self.inbox(&caller).map(|inbox| (inbox, self.pending.clone()));
+        let inbox = self
+            .inbox(&caller)
+            .map(|inbox| (inbox, self.pending.clone()));
         let messages = move || match &inbox {
-            Some((inbox, pending)) => lock(pending).get_mut(inbox).map(deliver).unwrap_or_default(),
+            Some((inbox, pending)) => lock(pending)
+                .get_mut(inbox)
+                .map(deliver)
+                .unwrap_or_default(),
             None => Vec::new(),
         };
 
@@ -741,8 +746,20 @@ mod tests {
         assert_eq!(
             dropped,
             [
-                (EdgeKind::Message, coder.clone(), lead.clone(), 5, "dropped".into()),
-                (EdgeKind::Message, other.clone(), lead.clone(), 10, "dropped".into()),
+                (
+                    EdgeKind::Message,
+                    coder.clone(),
+                    lead.clone(),
+                    5,
+                    "dropped".into()
+                ),
+                (
+                    EdgeKind::Message,
+                    other.clone(),
+                    lead.clone(),
+                    10,
+                    "dropped".into()
+                ),
             ]
         );
         assert_eq!(
@@ -770,7 +787,8 @@ mod tests {
             send(&calls, node(&lead), ROOT_NAME, "x").await,
             refused(RefusalReason::OverAllowance)
         );
-        let wrap = |text: &str| format!("<message from=\"{lead}\" untrusted=\"true\">{text}</message>");
+        let wrap =
+            |text: &str| format!("<message from=\"{lead}\" untrusted=\"true\">{text}</message>");
         assert_eq!(root.take_run_messages(), [wrap("one"), wrap(&allowance)]);
         assert!(root.take_run_messages().is_empty(), "delivered once");
         assert!(

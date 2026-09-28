@@ -356,11 +356,7 @@ impl ParticipantRegistry {
     /// A new task is the participant's next run: the messages waiting for
     /// it open the task's text, and each sender's allowance starts over
     /// (tree messages, TM-2).
-    pub fn submit_task(
-        &self,
-        name: &str,
-        mut task: DelegatedTask,
-    ) -> Option<(String, TaskStream)> {
+    pub fn submit_task(&self, name: &str, mut task: DelegatedTask) -> Option<(String, TaskStream)> {
         if !self.is_registered(name) {
             return None;
         }

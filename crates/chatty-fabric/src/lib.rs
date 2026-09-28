@@ -24,9 +24,7 @@ pub use directory::{
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES};
 pub use origin::AgentOrigin;
-pub use pending::{
-    Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, wrap_message,
-};
+pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, wrap_message};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
     CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome, InvokeAgentParams,
