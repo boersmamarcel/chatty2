@@ -507,6 +507,15 @@ impl AgentSession {
             .trim_start()
             .starts_with(MALFORMED_TOOL_CALL_FOLLOW_UP);
 
+        // A human turn is the root's next run: the tree messages waiting
+        // for it open the turn, wrapped as untrusted data, and stay with it
+        // in history (TM-2, delivery point b).
+        let contents = if kind == TurnKind::Human {
+            open_with_messages(contents, conversation.agent().take_run_messages())
+        } else {
+            contents
+        };
+
         let mut llm_contents = contents.clone();
         llm_contents.extend(llm_only_contents);
         if kind != TurnKind::Regenerate {
@@ -918,6 +927,17 @@ impl AgentSession {
 
         Some(outcome)
     }
+}
+
+/// `contents` with the delivered tree `messages` ahead of it, as one text
+/// part; `contents` unchanged when there are none.
+fn open_with_messages(contents: Vec<UserContent>, messages: Vec<String>) -> Vec<UserContent> {
+    if messages.is_empty() {
+        return contents;
+    }
+    std::iter::once(UserContent::text(messages.join("\n")))
+        .chain(contents)
+        .collect()
 }
 
 /// A turn after [`AgentSession::prepare_turn`]: everything the async part

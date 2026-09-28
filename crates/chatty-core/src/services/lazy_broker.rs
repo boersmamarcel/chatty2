@@ -46,6 +46,15 @@ pub trait LazyBroker: Send + Sync {
     /// disabled, or `--broker` never passed).
     fn bound_addrs(&self) -> Vec<SocketAddr>;
 
+    /// The root's next run is starting: take the tree messages waiting for
+    /// it (TM-2), wrapped as untrusted data and oldest first, to open its
+    /// user turn with ([`Transport::take_run_messages`]). Never starts the
+    /// broker — one that has not started has no messages — so the default,
+    /// for a broker with no direct transport, is none.
+    fn take_run_messages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Stop serving, if this ever started. A no-op otherwise (nothing to
     /// stop) — the default for a host whose lifecycle already tears the
     /// underlying gateway down some other way.

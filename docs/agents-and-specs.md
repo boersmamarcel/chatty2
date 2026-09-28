@@ -384,8 +384,23 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
   `chatty_fabric::PendingList`: at most 64 KB per recipient, and at most 8 KB
   per sender per run of the recipient. A message over either bound is
   `over_allowance` — refused whole, never truncated.
-- **Delivery** — on the recipient's next `invoke_agent` result, or at the start
-  of its next run — is TM-2's; until then accepted messages wait.
+- **Delivery** (TM-2, AGE-655) happens at exactly two points, never mid-run:
+  appended to the next `invoke_agent` result the recipient receives, as
+  `messages: [...]` in `InvokeAgentOutput` (absent when empty; a failed
+  delegation lists them after its error), or prepended to the recipient's next
+  run — the root's next human turn (`Transport::take_run_messages` via
+  `LazyBroker::take_run_messages`, kept in history with the turn), a node's
+  next task text. Each message is delivered once, as untrusted data:
+
+  ```
+  <message from="local-coder-2" untrusted="true">…</message>
+  ```
+
+  with `<` and `>` in the body escaped (`chatty_fabric::wrap_message`). A
+  message grants nothing: the recipient's tools, budget and approval policy
+  are what they were.
+- **Drops.** When the recipient ends, what is still waiting for it is dropped,
+  one edge-log `message` row per message with outcome `dropped`.
 - **Neutral description.** The description says what the tool does and names
   neither relaying nor siblings (golden:
   `crates/chatty-core/src/tools/goldens/send_message_description.txt`): the F3
