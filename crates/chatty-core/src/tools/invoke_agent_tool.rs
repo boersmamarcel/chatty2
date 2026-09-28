@@ -112,6 +112,13 @@ pub struct InvokeAgentOutput {
     /// the model sees otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<serde_json::Value>,
+    /// Messages that were waiting for this agent when the result came back
+    /// (tree messages, TM-2), oldest first, each wrapped as untrusted data
+    /// (`<message from="…" untrusted="true">…</message>`). This result is
+    /// where they are delivered, once; they grant nothing. Absent from the
+    /// JSON when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
 }
 
 /// Error type for invoke_agent tool
@@ -133,8 +140,24 @@ pub enum InvokeAgentError {
     /// The worker's handoff failed its role's schema twice: once, and again
     /// after the one follow-up turn that listed the errors (TD-2, AGE-693).
     /// The model sees `Error: invoke_agent: handoff_invalid: <role>: …`.
-    #[error("handoff_invalid: {role}: {}", errors.join("; "))]
-    HandoffInvalid { role: String, errors: Vec<String> },
+    /// `messages` are the caller's tree messages this failed result still
+    /// delivers (TM-2), listed after the errors.
+    #[error("handoff_invalid: {role}: {}{}", errors.join("; "), delivered_after_error(messages))]
+    HandoffInvalid {
+        role: String,
+        errors: Vec<String>,
+        messages: Vec<String>,
+    },
+}
+
+/// The tree messages a failed delegation still delivers (TM-2), as the
+/// tail of its error text; empty when there are none.
+fn delivered_after_error(messages: &[String]) -> String {
+    if messages.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nmessages:\n{}", messages.join("\n"))
+    }
 }
 
 /// Tool that invokes a named agent with a prompt: a remote A2A agent, or one of
@@ -631,6 +654,7 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff,
+            Vec::new(),
         )
     }
 
@@ -710,6 +734,7 @@ impl InvokeAgentTool {
                 response: String::new(),
                 error: Some(reason),
                 metadata: None,
+                messages: Vec::new(),
             },
             (None, Some(Ok(outcome))) => outcome,
             (None, None) => InvokeAgentOutcome {
@@ -717,6 +742,7 @@ impl InvokeAgentTool {
                 response: String::new(),
                 error: Some("the broker ended the call without a result".to_string()),
                 metadata: None,
+                messages: Vec::new(),
             },
         };
 
@@ -750,11 +776,15 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff,
+            outcome.messages,
         )
     }
 
     /// Report how a delegation ended, to the progress channel and to the
     /// model — the one ending both the A2A and the fabric path share.
+    /// `messages` are the caller's delivered tree messages: on the output
+    /// when the delegation succeeded, after the error when it failed, so a
+    /// failed delegation still delivers them.
     #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
@@ -766,6 +796,7 @@ impl InvokeAgentTool {
         trace: Option<String>,
         conversation: Option<serde_json::Value>,
         handoff: HandoffReport,
+        messages: Vec<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let response = response.trim().to_string();
         let handoff_value = if success { handoff.handoff } else { None };
@@ -784,13 +815,19 @@ impl InvokeAgentTool {
                 usage,
             });
             if let Some((role, errors)) = handoff.invalid {
-                return Err(InvokeAgentError::HandoffInvalid { role, errors });
+                return Err(InvokeAgentError::HandoffInvalid {
+                    role,
+                    errors,
+                    messages,
+                });
             }
-            return Err(InvokeAgentError::InvocationFailed(format!(
+            let mut failure = format!(
                 "Agent '{}' reported failure{}",
                 agent,
                 error_msg.map(|m| format!(": {}", m)).unwrap_or_default()
-            )));
+            );
+            failure.push_str(&delivered_after_error(&messages));
+            return Err(InvokeAgentError::InvocationFailed(failure));
         }
 
         // Emit Finished with the full result so the sub-agent trace block
@@ -821,6 +858,7 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff: handoff_value,
+            messages,
         })
     }
 }
