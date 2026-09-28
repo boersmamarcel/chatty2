@@ -26,6 +26,11 @@ pub struct ModuleMetadata {
     pub support_email: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The stored manifest (API spec §6.3) of the latest version, present
+    /// only on `GET /api/modules/{name}` (absent — and so `None` — on list
+    /// and search results, and `null` when every version is deleted).
+    #[serde(default)]
+    pub manifest: Option<Value>,
 }
 
 /// Authorship information embedded in [`ModuleMetadata`].
@@ -222,7 +227,7 @@ impl TokenPair {
 /// A module category.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Category {
-    pub name: String,
+    pub slug: String,
     pub display_name: String,
     pub description: String,
     pub module_count: i64,
