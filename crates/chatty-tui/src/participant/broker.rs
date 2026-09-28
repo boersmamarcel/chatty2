@@ -44,14 +44,14 @@ use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::tools::worker_executable;
-use chatty_fabric::{EdgeLog, HandoffContract, Transport};
+use chatty_fabric::{EdgeLog, EndpointBudget, HandoffContract, Transport};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 #[cfg(test)]
 use chatty_protocol_gateway::RouteCounter;
 use chatty_protocol_gateway::participant::{
-    EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
-    WorkspaceFactory, WorkspaceRequest,
+    LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace, WorkspaceFactory,
+    WorkspaceRequest,
 };
 use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
 use tokio::net::TcpListener;
