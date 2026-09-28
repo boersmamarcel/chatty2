@@ -8,6 +8,7 @@ mod model_picker;
 pub(crate) mod plan;
 mod slash_menu;
 mod status_bar;
+pub(crate) mod swarm;
 pub mod theme;
 mod tool_picker;
 mod tool_summary;

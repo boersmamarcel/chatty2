@@ -87,6 +87,15 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         tui: true,
     },
     SlashCommandSpec {
+        command: "/swarm",
+        description: "Print this conversation's swarm tree",
+        insert_text: "/swarm",
+        execute_immediately: true,
+        // The desktop renders the tree in its own panel (TB-4).
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
         command: "/clear",
         description: "Clear conversation history",
         insert_text: "/clear",

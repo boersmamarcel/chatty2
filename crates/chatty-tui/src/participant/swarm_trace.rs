@@ -80,16 +80,19 @@ fn sum(lines: &[UsageLine]) -> (u32, u32, u32, u32) {
 }
 
 /// A run, as the root session and the broker saw it.
-struct Run {
-    events: Vec<SessionEvent>,
-    edges: Vec<EdgeRow>,
+///
+/// `pub(crate)` so TB-5's `/swarm` golden (`tui_swarm.rs`) can script the
+/// same three-level run without duplicating the kit setup.
+pub(crate) struct Run {
+    pub(crate) events: Vec<SessionEvent>,
+    pub(crate) edges: Vec<EdgeRow>,
     /// The fake server's request count per agent's model.
     requests: [(usize, usize); 2],
 }
 
 /// The leader delegates to the reviewer, which reads the readme and asks
 /// the coder, which reads it too.
-async fn leader_reviewer_coder() -> Run {
+pub(crate) async fn leader_reviewer_coder() -> Run {
     let kit = SwarmKit::start(
         vec![
             AgentDef::new(REVIEWER, REVIEWER_MODEL, Endpoint::Sse).sub_leader(),

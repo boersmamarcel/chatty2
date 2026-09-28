@@ -132,6 +132,8 @@ pub enum Command {
     Agent(Option<String>),
     /// /agents — list the agents /agent and invoke_agent can reach
     Agents,
+    /// /swarm — print this conversation's latest swarm tree (TB-5, AGE-667)
+    Swarm,
     /// /clear, /new — clear conversation and start fresh
     Clear,
     /// /compact — summarize older conversation turns
@@ -182,6 +184,7 @@ impl ChatEngine {
             "/add-dir" => Some(Command::AddDir(arg)),
             "/agent" => Some(Command::Agent(arg)),
             "/agents" => Some(Command::Agents),
+            "/swarm" => Some(Command::Swarm),
             "/clear" | "/new" => Some(Command::Clear),
             "/compact" => Some(Command::Compact),
             "/context" => Some(Command::Context),
@@ -215,7 +218,14 @@ impl ChatEngine {
         self.tool_picker = None;
         self.session.set_conversation(None);
         self.is_ready = false;
+        self.swarm_trace = chatty_core::services::swarm_trace::SwarmTrace::new();
         self.add_system_message("Started a new conversation.".to_string());
+    }
+
+    /// `/swarm`: this conversation's latest swarm tree, folded live from its
+    /// events (TB-5, AGE-667).
+    pub fn swarm_summary(&self) -> String {
+        crate::ui::swarm::render(&self.swarm_trace)
     }
 
     /// Show current context usage and working directory.
@@ -1118,6 +1128,12 @@ mod tests {
         WORKSPACE_AGENTS_DIR, inspect_agent_specs_from, roster_names_of,
     };
     use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+
+    /// TB-5 (AGE-667): `/swarm` parses to its own command.
+    #[test]
+    fn swarm_command_parses() {
+        assert_eq!(ChatEngine::parse_command("/swarm"), Some(Command::Swarm));
+    }
 
     /// PL-U5: `/agents` lists the roster's specs with what they declare,
     /// the remote agents, and every spec file left out with the reason.

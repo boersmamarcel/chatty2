@@ -390,6 +390,9 @@ pub struct ChatEngine {
     /// When `true`, this engine is itself a delegated worker: `/agent` is
     /// refused, so a worker cannot fan out further from the chat box.
     pub is_sub_agent: bool,
+    /// This conversation's swarm tree, folded live from the turn's events
+    /// (TB-1/TB-2) so `/swarm` always has the latest one (TB-5, AGE-667).
+    pub swarm_trace: chatty_core::services::swarm_trace::SwarmTrace,
 
     // Display state
     pub transcript: Transcript,
@@ -488,6 +491,44 @@ pub(crate) fn load_agent_roster(
         })
 }
 
+/// `event` reconstructed as the [`SessionEvent`](chatty_core::session::SessionEvent)
+/// [`SwarmTrace::apply`](chatty_core::services::swarm_trace::SwarmTrace::apply)
+/// acts on, so the tree `/swarm` renders stays live (TB-1/TB-5, AGE-667).
+/// `AppEvent` is `SessionEvent`'s own stream projection (see
+/// `events.rs`'s `From` impl), so every variant `apply` cares about has an
+/// `AppEvent` counterpart to rebuild from; the rest fold into `None`.
+fn swarm_session_event(event: &AppEvent) -> Option<chatty_core::session::SessionEvent> {
+    use chatty_core::session::SessionEvent;
+    Some(match event {
+        AppEvent::StreamStarted => SessionEvent::TurnStarted,
+        AppEvent::TextChunk(text) => SessionEvent::Text(text.clone()),
+        AppEvent::ToolCallStarted { id, name } => SessionEvent::ToolCallStarted {
+            id: id.clone(),
+            name: name.clone(),
+        },
+        AppEvent::ToolCallInput { id, arguments } => SessionEvent::ToolCallInput {
+            id: id.clone(),
+            arguments: arguments.clone(),
+        },
+        AppEvent::ToolCallResult { id, result } => SessionEvent::ToolCallResult {
+            id: id.clone(),
+            result: result.clone(),
+        },
+        AppEvent::ToolCallError { id, error } => SessionEvent::ToolCallError {
+            id: id.clone(),
+            error: error.clone(),
+        },
+        AppEvent::TokenUsage(usage) => SessionEvent::TokenUsage(usage.clone()),
+        AppEvent::PluginUsage(usage) => SessionEvent::PluginUsage(usage.clone()),
+        AppEvent::Delegation(progress) => SessionEvent::Delegation(progress.clone()),
+        AppEvent::SwarmEvent(batch) => SessionEvent::SwarmEvent(batch.clone()),
+        AppEvent::StreamError(error) => SessionEvent::Error(error.clone()),
+        AppEvent::StreamCancelled => SessionEvent::Cancelled,
+        AppEvent::StreamCompleted => SessionEvent::TurnEnded,
+        _ => return None,
+    })
+}
+
 /// Configuration for constructing a new `ChatEngine`.
 pub struct ChatEngineConfig {
     pub model_config: ModelConfig,
@@ -573,6 +614,7 @@ impl ChatEngine {
             is_streaming: false,
             pending_approval: None,
             pending_restore_text: None,
+            swarm_trace: chatty_core::services::swarm_trace::SwarmTrace::new(),
             mailbox: Mailbox::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -995,6 +1037,9 @@ impl ChatEngine {
 
     /// Process an AppEvent and return what the main loop should do
     pub fn handle_event(&mut self, event: AppEvent) -> EngineAction {
+        if let Some(session_event) = swarm_session_event(&event) {
+            self.swarm_trace.apply(&session_event);
+        }
         match event {
             AppEvent::StreamStarted => {
                 self.is_streaming = true;

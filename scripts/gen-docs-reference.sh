@@ -121,6 +121,7 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/add-dir <dir>` | Add workspace directory | Yes | Yes |
 | `/agent [name] <prompt>` | Run an agent spec on the local roster or a named A2A agent, else a local sub-agent | Yes | Yes |
 | `/agents` | List the agents `/agent` and `invoke_agent` reach, and the spec files left out | — | Yes |
+| `/swarm` | Print this conversation's latest swarm tree: agent · model · status · spend (TB-5, AGE-667) | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
