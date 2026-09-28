@@ -354,14 +354,7 @@ impl ChattyApp {
                     // Wait for memory service init to complete before building the agent
                     let memory_service = await_memory_service(cx).await;
                     let embedding_service = get_embedding_service(cx);
-                    let module_agents = cx
-                        .update(|cx| collect_module_agents(cx))
-                        .unwrap_or_default();
-                    let (gateway_port, local_agents) = cx
-                        .update(|cx| {
-                            cx.try_global::<crate::settings::models::ModuleSettingsModel>()
-                                .map(|m| (m.gateway_port, m.virtual_agent_names()))
-                        })
+                    let (gateway_port, local_agents) = cx.update(|cx| gateway_and_roster(cx))
                         .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                         .ok()
                         .flatten()
@@ -407,7 +400,6 @@ impl ChattyApp {
                                     skill_service: Some(skill_service),
                                     search_settings,
                                     embedding_service,
-                                    module_agents,
                                     gateway_port,
                                     lazy_broker,
                                     local_agents: local_agents.unwrap_or_default(),
@@ -523,11 +515,7 @@ impl ChattyApp {
         } else {
             // Slow path: fetch from SQLite, restore, then display
             let repo = self.conversation_repo.clone();
-            let module_agents = collect_module_agents(cx);
-            let (gateway_port, local_agents) = cx
-                .try_global::<crate::settings::models::ModuleSettingsModel>()
-                .map(|m| (m.gateway_port, m.virtual_agent_names()))
-                .unzip();
+            let (gateway_port, local_agents) = gateway_and_roster(cx).unzip();
             // The broker starts itself on this call if it has not already
             // (BI-2, AGE-634).
             let lazy_broker = cx
@@ -580,7 +568,6 @@ impl ChattyApp {
                                     skill_service: Some(skill_service),
                                     search_settings,
                                     embedding_service,
-                                    module_agents,
                                     gateway_port,
                                     lazy_broker,
                                     local_agents: local_agents.unwrap_or_default(),
