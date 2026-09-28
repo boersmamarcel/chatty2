@@ -39,13 +39,13 @@ mod virtual_agent;
 
 pub use calls::{BrokerCalls, Caller, DirectTransport};
 pub use protocol::{
-    BrokerFrame, CALLER_HEADER, DelegatedTask, FrameError, InputAnswer, InputQuestion,
+    BrokerFrame, CALLER_HEADER, CallStamp, DelegatedTask, FrameError, InputAnswer, InputQuestion,
     InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame, ParticipantSkill,
     TaskBearer, TaskInput, TaskState, decode_frame, encode_frame,
 };
 pub use registry::{
-    AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, TaskStream,
-    TaskUpdate,
+    AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, RunGuard,
+    TaskStream, TaskUpdate,
 };
 pub use virtual_agent::{EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle};
 
