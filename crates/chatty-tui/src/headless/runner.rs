@@ -19,6 +19,7 @@ use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::models::token_usage::ConversationTokenUsage;
 use chatty_core::repositories::ConversationData;
 use chatty_core::services::StreamSurface;
+use chatty_core::services::handoff::{self, HandoffContract, HandoffLedger, HandoffOutcome};
 use chatty_core::services::team::Team;
 use chatty_core::services::turn_budget::{Deadline, TurnBudget};
 use chatty_core::session::{
@@ -104,6 +105,14 @@ pub struct HeadlessRunner {
     /// The connection a delegated worker's calls travel over (ADR-0020,
     /// BI-4), set before the agent is built.
     fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
+    /// The role and schema this worker's final answer must match (TD-2,
+    /// AGE-693), from its delegated task. `None` for a worker whose team
+    /// names no schema for it, and for every other run.
+    handoff: Option<HandoffContract>,
+    /// Where a `--team` leader's `invoke_agent` records its roles' handoffs,
+    /// and what the `--usage-file` reports them from (TD-2). `None` for a
+    /// team without `handoffs` and for every other run.
+    handoff_ledger: Option<HandoffLedger>,
     /// The owner the broker's `welcome` named, set with `fabric_transport`.
     fabric_owner: Option<String>,
     /// Tests only: the budget every turn started with, in order.
@@ -136,6 +145,7 @@ impl HeadlessRunner {
         // Delegated lines are priced at the model they name (AGE-682).
         session.set_price_book(config.models.price_book());
         let pending_first_turn = config.team.as_ref().and_then(Team::first_turn_instruction);
+        let handoff_ledger = config.team.as_ref().and_then(Team::handoff_ledger);
         Self {
             session,
             execution_settings: config.execution_settings.clone(),
@@ -158,6 +168,8 @@ impl HeadlessRunner {
             usage: UsageRecorder::default(),
             save_conversation: None,
             fabric_transport: None,
+            handoff: None,
+            handoff_ledger,
             fabric_owner: None,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
@@ -181,6 +193,7 @@ impl HeadlessRunner {
     /// [`super::usage_file`].
     pub fn set_usage_recorder(&mut self, recorder: UsageRecorder) {
         recorder.set_model(self.config.model_config.model_identifier.clone());
+        recorder.set_handoff_ledger(self.handoff_ledger.clone());
         self.usage = recorder;
     }
 
@@ -218,6 +231,40 @@ impl HeadlessRunner {
         self.spawn_turn(TurnInput {
             kind: TurnKind::ProtocolFollowUp,
             turn_budget: Some(TurnBudget::run_share(0, total, self.tool_turns_spent)),
+            ..input
+        });
+    }
+
+    /// The handoff contract this worker's task carries (TD-2, AGE-693):
+    /// its final answer is checked against it, and sent back once when it
+    /// does not match.
+    pub fn set_handoff(&mut self, contract: Option<HandoffContract>) {
+        self.handoff = contract;
+    }
+
+    /// The follow-up a final answer whose last model call said
+    /// `final_call_text` needs: the schema errors, when this worker has a
+    /// contract and the answer does not meet it.
+    pub(super) fn handoff_follow_up(&self, final_call_text: &str) -> Option<String> {
+        let contract = self.handoff.as_ref()?;
+        match handoff::check(contract, final_call_text) {
+            HandoffOutcome::Valid(_) => None,
+            HandoffOutcome::Invalid { errors } => Some(handoff::follow_up(contract, &errors)),
+        }
+    }
+
+    /// Send the handoff back once (TD-2): the observer — the worker's frame
+    /// mapper — sees it as a `FollowUp`, which is how it counts the invalid
+    /// answer, and the model gets the errors as a protocol turn.
+    pub(super) fn send_handoff_follow_up(&mut self, prompt: String) {
+        if let Some(observer) = self.event_observer.as_ref() {
+            observer(&SessionEvent::FollowUp(prompt.clone()));
+        }
+        let Some(input) = self.prepare_send(prompt, false) else {
+            return;
+        };
+        self.spawn_turn(TurnInput {
+            kind: TurnKind::ProtocolFollowUp,
             ..input
         });
     }
@@ -380,6 +427,7 @@ impl HeadlessRunner {
         Ok(AgentBuildContext {
             mcp_tools,
             team_skill: self.config.team.as_ref().and_then(Team::skill),
+            handoff_ledger: self.handoff_ledger.clone(),
             unattended: true,
             answer_file: self.answer_file,
             fabric_transport: self.fabric_transport.clone(),

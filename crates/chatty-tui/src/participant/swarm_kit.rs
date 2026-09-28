@@ -52,6 +52,7 @@ use chatty_core::tools::invoke_agent_tool::{
     InvokeAgentArgs, InvokeAgentOutput, InvokeAgentProgress, InvokeAgentTool,
 };
 use chatty_core::tools::worker_executable;
+use chatty_fabric::HandoffContract;
 use rig_agent::tool::{Tool, ToolContext};
 
 use super::broker::Broker;
@@ -81,6 +82,8 @@ pub(crate) struct AgentDef {
     pub spec: Option<AgentSpec>,
     /// The spec's `[tools] profile`, e.g. `coder`, over `spec`'s.
     pub profile: Option<&'static str>,
+    /// The JSON Schema the team names for this role's handoff (TD-2).
+    pub handoff: Option<serde_json::Value>,
 }
 
 impl AgentDef {
@@ -92,6 +95,7 @@ impl AgentDef {
             sub_leader: false,
             spec: None,
             profile: None,
+            handoff: None,
         }
     }
 
@@ -101,6 +105,12 @@ impl AgentDef {
             spec: Some(spec.clone()),
             ..Self::new(&spec.agent.name, model, endpoint)
         }
+    }
+
+    /// Name a handoff schema for this role, as a team's `handoffs` does.
+    pub fn with_handoff(mut self, schema: serde_json::Value) -> Self {
+        self.handoff = Some(schema);
+        self
     }
 
     pub fn sub_leader(mut self) -> Self {
@@ -277,13 +287,20 @@ impl SwarmKit {
         }
 
         let executable = wrapper(&base, &worker_executable());
-        let specs = resolve_virtual_agents(
+        let mut specs = resolve_virtual_agents(
             &models,
             &providers,
             &module_settings,
             &specs,
             &["--auto-approve".to_string()],
         );
+        // What `Broker::start` does with a team's `handoffs` (TD-2).
+        for (spec, agent) in specs.iter_mut().zip(&roster) {
+            spec.handoff = agent.handoff.clone().map(|schema| HandoffContract {
+                role: agent.name.clone(),
+                schema,
+            });
+        }
         let broker = Broker::start_at(
             base.join("run").join("participants.sock"),
             executable,
@@ -345,7 +362,18 @@ impl SwarmKit {
     /// in-process root reaches its broker without a socket or an HTTP hop
     /// (ADR-0020, BI-4).
     pub async fn run_leader_to(&self, agent: &str, prompt: &str) -> LeaderRun {
-        let tool = self.leader_tool();
+        self.run_leader_with(self.leader_tool(), agent, prompt)
+            .await
+    }
+
+    /// As [`run_leader_to`](Self::run_leader_to), through `tool`: the
+    /// leader's `invoke_agent` with something of the test's own added.
+    pub async fn run_leader_with(
+        &self,
+        tool: InvokeAgentTool,
+        agent: &str,
+        prompt: &str,
+    ) -> LeaderRun {
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let output = tokio::time::timeout(

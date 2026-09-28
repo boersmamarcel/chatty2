@@ -35,6 +35,8 @@ pub(crate) mod stand_in;
 pub(crate) mod swarm_kit;
 #[cfg(test)]
 mod team_preset;
+#[cfg(test)]
+mod typed_handoffs;
 
 use anyhow::{Context, Result, bail};
 use chatty_protocol_gateway::worker::{WorkerConnection, answer_clarifications, worker_card};
@@ -118,6 +120,17 @@ pub async fn run_participant(
             // The observer is dropped with the engine, which `run_headless`
             // consumes — that is what closes the shared loop's frame queue.
             engine.set_event_observer(sink);
+            // A role with a handoff schema is told the schema with its
+            // task, and its answer is checked against it (TD-2, AGE-693).
+            let text = match task.handoff.as_ref() {
+                Some(contract) => format!(
+                    "{}\n\n{}",
+                    task.text,
+                    chatty_core::services::handoff::instruction(contract)
+                ),
+                None => task.text,
+            };
+            engine.set_handoff(task.handoff);
             // A question this turn asks goes up the chain as
             // `input-required`; the answer comes back down here and lands on
             // the store the turn's `ask_user` is waiting on (AGE-306).
@@ -125,7 +138,7 @@ pub async fn run_participant(
                 inputs,
                 engine.session.clarifications().clone(),
             ));
-            run_headless(engine, event_rx, task.text).await
+            run_headless(engine, event_rx, text).await
         })
         .await
 }

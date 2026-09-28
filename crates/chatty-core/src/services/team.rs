@@ -20,13 +20,20 @@
 //! binary ([`PRESETS`]). The first directory with a `team.json` wins; a
 //! malformed file there is an error, not a fall-through, so a typo never
 //! silently runs the preset instead.
+//!
+//! `handoffs` (TD-2, AGE-693) names a JSON Schema per role, relative to the
+//! team directory. Each is read and compiled when the team loads: a missing
+//! file, a file that is not JSON, a schema that does not compile, or a role
+//! that is not on the roster fails the load, never the run.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_spec::{AgentSpec, load_agent_spec_from};
+use crate::services::handoff::{self, HandoffContract};
 use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
 
 /// The presets compiled into the binary: `(id, team.json, SKILL.md)`.
@@ -64,6 +71,11 @@ pub struct TeamFile {
     /// The leader's turn budget for the run, ahead of the leader spec's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_agent_turns: Option<u32>,
+    /// Role → the JSON Schema its handoff must match, as a path relative to
+    /// the team directory (TD-2, AGE-693). Absent is today's behaviour: a
+    /// worker's answer is free text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub handoffs: BTreeMap<String, String>,
 }
 
 impl TeamFile {
@@ -125,6 +137,8 @@ pub struct Team {
     pub leader: AgentSpec,
     /// `file.agents`, resolved, in order.
     pub agents: Vec<AgentSpec>,
+    /// `file.handoffs`, read and compiled: role → its contract.
+    pub handoffs: BTreeMap<String, HandoffContract>,
 }
 
 impl Team {
@@ -157,6 +171,13 @@ impl Team {
         if let Some(turns) = self.file.max_agent_turns {
             execution_settings.max_agent_turns = turns;
         }
+    }
+
+    /// What the leader's `invoke_agent` records this run's handoffs in:
+    /// the invalid count per role and the read rules' `handoff_misread`
+    /// tag (TD-1's scorecard). `None` for a team without `handoffs`.
+    pub fn handoff_ledger(&self) -> Option<handoff::HandoffLedger> {
+        (!self.handoffs.is_empty()).then(|| handoff::HandoffLedger::new(self.handoffs.values()))
     }
 
     /// The skill `read_skill` should serve from this team, when the file
@@ -244,6 +265,8 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         .iter()
         .map(|name| spec(name))
         .collect::<Result<Vec<_>>>()?;
+    let handoffs = load_handoffs(&file, &source)
+        .with_context(|| format!("team '{id}' names a handoff schema that does not load"))?;
     Ok(Team {
         id: id.to_string(),
         source,
@@ -251,7 +274,60 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         skill_content,
         leader,
         agents,
+        handoffs,
     })
+}
+
+/// Read and compile every schema `file.handoffs` names, from the team's
+/// directory. A role must be on the roster (the leader hands off to
+/// nobody), and a schema's `x-must-be-read` may only name roles that have a
+/// schema of their own.
+fn load_handoffs(
+    file: &TeamFile,
+    source: &TeamSource,
+) -> Result<BTreeMap<String, HandoffContract>> {
+    if file.handoffs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let TeamSource::Dir(dir) = source else {
+        bail!("a preset's handoff schemas are not compiled into the binary");
+    };
+    let mut contracts = BTreeMap::new();
+    for (role, relative) in &file.handoffs {
+        if !file.agents.contains(role) {
+            bail!("`handoffs` names '{role}', which is not in `agents`");
+        }
+        let path = dir.join(relative);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {role}'s schema {}", path.display()))?;
+        let schema: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("{role}'s schema {} is not JSON", path.display()))?;
+        handoff::compile(&schema).map_err(|e| {
+            anyhow::anyhow!(
+                "{role}'s schema {} is not a valid JSON Schema: {e}",
+                path.display()
+            )
+        })?;
+        for earlier in handoff::read_rules(&schema)
+            .map_err(|e| anyhow::anyhow!("{role}'s schema {}: {e}", path.display()))?
+            .keys()
+        {
+            if !file.handoffs.contains_key(earlier) {
+                bail!(
+                    "{role}'s schema {} must read '{earlier}', which has no handoff schema",
+                    path.display()
+                );
+            }
+        }
+        contracts.insert(
+            role.clone(),
+            HandoffContract {
+                role: role.clone(),
+                schema,
+            },
+        );
+    }
+    Ok(contracts)
 }
 
 #[cfg(test)]
@@ -489,6 +565,78 @@ mod tests {
             assert!(err.contains(field), "{err}");
             assert!(err.contains(".chatty/agents/"), "{err}");
         }
+    }
+
+    /// TD-2: a team whose `handoffs` names a schema that is missing, not
+    /// JSON, not a JSON Schema, for a role off the roster, or reading a
+    /// role without a schema fails to load, saying which; a good one loads
+    /// with each role's schema compiled in.
+    #[test]
+    fn team_with_bad_schema_fails_to_load() {
+        let workspace = tempfile::tempdir().unwrap();
+        let teams = workspace.path().join(WORKSPACE_TEAMS_DIR);
+        let team_json = |handoffs: &str| {
+            format!(
+                r#"{{"leader":"coder-reviewer-leader","agents":["local-coder","local-reviewer"],"handoffs":{handoffs}}}"#
+            )
+        };
+        let schemas = teams.join("t").join("schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::write(schemas.join("not-json.json"), "{ nope").unwrap();
+        std::fs::write(schemas.join("bad.json"), r#"{"type": 5}"#).unwrap();
+        std::fs::write(
+            schemas.join("change.json"),
+            r#"{"type":"object","required":["files_changed"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("review.json"),
+            r#"{"type":"object","x-must-be-read":{"local-coder":["files_changed"]}}"#,
+        )
+        .unwrap();
+
+        for (handoffs, says) in [
+            (
+                r#"{"local-coder":"schemas/missing.json"}"#,
+                "failed to read",
+            ),
+            (r#"{"local-coder":"schemas/not-json.json"}"#, "is not JSON"),
+            (
+                r#"{"local-coder":"schemas/bad.json"}"#,
+                "not a valid JSON Schema",
+            ),
+            (r#"{"nobody":"schemas/change.json"}"#, "not in `agents`"),
+            (
+                r#"{"local-reviewer":"schemas/review.json"}"#,
+                "has no handoff schema",
+            ),
+        ] {
+            write_team(&teams, "t", &team_json(handoffs), None);
+            let err = format!(
+                "{:#}",
+                load_team("t", Some(workspace.path()), None).unwrap_err()
+            );
+            assert!(err.contains("handoff schema"), "{err}");
+            assert!(err.contains(says), "{handoffs}: {err}");
+        }
+
+        write_team(
+            &teams,
+            "t",
+            &team_json(
+                r#"{"local-coder":"schemas/change.json","local-reviewer":"schemas/review.json"}"#,
+            ),
+            None,
+        );
+        let team = load_team("t", Some(workspace.path()), None).unwrap();
+        assert_eq!(team.handoffs["local-coder"].role, "local-coder");
+        assert_eq!(
+            team.handoffs["local-coder"].schema["required"][0],
+            "files_changed"
+        );
+        assert!(team.handoff_ledger().is_some());
+        let preset = load_team("coder-reviewer", None, None).unwrap();
+        assert!(preset.handoffs.is_empty() && preset.handoff_ledger().is_none());
     }
 
     #[test]
