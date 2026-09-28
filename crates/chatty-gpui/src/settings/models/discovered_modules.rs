@@ -30,6 +30,9 @@ pub struct DiscoveredModuleEntry {
     /// The trust a loaded module loaded at (PL-H5a): its install record's,
     /// or `Local` for one copied in by hand. `None` unless it loaded.
     pub trust_level: Option<TrustLevel>,
+    /// What its `metadata` requests (PL-U4), by capability name. `None`
+    /// unless it loaded.
+    pub requested: Option<Vec<String>>,
 }
 
 pub struct DiscoveredModulesModel {

@@ -132,8 +132,12 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
 
     let loaded = report.loaded.into_iter().map(|(dir, manifest)| {
         let trust_level = validation_registry.trust_level(&manifest.name);
+        let requested = validation_registry
+            .requested_capabilities(&manifest.name)
+            .map(|caps| caps.iter().map(|c| c.name().to_string()).collect());
         DiscoveredModuleEntry {
             trust_level,
+            requested,
             ..discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded)
         }
     });
@@ -194,6 +198,7 @@ fn discovered_entry(
         status,
         execution_mode: manifest.execution_mode.to_string(),
         trust_level: None,
+        requested: None,
     }
 }
 
@@ -210,6 +215,7 @@ fn invalid_manifest_entry(dir: &Path, status: ModuleLoadStatus) -> DiscoveredMod
         status,
         execution_mode: "local".to_string(),
         trust_level: None,
+        requested: None,
     }
 }
 
@@ -612,6 +618,7 @@ mod refresh_runtime_tests {
             status: ModuleLoadStatus::Loaded,
             execution_mode: "local".to_string(),
             trust_level: None,
+            requested: None,
         }
     }
 
