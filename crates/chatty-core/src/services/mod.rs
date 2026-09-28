@@ -32,6 +32,8 @@ pub mod context_compaction;
 pub mod context_shaper;
 pub mod embedding_service;
 pub mod error_collector_layer;
+/// A worker's calls over the connection its broker made (ADR-0020, BI-4).
+pub mod fabric_transport;
 pub mod filesystem_service;
 pub mod git_service;
 pub mod github_pr_service;

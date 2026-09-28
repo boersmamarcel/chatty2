@@ -25,5 +25,6 @@ pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES};
 pub use origin::AgentOrigin;
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
-    CallError, CallEvent, CallRequest, CallStream, InvokeAgentParams, SendMessageParams, Transport,
+    CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome, InvokeAgentParams,
+    SendMessageParams, Transport,
 };

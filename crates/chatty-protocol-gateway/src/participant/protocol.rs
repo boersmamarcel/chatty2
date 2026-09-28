@@ -36,9 +36,33 @@
 //! participant → {"v":2,"type":"status","taskId":"task-…","state":"completed"}
 //! ```
 //!
-//! BI-4 (AGE-636) adds `call` frames from the worker and `call_progress` /
-//! `call_result` / `call_error` from the broker to these two enums; nothing
-//! about the envelope changes for them.
+//! # Calls (BI-4, AGE-636)
+//!
+//! A worker reaches other agents over the same connection: its
+//! `invoke_agent` and `list_agents` send a `call`, and the broker runs it
+//! as the node this connection names — the call says nothing about who is
+//! calling. Several calls can be in flight within one task; every reply
+//! carries the call's `id`, and the replies of different calls interleave
+//! in whatever order they finish.
+//!
+//! ```text
+//! participant → {"v":2,"type":"call","id":1,"method":"invoke_agent",
+//!                "params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
+//! participant → {"v":2,"type":"call","id":2,"method":"list_agents"}
+//! broker      → {"v":2,"type":"call_result","id":2,"result":[{"name":"local-reviewer","origin":"local",…}]}
+//! broker      → {"v":2,"type":"call_progress","id":1,"event":{"Step":"read_file"}}
+//! broker      → {"v":2,"type":"call_progress","id":1,"event":{"Text":"Looks good."}}
+//! broker      → {"v":2,"type":"call_result","id":1,
+//!                "result":{"success":true,"response":"Looks good.","metadata":{"usage":[…]}}}
+//! ```
+//!
+//! `event` is an `InvokeAgentProgress` as JSON (`Step` for a line about the
+//! callee's work, `Text` for its answer as it streams). A call that cannot
+//! run at all ends with `call_error` and `error: {kind, message}`; a callee
+//! whose task failed ends with a `call_result` whose `success` is false,
+//! exactly as a failed A2A task. When the worker's connection closes, the
+//! broker cancels every call still in flight on it, which reaps the
+//! workers those calls started.
 //!
 //! # A parked task
 //!
@@ -56,7 +80,7 @@
 //! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 //! ```
 
-use chatty_fabric::{ConversationScope, NodeName};
+use chatty_fabric::{CallError, CallRequest, ConversationScope, NodeName};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -363,6 +387,16 @@ pub enum ParticipantFrame {
         #[serde(default)]
         last_chunk: bool,
     },
+    /// A call to another agent, made as the node this connection names
+    /// (BI-4). `id` is the worker's own, unique on this connection; the
+    /// replies carry it back. The request is flattened in, so the wire
+    /// reads `{"type":"call","id":1,"method":…,"params":…}`.
+    #[serde(rename = "call")]
+    Call {
+        id: u64,
+        #[serde(flatten)]
+        request: CallRequest,
+    },
 }
 
 /// A frame from the broker to a participant.
@@ -404,6 +438,15 @@ pub enum BrokerFrame {
     /// it names and carry on; the next `Status` frame un-parks the task.
     #[serde(rename_all = "camelCase")]
     Input { task_id: String, input: TaskInput },
+    /// Progress on call `id`: an `InvokeAgentProgress`, as JSON.
+    #[serde(rename = "call_progress")]
+    CallProgress { id: u64, event: Value },
+    /// Call `id` is over, and this is what it returned.
+    #[serde(rename = "call_result")]
+    CallResult { id: u64, result: Value },
+    /// Call `id` could not be carried out, and is over.
+    #[serde(rename = "call_error")]
+    CallError { id: u64, error: CallError },
 }
 
 #[cfg(test)]
@@ -658,6 +701,78 @@ mod tests {
         assert_eq!(name.as_str(), "local-coder-0");
         assert_eq!(scope.as_str(), "root");
         assert!(owner.is_none());
+    }
+
+    #[test]
+    fn call_frames_use_the_documented_wire_names() {
+        use chatty_fabric::InvokeAgentParams;
+
+        let line = encode_frame(&ParticipantFrame::Call {
+            id: 7,
+            request: CallRequest::InvokeAgent(InvokeAgentParams {
+                agent: "local-reviewer".into(),
+                prompt: "review it".into(),
+                handle: None,
+                include_trace: false,
+            }),
+        })
+        .unwrap();
+        let json: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(json["type"], "call");
+        assert_eq!(json["id"], 7);
+        assert_eq!(json["method"], "invoke_agent");
+        assert_eq!(json["params"]["agent"], "local-reviewer");
+        let back: ParticipantFrame = decode_frame(&line).unwrap();
+        assert!(matches!(
+            back,
+            ParticipantFrame::Call { id: 7, request: CallRequest::InvokeAgent(p) } if p.prompt == "review it"
+        ));
+
+        let list: ParticipantFrame =
+            decode_frame(r#"{"v":2,"type":"call","id":2,"method":"list_agents"}"#).unwrap();
+        assert!(matches!(
+            list,
+            ParticipantFrame::Call {
+                id: 2,
+                request: CallRequest::ListAgents
+            }
+        ));
+
+        for (frame, kind) in [
+            (
+                BrokerFrame::CallProgress {
+                    id: 1,
+                    event: serde_json::json!({"Step": "read_file"}),
+                },
+                "call_progress",
+            ),
+            (
+                BrokerFrame::CallResult {
+                    id: 1,
+                    result: serde_json::json!({"success": true}),
+                },
+                "call_result",
+            ),
+            (
+                BrokerFrame::CallError {
+                    id: 1,
+                    error: CallError::UnknownAgent("nobody".into()),
+                },
+                "call_error",
+            ),
+        ] {
+            let json: Value = serde_json::from_str(&encode_frame(&frame).unwrap()).unwrap();
+            assert_eq!(json["type"], kind);
+            assert_eq!(json["id"], 1);
+        }
+        let error: BrokerFrame = decode_frame(
+            r#"{"v":2,"type":"call_error","id":3,"error":{"kind":"unknown_agent","message":"x"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            error,
+            BrokerFrame::CallError { id: 3, error: CallError::UnknownAgent(m) } if m == "x"
+        ));
     }
 
     #[test]

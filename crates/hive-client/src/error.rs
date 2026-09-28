@@ -23,6 +23,12 @@ pub enum ClientError {
     #[error("signature verification failed: {0}")]
     SignatureInvalid(String),
 
+    /// The download is larger than [`MAX_DOWNLOAD_BYTES`](crate::models::MAX_DOWNLOAD_BYTES)
+    /// (declared up front or found while streaming); nothing past the cap
+    /// was read.
+    #[error("download too large: over the {limit}-byte cap")]
+    TooLarge { limit: u64 },
+
     /// The response body could not be parsed.
     #[error("response parse error: {0}")]
     Parse(#[source] serde_json::Error),

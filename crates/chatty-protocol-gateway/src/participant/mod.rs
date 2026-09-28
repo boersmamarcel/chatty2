@@ -16,6 +16,8 @@
 //!   A2A: A2A is the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go,
 //!   and the way back down to a task parked on a question (AGE-306).
+//! * [`calls`] — the calls a worker makes over its connection, and the
+//!   root's direct handle, run as the node that made them (BI-4).
 //! * [`listener`] — broker-made connections, the rule that a closed one
 //!   deregisters its participant and fails its open tasks, and the shared
 //!   socket that refuses every registration.
@@ -26,11 +28,13 @@
 //!   (ADR-0011 C2).
 
 mod budget;
+mod calls;
 mod protocol;
 mod registry;
 mod virtual_agent;
 
 pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
+pub use calls::{BrokerCalls, Caller, DirectTransport};
 pub use protocol::{
     BrokerFrame, CALLER_ENV, CALLER_HEADER, DelegatedTask, FrameError, InputAnswer, InputQuestion,
     InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame, ParticipantSkill,

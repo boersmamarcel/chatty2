@@ -261,20 +261,13 @@ impl LocalRunner {
     /// returned alongside the task's update stream rather than owning it, so
     /// the caller can read updates while still holding the process handle.
     pub async fn run_task(&self, task: DelegatedTask) -> Result<(Worker, TaskStream)> {
-        // This worker's own caller token: handed to the child, and what its
-        // permit is tagged with, so a task it delegates back here is known
-        // to come from a holder of this slot (AGE-628).
-        let caller_token = crate::gateway::new_id();
-
         // Before the name, the workspace and the process: a queued task that
         // had already claimed those would be holding a worktree open for as
         // long as it waits.
         let permit = match self.endpoint.as_ref() {
-            Some((endpoint, budget)) => Some(
-                admit(budget, endpoint, task.caller.as_deref())
-                    .await?
-                    .held_by(&caller_token),
-            ),
+            Some((endpoint, budget)) => {
+                Some(admit(budget, endpoint, task.caller.as_deref()).await?)
+            }
             None => None,
         };
 
@@ -285,6 +278,12 @@ impl LocalRunner {
         let LocalConnection { name, worker_end } =
             open_connection(&self.registry, &self.agent_name)
                 .context("failed to make a connection for a worker")?;
+        // The permit is tagged with the node's name, which is how a task
+        // this worker delegates back here is known to come from a holder of
+        // this slot (AGE-628): a call over its connection is made as that
+        // name, and an HTTP call carries it as the caller token.
+        let permit = permit.map(|permit| permit.held_by(&name));
+        let caller_token = name.clone();
 
         let workspace = match self.workspace.as_ref() {
             Some(factory) => factory(name.clone())

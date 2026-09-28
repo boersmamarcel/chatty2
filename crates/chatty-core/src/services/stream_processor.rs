@@ -939,6 +939,7 @@ mod tests {
             let name = match progress {
                 InvokeAgentProgress::Started { .. } => "Started",
                 InvokeAgentProgress::Text(_) => "Text",
+                InvokeAgentProgress::Step(_) => "Step",
                 InvokeAgentProgress::Finished { .. } => "Finished",
             };
             self.calls.push(format!("on_progress({name})"));

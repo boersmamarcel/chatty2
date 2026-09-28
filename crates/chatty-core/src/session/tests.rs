@@ -813,6 +813,7 @@ fn describe(event: &SessionEvent) -> String {
                 format!("Delegation(Started {agent_name:?}, {prompt:?})")
             }
             InvokeAgentProgress::Text(text) => format!("Delegation(Text {text:?})"),
+            InvokeAgentProgress::Step(step) => format!("Delegation(Step {step:?})"),
             InvokeAgentProgress::Finished {
                 success, result, ..
             } => {

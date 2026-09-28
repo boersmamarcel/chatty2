@@ -776,7 +776,9 @@ impl AgentSession {
                     source.clone(),
                 );
             }
-            InvokeAgentProgress::Text(text) => conversation.append_delegation_progress(text),
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
+                conversation.append_delegation_progress(text)
+            }
             InvokeAgentProgress::Finished {
                 success,
                 result,

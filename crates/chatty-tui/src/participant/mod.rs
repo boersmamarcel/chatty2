@@ -1,9 +1,11 @@
 //! Participant mode: this process is a worker behind the broker (AGE-301).
 //!
-//! `chatty-tui --participant-fd <N>` is `--headless` with two things
-//! changed: the prompt arrives as a broker frame instead of `--message`, and
-//! the turn's events go back over the connection rather than nowhere at
-//! all. The connection is the one the broker made for this process and
+//! `chatty-tui --participant-fd <N>` is `--headless` with three things
+//! changed: the prompt arrives as a broker frame instead of `--message`, the
+//! turn's events go back over the connection rather than nowhere at all,
+//! and the agent's `invoke_agent` / `list_agents` reach local roles over
+//! that same connection rather than loopback HTTP (ADR-0020, BI-4) — which
+//! is why the worker connects before it builds its agent. The connection is the one the broker made for this process and
 //! handed over on descriptor `N` (ADR-0020): the worker names nothing, and
 //! learns its name from the broker's `welcome`. Everything between
 //! those two ends — the session, the tools, the recovery loop — is the same
@@ -31,7 +33,7 @@ pub(crate) mod swarm_kit;
 mod team_preset;
 
 use anyhow::{Context, Result, bail};
-use chatty_protocol_gateway::worker::{answer_clarifications, serve_one_task, worker_card};
+use chatty_protocol_gateway::worker::{WorkerConnection, answer_clarifications, worker_card};
 use std::ffi::OsString;
 use std::os::fd::{FromRawFd, RawFd};
 use tokio::net::UnixStream;
@@ -84,13 +86,9 @@ fn participant_fd_arg(args: impl IntoIterator<Item = OsString>) -> Option<String
     None
 }
 
-/// Say hello over the broker's connection on `fd`, run one delegated task,
-/// report, exit.
-pub async fn run_participant(
-    mut engine: HeadlessRunner,
-    event_rx: mpsc::UnboundedReceiver<AppEvent>,
-    fd: RawFd,
-) -> Result<()> {
+/// Say hello over the broker's connection on `fd` and wait for its
+/// welcome. The agent is built after this, with the connection's transport.
+pub async fn connect(fd: RawFd) -> Result<WorkerConnection> {
     // SAFETY: the descriptor was handed to this process by the broker for
     // exactly this, `seal_participant_fd` checked it is open, and nothing
     // else in the process takes ownership of it.
@@ -100,24 +98,32 @@ pub async fn run_participant(
         .with_context(|| format!("--participant-fd {fd} is not the broker's connection"))?;
     let stream = UnixStream::from_std(stream)
         .with_context(|| format!("--participant-fd {fd} is not the broker's connection"))?;
+    WorkerConnection::connect(stream, worker_card(env!("CARGO_PKG_VERSION"))).await
+}
 
-    let card = worker_card(env!("CARGO_PKG_VERSION"));
+/// Run one delegated task over the welcomed `connection`, report, exit.
+pub async fn run_participant(
+    mut engine: HeadlessRunner,
+    event_rx: mpsc::UnboundedReceiver<AppEvent>,
+    connection: WorkerConnection,
+) -> Result<()> {
     // A desktop worker runs as whoever launched it; the task's bearer is
     // for a hosted worker (AGE-371) and is not read here.
-    serve_one_task(stream, card, move |task, sink, inputs| async move {
-        // The observer is dropped with the engine, which `run_headless`
-        // consumes — that is what closes the shared loop's frame queue.
-        engine.set_event_observer(sink);
-        // A question this turn asks goes up the chain as `input-required`;
-        // the answer comes back down here and lands on the store the
-        // turn's `ask_user` is waiting on (AGE-306).
-        tokio::spawn(answer_clarifications(
-            inputs,
-            engine.session.clarifications().clone(),
-        ));
-        run_headless(engine, event_rx, task.text).await
-    })
-    .await
+    connection
+        .serve_one_task(move |task, sink, inputs| async move {
+            // The observer is dropped with the engine, which `run_headless`
+            // consumes — that is what closes the shared loop's frame queue.
+            engine.set_event_observer(sink);
+            // A question this turn asks goes up the chain as
+            // `input-required`; the answer comes back down here and lands on
+            // the store the turn's `ask_user` is waiting on (AGE-306).
+            tokio::spawn(answer_clarifications(
+                inputs,
+                engine.session.clarifications().clone(),
+            ));
+            run_headless(engine, event_rx, task.text).await
+        })
+        .await
 }
 
 #[cfg(test)]

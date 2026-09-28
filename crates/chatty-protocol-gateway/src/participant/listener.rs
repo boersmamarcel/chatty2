@@ -29,9 +29,12 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::calls::Caller;
 use super::protocol::{BrokerFrame, FrameError, ParticipantFrame, decode_frame, encode_frame};
 use super::registry::{AdmittedNode, ParticipantRegistry};
-use chatty_fabric::AgentOrigin;
+use chatty_fabric::{AgentOrigin, CallError, CallEvent, CallStream};
+use futures::StreamExt;
+use tokio::task::JoinSet;
 
 /// Why every connection on the shared socket is refused.
 const SHARED_SOCKET_REFUSAL: &str = "this socket admits no workers: a worker's connection \
@@ -180,8 +183,12 @@ where
         }
     };
 
-    // 2. Task traffic until the socket closes.
+    // 2. Task traffic and calls until the socket closes. Each call runs on
+    // its own task, so several can be in flight and finish in any order;
+    // the set owns them, so closing the connection cancels every one.
+    let mut calls = JoinSet::new();
     loop {
+        while calls.try_join_next().is_some() {}
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => match decode_frame::<ParticipantFrame>(&line) {
@@ -196,6 +203,18 @@ where
                 // A malformed line is dropped, not fatal: one bad frame
                 // should not fail every task the participant still owes.
                 Err(e) => warn!(participant = %name, error = %e, "Ignoring a malformed frame"),
+                Ok(ParticipantFrame::Call { id, request }) => match registry.calls() {
+                    Some(broker) => {
+                        let stream = broker.call(Caller::Node(name.clone()), request);
+                        calls.spawn(reply(id, stream, outbound_tx.clone()));
+                    }
+                    None => {
+                        let _ = outbound_tx.send(BrokerFrame::CallError {
+                            id,
+                            error: CallError::Refused("this broker takes no calls".to_string()),
+                        });
+                    }
+                },
                 Ok(frame) => {
                     if !registry.on_frame(&name, frame) {
                         warn!(participant = %name, "Closing the connection after a protocol error");
@@ -214,11 +233,35 @@ where
         }
     }
 
-    // 3. However we got here, the participant is gone.
+    // 3. However we got here, the participant is gone, and so is everything
+    // it had asked for: its calls are cancelled, which reaps the workers
+    // they started.
+    calls.abort_all();
     registry.deregister(&name);
     drop(outbound_tx);
     let _ = writer.await;
     info!(participant = %name, "Participant connection closed");
+}
+
+/// Send call `id`'s events back as `call_progress`, then one `call_result`
+/// or `call_error`.
+async fn reply(id: u64, mut stream: CallStream, outbound: mpsc::UnboundedSender<BrokerFrame>) {
+    while let Some(event) = stream.next().await {
+        let (frame, last) = match event {
+            Ok(CallEvent::Progress(event)) => (BrokerFrame::CallProgress { id, event }, false),
+            Ok(CallEvent::Result(result)) => (BrokerFrame::CallResult { id, result }, true),
+            // A node's calls are never asked a question (see `BrokerCalls`).
+            Ok(CallEvent::InputRequired { .. }) => continue,
+            Err(error) => (BrokerFrame::CallError { id, error }, true),
+        };
+        if outbound.send(frame).is_err() || last {
+            return;
+        }
+    }
+    let _ = outbound.send(BrokerFrame::CallError {
+        id,
+        error: CallError::Failed("the call ended without a result".to_string()),
+    });
 }
 
 /// Write one frame as a line.
