@@ -200,6 +200,7 @@ pub mod save_skill_tool;
 pub mod search_memory_tool;
 pub mod search_tool;
 pub mod search_web_tool;
+pub mod send_message_tool;
 pub mod shell_tool;
 pub mod terminal_read_tool;
 pub mod terminal_run_tool;
@@ -256,6 +257,7 @@ pub use search_memory_tool::{
 };
 pub use search_tool::{FindDefinitionTool, FindFilesTool, SearchCodeTool};
 pub use search_web_tool::SearchWebTool;
+pub use send_message_tool::SendMessageTool;
 pub use shell_tool::{ShellCdTool, ShellExecuteTool, ShellSetEnvTool, ShellStatusTool};
 pub use terminal_read_tool::TerminalReadTool;
 pub use terminal_run_tool::TerminalRunTool;

@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::task_table::RunId;
 
+/// The name the in-process root answers to: the owner of every node admitted
+/// with no owner. The root is not a node of the [`Directory`], and no node is
+/// ever named this, since every node's name ends in `-<n>`.
+pub const ROOT_NAME: &str = "root";
+
 /// A node's broker-local id. Never reused within a root process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
