@@ -67,7 +67,7 @@ async fn list_agents_offers_local_agent_once_the_broker_is_started() {
 
     let tool = ListAgentsTool::new(vec![])
         .with_local_workers([LOCAL_AGENT_NAME])
-        .with_gateway_port(broker.port);
+        .with_transport(broker.transport());
     let output = tool
         .call(&mut ToolContext::new(), ListAgentsToolArgs {})
         .await
@@ -115,9 +115,11 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
     .expect("the broker starts");
 
     // Built exactly as `agent_factory::mod.rs` builds it when `--broker` has
-    // set `gateway_port = Some(broker.port)`.
-    let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
-        .with_local_agents([LOCAL_AGENT_NAME]);
+    // a root broker: the leader's `invoke_agent` reaches its roles over the
+    // root's direct handle into it (ADR-0020, BI-7), never over loopback.
+    let tool = InvokeAgentTool::new(vec![], vec![], None)
+        .with_local_agents([LOCAL_AGENT_NAME])
+        .with_transport(broker.transport());
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
     let result = tool
@@ -180,8 +182,9 @@ async fn delegate(
     .await
     .expect("the broker starts");
 
-    let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
-        .with_local_agents([LOCAL_AGENT_NAME]);
+    let tool = InvokeAgentTool::new(vec![], vec![], None)
+        .with_local_agents([LOCAL_AGENT_NAME])
+        .with_transport(broker.transport());
 
     let result = tool
         .call(

@@ -104,8 +104,12 @@ impl LlmProvider for NoopProvider {
 }
 
 /// Start a gateway on an ephemeral port whose `local-agent` is a real
-/// `LocalRunner` spawning `executable`, and return its port and registry.
-async fn start_runner(executable: std::path::PathBuf) -> (u16, ParticipantRegistry) {
+/// `LocalRunner` spawning `executable`, and return its port, registry and
+/// direct handle (ADR-0020, BI-7: roles are reached over the handle now,
+/// never over the port).
+async fn start_runner(
+    executable: std::path::PathBuf,
+) -> (u16, ParticipantRegistry, Arc<dyn chatty_fabric::Transport>) {
     let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
     let modules = Arc::new(RwLock::new(
         ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
@@ -116,6 +120,10 @@ async fn start_runner(executable: std::path::PathBuf) -> (u16, ParticipantRegist
         .with_agent_name(LOCAL_AGENT_NAME)
         .with_registration_timeout(std::time::Duration::from_secs(10));
     let gateway = gateway.with_virtual_agent(Arc::new(runner));
+    // `transport()` snapshots the runners published so far (it builds
+    // `BrokerCalls` on first call), so it is taken only after every
+    // `with_virtual_agent` call, exactly as `Broker::start_at` does.
+    let transport = gateway.transport();
 
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
@@ -124,7 +132,7 @@ async fn start_runner(executable: std::path::PathBuf) -> (u16, ParticipantRegist
         axum::serve(tcp, router).await.ok();
     });
 
-    (port, participants)
+    (port, participants, transport)
 }
 
 /// The parent's progress, and the response `invoke_agent` hands the model.
@@ -141,10 +149,12 @@ struct BrokerRun {
 /// parent saw.
 async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     let dir = tempfile::tempdir().expect("a dir for the stand-in worker");
-    let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
+    let (_port, _registry, transport) =
+        start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
-    let tool =
-        InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+    let tool = InvokeAgentTool::new(vec![], vec![], None)
+        .with_local_agents([LOCAL_AGENT_NAME])
+        .with_transport(transport);
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
     let result = tool
@@ -479,7 +489,7 @@ mod evidence {
         verification: Option<String>,
         edits: bool,
         executable: PathBuf,
-    ) -> (u16, ParticipantRegistry) {
+    ) -> (u16, ParticipantRegistry, Arc<dyn chatty_fabric::Transport>) {
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
             ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
@@ -526,6 +536,7 @@ mod evidence {
                 })
             }));
         let gateway = gateway.with_virtual_agent(Arc::new(runner));
+        let transport = gateway.transport();
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = tcp.local_addr().unwrap().port();
@@ -534,14 +545,17 @@ mod evidence {
             axum::serve(tcp, router).await.ok();
         });
 
-        (port, registry)
+        (port, registry, transport)
     }
 
     /// Delegate one task to `local-agent` and return the answer the model
     /// reads plus every progress line the leader's transcript renders.
-    async fn delegate(port: u16) -> (Result<String, String>, String) {
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+    async fn delegate(
+        transport: Arc<dyn chatty_fabric::Transport>,
+    ) -> (Result<String, String>, String) {
+        let tool = InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents([LOCAL_AGENT_NAME])
+            .with_transport(transport);
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let result = tool
@@ -585,7 +599,7 @@ mod evidence {
         repo(dir.path()).await;
         let events = completed_turn().await;
         let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
-        let (port, _registry) = start_runner_gateway(
+        let (_port, _registry, transport) = start_runner_gateway(
             dir.path().to_path_buf(),
             Some(VERIFICATION.into()),
             true,
@@ -593,7 +607,7 @@ mod evidence {
         )
         .await;
 
-        let (response, progress) = delegate(port).await;
+        let (response, progress) = delegate(transport).await;
         let response = response.expect("the delegation succeeds");
 
         let answer: String = assistant_text(&events).concat();
@@ -636,7 +650,7 @@ mod evidence {
         repo(dir.path()).await;
         let events = completed_turn().await;
         let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
-        let (port, _registry) = start_runner_gateway(
+        let (_port, _registry, transport) = start_runner_gateway(
             dir.path().to_path_buf(),
             Some(VERIFICATION.into()),
             false,
@@ -644,7 +658,7 @@ mod evidence {
         )
         .await;
 
-        let (response, progress) = delegate(port).await;
+        let (response, progress) = delegate(transport).await;
         let response = response.expect("the delegation succeeds");
 
         let answer: String = assistant_text(&events).concat();
@@ -673,7 +687,7 @@ mod evidence {
             kind: StreamErrorKind::Other,
             message: "the worker crashed".to_string(),
         })];
-        let (port, _registry) = start_runner_gateway(
+        let (_port, _registry, transport) = start_runner_gateway(
             dir.path().to_path_buf(),
             None,
             true,
@@ -681,7 +695,7 @@ mod evidence {
         )
         .await;
 
-        let (result, progress) = delegate(port).await;
+        let (result, progress) = delegate(transport).await;
         assert!(
             result.is_err(),
             "the worker's own failure still fails the delegation"
@@ -809,8 +823,9 @@ pub(super) mod named_virtual_agents {
     /// Delegate one task to `agent` through the real `invoke_agent`; the
     /// runner's stand-in child answers it.
     async fn delegate(broker: &Broker, agent: &str) {
-        let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
-            .with_local_agents([CODER, REVIEWER]);
+        let tool = InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents([CODER, REVIEWER])
+            .with_transport(broker.transport());
         tool.call(
             &mut ToolContext::new(),
             InvokeAgentArgs {
@@ -847,7 +862,7 @@ pub(super) mod named_virtual_agents {
         // port and module settings' names.
         let output = ListAgentsTool::new(vec![])
             .with_local_workers([CODER, REVIEWER])
-            .with_gateway_port(broker.port)
+            .with_transport(broker.transport())
             .call(&mut ToolContext::new(), ListAgentsToolArgs {})
             .await
             .expect("list_agents succeeds");
@@ -1241,7 +1256,7 @@ mod declared_roles {
 
         let output = ListAgentsTool::new(vec![])
             .with_local_workers([REVIEWER])
-            .with_gateway_port(broker.port)
+            .with_transport(broker.transport())
             .call(
                 &mut rig_agent::tool::ToolContext::new(),
                 ListAgentsToolArgs {},
@@ -1302,9 +1317,13 @@ mod spend_cap {
     use super::{assistant_text, policy, start_runner};
 
     /// `invoke_agent` as the factory builds it for a leader with a gate.
-    fn leader_tool(port: u16, gate: Option<Arc<dyn SpendGate>>) -> InvokeAgentTool {
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+    fn leader_tool(
+        transport: Arc<dyn chatty_fabric::Transport>,
+        gate: Option<Arc<dyn SpendGate>>,
+    ) -> InvokeAgentTool {
+        let tool = InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents([LOCAL_AGENT_NAME])
+            .with_transport(transport);
         match gate {
             Some(gate) => tool.with_spend_gate(gate),
             None => tool,
@@ -1329,9 +1348,13 @@ mod spend_cap {
     #[tokio::test]
     async fn a_leader_over_its_cap_is_refused_and_nothing_spawns() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let (port, registry) = start_runner(scripted_worker_binary(dir.path(), &[])).await;
+        let (_port, registry, transport) =
+            start_runner(scripted_worker_binary(dir.path(), &[])).await;
 
-        let tool = leader_tool(port, Some(Arc::new(FixedSpendGate::refusing(12.5, 10.0))));
+        let tool = leader_tool(
+            transport,
+            Some(Arc::new(FixedSpendGate::refusing(12.5, 10.0))),
+        );
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let err = delegate(&tool)
@@ -1377,9 +1400,10 @@ mod spend_cap {
             policy(),
         )
         .await;
-        let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
+        let (_port, _registry, transport) =
+            start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
-        let response = delegate(&leader_tool(port, None))
+        let response = delegate(&leader_tool(transport, None))
             .await
             .expect("the delegation succeeds");
 
@@ -1402,9 +1426,10 @@ mod spend_cap {
         )
         .await;
         let dir = tempfile::tempdir().expect("a temp dir");
-        let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
+        let (_port, _registry, transport) =
+            start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
-        let tool = leader_tool(port, Some(Arc::new(FixedSpendGate::permitting())));
+        let tool = leader_tool(transport, Some(Arc::new(FixedSpendGate::permitting())));
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let response = delegate(&tool).await.expect("the delegation succeeds");

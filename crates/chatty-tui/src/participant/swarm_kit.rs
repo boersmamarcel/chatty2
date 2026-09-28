@@ -1248,17 +1248,18 @@ async fn no_worker_call_uses_loopback() {
         "the directory was read over loopback"
     );
 
-    // The counter counts: the same role and the directory, over HTTP.
+    // The counter counts: the same role and the directory, over HTTP — both
+    // refused now (BI-7), never served.
     let port = kit.broker().port;
     assert!(
         http_get(port, &format!("/a2a/{GRANDCHILD}/.well-known/agent.json"))
             .await
-            .contains("200 OK")
+            .contains("403 Forbidden")
     );
     assert!(
         http_get(port, "/.well-known/agent.json")
             .await
-            .contains("200 OK")
+            .contains("403 Forbidden")
     );
     assert_eq!(routes.role_requests(), 1);
     assert_eq!(routes.directory_requests(), 1);

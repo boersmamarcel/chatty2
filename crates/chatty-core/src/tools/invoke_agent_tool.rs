@@ -452,47 +452,28 @@ impl Tool for InvokeAgentTool {
 
         // 2. The broker's local workers: a chatty child in its own process.
         //    Ahead of modules, so a module cannot claim a worker's name by
-        //    accident.
+        //    accident. Reached only over the fabric connection (ADR-0020,
+        //    BI-7): there is no loopback-HTTP fallback any more, because
+        //    that route now refuses every role (`loopback_refuses_roles`).
         if let Some(local) = self
             .local_agents
             .iter()
             .map(String::as_str)
             .find(|local| *local == agent_name)
         {
-            if let Some(transport) = self.fabric_transport().await {
-                info!(agent = %local, "Delegating to a local worker over the fabric");
-                self.send_progress(InvokeAgentProgress::Started {
-                    agent_name: local.to_string(),
-                    prompt: prompt.clone(),
-                    source: ToolSource::Local,
-                });
-                return self
-                    .call_over_fabric(transport.as_ref(), local, &prompt, args.include_trace)
-                    .await;
-            }
-
-            let Some(base_url) = self.gateway_base_url().await else {
+            let Some(transport) = self.fabric_transport().await else {
                 return Err(InvokeAgentError::InvocationFailed(format!(
-                    "Agent '{local}' needs the protocol gateway. \
-                         Enable it in Settings \u{2192} Modules."
+                    "Agent '{local}' needs a broker connection, which is not available here."
                 )));
             };
-
-            info!(agent = %local, "Delegating to a local worker through the broker");
-            let config = A2aAgentConfig {
-                name: local.to_string(),
-                url: format!("{}/a2a/{}", base_url, local),
-                api_key: None,
-                enabled: true,
-                skills: vec!["delegate".to_string()],
-            };
+            info!(agent = %local, "Delegating to a local worker over the fabric");
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: local.to_string(),
                 prompt: prompt.clone(),
                 source: ToolSource::Local,
             });
             return self
-                .call_streaming(&config, &prompt, args.include_trace)
+                .call_over_fabric(transport.as_ref(), local, &prompt, args.include_trace)
                 .await;
         }
 

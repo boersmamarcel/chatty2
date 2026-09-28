@@ -325,14 +325,19 @@ async fn s3_13_loopback_host_is_served() {
 
 /// 3.14 — a participant claiming a plugin's name. Since ADR-0020 the name
 /// is not the participant's to claim: the broker names it `<spec>-<n>` and
-/// ignores the card's, so a participant whose card says `echo` is served as
-/// `echo-0`, and `echo` stays the plugin, served over MCP only (PL-U3).
+/// ignores the card's, so a participant whose card says `echo` is admitted
+/// as `echo-0`, and `echo` stays the plugin, served over MCP only (PL-U3).
+///
+/// Checked on the registry directly rather than over A2A: since BI-7 a role
+/// — `echo-0` included — is reached over its own connection, never over
+/// loopback, so an A2A client can no longer be the one proving it is
+/// addressable (`participant_socket.rs`'s `card_name_is_ignored` is the
+/// fuller version of this same check).
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn s3_14_participant_cannot_take_a_modules_name() {
-    use chatty_core::services::a2a_client::A2aClient;
     use chatty_protocol_gateway::participant::{
-        BrokerFrame, ParticipantCard, ParticipantConnection, TaskState, open_connection,
+        ParticipantCard, ParticipantConnection, open_connection,
     };
 
     let gw = Gateway::start(vec![Module::shipped("echo")], vec![]).await;
@@ -345,36 +350,23 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
     let connection = open_connection(&gw.participants, "echo").unwrap();
     connection.worker_end.set_nonblocking(true).unwrap();
     let stream = tokio::net::UnixStream::from_std(connection.worker_end).unwrap();
-    let mut conn = ParticipantConnection::hello_over(stream, card)
+    let conn = ParticipantConnection::hello_over(stream, card)
         .await
         .expect("the broker welcomes the participant");
     assert_eq!(conn.name(), "echo-0", "the card's name is ignored");
-    let participant = tokio::spawn(async move {
-        let Some(BrokerFrame::Task { task_id, text, .. }) = conn.next_frame().await.unwrap() else {
-            panic!("expected a task");
-        };
-        conn.artifact(&task_id, format!("participant got: {text}"), true)
-            .await
-            .unwrap();
-        conn.finish(&task_id, TaskState::Completed, None, None)
-            .await
-            .unwrap();
-        conn
-    });
-
-    let client = A2aClient::new();
-    let answer = client
-        .send_message(&gw.a2a_agent("echo-0"), "hi")
-        .await
-        .unwrap();
-    assert_eq!(
-        answer, "participant got: hi",
-        "A2A reaches the participant by its own name"
+    assert!(
+        gw.participants.is_registered("echo-0"),
+        "the participant is live under the assigned name"
     );
-    let participant = participant.await.unwrap();
+    assert!(
+        !gw.participants.is_registered("echo"),
+        "`echo` was never taken"
+    );
 
     // While the participant is connected, `echo` is still the plugin: no
-    // agent of that name on A2A, and its tools on MCP.
+    // agent of that name on A2A (never had one), and its tools on MCP.
+    // `echo-0` is a role now reached only over its connection: loopback
+    // refuses it exactly as it refuses any other role (BI-7).
     let card = gw
         .http
         .get(gw.url("/a2a/echo/.well-known/agent.json"))
@@ -386,6 +378,17 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
         StatusCode::NOT_FOUND,
         "no agent named `echo`"
     );
+    let role_card = gw
+        .http
+        .get(gw.url("/a2a/echo-0/.well-known/agent.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        role_card.status(),
+        StatusCode::FORBIDDEN,
+        "a role is reached over its connection, not loopback"
+    );
     let (status, body) = gw.post("/mcp/echo", &mcp_list()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
@@ -394,5 +397,5 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
             .is_some_and(|t| t.iter().any(|t| t["name"] == "echo")),
         "MCP still reaches the plugin: {body}"
     );
-    drop(participant);
+    drop(conn);
 }

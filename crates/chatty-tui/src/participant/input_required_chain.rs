@@ -61,7 +61,6 @@ impl LlmProvider for NoopProvider {
 
 /// A gateway on an ephemeral port.
 struct Broker {
-    port: u16,
     participants: ParticipantRegistry,
     /// The root's direct handle into it (BI-4).
     transport: Arc<dyn chatty_fabric::Transport>,
@@ -78,14 +77,12 @@ impl Broker {
         let transport = gateway.transport();
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = tcp.local_addr().unwrap().port();
         let router = gateway.build_router();
         tokio::spawn(async move {
             axum::serve(tcp, router).await.ok();
         });
 
         Self {
-            port,
             participants,
             transport,
         }
@@ -103,9 +100,12 @@ impl Broker {
     }
 
     /// The `invoke_agent` a level of the chain holds, addressing `agent`
-    /// through this broker and re-asking its questions on `store`.
+    /// through this broker's direct handle (ADR-0020, BI-7) and re-asking
+    /// its questions on `store`.
     fn invoke_agent(&self, agent: &str, store: Option<&ClarificationStore>) -> InvokeAgentTool {
-        let tool = InvokeAgentTool::new(vec![], vec![], Some(self.port)).with_local_agents([agent]);
+        let tool = InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents([agent])
+            .with_transport(self.transport.clone());
         match store {
             Some(store) => tool.with_clarifications(store.get_pending_clarifications()),
             None => tool,
@@ -196,50 +196,15 @@ async fn grandchild(broker: &Broker) -> String {
     name
 }
 
-/// The child: a worker with no human, whose turn delegates to the
-/// grandchild — `grandchild`, by name — and repeats its answer. Returns its
-/// name.
-async fn child(broker: &Broker, grandchild: String) -> String {
-    let (stream, name) = broker.connect(CHILD);
-    let card = worker_card("test");
-    let port = broker.port;
-    tokio::spawn(serve_one_task(
-        stream,
-        card,
-        move |task, sink, inputs| async move {
-            let store = scripted_session(&sink, inputs);
-            let tool = InvokeAgentTool::new(vec![], vec![], Some(port))
-                .with_local_agents([grandchild.as_str()])
-                .with_clarifications(store.get_pending_clarifications());
-            sink(&SessionEvent::TurnStarted);
-            tool_started(&sink, "invoke_agent");
-            let out = tool
-                .call(
-                    &mut ToolContext::new(),
-                    InvokeAgentArgs {
-                        agent: grandchild.clone(),
-                        prompt: task.text,
-                        include_trace: false,
-                    },
-                )
-                .await
-                .map_err(|e| anyhow!("{e}"))?;
-            tool_finished(&sink, "invoke_agent", &out.response);
-            sink(&SessionEvent::Text(out.response));
-            Ok(())
-        },
-    ));
-    broker.await_registration(&name).await;
-    name
-}
-
 /// The issue's "Verify": parent → child → grandchild, the grandchild's
-/// question in the parent's popover, the answer back down the chain.
+/// question in the parent's popover, the answer back down the chain. The
+/// child reaches the grandchild over the connection the broker made for it
+/// (ADR-0020, BI-7), never over loopback.
 #[tokio::test]
 async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes_back() {
     let broker = Broker::start().await;
     let grandchild = grandchild(&broker).await;
-    let child = child(&broker, grandchild.clone()).await;
+    let child = child_over_its_connection(&broker, grandchild.clone()).await;
 
     // The parent: the level facing a human. Its store's notifier is the
     // popover — that is exactly what a frontend listens on.
@@ -314,11 +279,11 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
     assert_eq!(broker.participants.open_task_count(&grandchild), 0);
 }
 
-/// The child for [`clarification_relays_across_two_hops`]: as [`child`],
-/// but its `invoke_agent` reaches the grandchild over the connection the
-/// broker made for it (ADR-0020), not over loopback — so the grandchild's
-/// question comes down that connection as `call_input_required` and the
-/// child's answer goes back up it as `call_input` (BI-5).
+/// The child: a worker with no human, whose `invoke_agent` reaches the
+/// grandchild over the connection the broker made for it (ADR-0020), never
+/// over loopback (BI-7) — so the grandchild's question comes down that
+/// connection as `call_input_required` and the child's answer goes back up
+/// it as `call_input` (BI-5). Returns the child's name.
 async fn child_over_its_connection(broker: &Broker, grandchild: String) -> String {
     let (stream, name) = broker.connect(CHILD);
     let worker = WorkerConnection::connect(stream, worker_card("test"))
