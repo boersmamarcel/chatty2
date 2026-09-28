@@ -24,6 +24,17 @@ Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress 
 
 Every local agent is a spec, whoever wrote it. The desktop lists them all on **Settings → Agents** — name, model, role, the plugins each runs with and what they may do, whether other agents may call it — along with any spec file that doesn't load and why. In the terminal, `/agents` prints the same list.
 
+### The swarm tree (desktop)
+
+When a sub-agent delegates in turn, its row in the desktop transcript opens into a live tree of agents. Each line shows the agent, its model (or the tool it is running right now), its status and its spend.
+
+- Click a line to open that agent's transcript, read-only, in a side sheet. The sheet shows a breadcrumb (`lead › writer-0 › drafter-2`), the agent's spec, model, status, turns and spend, its sub-agents and its tool calls. Click a sub-agent to go down, or a crumb to go back up. Press Escape or click outside to close it.
+- Fold an agent with its arrow, or the whole card from its header.
+- An agent with many sub-agents shows the first few plus any that are still running or failed, then a **+N more done · show all** line.
+- If you stop a turn, runs still drawn as running show as canceled.
+
+A single delegation with no further delegation keeps its plain row. In the terminal, `/swarm` prints the same tree as text.
+
 ## Let the agent decide
 
 With tools on ([Agents & tools](./agents-and-tools.md)) and the module runtime enabled ([Extensions](./extensions.md)), the parent can ask for children itself when a task splits cleanly:
