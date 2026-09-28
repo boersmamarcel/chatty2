@@ -82,6 +82,15 @@ fn plugins_group() -> SettingGroup {
                     if !module.tools.is_empty() {
                         facts.push(format!("Tools: {}", module.tools.join(", ")));
                     }
+                    // What it asks the host for; each spec below grants a
+                    // subset (PL-U4).
+                    if let Some(requested) = &module.requested {
+                        facts.push(if requested.is_empty() {
+                            "Requests no capability".to_string()
+                        } else {
+                            format!("Requests: {}", requested.join(", "))
+                        });
+                    }
                     facts.push(if module.mcp {
                         format!(
                             "Runs: {} · served to MCP clients at /mcp/{}",
@@ -137,7 +146,8 @@ fn plugins_group() -> SettingGroup {
 }
 
 /// The specs that list `module`, each with the capabilities it grants:
-/// `benford-analyst (grants llm)`. Only a name's first definition counts.
+/// `benford-analyst (grants llm)`, `auditor (grants nothing)`. Only a
+/// name's first definition counts.
 fn used_by(module: &str, listings: &[SpecListing]) -> Vec<String> {
     listings
         .iter()
@@ -145,11 +155,7 @@ fn used_by(module: &str, listings: &[SpecListing]) -> Vec<String> {
         .filter_map(|listing| {
             let spec = listing.spec.as_ref().ok()?;
             let plugin = spec.plugins.iter().find(|plugin| plugin.module == module)?;
-            Some(if plugin.grants.is_empty() {
-                format!("{} (no capabilities)", listing.name)
-            } else {
-                format!("{} (grants {})", listing.name, plugin.grants.join(", "))
-            })
+            Some(format!("{} (grants {})", listing.name, plugin.grant_list()))
         })
         .collect()
 }
