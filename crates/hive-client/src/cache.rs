@@ -93,6 +93,7 @@ mod tests {
                 support_email: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                manifest: None,
             }],
             page: 1,
             per_page: 20,
