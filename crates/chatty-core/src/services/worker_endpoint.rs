@@ -1,11 +1,9 @@
 //! Resolving which model endpoint a broker worker talks to, and how many
 //! workers may run against it at once (ADR-0011 C6).
 //!
-//! The endpoint's budget type itself (`EndpointBudget`) lives in
-//! `chatty-protocol-gateway`, which this crate does not depend on — that
-//! crate's optional `worker` feature depends back on `chatty-core`, so the
-//! edge stays acyclic. This resolves the decision (which endpoint, what
-//! limit) and leaves wrapping it in an `EndpointBudget` to the caller;
+//! The endpoint's budget type itself is `chatty_fabric::EndpointBudget`.
+//! This resolves the decision (which endpoint, what limit) and leaves
+//! wrapping it in an `EndpointBudget` to the broker wiring;
 //! `services::virtual_agents` asks it once per declared agent (ADR-0011
 //! C10), and both frontends' broker wiring wrap the answers (AGE-376).
 

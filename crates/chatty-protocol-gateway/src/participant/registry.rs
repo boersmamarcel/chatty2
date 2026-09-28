@@ -38,7 +38,7 @@ use super::protocol::{
 };
 use chatty_fabric::{
     AgentOrigin, ConversationScope, Directory, DirectoryError, NodeId, NodeName, NodeState,
-    SpawnContext,
+    RunPermit, SpawnContext,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -150,6 +150,10 @@ struct Inner {
     /// its own tree and branch, and the roster it was given. Kept while
     /// the node's connection is open.
     contexts: HashMap<String, SpawnContext>,
+    /// Each metered node's endpoint permit (BI-6): released while the
+    /// node's calls are outstanding, re-acquired before the last result is
+    /// delivered. Kept while the node's connection is open.
+    permits: HashMap<String, RunPermit>,
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -212,6 +216,18 @@ impl ParticipantRegistry {
         self.lock().contexts.get(name).cloned()
     }
 
+    /// Record the endpoint permit `name`'s run holds (BI-6). The runner that
+    /// spawned it calls this; a call the node makes releases it until the
+    /// call's result is due. Forgotten when the node's connection closes.
+    pub fn set_node_permit(&self, name: &str, permit: RunPermit) {
+        self.lock().permits.insert(name.to_string(), permit);
+    }
+
+    /// `name`'s endpoint permit, if its runner meters it (BI-6).
+    pub fn node_permit(&self, name: &str) -> Option<RunPermit> {
+        self.lock().permits.get(name).cloned()
+    }
+
     /// Register `node`'s connection: its worker said `hello` with `card`,
     /// and frames for it go to `outbound`. Returns the name it is served
     /// under, which is the admitted one whatever the card says.
@@ -257,6 +273,7 @@ impl ParticipantRegistry {
         let mut inner = self.lock();
         let _ = inner.directory.end(node.id);
         inner.contexts.remove(node.name.as_str());
+        inner.permits.remove(node.name.as_str());
         drop(inner);
         debug!(node = %node.name, "A node's connection closed before it said hello");
     }
@@ -270,6 +287,7 @@ impl ParticipantRegistry {
         let participant = {
             let mut inner = self.lock();
             inner.contexts.remove(name);
+            inner.permits.remove(name);
             let Some(participant) = inner.participants.remove(name) else {
                 return;
             };

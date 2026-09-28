@@ -27,6 +27,15 @@
 //! root's direct handle or a worker's connection alike, so a question climbs
 //! every hop to the root's human (AGE-306, BI-5).
 //!
+//! A caller metered on a model endpoint does not hold its permit while it
+//! waits (BI-6): an `invoke_agent` call releases the caller's
+//! [`RunPermit`](chatty_fabric::RunPermit), and the call that brings the
+//! caller's outstanding count back to zero re-acquires it, in the endpoint's
+//! queue, before its result is delivered — the result is what starts the
+//! caller's next model call. So a sub-leader and its child can share a
+//! budget-1 endpoint. A call dropped while it waits takes nothing and
+//! delivers nothing.
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, and every refused call one refusal row. `list_agents` reads the
 //! directory and is not an edge between two nodes, so it writes none.
@@ -35,8 +44,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    AgentOrigin, CallError, CallEvent, CallRequest, CallStream, ConversationScope, EdgeKind,
-    EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, SpawnContext, Transport,
+    AgentOrigin, CallError, CallEvent, CallRequest, CallStream, ChildCall, ConversationScope,
+    EdgeKind, EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, SpawnContext, Transport,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -91,7 +100,19 @@ impl BrokerCalls {
     /// result or error. Dropping it cancels whatever the call started.
     pub fn call(&self, caller: Caller, request: CallRequest) -> CallStream {
         match request {
-            CallRequest::InvokeAgent(params) => self.invoke(caller, params),
+            CallRequest::InvokeAgent(params) => {
+                // Released now, before the callee queues for a slot that
+                // may be this very one.
+                let child = match &caller {
+                    Caller::Node(name) => self.registry.node_permit(name).map(|p| p.child_call()),
+                    Caller::Root => None,
+                };
+                let call = self.invoke(caller, params);
+                match child {
+                    Some(child) => gated(child, call),
+                    None => call,
+                }
+            }
             CallRequest::ListAgents => {
                 futures::stream::iter([Ok(CallEvent::Result(self.directory()))]).boxed()
             }
@@ -141,10 +162,7 @@ impl BrokerCalls {
             }
             _ => Ok(None),
         };
-        let task = DelegatedTask::new(params.prompt).with_caller(match &caller {
-            Caller::Root => None,
-            Caller::Node(name) => Some(name.clone()),
-        });
+        let task = DelegatedTask::new(params.prompt);
         let agent = params.agent;
 
         async_stream::stream! {
@@ -289,6 +307,31 @@ impl BrokerCalls {
         }
         .refused(why);
     }
+}
+
+/// `call` with its caller's permit re-acquired before its result (or error)
+/// is delivered — at once unless it is the caller's last outstanding call.
+///
+/// The callee's stream is dropped before the wait: that reaps the callee's
+/// worker and frees its permit, which a callee on the caller's endpoint is
+/// holding.
+fn gated(child: ChildCall, mut call: CallStream) -> CallStream {
+    async_stream::stream! {
+        while let Some(event) = call.next().await {
+            if matches!(event, Ok(CallEvent::Result(_)) | Err(_)) {
+                drop(call);
+                child.finish().await;
+                yield event;
+                return;
+            }
+            yield event;
+        }
+        // No result at all: the connection reports that as a failed call,
+        // which starts the caller's next model call just the same.
+        drop(call);
+        child.finish().await;
+    }
+    .boxed()
 }
 
 /// The `call_result` of an `invoke_agent` call whose task ended in `state`.
