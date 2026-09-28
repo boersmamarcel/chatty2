@@ -49,7 +49,7 @@ The server appears under **Installed** with an **↗ External** badge. The agent
 
 ## Build your own module
 
-Modules are small programs that run inside Chatty, locally or on the Hive runner. The developer guide [Build a WASM module](../dev/guides/build-wasm-module.md) walks through it, with two worked examples: [echo-agent](../dev/start/tutorial-echo-agent.md) and [benford-agent](../dev/start/tutorial-benford-agent.md).
+Modules are small programs that run inside Chatty, locally or on the Hive runner. The developer guide [Build a WASM module](../dev/guides/build-wasm-module.md) walks through it, with two worked examples: [write a plugin (echo)](../dev/start/tutorial-echo-agent.md) and [give an agent the plugin (benford)](../dev/start/tutorial-benford-agent.md).
 
 A module you copy into the module directory yourself is listed under **Local modules** with **Trust: local**: Chatty loads it because you put it there, but nothing vouches for it.
 
