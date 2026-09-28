@@ -35,6 +35,7 @@
 //! exist yet, and only under `RECORD_PRE_FABRIC_GOLDENS=1`. A later PR may
 //! delete one with a stated reason; it may not re-record one.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -263,11 +264,11 @@ impl SwarmKit {
     }
 
     /// The leader delegates `prompt` to `agent` through the real
-    /// `invoke_agent` tool, over the root broker.
+    /// `invoke_agent` tool, over the root broker's direct handle — the
+    /// in-process root reaches its broker without a socket or an HTTP hop
+    /// (ADR-0020, BI-4).
     pub async fn run_leader_to(&self, agent: &str, prompt: &str) -> LeaderRun {
-        let port = self.broker.as_ref().expect("the broker is running").port;
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents(self.roster.clone());
+        let tool = self.leader_tool();
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let output = tokio::time::timeout(
@@ -296,6 +297,20 @@ impl SwarmKit {
             progress,
             requests,
         }
+    }
+}
+
+impl SwarmKit {
+    /// The leader's `invoke_agent`, holding the root broker's direct handle.
+    pub fn leader_tool(&self) -> InvokeAgentTool {
+        InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents(self.roster.clone())
+            .with_transport(self.broker().transport())
+    }
+
+    /// The root broker.
+    pub fn broker(&self) -> &Broker {
+        self.broker.as_ref().expect("the broker is running")
     }
 }
 
@@ -406,7 +421,11 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),
-            InvokeAgentProgress::Text(text) => format!("progress {text}"),
+            // A step and an answer chunk read alike in the goldens, which
+            // were recorded before the two were told apart (BI-4).
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
+                format!("progress {text}")
+            }
             InvokeAgentProgress::Finished {
                 success,
                 result,
@@ -635,7 +654,9 @@ async fn swarm_kit_two_process_delegation() {
         .progress
         .iter()
         .filter_map(|p| match p {
-            InvokeAgentProgress::Text(text) => Some(text.as_str()),
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -935,4 +956,312 @@ async fn fabric_hop_latency_baseline() {
         ms(hops[0]),
         ms(hops[hops.len() - 1])
     );
+}
+
+// ---------------------------------------------------------------------------
+// Calls over the worker's connection (BI-4, AGE-636; invariants 4 and 11)
+// ---------------------------------------------------------------------------
+
+const MIDDLE: &str = "kit-middle";
+const MIDDLE_MODEL: &str = "kit/middle";
+const GRANDCHILD: &str = "kit-grandchild";
+const GRANDCHILD_MODEL: &str = "kit/grandchild";
+
+/// Leader → middle worker → grandchild, on separate endpoints (BI-6 owns
+/// one shared budget-1 endpoint). The middle worker is a plain worker — no
+/// `--broker` of its own (sub-leaders' brokers go in BI-5) — that reads the
+/// directory, then delegates; `grandchild` is its model's replies.
+async fn nested_kit(grandchild: Vec<Reply>) -> SwarmKit {
+    SwarmKit::start(
+        vec![
+            AgentDef::new(MIDDLE, MIDDLE_MODEL, Endpoint::Sse),
+            AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(
+            MIDDLE_MODEL,
+            [
+                Reply::tool_call("list_agents", serde_json::json!({})),
+                Reply::tool_call(
+                    "invoke_agent",
+                    serde_json::json!({ "agent": GRANDCHILD, "prompt": "read the readme" }),
+                ),
+                Reply::text("The grandchild read it."),
+            ],
+        ),
+        Script::new().route(GRANDCHILD_MODEL, grandchild),
+    )
+    .await
+}
+
+/// The grandchild's replies in the nested tests that complete.
+fn reading_grandchild() -> Vec<Reply> {
+    vec![
+        Reply::tool_call("read_file", serde_json::json!({ "path": "README.md" })),
+        Reply::text("It says Chatty."),
+    ]
+}
+
+/// The progress lines, in order: what the leader's transcript shows.
+fn progress_lines(run: &LeaderRun) -> Vec<String> {
+    run.progress
+        .iter()
+        .filter_map(|p| match p {
+            InvokeAgentProgress::Step(line) => Some(line.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// BI-4: a worker with no broker of its own delegates over the connection
+/// its broker made, and the grandchild's tool events reach the leader,
+/// rendered by `progress_text_for_event` at the grandchild and passed up
+/// unchanged by the middle worker.
+#[tokio::test]
+async fn nested_delegation_over_the_connection() {
+    use chatty_core::session::SessionEvent;
+    use chatty_core::tools::progress_text_for_event;
+
+    let kit = nested_kit(reading_grandchild()).await;
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
+
+    let out = run
+        .output
+        .as_ref()
+        .expect("the nested delegation succeeded");
+    assert!(out.success);
+    assert_eq!(out.response, "The grandchild read it.");
+
+    // The grandchild really ran: its read reached its model, and its answer
+    // reached the middle worker's.
+    let grandchild = kit.ndjson.requests_for(GRANDCHILD_MODEL);
+    assert_eq!(grandchild.len(), 2);
+    assert!(String::from_utf8_lossy(&grandchild[1].body).contains("# Chatty"));
+    let middle = kit.sse.requests_for(MIDDLE_MODEL);
+    assert_eq!(middle.len(), 3);
+    assert!(
+        String::from_utf8_lossy(&middle[1].body).contains(GRANDCHILD),
+        "list_agents over the connection listed the grandchild's role"
+    );
+    assert!(String::from_utf8_lossy(&middle[2].body).contains("It says Chatty."));
+
+    // The grandchild's own lines, as progress_text_for_event renders its
+    // events, sit inside the middle worker's invoke_agent at the leader.
+    let mut names = HashMap::new();
+    let grandchild_lines: Vec<String> = [
+        SessionEvent::ToolCallStarted {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+        },
+        SessionEvent::ToolCallResult {
+            id: "call-1".to_string(),
+            result: "# Chatty".to_string(),
+        },
+    ]
+    .iter()
+    .filter_map(|event| progress_text_for_event(event, &mut names))
+    .collect();
+    assert_eq!(grandchild_lines, ["read_file", "\u{2713} read_file"]);
+    assert_eq!(
+        progress_lines(&run),
+        [
+            "list_agents",
+            "\u{2713} list_agents",
+            "invoke_agent",
+            "read_file",
+            "\u{2713} read_file",
+            "\u{2713} invoke_agent",
+        ],
+        "the leader sees the grandchild's steps inside the middle worker's delegation"
+    );
+
+    // One edge-log row per call, named by the connections: the root's call
+    // to the middle worker, and the middle worker's to the grandchild.
+    let log = std::fs::read_to_string(kit.broker().edge_log_path()).expect("the edge log");
+    let rows: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a JSON row"))
+        .collect();
+    let edges: Vec<(&str, &str, &str, &str)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap(),
+                row["from"].as_str().unwrap(),
+                row["to"].as_str().unwrap(),
+                row["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        [
+            ("task", "kit-middle-0", "kit-grandchild-0", "completed"),
+            ("task", "root", "kit-middle-0", "completed"),
+        ]
+    );
+}
+
+/// A raw loopback HTTP GET against the broker's gateway, for the counter's
+/// own sanity check.
+async fn http_get(port: u16, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("the gateway is listening");
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+/// Invariant 4: across the nested delegation — the leader's call, the
+/// middle worker's directory read and its call to the grandchild — no
+/// request for a role or the directory reaches the gateway's HTTP side.
+#[tokio::test]
+async fn no_worker_call_uses_loopback() {
+    let kit = nested_kit(reading_grandchild()).await;
+    let routes = kit.broker().route_counter();
+
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
+    assert!(run.output.is_ok(), "{:?}", run.output);
+    assert_eq!(kit.sse.requests_for(MIDDLE_MODEL).len(), 3);
+    assert_eq!(kit.ndjson.requests_for(GRANDCHILD_MODEL).len(), 2);
+
+    assert_eq!(
+        routes.role_requests(),
+        0,
+        "a role was reached over loopback"
+    );
+    assert_eq!(
+        routes.directory_requests(),
+        0,
+        "the directory was read over loopback"
+    );
+
+    // The counter counts: the same role and the directory, over HTTP.
+    let port = kit.broker().port;
+    assert!(
+        http_get(port, &format!("/a2a/{GRANDCHILD}/.well-known/agent.json"))
+            .await
+            .contains("200 OK")
+    );
+    assert!(
+        http_get(port, "/.well-known/agent.json")
+            .await
+            .contains("200 OK")
+    );
+    assert_eq!(routes.role_requests(), 1);
+    assert_eq!(routes.directory_requests(), 1);
+}
+
+/// Every process descended from this test process whose `HOME` is `kit`'s:
+/// the kit's workers and whatever they started.
+fn subtree(kit: &SwarmKit) -> Vec<i32> {
+    let home = format!("HOME={}", kit.root().join("home").display());
+    let mut parents = HashMap::new();
+    for entry in std::fs::read_dir("/proc").expect("/proc is readable") {
+        let path = entry.expect("a /proc entry").path();
+        let Some(pid) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Some(ppid) = std::fs::read_to_string(path.join("status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|l| l.strip_prefix("PPid:\t").map(str::to_string))
+            })
+            .and_then(|p| p.trim().parse::<i32>().ok())
+        else {
+            continue;
+        };
+        parents.insert(pid, ppid);
+    }
+    let me = std::process::id() as i32;
+    let descends = |mut pid: i32| {
+        while let Some(&parent) = parents.get(&pid) {
+            if parent == me {
+                return true;
+            }
+            pid = parent;
+        }
+        false
+    };
+    parents
+        .keys()
+        .copied()
+        .filter(|&pid| descends(pid))
+        .filter(|&pid| {
+            std::fs::read(format!("/proc/{pid}/environ"))
+                .is_ok_and(|env| env.split(|b| *b == 0).any(|var| var == home.as_bytes()))
+        })
+        .collect()
+}
+
+/// Whether `pid` still exists — a zombie included, so a process that died
+/// but was never reaped still counts.
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Invariant 11: cancelling the leader's task reaps every process in its
+/// subtree — the middle worker and the grandchild it delegated to over its
+/// connection — within 5 s.
+#[tokio::test]
+async fn cancel_reaps_the_subtree() {
+    // The grandchild waits on its model for far longer than the test runs.
+    let kit = nested_kit(vec![Reply::Delay(120_000), Reply::text("too late")]).await;
+    let tool = kit.leader_tool();
+    let leader = tokio::spawn(async move {
+        tool.call(
+            &mut ToolContext::new(),
+            InvokeAgentArgs {
+                agent: MIDDLE.to_string(),
+                prompt: "ask the grandchild".to_string(),
+                include_trace: false,
+            },
+        )
+        .await
+    });
+
+    // Both workers up, the grandchild mid-request.
+    let deadline = std::time::Instant::now() + DEADLINE;
+    let pids = loop {
+        let pids = subtree(&kit);
+        if pids.len() >= 2 && !kit.ndjson.requests_for(GRANDCHILD_MODEL).is_empty() {
+            break pids;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the subtree never came up: {pids:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    leader.abort();
+    let cancelled = std::time::Instant::now();
+    while pids.iter().any(|&pid| alive(pid)) {
+        assert!(
+            cancelled.elapsed() < Duration::from_secs(5),
+            "still alive 5 s after the cancel: {:?}",
+            pids.iter().filter(|&&pid| alive(pid)).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(subtree(&kit).is_empty(), "nothing new was started either");
 }

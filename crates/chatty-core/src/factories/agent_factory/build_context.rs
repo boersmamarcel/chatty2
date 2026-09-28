@@ -75,7 +75,8 @@ pub struct AgentBuildContext {
     pub lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// The broker's virtual agents by name — `local-agent`, or what
     /// `module_settings.virtual_agents` declares (ADR-0011 C10). Only
-    /// addressable while `gateway_port` or `lazy_broker` is set.
+    /// addressable while `gateway_port`, `lazy_broker` or `fabric_transport`
+    /// is set.
     pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
     /// Conversation this turn belongs to. Only consulted when the `browser`
@@ -131,6 +132,13 @@ pub struct AgentBuildContext {
     /// shared is never read. Only chatty-gpui sets it, on top of
     /// [`Self::from_services`]; chatty-tui and hive keep the tmux-only gate.
     pub embedded_terminals: Option<std::sync::Arc<dyn TerminalSource>>,
+    /// The connection a delegated worker reaches its local roles and the
+    /// broker's directory through (ADR-0020, BI-4): `invoke_agent` and
+    /// `list_agents` use it instead of loopback HTTP. Only chatty-tui's
+    /// participant mode sets it, on top of [`Self::from_services`], after
+    /// the broker's `welcome` and before the agent is built; the in-process
+    /// root reaches its broker through [`LazyBroker::transport`] instead.
+    pub fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
     /// The spec's `[[plugins]]` (PL-U2, AGE-616): loaded by the factory, one
     /// instance per plugin for this agent, their tools registered beside the
     /// native ones. Empty for an agent that is not built from a spec.
@@ -276,6 +284,8 @@ impl AgentBuildContext {
             instructions_dir: None,
             // Only the desktop has embedded terminals.
             embedded_terminals: None,
+            // Only a delegated worker has a connection to its broker.
+            fabric_transport: None,
             // Only a spec lists plugins (`from_spec`).
             plugins: Vec::new(),
             plugin_host,

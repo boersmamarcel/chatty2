@@ -18,7 +18,9 @@
 //! TCP listener, without triggering a start itself.
 
 use async_trait::async_trait;
+use chatty_fabric::Transport;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// See the module docs.
 #[async_trait]
@@ -28,6 +30,15 @@ pub trait LazyBroker: Send + Sync {
     /// the broker could not start; callers treat that exactly as they treat
     /// "no gateway configured".
     async fn ensure_started(&self) -> anyhow::Result<String>;
+
+    /// Starts the broker if it has not started yet, and returns a direct
+    /// [`Transport`] into it: how the in-process root reaches its local
+    /// roles without a socket or an HTTP hop (ADR-0020, BI-4). `Ok(None)`
+    /// — the default — means this broker offers none, and callers keep
+    /// reaching it over [`ensure_started`](Self::ensure_started)'s URL.
+    async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
+        Ok(None)
+    }
 
     /// The TCP addresses this broker is bound to right now: empty before the
     /// first successful [`ensure_started`](Self::ensure_started) call, and

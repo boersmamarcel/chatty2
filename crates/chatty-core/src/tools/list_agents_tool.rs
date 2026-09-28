@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::services::lazy_broker::LazyBroker;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
-use chatty_fabric::AgentOrigin;
+use chatty_fabric::{AgentOrigin, CallEvent, CallRequest, Transport};
 
 /// Arguments for listing A2A agents (no arguments needed)
 #[derive(Deserialize, Serialize)]
@@ -120,6 +120,10 @@ pub struct ListAgentsTool {
     /// A broker that has not necessarily started yet (BI-2, AGE-634).
     /// Consulted only when `gateway_base_url` is `None`.
     lazy_broker: Option<Arc<dyn LazyBroker>>,
+    /// The fabric the broker's directory is read through (ADR-0020, BI-4):
+    /// a worker's broker-made connection. When present, the live half is
+    /// never read over loopback HTTP.
+    transport: Option<Arc<dyn Transport>>,
     http: reqwest::Client,
 }
 
@@ -131,6 +135,7 @@ impl ListAgentsTool {
             local_workers: Vec::new(),
             gateway_base_url: None,
             lazy_broker: None,
+            transport: None,
             http: reqwest::Client::new(),
         }
     }
@@ -146,6 +151,7 @@ impl ListAgentsTool {
             local_workers: Vec::new(),
             gateway_base_url: None,
             lazy_broker: None,
+            transport: None,
             http: reqwest::Client::new(),
         }
     }
@@ -164,6 +170,28 @@ impl ListAgentsTool {
     pub fn with_lazy_broker(mut self, broker: Arc<dyn LazyBroker>) -> Self {
         self.lazy_broker = Some(broker);
         self
+    }
+
+    /// Read the broker's directory over `transport` instead of its
+    /// aggregated card over loopback HTTP (ADR-0020, BI-4).
+    pub fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// The fabric the directory is read through: the one this tool was
+    /// given, else the lazy broker's direct handle (starting it).
+    async fn fabric_transport(&self) -> Option<Arc<dyn Transport>> {
+        if let Some(transport) = &self.transport {
+            return Some(transport.clone());
+        }
+        match self.lazy_broker.as_ref()?.transport().await {
+            Ok(transport) => transport,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to start the broker for list_agents");
+                None
+            }
+        }
     }
 
     /// The gateway's base URL, resolving a [`LazyBroker`] on first use if
@@ -307,7 +335,9 @@ impl Tool for ListAgentsTool {
         let agents: Vec<AgentListing> = listings.into_values().collect();
         tracing::info!(
             agent_count = agents.len(),
-            live_read = self.gateway_base_url.is_some() || self.lazy_broker.is_some(),
+            live_read = self.gateway_base_url.is_some()
+                || self.lazy_broker.is_some()
+                || self.transport.is_some(),
             "list_agents called"
         );
 
@@ -344,6 +374,9 @@ impl ListAgentsTool {
     /// Failure is not an error: the gateway may be off, and this tool's job is
     /// to say what can be addressed, which is then nothing but settings.
     async fn live_agents(&self) -> Vec<AgentListing> {
+        if let Some(transport) = self.fabric_transport().await {
+            return directory_over(transport.as_ref()).await;
+        }
         let Some(base) = self.gateway_base_url().await else {
             return Vec::new();
         };
@@ -380,6 +413,37 @@ impl ListAgentsTool {
             .map(|agents| agents.iter().filter_map(listing_from_card).collect())
             .unwrap_or_default()
     }
+}
+
+/// The broker's directory, read over the fabric: the same card entries its
+/// aggregated card lists, as a `list_agents` call's result. A failed call is
+/// an empty live half, as a broker that does not answer over HTTP is.
+async fn directory_over(transport: &dyn Transport) -> Vec<AgentListing> {
+    use futures::StreamExt;
+
+    let mut stream = match transport.call(CallRequest::ListAgents).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::debug!(%error, "the broker's directory could not be read");
+            return Vec::new();
+        }
+    };
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(CallEvent::Result(agents)) => {
+                return agents
+                    .as_array()
+                    .map(|agents| agents.iter().filter_map(listing_from_card).collect())
+                    .unwrap_or_default();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::debug!(%error, "the broker's directory could not be read");
+                return Vec::new();
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// One entry of the broker's aggregated card as a listing.

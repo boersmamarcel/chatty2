@@ -36,8 +36,11 @@ use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::tools::worker_executable;
+use chatty_fabric::{EdgeLog, Transport};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
+#[cfg(test)]
+use chatty_protocol_gateway::RouteCounter;
 use chatty_protocol_gateway::participant::{
     EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
     WorkspaceFactory,
@@ -75,6 +78,11 @@ pub struct Broker {
     participants: ParticipantRegistry,
     server: JoinHandle<()>,
     participant_listener: JoinHandle<()>,
+    /// This process's own handle into the broker: the leader's calls run
+    /// on it directly, with no socket and no HTTP hop (ADR-0020, BI-4).
+    transport: Arc<dyn Transport>,
+    #[cfg(test)]
+    routes: RouteCounter,
 }
 
 impl Broker {
@@ -119,6 +127,7 @@ impl Broker {
             module_settings.default_endpoint_budget,
             specs,
             workspace_dir,
+            dirs::data_dir(),
         )
         .await
     }
@@ -130,7 +139,9 @@ impl Broker {
     /// they neither collide with each other — every test in one binary
     /// shares a pid, so [`socket_path`] alone gives them all the same path
     /// — nor write into the user's real runtime directory, and so they can
-    /// spawn a stand-in binary that records its argv.
+    /// spawn a stand-in binary that records its argv. The edge log goes
+    /// under the socket's directory ([`Self::edge_log_path`]), which each
+    /// test owns.
     #[cfg(test)]
     pub(crate) async fn start_at(
         socket: PathBuf,
@@ -139,6 +150,7 @@ impl Broker {
         specs: Vec<VirtualAgentSpec>,
         workspace_dir: Option<String>,
     ) -> Result<Self> {
+        let data_dir = socket.parent().map(std::path::Path::to_path_buf);
         Self::serve(
             Arc::new(NoopProvider),
             socket,
@@ -146,12 +158,26 @@ impl Broker {
             default_budget,
             specs,
             workspace_dir,
+            data_dir,
         )
         .await
     }
 
+    /// Where a [`start_at`](Self::start_at) broker writes its edge log.
+    #[cfg(test)]
+    pub(crate) fn edge_log_path(&self) -> PathBuf {
+        self.socket
+            .parent()
+            .expect("a test socket has a directory")
+            .join("chatty")
+            .join("fabric")
+            .join(format!("edges-{}.jsonl", std::process::id()))
+    }
+
     /// Bind and serve: the gateway over a module registry whose
-    /// `llm::complete()` goes to `provider`.
+    /// `llm::complete()` goes to `provider`. Every call is logged to the
+    /// edge log under `data_dir`, when there is one.
+    #[allow(clippy::too_many_arguments)]
     async fn serve(
         provider: Arc<dyn LlmProvider>,
         socket: PathBuf,
@@ -159,6 +185,7 @@ impl Broker {
         default_budget: usize,
         specs: Vec<VirtualAgentSpec>,
         workspace_dir: Option<String>,
+        data_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let registry = ModuleRegistry::new(provider, ResourceLimits::default())
             .context("failed to build the module registry the broker gateway needs")?;
@@ -180,6 +207,17 @@ impl Broker {
         ) {
             gateway = gateway.with_virtual_agent(Arc::new(runner));
         }
+        if let Some(dir) = data_dir {
+            match EdgeLog::open(&dir) {
+                Ok(log) => gateway = gateway.with_edge_log(log),
+                Err(error) => tracing::warn!(%error, "The broker's edge log could not be opened"),
+            }
+        }
+        // After every virtual agent: the call path reaches the ones
+        // published by now.
+        let transport = gateway.transport();
+        #[cfg(test)]
+        let routes = gateway.route_counter();
 
         // `gateway.start()` binds its own listener from `self.port`, which
         // leaves no way to learn an OS-assigned port before it is needed
@@ -204,7 +242,22 @@ impl Broker {
             participants,
             server,
             participant_listener,
+            transport,
+            #[cfg(test)]
+            routes,
         })
+    }
+
+    /// This process's direct handle into the broker (ADR-0020, BI-4).
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
+
+    /// How many HTTP requests reached a role or the directory (ADR-0020
+    /// invariant 4).
+    #[cfg(test)]
+    pub(crate) fn route_counter(&self) -> RouteCounter {
+        self.routes.clone()
     }
 
     /// The live participant registry, so a test can see who is connected.
@@ -351,6 +404,13 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
     async fn ensure_started(&self) -> anyhow::Result<String> {
         let broker = self.once.get_or_try_init(|| (self.start)()).await?;
         Ok(format!("http://localhost:{}", broker.port))
+    }
+
+    /// The leader reaches its broker directly, not over its own loopback
+    /// port (ADR-0020, BI-4).
+    async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
+        let broker = self.once.get_or_try_init(|| (self.start)()).await?;
+        Ok(Some(broker.transport()))
     }
 
     fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {

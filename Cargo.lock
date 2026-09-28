@@ -2068,6 +2068,7 @@ version = "0.4.11"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum",
  "chatty-core",
  "chatty-fabric",

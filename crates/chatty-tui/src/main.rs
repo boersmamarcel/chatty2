@@ -816,6 +816,18 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         {
             engine.note_task(message);
         }
+        // A worker connects before it builds its agent (ADR-0020, BI-4): the
+        // broker's welcome comes first, so the agent's `invoke_agent` and
+        // `list_agents` hold the connection's transport from the start.
+        #[cfg(unix)]
+        let participant = match cli.participant_fd {
+            Some(fd) => {
+                let connection = participant::connect(fd).await?;
+                engine.set_fabric_transport(connection.transport());
+                Some(connection)
+            }
+            None => None,
+        };
         match cli.restore.as_deref() {
             Some(path) => engine.restore_conversation(path).await?,
             None => engine.init_conversation().await?,
@@ -824,7 +836,9 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         if let Some(fd) = cli.participant_fd {
             #[cfg(unix)]
             {
-                participant::run_participant(engine, event_rx, fd).await
+                let _ = fd;
+                let connection = participant.context("--participant-fd connected above")?;
+                participant::run_participant(engine, event_rx, connection).await
             }
             #[cfg(not(unix))]
             {
