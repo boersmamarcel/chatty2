@@ -37,8 +37,8 @@ use super::protocol::{
     TaskState,
 };
 use chatty_fabric::{
-    AgentOrigin, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState,
-    RunPermit, SpawnContext, WeakRunPermit,
+    AgentOrigin, CallChain, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName,
+    NodeState, RunId, RunPermit, SpawnContext, TaskTable, WeakRunPermit,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -158,6 +158,36 @@ struct Inner {
     /// Where a copy of every line a connection reads or writes goes, when
     /// someone asked for one ([`ParticipantRegistry::tap_wire`]).
     wire_tap: Option<mpsc::UnboundedSender<String>>,
+    /// The runs broker calls started, each with the chain the broker
+    /// stamped on it (DP-2). A node's calls extend the chain of the run it
+    /// serves.
+    runs: TaskTable,
+}
+
+/// A run in the broker's task table, released when this is dropped: when
+/// the worker serving it is reaped, however the call ended.
+#[must_use = "dropping the guard releases the run"]
+pub struct RunGuard {
+    registry: ParticipantRegistry,
+    run: RunId,
+}
+
+impl RunGuard {
+    pub fn run(&self) -> RunId {
+        self.run
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.registry.lock().runs.release(self.run);
+    }
+}
+
+impl std::fmt::Debug for RunGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RunGuard").field(&self.run).finish()
+    }
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -233,6 +263,68 @@ impl ParticipantRegistry {
     /// `name`'s own context, if a runner recorded one (BI-5).
     pub fn node_context(&self, name: &str) -> Option<SpawnContext> {
         self.lock().contexts.get(name).cloned()
+    }
+
+    /// Open the run a broker call started, served by the node admitted as
+    /// `callee` and called by `caller` (`None`: the root), under `chain`
+    /// (DP-2). A runner does this once it has admitted the node and before
+    /// the worker exists, so every call the worker makes finds its chain.
+    /// `None` when `callee` was never admitted.
+    pub fn open_run(
+        &self,
+        callee: &str,
+        caller: Option<&str>,
+        chain: CallChain,
+    ) -> Option<RunGuard> {
+        let mut inner = self.lock();
+        let callee = inner.directory.by_name(callee)?.id();
+        let caller = caller.and_then(|name| inner.directory.by_name(name).map(Node::id));
+        let parent = caller.and_then(|node| inner.runs.served_by(node).map(|(run, _)| run).last());
+        let run = inner.runs.open(caller, callee, parent, chain).ok()?;
+        drop(inner);
+        Some(RunGuard {
+            registry: self.clone(),
+            run,
+        })
+    }
+
+    /// The chain of the run `name` serves (DP-2): the broker's own record,
+    /// never anything the node said. `None` for a node no broker call
+    /// started.
+    pub(crate) fn run_chain(&self, name: &str) -> Option<CallChain> {
+        let inner = self.lock();
+        let node = inner.directory.by_name(name)?.id();
+        inner
+            .runs
+            .served_by(node)
+            .map(|(_, entry)| entry.chain.clone())
+            .max_by_key(|chain| chain.depth)
+    }
+
+    /// The spec `name` was admitted as.
+    pub(crate) fn node_spec(&self, name: &str) -> Option<String> {
+        self.lock()
+            .directory
+            .by_name(name)
+            .map(|node| node.spec().to_string())
+    }
+
+    /// Every node this broker ever admitted, ended ones included, in
+    /// admission order. A runner admits a node for every worker process it
+    /// starts, so this is also every worker it spawned.
+    pub fn admitted(&self) -> Vec<String> {
+        let inner = self.lock();
+        let scope = ConversationScope::new(ROOT_SCOPE);
+        inner
+            .directory
+            .in_scope(&scope)
+            .map(|node| node.name().as_str().to_string())
+            .collect()
+    }
+
+    /// How many runs are open (DP-2 tests).
+    pub fn open_runs(&self) -> usize {
+        self.lock().runs.len()
     }
 
     /// Record the endpoint permit `name`'s run holds (BI-6), without
