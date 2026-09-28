@@ -12,8 +12,13 @@
 //! .chatty/modules/
 //! └── echo-agent/
 //!     ├── module.toml
-//!     └── echo_agent.wasm
+//!     ├── echo_agent.wasm
+//!     └── .chatty-install.json   (only for modules chatty installed)
 //! ```
+//!
+//! A module with an install record loads only while its `.wasm` still
+//! matches the recorded hash (see [`crate::install_record`]); one without
+//! loads as [`TrustLevel::Local`].
 //!
 //! Every subdirectory that contains a `module.toml` file is treated as a
 //! module.  The registry uses the `[module].name` field from the manifest
@@ -38,7 +43,9 @@ use tracing::{debug, info, warn};
 use chatty_wasm_runtime::ModuleManifest as RuntimeManifest;
 use chatty_wasm_runtime::{Engine, LlmProvider, ResourceLimits, WasmModule};
 
+use crate::install_record::verify_installed;
 use crate::manifest::ModuleManifest;
+use hive_client::TrustLevel;
 
 // ---------------------------------------------------------------------------
 // LoadedModule
@@ -52,6 +59,9 @@ pub type ModuleHandle = Arc<Mutex<WasmModule>>;
 /// An entry in the registry: the parsed manifest plus the live module.
 struct LoadedModule {
     manifest: ModuleManifest,
+    /// The trust the module loaded at: its install record's, or
+    /// [`TrustLevel::Local`] for one put there by hand (PL-H5a).
+    trust_level: TrustLevel,
     /// Directory that the module was loaded from (needed for reload).
     module_dir: PathBuf,
     wasm: ModuleHandle,
@@ -308,6 +318,13 @@ impl ModuleRegistry {
         self.modules.get(name).map(|m| &m.manifest)
     }
 
+    /// The trust a registered module loaded at: its install record's level,
+    /// or [`TrustLevel::Local`] for a module with no record (copied in by
+    /// hand). `None` if it is not registered.
+    pub fn trust_level(&self, name: &str) -> Option<TrustLevel> {
+        self.modules.get(name).map(|m| m.trust_level.clone())
+    }
+
     /// Return an iterator over the names of all registered modules.
     pub fn module_names(&self) -> impl Iterator<Item = &str> {
         self.modules.keys().map(String::as_str)
@@ -380,25 +397,31 @@ impl ModuleRegistry {
             runtime_manifest = runtime_manifest.with_weights_root(root);
         }
 
-        let wasm = WasmModule::from_file(
-            &self.engine,
-            wasm_path,
-            runtime_manifest,
-            self.llm_provider.clone(),
-            limits,
-        )
-        .with_context(|| {
+        let load_context = || {
             format!(
                 "failed to load WASM module '{}' from {}",
                 manifest.name,
                 wasm_path.display()
             )
-        })?;
+        };
+        // Read the bytes once: the hash is checked against the install
+        // record (PL-H5a) on exactly the bytes that are then compiled.
+        let bytes = std::fs::read(wasm_path).with_context(load_context)?;
+        let trust_level = verify_installed(module_dir, &bytes).with_context(load_context)?;
+        let wasm = WasmModule::from_bytes(
+            &self.engine,
+            &bytes,
+            runtime_manifest,
+            self.llm_provider.clone(),
+            limits,
+        )
+        .with_context(load_context)?;
 
         self.modules.insert(
             manifest.name.clone(),
             LoadedModule {
                 manifest,
+                trust_level,
                 module_dir: module_dir.to_path_buf(),
                 wasm: Arc::new(Mutex::new(wasm)),
             },

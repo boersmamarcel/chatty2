@@ -182,7 +182,8 @@ type reference.
 <module dir>/
 ├── echo-agent/
 │   ├── module.toml          # Manifest (required)
-│   └── echo_agent.wasm      # WASM component binary
+│   ├── echo_agent.wasm      # WASM component binary
+│   └── .chatty-install.json # Install record (only for modules installed from Hive)
 └── code-reviewer/
     ├── module.toml
     └── code_reviewer.wasm
@@ -241,6 +242,18 @@ with its reason, and remote modules are listed apart from local loads. Two direc
 declaring the same `name`: the first by directory name wins, the second is a failure (so is
 `load` of a name already registered from another directory). The desktop's installed
 extensions list shows a module's failure reason under its row.
+
+**Install hardening (PL-H5a).** `chatty_core::install` checks a registry-supplied module
+name against the registry's rule (`^[a-z][a-z0-9-]{1,48}[a-z0-9]$`, no `--`) and the
+version as semver before anything touches the filesystem, installs into the configured
+`module_dir`, and caps the download at `hive_client::MAX_DOWNLOAD_BYTES` (64 MiB) while it
+streams. Each WASM install writes `.chatty-install.json` (`{sha256, trust_level,
+publisher_key_id}`) beside the module; the registry hashes the `.wasm` bytes it is about
+to compile against that record at every load and refuses a mismatch (`hash mismatch …`,
+shown as `Failed to load:`). A module without a record — copied in by hand — loads as
+`TrustLevel::Local` (`ModuleRegistry::trust_level`), and Settings → Extensions lists it
+under **Local modules**. Signature enforcement (refusing unsigned downloads) is PL-H5,
+AGE-608.
 
 A module appears in `list_agents` when `[capabilities].agent = true`, it is
 `Loaded` (or `Remote`), and it is enabled in Settings → Extensions

@@ -89,6 +89,10 @@ pub struct DownloadResult {
     pub manifest: Value,
 }
 
+/// The most bytes a module download may have (PL-D3): 64 MiB. A larger body
+/// is refused while it streams, before it is all in memory.
+pub const MAX_DOWNLOAD_BYTES: u64 = 64 << 20;
+
 /// An in-progress download whose body has not yet been consumed.
 ///
 /// Returned by [`HiveRegistryClient::begin_download`]; stream the body
@@ -103,10 +107,60 @@ pub struct BegunDownload {
     pub signature: Option<String>,
     /// `x-publisher-public-key` response header, if present.
     pub publisher_public_key: Option<String>,
-    /// Streaming response body.  Consume with `futures_util::StreamExt::next`.
+    /// Streaming response body. Read it with [`BegunDownload::read_body`],
+    /// which enforces [`MAX_DOWNLOAD_BYTES`].
     pub stream: std::pin::Pin<
         Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>,
     >,
+}
+
+impl BegunDownload {
+    /// Read the whole body, at most [`MAX_DOWNLOAD_BYTES`] of it.
+    ///
+    /// Refuses a declared `Content-Length` over the cap before reading, and
+    /// stops at the first chunk that would take the body past it, so an
+    /// oversized download never sits in memory. `on_progress` gets the bytes
+    /// read so far after each chunk.
+    pub async fn read_body(
+        &mut self,
+        on_progress: impl FnMut(u64),
+    ) -> Result<Vec<u8>, crate::ClientError> {
+        read_capped(
+            &mut self.stream,
+            self.total_size,
+            MAX_DOWNLOAD_BYTES,
+            on_progress,
+        )
+        .await
+    }
+}
+
+/// [`BegunDownload::read_body`] with the cap as a parameter.
+pub(crate) async fn read_capped<S, E>(
+    stream: &mut S,
+    declared: u64,
+    cap: u64,
+    mut on_progress: impl FnMut(u64),
+) -> Result<Vec<u8>, crate::ClientError>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+    crate::ClientError: From<E>,
+{
+    use futures_util::StreamExt as _;
+
+    if declared > cap {
+        return Err(crate::ClientError::TooLarge { limit: cap });
+    }
+    let mut body = Vec::with_capacity(declared as usize);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() as u64 + chunk.len() as u64 > cap {
+            return Err(crate::ClientError::TooLarge { limit: cap });
+        }
+        body.extend_from_slice(&chunk);
+        on_progress(body.len() as u64);
+    }
+    Ok(body)
 }
 
 // ── Authentication ─────────────────────────────────────────────────────────
@@ -321,4 +375,51 @@ pub struct ListParams {
     pub pricing_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunks(
+        sizes: &[usize],
+    ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, crate::ClientError>> + Unpin {
+        futures_util::stream::iter(
+            sizes
+                .iter()
+                .map(|&n| Ok(bytes::Bytes::from(vec![0u8; n])))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// A body with no `Content-Length` is cut at the first chunk that would
+    /// cross the cap; the chunks after it are never pulled.
+    #[tokio::test]
+    async fn read_capped_stops_at_the_cap_without_a_declared_length() {
+        let mut stream = chunks(&[4, 4, 4, 4]);
+        let mut seen = Vec::new();
+        let result = read_capped(&mut stream, 0, 10, |n| seen.push(n)).await;
+        assert!(
+            matches!(result, Err(crate::ClientError::TooLarge { limit: 10 })),
+            "{result:?}"
+        );
+        assert_eq!(seen, vec![4, 8], "the third chunk would cross the cap");
+        let rest = futures_util::StreamExt::count(stream).await;
+        assert_eq!(rest, 1, "the last chunk was never read");
+    }
+
+    #[tokio::test]
+    async fn read_capped_refuses_a_declared_length_over_the_cap_before_reading() {
+        let mut stream = chunks(&[1]);
+        let result = read_capped(&mut stream, 11, 10, |_| {}).await;
+        assert!(matches!(result, Err(crate::ClientError::TooLarge { .. })));
+        assert_eq!(futures_util::StreamExt::count(stream).await, 1);
+    }
+
+    #[tokio::test]
+    async fn read_capped_accepts_exactly_the_cap() {
+        let mut stream = chunks(&[5, 5]);
+        let body = read_capped(&mut stream, 10, 10, |_| {}).await.unwrap();
+        assert_eq!(body.len(), 10);
+    }
 }

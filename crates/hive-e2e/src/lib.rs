@@ -308,9 +308,12 @@ pub fn module_dir() -> PathBuf {
 }
 
 /// Install `meta` at `version` the way the desktop's marketplace does
-/// (`chatty-gpui` `extensions_controller::install_extension`): a remote
-/// module gets a `module.toml` built from its version manifest; a local one
-/// is downloaded (hash and signature checked by hive-client) and written by
+/// (`chatty-gpui` `extensions_controller::install_extension`), into
+/// [`module_dir`]: a remote module gets a `module.toml` built from its
+/// version manifest; a local one is downloaded by
+/// `chatty_core::install::download_wasm_module` (name and version validated,
+/// body capped at 64 MiB while it streams, hash and signature checked by
+/// hive-client) and written, with its install record, by
 /// `chatty_core::install::install_wasm_module`. Any refusal, from either
 /// layer, is the `Err`.
 pub async fn install_from_hive(
@@ -318,7 +321,7 @@ pub async fn install_from_hive(
     meta: &ModuleMetadata,
     version: &str,
 ) -> Result<InstalledExtension, String> {
-    data_home();
+    let module_dir = module_dir();
     let mut extensions = ExtensionsModel::default();
     if matches!(meta.execution_mode.as_str(), "remote" | "remote_only") {
         let manifest = client
@@ -337,12 +340,12 @@ pub async fn install_from_hive(
             &meta.description,
             &meta.pricing_model,
             &manifest,
+            &module_dir,
             &mut extensions,
         )
         .map_err(|e| format!("install: {e}"))
     } else {
-        let download = client
-            .download(&meta.name, version)
+        let download = install::download_wasm_module(client, &meta.name, version, |_, _| {})
             .await
             .map_err(|e| format!("download: {e}"))?;
         install::install_wasm_module(
@@ -352,6 +355,7 @@ pub async fn install_from_hive(
             &meta.display_name,
             &meta.description,
             &meta.pricing_model,
+            &module_dir,
             &mut extensions,
         )
         .map_err(|e| format!("install: {e}"))

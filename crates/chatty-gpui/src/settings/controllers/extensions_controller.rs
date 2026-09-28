@@ -11,7 +11,9 @@ use chatty_core::settings::models::extensions_store::{
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::mcp_store::{McpAuthStatus, McpServerConfig, McpServersModel};
+use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use gpui::{App, AsyncApp, Global};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -254,11 +256,21 @@ pub fn search_marketplace(query: String, cx: &mut App) {
 
 // ── Install / Uninstall ────────────────────────────────────────────────────
 
-/// Install a WASM module (or register a remote module) from the Hive registry.
+/// The configured module directory (Settings → Modules), where installs,
+/// uninstalls and mode switches act.
+fn configured_module_dir(cx: &App) -> PathBuf {
+    PathBuf::from(&cx.global::<ModuleSettingsModel>().module_dir)
+}
+
+/// Install a WASM module (or register a remote module) from the Hive registry
+/// into the configured module directory.
 ///
 /// For `execution_mode = "remote"` / `"remote_only"`: fetches version metadata
 /// to extract capabilities, writes a `module.toml` marker, and registers in
-/// `ExtensionsModel` — no WASM binary is downloaded.
+/// `ExtensionsModel` — no WASM binary is downloaded. Otherwise the `.wasm` is
+/// downloaded through [`install::download_wasm_module`] (name and version
+/// validated first, body capped while it streams, hash and signature
+/// checked) and written with its install record.
 pub fn install_extension(
     name: String,
     version: String,
@@ -268,7 +280,18 @@ pub fn install_extension(
     execution_mode: String,
     cx: &mut App,
 ) {
+    // Refuse a bad registry-supplied name or version before any network or
+    // filesystem work (PL-H5a).
+    if let Err(e) = install::validate_module_name(&name).and(install::validate_version(&version)) {
+        error!(error = %e, "Refusing to install");
+        cx.global_mut::<MarketplaceState>()
+            .set_error(format!("Install failed: {e}"));
+        cx.refresh_windows();
+        return;
+    }
+
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
+    let module_dir = configured_module_dir(cx);
     let mut client = HiveRegistryClient::new(&registry_url);
     if let Some(session) = hive_session(cx) {
         client = client.with_session(session);
@@ -302,6 +325,7 @@ pub fn install_extension(
                     &description,
                     &pricing_model,
                     &version_manifest,
+                    &module_dir,
                     extensions,
                 ) {
                     Ok(ext) => {
@@ -328,148 +352,80 @@ pub fn install_extension(
             .map_err(|e| warn!(error = ?e, "Failed to signal download start in UI"))
             .ok();
 
-            // Phase 1: send request, get headers.
-            let begun = match client.begin_download(&name, &version).await {
-                Ok(b) => b,
-                Err(chatty_core::hive::ClientError::Unauthorized) => {
-                    warn!(name = %name, "Download requires authentication");
+            let downloaded = install::download_wasm_module(&client, &name, &version, |read, total| {
+                if total > 0 {
+                    let progress = (read as f32 / total as f32).min(0.99);
                     cx.update(|cx| {
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.clear_download_progress(&name);
-                        state.set_error(
+                        cx.global_mut::<MarketplaceState>()
+                            .set_download_progress(&name, progress);
+                        cx.refresh_windows();
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update download progress in UI"))
+                    .ok();
+                }
+            })
+            .await;
+
+            cx.update(|cx| {
+                cx.global_mut::<MarketplaceState>().clear_download_progress(&name);
+                let download = match downloaded {
+                    Ok(download) => download,
+                    Err(install::InstallError::Client(
+                        chatty_core::hive::ClientError::Unauthorized,
+                    )) => {
+                        warn!(name = %name, "Download requires authentication");
+                        cx.global_mut::<MarketplaceState>().set_error(
                             "Login required to download modules. Please sign in first.".to_string(),
                         );
                         cx.refresh_windows();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to show auth-required error in UI"))
-                    .ok();
-                    return;
-                }
-                Err(e) => {
-                    error!(error = ?e, name = %name, "Failed to start module download");
-                    cx.update(|cx| {
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.clear_download_progress(&name);
-                        state.set_error(format!("Download failed: {e}"));
-                        cx.refresh_windows();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to show download-start error in UI"))
-                    .ok();
-                    return;
-                }
-            };
-
-            // Phase 2: stream body, updating progress on each chunk.
-            use futures::StreamExt as _;
-            let chatty_core::hive::BegunDownload {
-                total_size: total,
-                registry_hash,
-                signature,
-                publisher_public_key,
-                mut stream,
-            } = begun;
-
-            let mut wasm_bytes: Vec<u8> =
-                if total > 0 { Vec::with_capacity(total as usize) } else { Vec::new() };
-
-            loop {
-                match stream.next().await {
-                    None => break,
-                    Some(Err(e)) => {
-                        error!(error = ?e, name = %name, "Stream error during module download");
-                        cx.update(|cx| {
-                            let state = cx.global_mut::<MarketplaceState>();
-                            state.clear_download_progress(&name);
-                            state.set_error(format!("Download interrupted: {e}"));
-                            cx.refresh_windows();
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to show download-interrupted error in UI"))
-                        .ok();
                         return;
                     }
-                    Some(Ok(chunk)) => {
-                        wasm_bytes.extend_from_slice(&chunk[..]);
-                        if total > 0 {
-                            let progress = (wasm_bytes.len() as f32 / total as f32).min(0.99);
-                            cx.update(|cx| {
-                                cx.global_mut::<MarketplaceState>()
-                                    .set_download_progress(&name, progress);
-                                cx.refresh_windows();
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to update download progress in UI"))
-                            .ok();
-                        }
+                    Err(e) => {
+                        error!(error = ?e, name = %name, "Module download failed");
+                        cx.global_mut::<MarketplaceState>()
+                            .set_error(format!("Download failed: {e}"));
+                        cx.refresh_windows();
+                        return;
+                    }
+                };
+
+                let extensions = cx.global_mut::<ExtensionsModel>();
+                match install::install_wasm_module(
+                    &download,
+                    &name,
+                    &version,
+                    &display_name,
+                    &description,
+                    &pricing_model,
+                    &module_dir,
+                    extensions,
+                ) {
+                    Ok(ext) => {
+                        info!(id = %ext.id, "Installed extension from Hive");
+                        save_extensions_async(extensions.clone(), cx);
+                        module_settings_controller::refresh_runtime(cx);
+                    }
+                    Err(e) => {
+                        error!(error = ?e, "Failed to install extension");
+                        let state = cx.global_mut::<MarketplaceState>();
+                        state.set_error(format!("Install failed: {e}"));
                     }
                 }
-            }
-
-            // Phase 3: verify hash, fetch manifest.
-            match client.finalize_download(wasm_bytes, registry_hash, signature, publisher_public_key, &name, &version).await {
-                Ok(download) => {
-                    cx.update(|cx| {
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.clear_download_progress(&name);
-
-                        let extensions = cx.global_mut::<ExtensionsModel>();
-                        match install::install_wasm_module(
-                            &download,
-                            &name,
-                            &version,
-                            &display_name,
-                            &description,
-                            &pricing_model,
-                            extensions,
-                        ) {
-                            Ok(ext) => {
-                                info!(id = %ext.id, "Installed extension from Hive");
-                                save_extensions_async(extensions.clone(), cx);
-                                module_settings_controller::refresh_runtime(cx);
-                            }
-                            Err(e) => {
-                                error!(error = ?e, "Failed to install extension");
-                                let state = cx.global_mut::<MarketplaceState>();
-                                state.set_error(format!("Install failed: {e}"));
-                            }
-                        }
-                        cx.refresh_windows();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
-                    .ok();
-                }
-                Err(chatty_core::hive::ClientError::Unauthorized) => {
-                    warn!(name = %name, "Finalise requires authentication");
-                    cx.update(|cx| {
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.clear_download_progress(&name);
-                        state.set_error(
-                            "Login required to download modules. Please sign in first.".to_string(),
-                        );
-                        cx.refresh_windows();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to show auth-required error in UI"))
-                    .ok();
-                }
-                Err(e) => {
-                    error!(error = ?e, name = %name, "Failed to finalise module download");
-                    cx.update(|cx| {
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.clear_download_progress(&name);
-                        state.set_error(format!("Download failed: {e}"));
-                        cx.refresh_windows();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to show finalise-download error in UI"))
-                    .ok();
-                }
-            }
+                cx.refresh_windows();
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
+            .ok();
         }
     })
     .detach();
 }
 
-/// Uninstall an extension by ID.
+/// Uninstall an extension by ID (a WASM module's files go from the
+/// configured module directory).
 pub fn uninstall_extension(id: String, cx: &mut App) {
+    let module_dir = configured_module_dir(cx);
     let extensions = cx.global_mut::<ExtensionsModel>();
-    match install::uninstall_extension(&id, extensions) {
+    match install::uninstall_extension(&id, &module_dir, extensions) {
         Ok(()) => {
             info!(id = %id, "Uninstalled extension");
             save_extensions_async(extensions.clone(), cx);
@@ -488,7 +444,7 @@ pub fn uninstall_extension(id: String, cx: &mut App) {
 /// After updating `module.toml` on disk, triggers a module re-scan so the new
 /// mode is reflected immediately in the UI.
 pub fn set_execution_mode(id: String, mode: String, cx: &mut App) {
-    match install::set_module_execution_mode(&id, &mode) {
+    match install::set_module_execution_mode(&id, &mode, &configured_module_dir(cx)) {
         Ok(()) => {
             info!(id = %id, mode = %mode, "Updated module execution mode");
             module_settings_controller::refresh_runtime(cx);
