@@ -18,10 +18,8 @@ use chatty_core::settings::models::ModelsModel;
 pub(crate) use chatty_core::settings::models::execution_settings::{
     TOOL_GROUPS as ALL_TOOL_GROUPS, VALID_TOOL_GROUPS, set_tool_group, tool_group_enabled,
 };
-use chatty_core::settings::models::extensions_store::ExtensionsModel;
 use chatty_core::settings::models::models_store::{ModelConfig, resolve_model_query};
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
-use chatty_core::tools::LocalModuleAgentSummary;
 use clap::{Parser, Subcommand};
 use std::path::Path;
 use std::sync::Arc;
@@ -510,14 +508,12 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         models_result,
         exec_settings_result,
         module_settings_result,
-        extensions_result,
         a2a_agents_result,
     ) = tokio::join!(
         chatty_core::provider_repository().load_all(),
         chatty_core::models_repository().load_all(),
         chatty_core::execution_settings_repository().load(),
         chatty_core::module_settings_repository().load(),
-        chatty_core::extensions_repository().load(),
         chatty_core::a2a_repository().load_all(),
     );
 
@@ -527,9 +523,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // A module settings file in a shape no longer read (agent objects in
     // `virtual_agents`, AGE-614) is an error to fix, not a default to run.
     let module_settings = module_settings_result.context("Failed to load module settings")?;
-    let extensions = extensions_result.unwrap_or_default();
     let remote_agents = a2a_agents_result.unwrap_or_default();
-    let module_agents = discover_module_agents(&module_settings, &extensions);
 
     // --ollama / --openai-compat-url: auto-discover models from a running server
     // and inject ephemeral provider + model configs so no pre-configuration is needed.
@@ -680,7 +674,8 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
 
     // --broker (AGE-376): this leader's own protocol gateway, so
     // `invoke_agent`/`list_agents` can reach its virtual agents —
-    // `local-agent`, or the named team module settings declare (AGE-377) —
+    // the roster's specs: the team's, else what module settings declare,
+    // else `local-agent` and every exposed spec (AGE-377, PL-U5) —
     // the same wiring chatty-gpui's module-settings controller turns on for
     // the desktop. The leader's own provider flags ride along to every
     // worker: a leader configured by `--ollama`/`--openai-compat-url` has
@@ -694,7 +689,8 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // `--team` implies `--broker`: a team is nothing without its workers.
     // A worker never starts one (BI-5): it delegates over its connection.
     let run_broker = starts_a_broker(&cli);
-    // The roster's specs: the team's, else the names module settings list.
+    // The roster's specs: the team's, else the names module settings list,
+    // else every exposed spec (PL-U5).
     let broker_agents = match team.as_ref() {
         Some(team) => team.agents.clone(),
         None if run_broker => chatty_core::agent_spec::load_roster(
@@ -769,7 +765,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             embedding_service,
             user_secrets,
             remote_agents,
-            module_agents,
             spec: spec.clone(),
             team: None,
             is_sub_agent: false,
@@ -803,7 +798,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 embedding_service,
                 user_secrets,
                 remote_agents,
-                module_agents: module_agents.clone(),
                 spec: spec.clone(),
                 team: team.clone(),
                 is_sub_agent: true,
@@ -884,7 +878,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 embedding_service: None,
                 user_secrets: vec![],
                 remote_agents,
-                module_agents,
                 spec,
                 team,
                 is_sub_agent: false,
@@ -1155,52 +1148,6 @@ async fn init_embedding_service(
     }
 
     svc
-}
-
-fn discover_module_agents(
-    module_settings: &chatty_core::settings::models::module_settings::ModuleSettingsModel,
-    extensions: &ExtensionsModel,
-) -> Vec<LocalModuleAgentSummary> {
-    let enabled_ids: std::collections::HashSet<&str> =
-        extensions.wasm_module_ids().into_iter().collect();
-    let root = std::path::Path::new(&module_settings.module_dir);
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-
-    let mut agents = Vec::new();
-    for entry in entries.flatten() {
-        let manifest_path = entry.path().join("module.toml");
-        if !manifest_path.is_file() {
-            continue;
-        }
-
-        match chatty_module_registry::ModuleManifest::from_file(&manifest_path) {
-            Ok(manifest)
-                if manifest.capabilities.agent && enabled_ids.contains(manifest.name.as_str()) =>
-            {
-                agents.push(LocalModuleAgentSummary {
-                    name: manifest.name,
-                    version: manifest.version,
-                    description: manifest.description,
-                    tools: manifest.capabilities.tools,
-                    supports_a2a: manifest.protocols.a2a,
-                    execution_mode: manifest.execution_mode.to_string(),
-                });
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    error = ?error,
-                    manifest = %manifest_path.display(),
-                    "Failed to parse module manifest for TUI agent discovery"
-                );
-            }
-        }
-    }
-
-    agents.sort_by(|left, right| left.name.cmp(&right.name));
-    agents
 }
 
 fn resolve_model(query: Option<&str>, models: &ModelsModel) -> Result<ModelConfig> {

@@ -37,9 +37,10 @@ pub struct ModuleSettingsModel {
     pub endpoint_budgets: HashMap<String, usize>,
     /// The broker's virtual agents (ADR-0011 C10), by agent spec name
     /// (AGE-614): each names a spec in `<workspace>/.chatty/agents/`, the
-    /// data directory's `chatty/agents/`, or the presets. Empty means the
-    /// one default worker, `local-agent`, which runs the roster's default
-    /// model with the leader's tools.
+    /// data directory's `chatty/agents/`, or the presets. Empty means every
+    /// exposed spec the workspace can reach, `local-agent` first
+    /// ([`agent_spec::exposed_specs`](crate::agent_spec::exposed_specs),
+    /// PL-U5); naming agents here narrows the roster to them.
     ///
     /// Roles are declared here rather than passed on `invoke_agent`, so the
     /// leader's tool schema and prompt stay identical whatever the team. A
@@ -124,14 +125,11 @@ impl ModuleSettingsModel {
             .max(1)
     }
 
-    /// The names the broker publishes as virtual agents: what was declared,
-    /// or the one default worker when nothing was.
-    pub fn virtual_agent_names(&self) -> Vec<String> {
-        if self.virtual_agents.is_empty() {
-            vec![crate::tools::LOCAL_AGENT_NAME.to_string()]
-        } else {
-            self.virtual_agents.clone()
-        }
+    /// The names the broker publishes as virtual agents, looked up from
+    /// `workspace`: what was declared, or every exposed spec when nothing
+    /// was ([`agent_spec::roster_names`](crate::agent_spec::roster_names)).
+    pub fn roster_names(&self, workspace: Option<&std::path::Path>) -> Vec<String> {
+        crate::agent_spec::roster_names(&self.virtual_agents, workspace)
     }
 }
 
@@ -304,17 +302,18 @@ mod tests {
         assert!(old.endpoint_budgets.is_empty());
     }
 
-    /// ADR-0011 C10: nothing declared means the one default worker, so a
-    /// settings file written before virtual agents existed publishes exactly
-    /// what it did before.
+    /// PL-U5: nothing declared means every exposed spec, `local-agent`
+    /// first.
     #[test]
-    fn no_declared_virtual_agents_means_the_one_default_worker() {
+    fn no_declared_virtual_agents_means_every_exposed_spec() {
         let settings = ModuleSettingsModel::default();
         assert!(settings.virtual_agents.is_empty());
         assert_eq!(
-            settings.virtual_agent_names(),
-            vec!["local-agent".to_string()]
+            settings.roster_names(None),
+            crate::agent_spec::roster_names(&[], None),
+            "nothing declared is every exposed spec"
         );
+        assert_eq!(settings.roster_names(None)[0], "local-agent");
 
         let old: ModuleSettingsModel =
             serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
@@ -335,9 +334,9 @@ mod tests {
         let restored: ModuleSettingsModel = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.virtual_agents, original.virtual_agents);
         assert_eq!(
-            restored.virtual_agent_names(),
+            restored.roster_names(None),
             vec!["local-coder".to_string(), "local-reviewer".to_string()],
-            "declared names replace the default worker rather than joining it"
+            "declared names replace the default roster rather than joining it"
         );
     }
 

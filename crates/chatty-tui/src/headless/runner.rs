@@ -404,7 +404,6 @@ impl HeadlessRunner {
                 skill_service: Some(self.skill_service.clone()),
                 search_settings: self.config.search_settings.clone(),
                 embedding_service: self.config.embedding_service.clone(),
-                module_agents: self.config.module_agents.clone(),
                 gateway_port: self.config.broker_port.or(self
                     .config
                     .module_settings
@@ -413,7 +412,12 @@ impl HeadlessRunner {
                 lazy_broker: self.config.broker.clone(),
                 local_agents: match self.config.team.as_ref() {
                     Some(team) => team.agent_names(),
-                    None => self.config.module_settings.virtual_agent_names(),
+                    None => self.config.module_settings.roster_names(
+                        self.execution_settings
+                            .workspace_dir
+                            .as_deref()
+                            .map(std::path::Path::new),
+                    ),
                 },
                 remote_agents: self.config.remote_agents.clone(),
                 plugin_host: crate::engine::plugin_host(

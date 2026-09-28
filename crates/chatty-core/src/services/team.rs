@@ -155,13 +155,16 @@ impl Team {
         settings
     }
 
-    /// The names the run's broker publishes — the roster's, or the one
-    /// default worker when the file declares none — exactly as
-    /// `ModuleSettingsModel::virtual_agent_names` answers it for a declared
-    /// roster.
+    /// The names the run's broker publishes: the roster's, or the one
+    /// default worker when the file declares none, as
+    /// [`resolve_virtual_agents`](super::virtual_agents::resolve_virtual_agents)
+    /// resolves an empty roster. A team never widens to every exposed spec.
     pub fn agent_names(&self) -> Vec<String> {
-        self.run_module_settings(&ModuleSettingsModel::default())
-            .virtual_agent_names()
+        if self.file.agents.is_empty() {
+            vec![crate::tools::LOCAL_AGENT_NAME.to_string()]
+        } else {
+            self.file.agents.clone()
+        }
     }
 
     /// The leader's turn budget for the run, when the file names one.
@@ -496,14 +499,14 @@ mod tests {
         let mut team = load_team("coder-reviewer", None, None).unwrap();
         team.file.max_agent_turns = None;
         let run = team.run_module_settings(&on_disk);
-        assert_eq!(run.virtual_agent_names(), ["local-coder", "local-reviewer"]);
+        assert_eq!(run.virtual_agents, ["local-coder", "local-reviewer"]);
         assert_eq!(team.agent_names(), ["local-coder", "local-reviewer"]);
         assert!(run.team.verification.is_none());
         assert_eq!(
             run.gateway_port, 9999,
             "everything else is the on-disk value"
         );
-        assert_eq!(on_disk.virtual_agent_names(), ["stale"]);
+        assert_eq!(on_disk.virtual_agents, ["stale"]);
         assert_eq!(on_disk.team.verification.as_deref(), Some("old"));
         team.apply_turn_budget(&mut execution_settings);
         assert_eq!(execution_settings.max_agent_turns, before);

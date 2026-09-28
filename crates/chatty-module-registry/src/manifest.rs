@@ -90,8 +90,6 @@ pub(crate) struct RawModuleSection {
 pub(crate) struct RawCapabilities {
     #[serde(default)]
     pub tools: Vec<String>,
-    #[serde(default)]
-    pub agent: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,8 +97,6 @@ pub(crate) struct RawCapabilities {
 pub(crate) struct RawProtocols {
     #[serde(default)]
     pub mcp: bool,
-    #[serde(default)]
-    pub a2a: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -165,9 +161,6 @@ impl fmt::Display for ExecutionMode {
 pub struct ModuleCapabilities {
     /// Tool names the module exposes.
     pub tools: Vec<String>,
-    /// Read only by the module-agent listing PL-U5 removes; a
-    /// `chatty:plugin@0.3.0` plugin is never an agent.
-    pub agent: bool,
 }
 
 /// Protocol flags declared by a module.
@@ -175,9 +168,6 @@ pub struct ModuleCapabilities {
 pub struct ModuleProtocols {
     /// Serve the plugin's tools to external MCP clients at `/mcp/{name}`.
     pub mcp: bool,
-    /// Read only by the module-agent listing PL-U5 removes and by remote
-    /// forwarding (PL-H8b); local plugins have no A2A route.
-    pub a2a: bool,
 }
 
 /// Resource limits declared by a module, already clamped to the host
@@ -321,11 +311,9 @@ impl ModuleManifest {
             execution_mode,
             capabilities: ModuleCapabilities {
                 tools: raw.capabilities.tools,
-                agent: raw.capabilities.agent,
             },
             protocols: ModuleProtocols {
                 mcp: raw.protocols.mcp,
-                a2a: raw.protocols.a2a,
             },
             resources: ModuleResourceLimits {
                 max_memory_mb,
@@ -419,9 +407,7 @@ max_execution_ms = 30000
         assert_eq!(m.description, "A simple echo plugin for testing");
         assert_eq!(m.wasm_path, Some(PathBuf::from("/fake/echo.wasm")));
         assert_eq!(m.capabilities.tools, vec!["echo", "reverse"]);
-        assert!(!m.capabilities.agent);
         assert!(m.protocols.mcp);
-        assert!(!m.protocols.a2a);
         assert_eq!(m.resources.max_memory_mb, 64);
         assert_eq!(m.resources.max_execution_ms, 30000);
     }
@@ -439,9 +425,7 @@ wasm = "minimal.wasm"
         assert_eq!(m.version, "1.0.0");
         assert!(m.description.is_empty());
         assert!(m.capabilities.tools.is_empty());
-        assert!(!m.capabilities.agent);
         assert!(!m.protocols.mcp);
-        assert!(!m.protocols.a2a);
         assert_eq!(m.resources.max_memory_mb, 0);
         assert_eq!(m.resources.max_execution_ms, 0);
         assert_eq!(m.execution_mode, ExecutionMode::Local);
@@ -490,9 +474,6 @@ wasm = ""
 name = "x"
 version = "1.0.0"
 execution_mode = "remote"
-
-[protocols]
-a2a = true
 "#;
         let m = parse(toml).expect("remote module without wasm should parse");
         assert_eq!(m.execution_mode, ExecutionMode::Remote);
@@ -556,14 +537,17 @@ wasm = "sub/mod.wasm"
         }
     }
 
-    /// `chat` and `openai_compat` described the 0.2.0 agent world, which
-    /// PL-U3 removed without a compatibility window: naming them is an error
-    /// that names the field.
+    /// `chat`, `agent`, `openai_compat` and `a2a` described the 0.2.0
+    /// agent world, which PL-U3 and PL-U5 removed without a compatibility
+    /// window — a plugin is never an agent: naming them is an error that
+    /// names the field.
     #[test]
     fn removed_agent_world_keys_are_refused() {
         for (extra, field) in [
             ("\n[capabilities]\nchat = true\n", "chat"),
+            ("\n[capabilities]\nagent = true\n", "agent"),
             ("\n[protocols]\nopenai_compat = true\n", "openai_compat"),
+            ("\n[protocols]\na2a = true\n", "a2a"),
         ] {
             let toml = format!("{MINIMAL}{extra}");
             let err = format!("{:#}", parse(&toml).expect_err(&toml));

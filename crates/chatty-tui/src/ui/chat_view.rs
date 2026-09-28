@@ -130,16 +130,7 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
         .iter()
         .filter(|agent| agent.enabled)
         .count();
-    let local_module_count = engine
-        .module_agents
-        .iter()
-        .filter(|agent| !matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
-        .count();
-    let remote_module_count = engine
-        .module_agents
-        .iter()
-        .filter(|agent| matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
-        .count();
+    let local_agent_count = engine.agent_roster.len();
 
     lines.extend([
         Line::from(""),
@@ -222,12 +213,10 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
                     loading_badge("semantic memory")
                 },
                 badge("modules", engine.module_settings.enabled),
-                badge(format!("module local {local_module_count}"), local_module_count > 0),
                 badge(
-                    format!("module remote {remote_module_count}"),
-                    remote_module_count > 0,
+                    format!("agents {local_agent_count}"),
+                    local_agent_count > 0 && !engine.is_sub_agent,
                 ),
-                badge("local agent", !engine.is_sub_agent),
                 badge(format!("remote {remote_agent_count}"), remote_agent_count > 0),
             ]),
         ),
@@ -242,6 +231,8 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
                 command_span("/modules"),
                 Span::raw(" "),
                 command_span("/agent"),
+                Span::raw(" "),
+                command_span("/agents"),
                 Span::raw(" "),
                 command_span("/add-dir"),
                 Span::raw(" "),
