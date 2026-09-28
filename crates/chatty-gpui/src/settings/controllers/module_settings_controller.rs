@@ -262,12 +262,13 @@ fn apply_gateway_result(
     settings: &ModuleSettingsModel,
     generation: u64,
     result: Result<ProtocolGateway>,
+    gateway_workspace: Option<std::path::PathBuf>,
     cx: &mut App,
 ) {
     // A module's tools reach an agent as a plugin its spec lists (PL-U2),
     // not as an MCP server pointed at this gateway; `/mcp/{module}` stays
     // for external MCP clients.
-    {
+    let started = {
         let state = cx.global_mut::<DiscoveredModulesModel>();
         if state.refresh_generation != generation {
             return;
@@ -280,15 +281,35 @@ fn apply_gateway_result(
                     settings.gateway_port
                 );
                 state.gateway = Some(gateway);
+                state.gateway_workspace = gateway_workspace;
+                true
             }
             Err(err) => {
                 state.gateway_status = format!("Gateway failed to start: {err}");
                 state.gateway = None;
+                state.gateway_workspace = None;
+                false
             }
         }
-    }
+    };
 
     cx.refresh_windows();
+
+    // The gateway (and thus the roster it actually serves, AGE-719) just
+    // became live — later than `apply_scan_snapshot`'s own
+    // `RebuildRequired`, which fires before the gateway exists. Rebuild the
+    // active conversation's agent now so its `local_agents` picks up the
+    // roster this gateway was actually built for, rather than staying
+    // pinned to whatever it guessed before the gateway existed.
+    if started
+        && let Some(notifier) = cx
+            .try_global::<GlobalAgentConfigNotifier>()
+            .and_then(|g| g.try_upgrade())
+    {
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(AgentConfigEvent::RebuildRequired);
+        });
+    }
 }
 
 pub fn refresh_runtime(cx: &mut App) {
@@ -384,6 +405,11 @@ pub fn refresh_runtime(cx: &mut App) {
             .await
             .unwrap_or_else(|err| Err(anyhow::anyhow!("Module registry task failed: {err}")));
 
+            // The workspace this gateway's roster actually ends up serving
+            // (AGE-719); stays `None` on non-unix, where there are no
+            // virtual-agent runners to resolve one for.
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut gateway_workspace: Option<std::path::PathBuf> = None;
             let gateway_result = match registry_result {
                 Ok(registry) => {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
@@ -465,7 +491,7 @@ pub fn refresh_runtime(cx: &mut App) {
                     {
                         let participants = gateway.participants();
                         broker_runner::serve_socket(&broker_runner::socket_path());
-                        let (workspace_dir, specs) = cx
+                        let (resolved_workspace, specs) = cx
                             .update(|cx| {
                                 let exec = cx.global::<ExecutionSettingsModel>();
                                 // A worker inherits the desktop's approval
@@ -488,18 +514,38 @@ pub fn refresh_runtime(cx: &mut App) {
                                     .try_global::<ProviderModel>()
                                     .map(|p| p.providers())
                                     .unwrap_or(&[]);
+                                // The same workspace a conversation's own
+                                // `local_agents` resolves to
+                                // (`gateway_and_roster`, AGE-719): the
+                                // active conversation's own working
+                                // directory when it has one, else the
+                                // shared default.
+                                let active_conv_workspace = cx
+                                    .try_global::<crate::chatty::models::ConversationsStore>()
+                                    .and_then(|store| {
+                                        store
+                                            .active_id()
+                                            .and_then(|id| store.get_conversation(id))
+                                    })
+                                    .and_then(|conv| conv.working_dir())
+                                    .cloned();
+                                let resolved_workspace = chatty_core::agent_spec::roster_workspace(
+                                    exec.workspace_dir.as_deref().map(Path::new),
+                                    active_conv_workspace.as_deref(),
+                                )
+                                .map(Path::to_path_buf);
                                 // The roster's specs, looked up from the
                                 // workspace a worker's tree comes from. A
                                 // spec that does not load leaves the
                                 // broker without workers, loudly.
                                 let agents = match load_roster(
                                     &settings.virtual_agents,
-                                    exec.workspace_dir.as_deref().map(Path::new),
+                                    resolved_workspace.as_deref(),
                                 ) {
                                     Ok(agents) => agents,
                                     Err(e) => {
                                         error!(error = ?e, "Failed to load the virtual agents' specs");
-                                        return (exec.workspace_dir.clone(), Vec::new());
+                                        return (resolved_workspace, Vec::new());
                                     }
                                 };
                                 let specs = resolve_virtual_agents(
@@ -509,12 +555,13 @@ pub fn refresh_runtime(cx: &mut App) {
                                     &agents,
                                     &common_args,
                                 );
-                                (exec.workspace_dir.clone(), specs)
+                                (resolved_workspace, specs)
                             })
                             .unwrap_or((None, Vec::new()));
+                        gateway_workspace = resolved_workspace.clone();
                         for runner in broker_runner::local_runners(
                             participants,
-                            workspace_dir,
+                            resolved_workspace.map(|dir| dir.to_string_lossy().to_string()),
                             settings.default_endpoint_budget,
                             specs,
                         ) {
@@ -530,7 +577,7 @@ pub fn refresh_runtime(cx: &mut App) {
             let port = settings.gateway_port;
             let error_text = gateway_result.as_ref().err().map(|e| e.to_string());
             let _ = cx.update(|cx| {
-                apply_gateway_result(&settings, generation, gateway_result, cx);
+                apply_gateway_result(&settings, generation, gateway_result, gateway_workspace, cx);
             });
             let _ = reply.send(match error_text {
                 None => Ok(port),

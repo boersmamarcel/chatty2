@@ -2,6 +2,7 @@ use chatty_core::services::lazy_broker::LazyBroker;
 use chatty_module_registry::TrustLevel;
 use chatty_protocol_gateway::ProtocolGateway;
 use gpui::Global;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,14 @@ pub struct DiscoveredModulesModel {
     /// gateway setting is on), and replaced outright on every later
     /// refresh.
     pub lazy_broker: Option<Arc<dyn LazyBroker>>,
+    /// The workspace the live `gateway`'s roster was actually resolved from
+    /// (AGE-719, PL-U5b) — `None` both before any gateway has started and
+    /// for one built with no workspace at all. A conversation's own
+    /// `local_agents` compares its own resolved workspace against this
+    /// (only meaningful while `gateway` is `Some`) before publishing a
+    /// name, so it can never claim one the running broker was not, in
+    /// fact, built to serve.
+    pub gateway_workspace: Option<PathBuf>,
 }
 
 impl Default for DiscoveredModulesModel {
@@ -58,6 +67,7 @@ impl Default for DiscoveredModulesModel {
             refresh_generation: 0,
             gateway: None,
             lazy_broker: None,
+            gateway_workspace: None,
         }
     }
 }

@@ -53,20 +53,36 @@ mod slash_commands;
 
 pub(crate) use conversation_ops_modify::move_ui_enabled;
 
-/// The broker's gateway port and the local roster's names (PL-U5): the
-/// specs module settings declare, else every exposed spec the workspace
-/// reaches. `None` without module settings.
-fn gateway_and_roster(cx: &App) -> Option<(u16, Vec<String>)> {
-    let workspace = cx
-        .try_global::<crate::settings::models::ExecutionSettingsModel>()
-        .and_then(|settings| settings.workspace_dir.clone());
-    cx.try_global::<crate::settings::models::ModuleSettingsModel>()
-        .map(|m| {
-            (
-                m.gateway_port,
-                m.roster_names(workspace.as_deref().map(std::path::Path::new)),
-            )
-        })
+/// The broker's gateway port and the local roster's names (PL-U5) for a
+/// conversation whose own effective workspace is `workspace` (its own
+/// working directory when it has one, else the shared default — the same
+/// value the caller already resolved for its `exec_settings`, AGE-719).
+/// `None` without module settings.
+///
+/// The names come back empty, with a loud `error!`, when a broker/gateway
+/// is already running but was built for a *different* workspace
+/// (`chatty_core::agent_spec::roster_workspace_matches`): the point of
+/// AGE-719 is that a conversation must never claim an agent the live
+/// broker cannot actually reach, even momentarily while the broker has not
+/// caught up with a workspace change yet. No broker running yet is not a
+/// disagreement — its own resolved roster is the best guess available
+/// until one starts (the lazy broker, BI-2/AGE-634, builds on first use).
+fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<String>)> {
+    let m = cx.try_global::<crate::settings::models::ModuleSettingsModel>()?;
+    let discovered = cx.try_global::<crate::settings::models::DiscoveredModulesModel>();
+    let broker_is_live = discovered.is_some_and(|d| d.gateway.is_some());
+    let broker_workspace = discovered.and_then(|d| d.gateway_workspace.as_deref());
+    if !chatty_core::agent_spec::roster_workspace_matches(workspace, broker_workspace, broker_is_live)
+    {
+        error!(
+            conversation_workspace = ?workspace,
+            broker_workspace = ?broker_workspace,
+            "conversation workspace and the running broker's roster workspace disagree; \
+             listing no local agents rather than one the broker cannot reach"
+        );
+        return Some((m.gateway_port, Vec::new()));
+    }
+    Some((m.gateway_port, m.roster_names(workspace)))
 }
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
@@ -303,7 +319,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let embedding_service = get_embedding_service(cx);
     let skill_service = get_skill_service(cx);
     let (gateway_port, local_agents) = cx
-        .update(|cx| gateway_and_roster(cx))
+        .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
         .ok()
         .flatten()
         .unzip();

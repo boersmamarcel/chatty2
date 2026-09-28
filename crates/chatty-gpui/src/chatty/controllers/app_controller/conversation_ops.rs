@@ -321,6 +321,7 @@ impl ChattyApp {
                         theme_colors,
                         search_settings,
                         mut session,
+                        built_workspace_dir,
                     ) = cx.update(|cx| {
                         let mut settings = cx
                             .global::<crate::settings::models::ExecutionSettingsModel>()
@@ -332,6 +333,10 @@ impl ChattyApp {
                                     .to_string(),
                             );
                         }
+                        let built_workspace_dir = settings
+                            .workspace_dir
+                            .as_ref()
+                            .map(|dir| normalize_workspace_path(Path::new(dir)));
                         // The conversation's session owns the stores its
                         // agent's tools raise requests on (AGE-195).
                         let session = desktop_session(cx);
@@ -348,13 +353,15 @@ impl ChattyApp {
                             Some(colors),
                             search_cfg,
                             session,
+                            built_workspace_dir,
                         )
                     })?;
 
                     // Wait for memory service init to complete before building the agent
                     let memory_service = await_memory_service(cx).await;
                     let embedding_service = get_embedding_service(cx);
-                    let (gateway_port, local_agents) = cx.update(|cx| gateway_and_roster(cx))
+                    let (gateway_port, local_agents) = cx
+                        .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
                         .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                         .ok()
                         .flatten()
@@ -515,7 +522,6 @@ impl ChattyApp {
         } else {
             // Slow path: fetch from SQLite, restore, then display
             let repo = self.conversation_repo.clone();
-            let (gateway_port, local_agents) = gateway_and_roster(cx).unzip();
             // The broker starts itself on this call if it has not already
             // (BI-2, AGE-634).
             let lazy_broker = cx
@@ -553,6 +559,27 @@ impl ChattyApp {
                 match repo.load_one(&conv_id).await {
                     Ok(Some(data)) => {
                         let embedding_service = get_embedding_service(cx);
+                        // The persisted conversation's own working directory
+                        // (its `local_agents`' workspace, AGE-719) was not
+                        // known until now — read it the same way
+                        // `restore_conversation_from_data` will resolve
+                        // `exec_settings.workspace_dir` right below, so both
+                        // land on the same effective workspace.
+                        let conv_workspace_dir = data
+                            .working_dir
+                            .as_ref()
+                            .map(|dir| normalize_workspace_path(Path::new(dir)));
+                        let effective_workspace = chatty_core::agent_spec::roster_workspace(
+                            exec_settings.workspace_dir.as_deref().map(Path::new),
+                            conv_workspace_dir.as_deref(),
+                        )
+                        .map(Path::to_path_buf);
+                        let (gateway_port, local_agents) = cx
+                            .update(|cx| gateway_and_roster(cx, effective_workspace.as_deref()))
+                            .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
+                            .ok()
+                            .flatten()
+                            .unzip();
                         match Self::restore_conversation_from_data(
                             &mut session, data, &models, &providers, &mcp_service,
                             AgentBuildContext {
