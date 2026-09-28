@@ -38,7 +38,7 @@ use super::protocol::{
 };
 use chatty_fabric::{
     AgentOrigin, CallChain, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName,
-    NodeState, RunId, RunPermit, SpawnContext, TaskTable, WeakRunPermit,
+    NodeState, RunId, RunPermit, SpawnContext, SwarmItem, TaskTable, WeakRunPermit,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -65,6 +65,9 @@ pub enum TaskUpdate {
         text: String,
         last_chunk: bool,
     },
+    /// One of the worker's own turns or tool events, on a task sent with
+    /// `swarmEvents` (TB-1). Untagged: the broker's call path tags it.
+    Event(SwarmItem),
 }
 
 /// The stream of updates for one submitted task.
@@ -544,6 +547,7 @@ impl ParticipantRegistry {
                 capture_conversation: task.capture_conversation,
                 spawn_context: task.spawn_context,
                 handoff: task.handoff,
+                swarm_events: task.swarm_events,
             })
             .is_err()
         {
@@ -656,6 +660,9 @@ impl ParticipantRegistry {
                 text,
                 last_chunk,
             } => (task_id, TaskUpdate::Artifact { text, last_chunk }, false),
+            ParticipantFrame::Event { task_id, event } => {
+                (task_id, TaskUpdate::Event(event), false)
+            }
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
             ParticipantFrame::Call { id, .. } | ParticipantFrame::CallInput { id, .. } => {

@@ -243,6 +243,25 @@ broker → {"v":2,"type":"call_input_required","id":1,"task":"task-…","request
 worker → {"v":2,"type":"call_input","id":1,"task":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}
 ```
 
+**The root sees every nested run (TB-1, AGE-663).** A run a worker's call
+starts is nested under the root's delegation. When the root's call is
+listening — every root `invoke_agent` over its broker is — the broker sends
+that run's `task` frame with `"swarmEvents":true`, and the worker reports its
+own turns and tool events as `event` frames beside its usual ones
+(`{"v":2,"type":"event","taskId":"task-…","event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}`).
+The broker forwards them to the root's call, tagged with
+`(root_task_id, node, chain)` from its own task table — never from the frame,
+whose extra fields are dropped when it is parsed — together with what it reads
+off the run's own frames: its text as a byte count (`{"kind":"text","bytes":15}`;
+the text itself stays with the run's caller), its usage whole, and its end.
+It batches per node and flushes at most once every 250 ms, one batch per node,
+the last before the root's result; nothing is forwarded per token. The root's
+session emits each batch as `SessionEvent::SwarmEvent` — a view of the tree,
+not a bill: the delegation's own progress and usage still arrive as
+`SessionEvent::Delegation`. A task nobody forwards gets no `event` frames, so
+its wire is unchanged (`nested_events_reach_the_root_tagged`,
+`forwarding_is_bounded`, `worker_cannot_forge_tags`).
+
 **Spawn context: sub-leaders use the root broker (ADR-0020 invariants 5–6,
 BI-5, AGE-637).** Only a root process starts a broker. A sub-leader — a worker
 whose spec delegates in turn — is spawned with no `--broker`, and

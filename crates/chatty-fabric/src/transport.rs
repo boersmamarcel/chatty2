@@ -141,6 +141,10 @@ pub enum CallEvent {
     /// worker's connection both carry the answer back down, so a question
     /// climbs any number of hops (BI-5).
     InputRequired { task: String, request: Value },
+    /// A batch of what one run nested under this call did, tagged by the
+    /// broker (TB-1). Only a root call receives these: a worker's calls
+    /// are nested runs themselves, whose events go to the root directly.
+    Swarm(crate::swarm::SwarmEvent),
     /// The call's result. The last item of a successful stream.
     Result(Value),
 }

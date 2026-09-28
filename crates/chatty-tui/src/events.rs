@@ -92,6 +92,9 @@ pub enum AppEvent {
     /// A turn's sub-agent progress, typed: the session records it in the
     /// trace and the transcript renders it as a line (AGE-274).
     Delegation(chatty_core::tools::invoke_agent_tool::InvokeAgentProgress),
+    /// A batch of what a run nested under a delegation did, tagged by the
+    /// broker (TB-1).
+    SwarmEvent(chatty_fabric::SwarmEvent),
 
     // ── Terminal events ──────────────────────────────────────────────────
     TerminalInput(CrosstermEvent),
@@ -173,6 +176,7 @@ impl std::fmt::Debug for AppEvent {
             Self::DelegationProgress(s) => f.debug_tuple("DelegationProgress").field(s).finish(),
             Self::DelegationFinished(s) => f.debug_tuple("DelegationFinished").field(s).finish(),
             Self::Delegation(p) => f.debug_tuple("Delegation").field(p).finish(),
+            Self::SwarmEvent(e) => f.debug_tuple("SwarmEvent").field(e).finish(),
             Self::TerminalInput(e) => f.debug_tuple("TerminalInput").field(e).finish(),
             Self::Tick => write!(f, "Tick"),
         }
@@ -222,6 +226,7 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
             SessionEvent::PluginUsage(usage) => AppEvent::PluginUsage(usage),
             SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
             SessionEvent::Delegation(progress) => AppEvent::Delegation(progress),
+            SessionEvent::SwarmEvent(event) => AppEvent::SwarmEvent(event),
             SessionEvent::Error(error) => AppEvent::StreamError(error),
             SessionEvent::Cancelled => AppEvent::StreamCancelled,
             SessionEvent::TurnEnded => AppEvent::StreamCompleted,
