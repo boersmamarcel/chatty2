@@ -55,9 +55,13 @@ pub fn may_call(caller: CallerView, callee: &AgentSpec) -> Result<(), Refusal> {
 /// asks before a node's `invoke_agent` (DP-2). A name with no spec here —
 /// the default `local-agent`, a registered participant — is a bare spec:
 /// it lists nobody and is exposed to anyone.
+///
+/// The root's own calls are checked against the spec it runs as, when it
+/// runs as one ([`with_root`](Self::with_root), AGE-745).
 #[derive(Clone, Debug, Default)]
 pub struct SpecPolicy {
     specs: BTreeMap<String, AgentSpec>,
+    root: Option<AgentSpec>,
 }
 
 impl SpecPolicy {
@@ -67,7 +71,16 @@ impl SpecPolicy {
                 .into_iter()
                 .map(|spec| (spec.agent.name.clone(), spec))
                 .collect(),
+            root: None,
         }
+    }
+
+    /// Check the root's calls against `root`, the spec the broker's root
+    /// runs as: a `--team` leader, an `--agent <spec>` root. `None` is a
+    /// plain root, which may call anyone.
+    pub fn with_root(mut self, root: Option<AgentSpec>) -> Self {
+        self.root = root;
+        self
     }
 
     /// The policy over the specs a broker publishes as virtual agents.
@@ -91,6 +104,13 @@ impl CallPolicy for SpecPolicy {
             },
             &self.spec(callee),
         )
+    }
+
+    fn root_may_call(&self, callee: &str) -> Result<(), Refusal> {
+        match &self.root {
+            Some(root) => may_call(CallerView { spec: root }, &self.spec(callee)),
+            None => Ok(()),
+        }
     }
 
     /// The callee spec's `[budget]` (DP-3): `max_agent_turns` (`0` is no

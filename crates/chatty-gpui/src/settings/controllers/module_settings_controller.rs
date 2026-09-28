@@ -569,7 +569,10 @@ pub fn refresh_runtime(cx: &mut App) {
                             .unwrap_or((None, Vec::new()));
                         gateway_workspace = resolved_workspace.clone();
                         // A node's call is checked against the roster's
-                        // specs before anything is spawned (PL-S2).
+                        // specs before anything is spawned (PL-S2). The
+                        // root is the desktop's conversation, which is not
+                        // built from a spec, so it may call anyone
+                        // (AGE-745).
                         gateway = gateway.with_call_policy(Arc::new(
                             chatty_core::services::delegation_policy::SpecPolicy::for_agents(
                                 &specs,

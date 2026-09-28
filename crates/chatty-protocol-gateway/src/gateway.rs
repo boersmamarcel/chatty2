@@ -253,9 +253,9 @@ impl ProtocolGateway {
         self
     }
 
-    /// Check every node's `invoke_agent` against `policy` — the specs'
-    /// `delegates_to`, `exposed` and `callers` — before anything is spawned
-    /// (PL-S2). Set it before [`calls`](Self::calls) is first asked for.
+    /// Check every `invoke_agent`, the root's included, against `policy` —
+    /// the specs' `delegates_to`, `exposed` and `callers` — before anything
+    /// is spawned (PL-S2, AGE-745). Set it before [`calls`](Self::calls) is first asked for.
     pub fn with_call_policy(mut self, policy: Arc<dyn CallPolicy>) -> Self {
         self.call_policy = Some(policy);
         self

@@ -225,3 +225,67 @@ async fn may_call_enforced_at_broker() {
         ]
     );
 }
+
+/// The `--team audit` run (AGE-745): a leader that lists `kit-analyst` and
+/// `kit-writer` calls `kit-checker`, which is on the roster. The broker's
+/// root runs as that leader, so the call is refused with `not_listed`
+/// before `kit-checker` is spawned, and writes one refusal row.
+#[tokio::test]
+async fn team_leader_may_call_enforced() {
+    let mut lead = AgentSpec::named("kit-lead");
+    lead.swarm.delegates_to = vec!["kit-analyst".to_string(), "kit-writer".to_string()];
+    let kit = SwarmKit::start_led(
+        lead,
+        vec![
+            AgentDef::new("kit-analyst", "kit/analyst", Endpoint::Sse),
+            AgentDef::new("kit-writer", "kit/writer", Endpoint::Ndjson),
+            AgentDef::new("kit-checker", "kit/checker", Endpoint::Ndjson),
+        ],
+        Script::new(),
+        Script::new(),
+    )
+    .await;
+
+    let run = kit.run_leader_to("kit-checker", "Check it.").await;
+    let refused = format!("{:?}", run.output);
+    assert!(
+        refused.contains("not_listed: kit-lead may not call kit-checker"),
+        "the leader reads the refusal: {refused}"
+    );
+
+    assert!(kit.participants().admitted().is_empty(), "nothing spawned");
+    assert!(run.requests.is_empty(), "no model was asked");
+    assert_eq!(
+        edges(&kit),
+        [row(
+            "refusal",
+            "root",
+            "kit-checker",
+            "not_listed: kit-lead may not call kit-checker"
+        )]
+    );
+}
+
+/// A plain root, one that runs as no spec, keeps calling any agent on the
+/// roster: its own tools decide whether it delegates at all (AGE-745).
+#[tokio::test]
+async fn root_without_spec_unchanged() {
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new("kit-analyst", "kit/analyst", Endpoint::Sse),
+            AgentDef::new("kit-checker", "kit/checker", Endpoint::Ndjson),
+        ],
+        Script::new(),
+        Script::new().route("kit/checker", [Reply::text("Checked.")]),
+    )
+    .await;
+
+    let run = kit.run_leader_to("kit-checker", "Check it.").await;
+    let out = run.output.as_ref().expect("the call completes");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response, "Checked.");
+    assert_eq!(
+        edges(&kit),
+        [row("task", "root", "kit-checker-0", "completed")]
+    );
+}

@@ -219,10 +219,16 @@ pub enum Refusal {
     BudgetSpent { what: String },
 }
 
-/// The spec rules a broker asks before a node's call (DP-1's `may_call`):
-/// may a node started as spec `caller` call spec `callee`?
+/// The spec rules a broker asks before a call (DP-1's `may_call`): may a
+/// node started as spec `caller` call spec `callee`, and may the root?
 pub trait CallPolicy: Send + Sync {
     fn may_call(&self, caller: &str, callee: &str) -> Result<(), Refusal>;
+
+    /// May the broker's root call spec `callee`? A root that runs as a spec
+    /// (a `--team` leader, an `--agent <spec>` root) is checked like any
+    /// caller; a plain root, whose tools already decide whether it may
+    /// delegate at all, may call anyone (AGE-745).
+    fn root_may_call(&self, callee: &str) -> Result<(), Refusal>;
 
     /// Spec `callee`'s own budget (DP-3): its `max_agent_turns`,
     /// `max_duration` in seconds and `cap_usd`. Unlimited by default.

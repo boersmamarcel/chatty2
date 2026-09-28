@@ -700,10 +700,16 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         .context("module settings' virtual_agents could not be loaded")?,
         None => Vec::new(),
     };
+    // The spec the broker checks the leader's own calls against: a
+    // `--team` leader's or an `--agent <spec>` root's. A bare root is the
+    // human's own agent and may call anyone it can reach (AGE-745).
+    #[cfg(unix)]
+    let root_spec = (team.is_some() || cli.agent.is_some()).then(|| spec.clone());
     #[cfg(unix)]
     let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> =
         run_broker.then(|| {
             Arc::new(participant::broker::PendingBroker::new(
+                root_spec.clone(),
                 model_config.clone(),
                 models.models().to_vec(),
                 providers.clone(),

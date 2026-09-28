@@ -106,9 +106,13 @@ impl Broker {
     /// `resolve_virtual_agents` resolves it). `leader_model` is the model
     /// this leader runs: what a module's `llm::complete("")` is served by
     /// (PL-H2, AGE-605). `handoffs` is the team's contract per role (TD-2,
-    /// AGE-693): each role's runner hands its workers theirs.
+    /// AGE-693): each role's runner hands its workers theirs. `root` is
+    /// the spec the leader runs as — a `--team` leader, an `--agent <spec>`
+    /// root — whose `delegates_to` its own calls are checked against, or
+    /// `None` for a plain root, which may call anyone (AGE-745).
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
+        root: Option<AgentSpec>,
         leader_model: &ModelConfig,
         models: &[ModelConfig],
         providers: &[ProviderConfig],
@@ -145,6 +149,7 @@ impl Broker {
         }
         Self::serve(
             llm,
+            root,
             socket_path(),
             worker_executable(),
             module_settings.default_endpoint_budget,
@@ -175,6 +180,7 @@ impl Broker {
         workspace_dir: Option<String>,
     ) -> Result<Self> {
         Self::start_priced_at(
+            None,
             socket,
             executable,
             default_budget,
@@ -185,10 +191,12 @@ impl Broker {
         .await
     }
 
-    /// As [`start_at`](Self::start_at), pricing each task row's reported
-    /// usage with `prices` (DP-3).
+    /// As [`start_at`](Self::start_at), with the root running as `root`
+    /// (see [`start`](Self::start)) and each task row's reported usage
+    /// priced with `prices` (DP-3).
     #[cfg(test)]
     pub(crate) async fn start_priced_at(
+        root: Option<AgentSpec>,
         socket: PathBuf,
         executable: PathBuf,
         default_budget: usize,
@@ -199,6 +207,7 @@ impl Broker {
         let data_dir = socket.parent().map(std::path::Path::to_path_buf);
         Self::serve(
             Arc::new(NoopProvider),
+            root,
             socket,
             executable,
             default_budget,
@@ -228,6 +237,7 @@ impl Broker {
     #[allow(clippy::too_many_arguments)]
     async fn serve(
         provider: Arc<dyn LlmProvider>,
+        root: Option<AgentSpec>,
         socket: PathBuf,
         executable: PathBuf,
         default_budget: usize,
@@ -239,10 +249,10 @@ impl Broker {
         let registry = ModuleRegistry::new(provider, ResourceLimits::default())
             .context("failed to build the module registry the broker gateway needs")?;
         let shared = Arc::new(tokio::sync::RwLock::new(registry));
-        // A node's call is checked against the roster's specs before
-        // anything is spawned (PL-S2).
+        // A call is checked against the roster's specs before anything is
+        // spawned (PL-S2), the root's against the spec it runs as (AGE-745).
         let mut gateway = ProtocolGateway::new(shared, 0)
-            .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs)));
+            .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs).with_root(root)));
         if let Some(prices) = prices {
             gateway = gateway.with_usage_pricer(Arc::new(prices));
         }
@@ -389,6 +399,7 @@ pub struct PendingBroker {
 impl PendingBroker {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        root: Option<AgentSpec>,
         leader_model: ModelConfig,
         models: Vec<ModelConfig>,
         providers: Vec<ProviderConfig>,
@@ -400,6 +411,7 @@ impl PendingBroker {
         provider_flags: Vec<String>,
     ) -> Self {
         let start = move || -> StartFuture {
+            let root = root.clone();
             let leader_model = leader_model.clone();
             let models = models.clone();
             let providers = providers.clone();
@@ -410,6 +422,7 @@ impl PendingBroker {
             let provider_flags = provider_flags.clone();
             Box::pin(async move {
                 Broker::start(
+                    root,
                     &leader_model,
                     &models,
                     &providers,
