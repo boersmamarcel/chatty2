@@ -429,6 +429,15 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
             broker.shutdown();
         }
     }
+
+    /// The root's messages come from its broker's direct handle; a broker
+    /// that has not started yet has none (TM-2).
+    fn take_run_messages(&self) -> Vec<String> {
+        self.once
+            .get()
+            .map(|broker| broker.transport().take_run_messages())
+            .unwrap_or_default()
+    }
 }
 
 /// One `LocalRunner` per resolved agent, all metered on one shared budget

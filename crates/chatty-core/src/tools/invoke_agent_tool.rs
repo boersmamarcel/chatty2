@@ -106,6 +106,13 @@ pub struct InvokeAgentOutput {
     /// `trace` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<serde_json::Value>,
+    /// Messages that were waiting for this agent when the result came back
+    /// (tree messages, TM-2), oldest first, each wrapped as untrusted data
+    /// (`<message from="…" untrusted="true">…</message>`). This result is
+    /// where they are delivered, once; they grant nothing. Absent from the
+    /// JSON when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
 }
 
 /// Error type for invoke_agent tool
@@ -670,6 +677,7 @@ impl InvokeAgentTool {
             usage,
             trace,
             conversation,
+            Vec::new(),
         )
     }
 
@@ -749,6 +757,7 @@ impl InvokeAgentTool {
                 response: String::new(),
                 error: Some(reason),
                 metadata: None,
+                messages: Vec::new(),
             },
             (None, Some(Ok(outcome))) => outcome,
             (None, None) => InvokeAgentOutcome {
@@ -756,6 +765,7 @@ impl InvokeAgentTool {
                 response: String::new(),
                 error: Some("the broker ended the call without a result".to_string()),
                 metadata: None,
+                messages: Vec::new(),
             },
         };
 
@@ -787,11 +797,15 @@ impl InvokeAgentTool {
             usage,
             trace,
             conversation,
+            outcome.messages,
         )
     }
 
     /// Report how a delegation ended, to the progress channel and to the
     /// model — the one ending both the A2A and the fabric path share.
+    /// `messages` are the caller's delivered tree messages: on the output
+    /// when the delegation succeeded, after the error when it failed, so a
+    /// failed delegation still delivers them.
     #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
@@ -802,6 +816,7 @@ impl InvokeAgentTool {
         usage: Vec<TokenUsage>,
         trace: Option<String>,
         conversation: Option<serde_json::Value>,
+        messages: Vec<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let response = response.trim().to_string();
 
@@ -815,11 +830,16 @@ impl InvokeAgentTool {
                 result: Some(err_text),
                 usage,
             });
-            return Err(InvokeAgentError::InvocationFailed(format!(
+            let mut failure = format!(
                 "Agent '{}' reported failure{}",
                 agent,
                 error_msg.map(|m| format!(": {}", m)).unwrap_or_default()
-            )));
+            );
+            if !messages.is_empty() {
+                failure.push_str("\n\nmessages:\n");
+                failure.push_str(&messages.join("\n"));
+            }
+            return Err(InvokeAgentError::InvocationFailed(failure));
         }
 
         // Emit Finished with the full result so the sub-agent trace block
@@ -849,6 +869,7 @@ impl InvokeAgentTool {
             success: true,
             trace,
             conversation,
+            messages,
         })
     }
 }

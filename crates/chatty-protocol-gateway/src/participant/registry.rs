@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use serde_json::Value;
 
-use super::calls::BrokerCalls;
+use super::calls::{BrokerCalls, Caller};
 use super::protocol::{
     BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
     TaskState,
@@ -173,7 +173,6 @@ impl ParticipantRegistry {
 
     /// What runs a connection's calls, while the gateway that installed it
     /// is alive.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn calls(&self) -> Option<Arc<BrokerCalls>> {
         self.lock().calls.upgrade()
     }
@@ -258,7 +257,17 @@ impl ParticipantRegistry {
         let _ = inner.directory.end(node.id);
         inner.contexts.remove(node.name.as_str());
         drop(inner);
+        self.ended(node.id, node.name.as_str());
         debug!(node = %node.name, "A node's connection closed before it said hello");
+    }
+
+    /// The node `id` ended: the messages waiting for it die with it (tree
+    /// messages, TM-2). Called with the lock released, since the call path
+    /// reads the directory.
+    fn ended(&self, id: NodeId, name: &str) {
+        if let Some(calls) = self.calls() {
+            calls.recipient_ended(id, name);
+        }
     }
 
     /// Drop a participant and fail everything it still owed.
@@ -276,6 +285,7 @@ impl ParticipantRegistry {
             let _ = inner.directory.end(participant.node);
             participant
         };
+        self.ended(participant.node, name);
 
         let open = participant.tasks.len();
         for (task_id, sink) in participant.tasks {
@@ -342,7 +352,25 @@ impl ParticipantRegistry {
     ///
     /// Returns the task's id and its update stream, or `None` if the
     /// participant is not registered or its socket writer has already gone.
-    pub fn submit_task(&self, name: &str, task: DelegatedTask) -> Option<(String, TaskStream)> {
+    ///
+    /// A new task is the participant's next run: the messages waiting for
+    /// it open the task's text, and each sender's allowance starts over
+    /// (tree messages, TM-2).
+    pub fn submit_task(
+        &self,
+        name: &str,
+        mut task: DelegatedTask,
+    ) -> Option<(String, TaskStream)> {
+        if !self.is_registered(name) {
+            return None;
+        }
+        let messages = self
+            .calls()
+            .map(|calls| calls.start_run(&Caller::Node(name.to_string())))
+            .unwrap_or_default();
+        if !messages.is_empty() {
+            task.text = format!("{}\n\n{}", messages.join("\n"), task.text);
+        }
         let task_id = format!(
             "task-{}-{}",
             crate::gateway::new_id(),
@@ -546,6 +574,8 @@ impl ParticipantRegistry {
         let mut inner = self.lock();
         let id = inner.directory.by_name(name).expect("the node").id();
         inner.directory.end(id).expect("ended");
+        drop(inner);
+        self.ended(id, name);
     }
 }
 
