@@ -17,16 +17,25 @@
 //! leader's task reaps its whole subtree: each hop's worker dies with the
 //! call that started it, and its own calls die with its connection.
 //!
+//! A `send_message` call (tree messages, TM-1) never starts a run: the
+//! broker checks the recipient against the caller's connection — the
+//! sender's owner is the only recipient there is until live handles exist
+//! (RC-3) — and queues the message on the recipient's [`PendingList`], or
+//! refuses it. Either way the call's result is a [`MessageStatus`].
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
-//! ends, and every refused call one refusal row. `list_agents` reads the
-//! directory and is not an edge between two nodes, so it writes none.
+//! ends, every `send_message` call one message row, and every refused call
+//! one refusal row. `list_agents` reads the directory and is not an edge
+//! between two nodes, so it writes none.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
     AgentOrigin, CallError, CallEvent, CallRequest, CallStream, ConversationScope, EdgeKind,
-    EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Transport,
+    EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId,
+    NodeState, PendingList, ROOT_NAME, RefusalReason, SendMessageParams, Transport,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -49,18 +58,32 @@ pub enum Caller {
 impl Caller {
     fn name(&self) -> &str {
         match self {
-            Self::Root => "root",
+            Self::Root => ROOT_NAME,
             Self::Node(name) => name,
         }
     }
 }
 
-/// The broker's call path: the agents a call can reach, and the log it
-/// writes. Shared by every connection and the root's direct handle.
+/// Whose pending list a message waits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Recipient {
+    /// The in-process root, which is not a node.
+    Root,
+    Node(NodeId),
+}
+
+/// The broker's call path: the agents a call can reach, the messages
+/// waiting for them, and the log it writes. Shared by every connection and
+/// the root's direct handle.
 pub struct BrokerCalls {
     registry: ParticipantRegistry,
     runners: Arc<BTreeMap<String, Arc<dyn VirtualAgent>>>,
     edges: Option<Arc<Mutex<EdgeLog>>>,
+    /// Messages waiting for each recipient (tree messages). Nothing here
+    /// delivers them yet: that is the next `invoke_agent` result the
+    /// recipient receives, or its next run (TM-2).
+    pending: Mutex<HashMap<Recipient, PendingList>>,
+    next_message: AtomicU64,
 }
 
 impl BrokerCalls {
@@ -73,6 +96,8 @@ impl BrokerCalls {
             registry,
             runners,
             edges,
+            pending: Mutex::default(),
+            next_message: AtomicU64::new(0),
         }
     }
 
@@ -85,12 +110,78 @@ impl BrokerCalls {
                 futures::stream::iter([Ok(CallEvent::Result(self.directory()))]).boxed()
             }
             CallRequest::SendMessage(params) => {
-                self.refusal(&caller, &params.to, "send_message is not served yet");
-                futures::stream::iter([Err(CallError::Refused(
-                    "send_message is not served by this broker yet".to_string(),
-                ))])
-                .boxed()
+                let status = self.send_message(&caller, params);
+                futures::stream::iter([Ok(CallEvent::Result(json!(status)))]).boxed()
             }
+        }
+    }
+
+    /// Queue `params` for its recipient as `caller`, or refuse it, and log
+    /// one message row either way.
+    fn send_message(&self, caller: &Caller, params: SendMessageParams) -> MessageStatus {
+        let bytes = params.text.len() as u64;
+        let to = params.to.clone();
+        let status = self.accept_message(caller, params);
+        let outcome = match &status {
+            MessageStatus::Pending { .. } => "pending".to_string(),
+            MessageStatus::Refused { reason } => format!("refused: {reason}"),
+        };
+        debug!(from = %caller.name(), %to, %outcome, "send_message");
+        EdgeGuard {
+            log: self.edges.clone(),
+            from: caller.name().to_string(),
+            to,
+            bytes,
+            outcome: None,
+        }
+        .write(EdgeKind::Message, outcome);
+        status
+    }
+
+    /// The recipient check and the pending list's bounds. The sender is who
+    /// its connection says, and its owner is who the directory says: the
+    /// message names only the recipient, and a name that is not the
+    /// sender's owner — a sibling, the sender itself, a name nobody has, a
+    /// node of another conversation — is not on the tree.
+    fn accept_message(&self, caller: &Caller, params: SendMessageParams) -> MessageStatus {
+        let refused = |reason| MessageStatus::Refused { reason };
+        // The root has no owner, and its handles come with resumable
+        // conversations (RC-3).
+        let Caller::Node(name) = caller else {
+            return refused(RefusalReason::NotOnTree);
+        };
+        let Some((sender, owner)) = self.registry.node_and_owner(name) else {
+            return refused(RefusalReason::NotOnTree);
+        };
+        let (recipient, owner_name, ended) = match &owner {
+            None => (Recipient::Root, ROOT_NAME, false),
+            Some(owner) => (
+                Recipient::Node(owner.id()),
+                owner.name().as_str(),
+                owner.state() == NodeState::Ended,
+            ),
+        };
+        if params.to != owner_name {
+            return refused(RefusalReason::NotOnTree);
+        }
+        if ended {
+            return refused(RefusalReason::RecipientEnded);
+        }
+
+        let id = format!(
+            "msg-{}",
+            self.next_message.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let message = Message {
+            id: id.clone(),
+            from: sender.id(),
+            from_name: sender.name().clone(),
+            text: params.text,
+        };
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        match pending.entry(recipient).or_default().push(message) {
+            Ok(()) => MessageStatus::Pending { id },
+            Err(reason) => refused(reason),
         }
     }
 
@@ -235,18 +326,6 @@ impl BrokerCalls {
         }
         .boxed()
     }
-
-    /// Log a call refused before it reached anyone.
-    fn refusal(&self, caller: &Caller, to: &str, why: &str) {
-        EdgeGuard {
-            log: self.edges.clone(),
-            from: caller.name().to_string(),
-            to: to.to_string(),
-            bytes: 0,
-            outcome: None,
-        }
-        .refused(why);
-    }
 }
 
 /// The `call_result` of an `invoke_agent` call whose task ended in `state`.
@@ -356,5 +435,174 @@ impl Transport for DirectTransport {
             .registry
             .answer_task(task, input)
             .map_err(|e| CallError::Failed(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatty_fabric::{PENDING_LIST_BYTES, SENDER_ALLOWANCE_BYTES};
+
+    fn broker(edges: Option<Arc<Mutex<EdgeLog>>>) -> (BrokerCalls, ParticipantRegistry) {
+        let registry = ParticipantRegistry::new();
+        let calls = BrokerCalls::new(registry.clone(), Arc::new(BTreeMap::new()), edges);
+        (calls, registry)
+    }
+
+    async fn send(calls: &BrokerCalls, caller: Caller, to: &str, text: &str) -> MessageStatus {
+        let mut stream = calls.call(
+            caller,
+            CallRequest::SendMessage(SendMessageParams {
+                to: to.to_string(),
+                text: text.to_string(),
+            }),
+        );
+        let Some(Ok(CallEvent::Result(value))) = stream.next().await else {
+            panic!("a send_message call answers with one result");
+        };
+        assert!(stream.next().await.is_none());
+        serde_json::from_value(value).expect("a MessageStatus")
+    }
+
+    fn node(name: &str) -> Caller {
+        Caller::Node(name.to_string())
+    }
+
+    fn refused(reason: RefusalReason) -> MessageStatus {
+        MessageStatus::Refused { reason }
+    }
+
+    /// The owner is the only recipient: the root for a node the root owns,
+    /// the owning node for one a node owns; siblings, self, a grandparent,
+    /// unknown names, an unknown sender and the root itself are refused.
+    #[tokio::test]
+    async fn only_the_owner_is_on_the_tree() {
+        let (calls, registry) = broker(None);
+        let lead = registry.admit_under("lead", None);
+        let coder = registry.admit_under("coder", Some(&lead));
+        let other = registry.admit_under("coder", Some(&lead));
+
+        assert_eq!(
+            send(&calls, node(&lead), ROOT_NAME, "up").await,
+            MessageStatus::Pending { id: "msg-1".into() }
+        );
+        assert_eq!(
+            send(&calls, node(&coder), &lead, "up").await,
+            MessageStatus::Pending { id: "msg-2".into() }
+        );
+        for (from, to) in [
+            (coder.as_str(), other.as_str()),
+            (coder.as_str(), coder.as_str()),
+            (coder.as_str(), ROOT_NAME),
+            (coder.as_str(), "nobody-0"),
+            (lead.as_str(), coder.as_str()),
+            ("never-admitted-0", ROOT_NAME),
+        ] {
+            assert_eq!(
+                send(&calls, node(from), to, "x").await,
+                refused(RefusalReason::NotOnTree),
+                "{from} -> {to}"
+            );
+        }
+        assert_eq!(
+            send(&calls, Caller::Root, &lead, "x").await,
+            refused(RefusalReason::NotOnTree),
+            "the root's handles come with RC-3"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_to_an_ended_owner_is_refused() {
+        let (calls, registry) = broker(None);
+        let lead = registry.admit_under("lead", None);
+        let coder = registry.admit_under("coder", Some(&lead));
+        registry.end_node(&lead);
+        assert_eq!(
+            send(&calls, node(&coder), &lead, "too late").await,
+            refused(RefusalReason::RecipientEnded)
+        );
+    }
+
+    /// The pending list's bounds hold through the broker: per sender per
+    /// run, then per recipient, each recipient with a list of its own.
+    #[tokio::test]
+    async fn the_broker_enforces_the_pending_list_bounds() {
+        let (calls, registry) = broker(None);
+        let lead = registry.admit_under("lead", None);
+        let coders: Vec<String> = (0..9)
+            .map(|_| registry.admit_under("coder", Some(&lead)))
+            .collect();
+        let allowance = "x".repeat(SENDER_ALLOWANCE_BYTES);
+
+        assert!(matches!(
+            send(&calls, node(&coders[0]), &lead, &allowance).await,
+            MessageStatus::Pending { .. }
+        ));
+        assert_eq!(
+            send(&calls, node(&coders[0]), &lead, "one byte more").await,
+            refused(RefusalReason::OverAllowance)
+        );
+        for coder in &coders[1..PENDING_LIST_BYTES / SENDER_ALLOWANCE_BYTES] {
+            assert!(matches!(
+                send(&calls, node(coder), &lead, &allowance).await,
+                MessageStatus::Pending { .. }
+            ));
+        }
+        assert_eq!(
+            send(&calls, node(&coders[8]), &lead, "x").await,
+            refused(RefusalReason::OverAllowance),
+            "the lead's list is full"
+        );
+        assert!(
+            matches!(
+                send(&calls, node(&lead), ROOT_NAME, &allowance).await,
+                MessageStatus::Pending { .. }
+            ),
+            "the root's list is another list"
+        );
+    }
+
+    /// One message row per call, pending or refused, with the body's size.
+    #[tokio::test]
+    async fn every_message_writes_one_message_row() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let (calls, registry) = broker(Some(Arc::new(Mutex::new(log))));
+        let lead = registry.admit_under("lead", None);
+
+        send(&calls, node(&lead), ROOT_NAME, "hello").await;
+        send(&calls, node(&lead), "nobody-0", "hi").await;
+
+        let rows: Vec<EdgeRow> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.kind,
+                    row.from.as_str(),
+                    row.to.as_str(),
+                    row.bytes,
+                    row.outcome.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (EdgeKind::Message, lead.as_str(), ROOT_NAME, 5, "pending"),
+                (
+                    EdgeKind::Message,
+                    lead.as_str(),
+                    "nobody-0",
+                    2,
+                    "refused: not_on_tree"
+                ),
+            ]
+        );
     }
 }

@@ -30,6 +30,55 @@ pub struct SendMessageParams {
     pub text: String,
 }
 
+/// What a `send_message` call returns: its `call_result`. Serialises as
+/// `{"status": "pending", "id": …}` or
+/// `{"status": "refused", "reason": "not_on_tree"}`.
+///
+/// A refusal is an answer, not a [`CallError`]: the sender's model reads it
+/// as the tool's result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MessageStatus {
+    /// Accepted; it waits for the recipient's next delivery point.
+    Pending {
+        id: String,
+    },
+    Refused {
+        reason: RefusalReason,
+    },
+}
+
+/// Why the broker refused a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// The recipient is not the sender's owner (nor, once resumable
+    /// conversations exist, one of its live handles).
+    NotOnTree,
+    /// The message would take the recipient's pending list, or this
+    /// sender's share of it, past its bound.
+    OverAllowance,
+    /// The recipient has ended.
+    RecipientEnded,
+}
+
+impl RefusalReason {
+    /// The wire name, e.g. `not_on_tree`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotOnTree => "not_on_tree",
+            Self::OverAllowance => "over_allowance",
+            Self::RecipientEnded => "recipient_ended",
+        }
+    }
+}
+
+impl std::fmt::Display for RefusalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One call. Serialises as `{"method": …, "params": …}`, the body of a v2
 /// `call` frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +207,20 @@ mod tests {
                 text: "done".into()
             })
         );
+        assert_eq!(
+            serde_json::to_value(MessageStatus::Pending { id: "msg-1".into() }).unwrap(),
+            json!({"status": "pending", "id": "msg-1"})
+        );
+        for reason in [
+            RefusalReason::NotOnTree,
+            RefusalReason::OverAllowance,
+            RefusalReason::RecipientEnded,
+        ] {
+            assert_eq!(
+                serde_json::to_value(MessageStatus::Refused { reason }).unwrap(),
+                json!({"status": "refused", "reason": reason.as_str()})
+            );
+        }
         assert_eq!(
             serde_json::to_value(CallError::SpawnContextRefused("outside tree".into())).unwrap(),
             json!({"kind": "spawn_context_refused", "message": "outside tree"})

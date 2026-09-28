@@ -36,6 +36,9 @@ pub struct ToolAvailability {
     pub ask_user: bool,
     pub terminal: bool,
     pub terminal_run: bool,
+    /// `send_message`: offered to every worker with a broker-made
+    /// connection, whatever its delegation rights (tree messages, TM-1).
+    pub send_message: bool,
 }
 
 pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<String> {
@@ -200,6 +203,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.terminal_run {
         names.insert(String::from("terminal_run"));
+    }
+    if tools.send_message {
+        names.insert(String::from("send_message"));
     }
 
     names
@@ -485,6 +491,7 @@ mod tests {
             ask_user: true,
             terminal: true,
             terminal_run: true,
+            send_message: true,
         };
         let names = active_native_tool_names(&all);
         // Every individual flag's tools should be present
