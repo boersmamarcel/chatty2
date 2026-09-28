@@ -28,6 +28,7 @@ pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES};
 pub use origin::AgentOrigin;
 pub use permit::{
     ChildCall, DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit, RunPermit, RunPermitState,
+    WeakRunPermit,
 };
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{

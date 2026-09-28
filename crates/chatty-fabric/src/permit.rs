@@ -53,7 +53,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -281,7 +281,8 @@ impl State {
 /// them reports back. See the module docs.
 ///
 /// Cheap to clone; the clones are one run. The permit goes back to the
-/// endpoint when the last clone is dropped.
+/// endpoint when the last clone is dropped. Whoever only needs to find the
+/// run — not keep it alive — holds a [`WeakRunPermit`].
 #[derive(Clone)]
 pub struct RunPermit {
     inner: Arc<RunInner>,
@@ -305,6 +306,12 @@ impl RunPermit {
                 state: Mutex::new(State::Holding { _slot: permit }),
             }),
         }
+    }
+
+    /// A handle that finds this run while it lives, without keeping its
+    /// permit alive.
+    pub fn downgrade(&self) -> WeakRunPermit {
+        WeakRunPermit(Arc::downgrade(&self.inner))
     }
 
     /// The endpoint this run is metered on.
@@ -351,6 +358,18 @@ impl std::fmt::Debug for RunPermit {
             .field("endpoint", &self.inner.endpoint)
             .field("state", &self.state())
             .finish()
+    }
+}
+
+/// A [`RunPermit`] that does not keep the run's slot: see
+/// [`RunPermit::downgrade`].
+#[derive(Debug, Clone)]
+pub struct WeakRunPermit(Weak<RunInner>);
+
+impl WeakRunPermit {
+    /// The run, if anything still holds it.
+    pub fn upgrade(&self) -> Option<RunPermit> {
+        self.0.upgrade().map(|inner| RunPermit { inner })
     }
 }
 
@@ -702,6 +721,17 @@ mod tests {
             0,
             "and the freed slot stays free"
         );
+    }
+
+    #[tokio::test]
+    async fn a_weak_handle_does_not_keep_the_slot() {
+        let budget = EndpointBudget::new(1);
+        let run = RunPermit::acquire(&budget, ENDPOINT).await;
+        let weak = run.downgrade();
+        assert!(weak.upgrade().is_some());
+        drop(run);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(budget.in_flight(ENDPOINT), 0);
     }
 
     #[tokio::test]

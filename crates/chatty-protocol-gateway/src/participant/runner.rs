@@ -321,7 +321,7 @@ impl LocalRunner {
         // and re-acquire it before the last result is delivered (BI-6), so
         // the broker's call path finds it by the node's name.
         if let Some(permit) = permit.as_ref() {
-            self.registry.set_node_permit(&name, permit.clone());
+            self.registry.set_node_permit(&name, permit);
         }
 
         // Where it goes comes from the task's spawn context: the caller's

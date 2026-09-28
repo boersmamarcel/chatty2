@@ -38,7 +38,7 @@ use super::protocol::{
 };
 use chatty_fabric::{
     AgentOrigin, ConversationScope, Directory, DirectoryError, NodeId, NodeName, NodeState,
-    RunPermit, SpawnContext,
+    RunPermit, SpawnContext, WeakRunPermit,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -152,8 +152,9 @@ struct Inner {
     contexts: HashMap<String, SpawnContext>,
     /// Each metered node's endpoint permit (BI-6): released while the
     /// node's calls are outstanding, re-acquired before the last result is
-    /// delivered. Kept while the node's connection is open.
-    permits: HashMap<String, RunPermit>,
+    /// delivered. Weak: the node's worker owns it, so reaping the worker
+    /// frees the slot at once, not when its connection is next read.
+    permits: HashMap<String, WeakRunPermit>,
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -216,16 +217,22 @@ impl ParticipantRegistry {
         self.lock().contexts.get(name).cloned()
     }
 
-    /// Record the endpoint permit `name`'s run holds (BI-6). The runner that
-    /// spawned it calls this; a call the node makes releases it until the
-    /// call's result is due. Forgotten when the node's connection closes.
-    pub fn set_node_permit(&self, name: &str, permit: RunPermit) {
-        self.lock().permits.insert(name.to_string(), permit);
+    /// Record the endpoint permit `name`'s run holds (BI-6), without
+    /// keeping it: the runner that spawned the node owns it. A call the node
+    /// makes releases it until the call's result is due. Forgotten when the
+    /// node's connection closes.
+    pub fn set_node_permit(&self, name: &str, permit: &RunPermit) {
+        self.lock()
+            .permits
+            .insert(name.to_string(), permit.downgrade());
     }
 
-    /// `name`'s endpoint permit, if its runner meters it (BI-6).
+    /// `name`'s endpoint permit, while its runner meters a live run (BI-6).
     pub fn node_permit(&self, name: &str) -> Option<RunPermit> {
-        self.lock().permits.get(name).cloned()
+        self.lock()
+            .permits
+            .get(name)
+            .and_then(WeakRunPermit::upgrade)
     }
 
     /// Register `node`'s connection: its worker said `hello` with `card`,
