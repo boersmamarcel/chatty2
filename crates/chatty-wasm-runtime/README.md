@@ -10,7 +10,7 @@ provides the host-side implementation of the WIT interfaces (`llm`,
 ## Public surface
 
 - [`WasmModule`] — loaded, callable module instance
-- [`ResourceLimits`] — fuel / memory / wall-clock / output-size caps applied per call (PL-D3: 10⁹ fuel, 256 MiB, 60 s including host time, 1 MiB output; a manifest may only lower these)
+- [`ResourceLimits`] — fuel / memory / wall-clock / output-size caps applied per call (PL-D3/PL-D3b: 10¹² fuel, 256 MiB, 60 s including host time, 1 MiB output; a manifest may only lower these)
 - [`Engine`] — re-exported `wasmtime::Engine` so callers can share one engine
 - Host traits: [`LlmProvider`], [`BillingProvider`]
 - WIT types: `AgentCard`, `ChatRequest`, `ChatResponse`, `Message`, `Role`, `Skill`, `TokenUsage`, `ToolCall`, `ToolDefinition`

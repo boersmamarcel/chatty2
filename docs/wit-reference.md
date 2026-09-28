@@ -445,6 +445,38 @@ The `module` world is the compilation target for all chatty WASM modules. It wir
 
 ---
 
+## Resource Limits
+
+Every call into a guest export (`chat`, `invoke-tool`, `list-tools`, `get-agent-card`)
+runs inside a sandboxed Wasmtime instance under per-call limits
+(`crates/chatty-wasm-runtime/src/limits.rs`, `ResourceLimits`). Fuel and the wall-clock
+deadline are reset before each call, so a long-lived module never runs out of a
+lifetime budget. The defaults below are also the host ceilings: a module manifest's
+`[resources]` section may only lower a limit, never raise it — a larger value is
+clamped down to the ceiling.
+
+| Limit | Default = ceiling | Enforcement | Error |
+|:------|:------------------|:------------|:------|
+| **Fuel** | 10¹² units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
+| **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm`, `file`, `billing`) stop waiting at the deadline | `deadline exceeded` |
+| **Memory** | 256 MiB | Store memory limiter | `memory limit` |
+| **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
+
+`list-tools` and `get-agent-card` get a fixed 1 s wall-clock budget regardless of the
+call's own `max_execution_ms`.
+
+The fuel ceiling is sized so a CPU-bound guest is bounded by the 60 s wall clock, not
+by fuel (AGE-708/PL-D3b). An earlier ceiling of 10⁹ fuel — set before this was
+measured — let a tight arithmetic loop exhaust its fuel in roughly 130 ms, so the wall
+clock never got a chance to apply to legitimately CPU-heavy tools (parsing, a
+Benford's-law audit over a large input). Measured on the reference host, Wasmtime fuel
+drains at roughly 1.5 x 10^10 units/s for a pure arithmetic loop; 10¹² keeps that same
+loop running for about a minute of fuel (measured: ~68 s) — past the 60 s wall clock,
+so the deadline fires first. Fuel remains the deterministic bound underneath the wall
+clock: it is refilled per call, and a manifest may still only lower it.
+
+---
+
 ## Versioning Strategy
 
 The WIT package uses [semantic versioning](https://semver.org/): `chatty:module@MAJOR.MINOR.PATCH`.
