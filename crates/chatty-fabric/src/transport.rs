@@ -164,6 +164,12 @@ pub struct InvokeAgentOutcome {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// Messages that were waiting for the caller when this result was made
+    /// (tree messages, TM-2): each one [`wrap_message`](crate::wrap_message)ped,
+    /// oldest first. This result is their delivery point, so they are gone
+    /// from the caller's pending list; absent from the JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
 }
 
 /// Why a call failed. Serialises as `{"kind": …, "message": …}`, the
@@ -212,6 +218,17 @@ pub trait Transport: Send + Sync {
         Err(CallError::Failed(format!(
             "task '{task}' cannot be answered over this transport"
         )))
+    }
+
+    /// The caller is starting a new run (tree messages, TM-2): take the
+    /// messages waiting for it, [`wrap_message`](crate::wrap_message)ped and
+    /// oldest first, to prepend to the run's user turn, and give every
+    /// sender its allowance back. The root's direct handle is the one
+    /// transport with a run of its own to start; a worker's next run is its
+    /// next task, which the broker prepends them to itself. The default has
+    /// nothing waiting.
+    fn take_run_messages(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 

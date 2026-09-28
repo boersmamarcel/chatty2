@@ -23,6 +23,16 @@
 //! (RC-3) — and queues the message on the recipient's [`PendingList`], or
 //! refuses it. Either way the call's result is a [`MessageStatus`].
 //!
+//! A waiting message is delivered at exactly two points (TM-2): on the next
+//! `invoke_agent` result its recipient receives, as that result's
+//! `messages`, or at the start of the recipient's next run — the root's
+//! next user turn ([`Transport::take_run_messages`]), a node's next task
+//! ([`BrokerCalls::start_run`]). Never mid-run: nothing else reads a
+//! pending list. It is delivered wrapped as untrusted data
+//! ([`chatty_fabric::wrap_message`]) and grants nothing. A recipient that
+//! ends drops what is still waiting for it, one edge-log row per message
+//! ([`BrokerCalls::recipient_ended`]).
+//!
 //! A worker the call starts is spawned with a [`SpawnContext`] the broker
 //! sets from the caller's own (BI-5): a sub-leader's child gets its tree
 //! under the sub-leader's and its branch off the sub-leader's, and may call
@@ -113,10 +123,11 @@ pub struct BrokerCalls {
     registry: ParticipantRegistry,
     runners: Arc<BTreeMap<String, Arc<dyn VirtualAgent>>>,
     edges: Option<Arc<Mutex<EdgeLog>>>,
-    /// Messages waiting for each recipient (tree messages). Nothing here
-    /// delivers them yet: that is the next `invoke_agent` result the
-    /// recipient receives, or its next run (TM-2).
-    pending: Mutex<HashMap<Recipient, PendingList>>,
+    /// Messages waiting for each recipient (tree messages), until the next
+    /// `invoke_agent` result the recipient receives or its next run takes
+    /// them (TM-2). Shared with each call's stream, which delivers on its
+    /// result.
+    pending: Arc<Mutex<HashMap<Recipient, PendingList>>>,
     next_message: AtomicU64,
     /// The spec rules a node's call is checked against (PL-S2); `None`
     /// checks only the chain.
@@ -133,7 +144,7 @@ impl BrokerCalls {
             registry,
             runners,
             edges,
-            pending: Mutex::default(),
+            pending: Arc::default(),
             next_message: AtomicU64::new(0),
             policy: None,
         }
@@ -241,10 +252,58 @@ impl BrokerCalls {
             from_name: sender.name().clone(),
             text: params.text,
         };
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = lock(&self.pending);
         match pending.entry(recipient).or_default().push(message) {
             Ok(()) => MessageStatus::Pending { id },
             Err(reason) => refused(reason),
+        }
+    }
+
+    /// Whose pending list `caller` reads: the root's, or its node's. `None`
+    /// for a name no node was admitted under, which has nothing waiting.
+    fn inbox(&self, caller: &Caller) -> Option<Recipient> {
+        match caller {
+            Caller::Root => Some(Recipient::Root),
+            Caller::Node(name) => self
+                .registry
+                .node_and_owner(name)
+                .map(|(node, _)| Recipient::Node(node.id())),
+        }
+    }
+
+    /// `caller` is starting a new run — the root's next user turn, a node's
+    /// next task: take what is waiting for it, wrapped and oldest first,
+    /// and give each sender its allowance back (delivery point b).
+    pub fn start_run(&self, caller: &Caller) -> Vec<String> {
+        let Some(inbox) = self.inbox(caller) else {
+            return Vec::new();
+        };
+        let mut pending = lock(&self.pending);
+        let Some(list) = pending.get_mut(&inbox) else {
+            return Vec::new();
+        };
+        list.start_run();
+        deliver(list)
+    }
+
+    /// The node `id`, admitted as `name`, has ended: what was waiting for it
+    /// is dropped, one `message` row per message with outcome `dropped`.
+    /// Later messages to it are `recipient_ended`.
+    pub(crate) fn recipient_ended(&self, id: NodeId, name: &str) {
+        let dropped = lock(&self.pending)
+            .remove(&Recipient::Node(id))
+            .map(|mut list| list.take_all())
+            .unwrap_or_default();
+        for message in dropped {
+            debug!(from = %message.from_name, to = %name, id = %message.id, "Dropped a message with its recipient");
+            EdgeGuard {
+                log: self.edges.clone(),
+                from: message.from_name.as_str().to_string(),
+                to: name.to_string(),
+                bytes: message.bytes() as u64,
+                outcome: None,
+            }
+            .write(EdgeKind::Message, "dropped".to_string());
         }
     }
 
@@ -317,6 +376,18 @@ impl BrokerCalls {
         };
         let task = DelegatedTask::new(params.prompt).with_call(stamp);
         let agent = params.agent;
+        // The caller's messages ride on this call's result (delivery point
+        // a), taken when the result is made.
+        let inbox = self
+            .inbox(&caller)
+            .map(|inbox| (inbox, self.pending.clone()));
+        let messages = move || match &inbox {
+            Some((inbox, pending)) => lock(pending)
+                .get_mut(inbox)
+                .map(deliver)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
 
         async_stream::stream! {
             let task = match spawn {
@@ -344,7 +415,7 @@ impl BrokerCalls {
                 Err(reason) => {
                     warn!(agent = %agent, %reason, "Could not start a worker for a call");
                     edge.end(TaskState::Failed);
-                    yield Ok(CallEvent::Result(outcome(TaskState::Failed, String::new(), Some(reason), None)));
+                    yield Ok(CallEvent::Result(outcome(TaskState::Failed, String::new(), Some(reason), None, messages())));
                     return;
                 }
             };
@@ -412,7 +483,7 @@ impl BrokerCalls {
                 )
             });
             edge.end(state);
-            yield Ok(CallEvent::Result(outcome(state, response, message, metadata)));
+            yield Ok(CallEvent::Result(outcome(state, response, message, metadata, messages())));
             // `running` is dropped here, which reaps a spawned worker.
         }
         .boxed()
@@ -520,14 +591,16 @@ fn gated(child: ChildCall, mut call: CallStream) -> CallStream {
     .boxed()
 }
 
-/// The `call_result` of an `invoke_agent` call whose task ended in `state`.
-/// Only a failure is a failure: a task that was cancelled from its own side
-/// reads as it does to an A2A caller.
+/// The `call_result` of an `invoke_agent` call whose task ended in `state`,
+/// carrying the caller's waiting `messages`. Only a failure is a failure: a
+/// task that was cancelled from its own side reads as it does to an A2A
+/// caller.
 fn outcome(
     state: TaskState,
     response: String,
     message: Option<String>,
     metadata: Option<Value>,
+    messages: Vec<String>,
 ) -> Value {
     let success = state != TaskState::Failed;
     json!(InvokeAgentOutcome {
@@ -535,7 +608,21 @@ fn outcome(
         response,
         error: if success { None } else { message },
         metadata,
+        messages,
     })
+}
+
+/// Take everything waiting on `list`, as its recipient reads it.
+fn deliver(list: &mut PendingList) -> Vec<String> {
+    list.take_all().iter().map(Message::wrapped).collect()
+}
+
+/// The pending lists, recovered from a poisoned lock: each list is plain
+/// owned data with no invariant a panic could leave half-kept.
+fn lock(
+    pending: &Mutex<HashMap<Recipient, PendingList>>,
+) -> std::sync::MutexGuard<'_, HashMap<Recipient, PendingList>> {
+    pending.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Tag one agent card with its origin, as the aggregated card does.
@@ -630,6 +717,12 @@ impl Transport for DirectTransport {
             .answer_task(task, input)
             .map_err(|e| CallError::Failed(e.to_string()))
     }
+
+    /// The root's next user turn is starting: its messages, for the turn
+    /// to open with (delivery point b).
+    fn take_run_messages(&self) -> Vec<String> {
+        self.calls.start_run(&Caller::Root)
+    }
 }
 
 #[cfg(test)]
@@ -637,10 +730,25 @@ mod tests {
     use super::*;
     use chatty_fabric::{PENDING_LIST_BYTES, SENDER_ALLOWANCE_BYTES};
 
-    fn broker(edges: Option<Arc<Mutex<EdgeLog>>>) -> (BrokerCalls, ParticipantRegistry) {
+    fn broker(edges: Option<Arc<Mutex<EdgeLog>>>) -> (Arc<BrokerCalls>, ParticipantRegistry) {
         let registry = ParticipantRegistry::new();
-        let calls = BrokerCalls::new(registry.clone(), Arc::new(BTreeMap::new()), edges);
+        let calls = Arc::new(BrokerCalls::new(
+            registry.clone(),
+            Arc::new(BTreeMap::new()),
+            edges,
+        ));
+        registry.install_calls(&calls);
         (calls, registry)
+    }
+
+    /// The edge log's rows as `(kind, from, to, bytes, outcome)`.
+    fn rows(path: &std::path::Path) -> Vec<(EdgeKind, String, String, u64, String)> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<EdgeRow>(line).unwrap())
+            .map(|row| (row.kind, row.from, row.to, row.bytes, row.outcome))
+            .collect()
     }
 
     async fn send(calls: &BrokerCalls, caller: Caller, to: &str, text: &str) -> MessageStatus {
@@ -754,6 +862,128 @@ mod tests {
             ),
             "the root's list is another list"
         );
+    }
+
+    /// Rule 5: a recipient that ends drops what was waiting for it, one
+    /// `dropped` row per message; nothing delivers them afterwards, and a
+    /// later message to it is `recipient_ended`. Another recipient's list
+    /// is untouched.
+    #[tokio::test]
+    async fn messages_dropped_with_recipient() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let (calls, registry) = broker(Some(Arc::new(Mutex::new(log))));
+        let lead = registry.admit_under("lead", None);
+        let coder = registry.admit_under("coder", Some(&lead));
+        let other = registry.admit_under("coder", Some(&lead));
+
+        send(&calls, node(&coder), &lead, "first").await;
+        send(&calls, node(&other), &lead, "second one").await;
+        send(&calls, node(&lead), ROOT_NAME, "for the root").await;
+        registry.end_node(&lead);
+
+        assert!(
+            calls.start_run(&node(&lead)).is_empty(),
+            "nothing is left to deliver"
+        );
+        assert_eq!(
+            send(&calls, node(&coder), &lead, "too late").await,
+            refused(RefusalReason::RecipientEnded)
+        );
+        let dropped: Vec<_> = rows(&path)
+            .into_iter()
+            .filter(|row| row.4 == "dropped")
+            .collect();
+        assert_eq!(
+            dropped,
+            [
+                (
+                    EdgeKind::Message,
+                    coder.clone(),
+                    lead.clone(),
+                    5,
+                    "dropped".into()
+                ),
+                (
+                    EdgeKind::Message,
+                    other.clone(),
+                    lead.clone(),
+                    10,
+                    "dropped".into()
+                ),
+            ]
+        );
+        assert_eq!(
+            calls.start_run(&Caller::Root),
+            [format!(
+                "<message from=\"{lead}\" untrusted=\"true\">for the root</message>"
+            )],
+            "the root's own list is not the ended node's"
+        );
+    }
+
+    /// Delivery point b for the root: its next run takes what is waiting,
+    /// wrapped and oldest first, exactly once, and gives each sender its
+    /// allowance back.
+    #[tokio::test]
+    async fn the_roots_next_run_takes_its_messages() {
+        let (calls, registry) = broker(None);
+        let lead = registry.admit_under("lead", None);
+        let root = DirectTransport::new(calls.clone());
+        let allowance = "x".repeat(SENDER_ALLOWANCE_BYTES - 3);
+
+        send(&calls, node(&lead), ROOT_NAME, "one").await;
+        send(&calls, node(&lead), ROOT_NAME, &allowance).await;
+        assert_eq!(
+            send(&calls, node(&lead), ROOT_NAME, "x").await,
+            refused(RefusalReason::OverAllowance)
+        );
+        let wrap =
+            |text: &str| format!("<message from=\"{lead}\" untrusted=\"true\">{text}</message>");
+        assert_eq!(root.take_run_messages(), [wrap("one"), wrap(&allowance)]);
+        assert!(root.take_run_messages().is_empty(), "delivered once");
+        assert!(
+            matches!(
+                send(&calls, node(&lead), ROOT_NAME, "x").await,
+                MessageStatus::Pending { .. }
+            ),
+            "a new run gives the sender its allowance back"
+        );
+    }
+
+    /// Delivery point b for a node: its next task opens with what is
+    /// waiting for it.
+    #[tokio::test]
+    async fn a_nodes_next_task_opens_with_its_messages() {
+        use super::super::protocol::{BrokerFrame, ParticipantCard};
+
+        let (calls, registry) = broker(None);
+        let admitted = registry.admit("lead", AgentOrigin::Local).unwrap();
+        let (tx, mut outbound) = tokio::sync::mpsc::unbounded_channel();
+        let lead = registry.register(admitted, ParticipantCard::default(), tx);
+        let coder = registry.admit_under("coder", Some(&lead));
+        send(&calls, node(&coder), &lead, "<b>tests pass</b>").await;
+
+        registry
+            .submit_task(&lead, DelegatedTask::new("next task"))
+            .expect("the lead is registered");
+        let Some(BrokerFrame::Task { text, .. }) = outbound.recv().await else {
+            panic!("a task frame");
+        };
+        assert_eq!(
+            text,
+            format!(
+                "<message from=\"{coder}\" untrusted=\"true\">&lt;b&gt;tests pass&lt;/b&gt;</message>\n\nnext task"
+            )
+        );
+        registry
+            .submit_task(&lead, DelegatedTask::new("and another"))
+            .unwrap();
+        let Some(BrokerFrame::Task { text, .. }) = outbound.recv().await else {
+            panic!("a task frame");
+        };
+        assert_eq!(text, "and another", "delivered once");
     }
 
     /// One message row per call, pending or refused, with the body's size.
