@@ -184,9 +184,6 @@ fn delivered_after_error(messages: &[String]) -> String {
 pub struct InvokeAgentTool {
     /// Snapshot of configured remote A2A agents taken at construction time.
     remote_agents: Vec<A2aAgentConfig>,
-    /// Base URL for the protocol gateway (e.g. `http://localhost:8420`),
-    /// used to call the broker's local agents via their A2A endpoint.
-    gateway_base_url: Option<String>,
     client: A2aClient,
     /// Shared slot for sending progress events to the UI stream loop.
     progress_slot: InvokeAgentProgressSlot,
@@ -216,10 +213,9 @@ pub struct InvokeAgentTool {
     /// `None` — a host that tracks no budget — says nothing and refuses
     /// nothing.
     run_budget: Option<RunBudget>,
-    /// A broker that has not necessarily started yet (BI-2, AGE-634).
-    /// Consulted only when `gateway_base_url` is `None`: the production
-    /// desktop/chatty-tui wiring hands this in instead of a pre-resolved
-    /// port, and the first local delegation actually starts it.
+    /// A broker that has not necessarily started yet (BI-2, AGE-634): the
+    /// production desktop/chatty-tui wiring hands this in, and the first
+    /// local delegation actually starts it.
     lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// The fabric this agent reaches its local roles through (ADR-0020,
     /// BI-4): a worker's broker-made connection, or the root's direct
@@ -234,11 +230,9 @@ pub struct InvokeAgentTool {
 }
 
 impl InvokeAgentTool {
-    pub fn new(remote_agents: Vec<A2aAgentConfig>, gateway_port: Option<u16>) -> Self {
-        let gateway_base_url = gateway_port.map(|port| format!("http://localhost:{}", port));
+    pub fn new(remote_agents: Vec<A2aAgentConfig>) -> Self {
         Self {
             remote_agents,
-            gateway_base_url,
             client: A2aClient::for_delegation(),
             progress_slot: Arc::new(Mutex::new(None)),
             local_agents: Vec::new(),
@@ -267,7 +261,7 @@ impl InvokeAgentTool {
 
     /// The fabric local roles are reached through: the one this tool was
     /// given, else the lazy broker's direct handle (starting it), else
-    /// none, and local roles go over the gateway's URL.
+    /// none — a local role is then unreachable, there is no fallback.
     async fn fabric_transport(&self) -> Option<Arc<dyn Transport>> {
         if let Some(transport) = &self.transport {
             return Some(transport.clone());
@@ -283,29 +277,10 @@ impl InvokeAgentTool {
     }
 
     /// Start the broker itself on first use instead of expecting it
-    /// already running (BI-2, AGE-634). Ignored when a `gateway_port` was
-    /// already given to [`Self::new`]: that path is for tests and hosts
-    /// that already know a live port.
+    /// already running (BI-2, AGE-634).
     pub fn with_lazy_broker(mut self, broker: Arc<dyn LazyBroker>) -> Self {
         self.lazy_broker = Some(broker);
         self
-    }
-
-    /// The gateway's base URL, resolving a [`LazyBroker`] on first use if
-    /// that is all this tool has. `None` means there is nothing to delegate
-    /// through — no port, no lazy broker.
-    async fn gateway_base_url(&self) -> Option<String> {
-        if let Some(url) = &self.gateway_base_url {
-            return Some(url.clone());
-        }
-        let broker = self.lazy_broker.as_ref()?;
-        match broker.ensure_started().await {
-            Ok(url) => Some(url),
-            Err(error) => {
-                warn!(%error, "Failed to start the broker for a delegation");
-                None
-            }
-        }
     }
 
     /// Re-ask a delegated agent's questions on this agent's own `ask_user`
@@ -521,50 +496,30 @@ impl Tool for InvokeAgentTool {
         }
 
         // 2. The broker's local agents: a spec, run as a chatty child in its
-        //    own process.
+        //    own process. Reached only over the fabric connection (ADR-0020,
+        //    BI-7): there is no loopback-HTTP fallback any more, because
+        //    that route now refuses every role (`loopback_refuses_roles`).
         if let Some(local) = self
             .local_agents
             .iter()
             .map(String::as_str)
             .find(|local| *local == agent_name)
         {
-            if let Some(transport) = self.fabric_transport().await {
-                // The broker checks what is left against the chain and
-                // refuses a spent budget itself, with an edge-log row.
-                info!(agent = %local, "Delegating to a local worker over the fabric");
-                self.send_progress(InvokeAgentProgress::Started {
-                    agent_name: local.to_string(),
-                    prompt: prompt.clone(),
-                    source: ToolSource::Local,
-                });
-                return self
-                    .call_over_fabric(transport.as_ref(), local, &prompt, args.include_trace)
-                    .await;
-            }
-
-            self.check_budget(local)?;
-            let Some(base_url) = self.gateway_base_url().await else {
+            let Some(transport) = self.fabric_transport().await else {
                 return Err(InvokeAgentError::InvocationFailed(format!(
-                    "Agent '{local}' needs the protocol gateway. \
-                         Enable it in Settings \u{2192} Modules."
+                    "Agent '{local}' needs a broker connection, which is not available here."
                 )));
             };
-
-            info!(agent = %local, "Delegating to a local worker through the broker");
-            let config = A2aAgentConfig {
-                name: local.to_string(),
-                url: format!("{}/a2a/{}", base_url, local),
-                api_key: None,
-                enabled: true,
-                skills: vec!["delegate".to_string()],
-            };
+            // The broker checks what is left against the chain and
+            // refuses a spent budget itself, with an edge-log row.
+            info!(agent = %local, "Delegating to a local worker over the fabric");
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: local.to_string(),
                 prompt: prompt.clone(),
                 source: ToolSource::Local,
             });
             return self
-                .call_streaming(&config, &prompt, args.include_trace)
+                .call_over_fabric(transport.as_ref(), local, &prompt, args.include_trace)
                 .await;
         }
 
@@ -1058,11 +1013,9 @@ mod tests {
     /// server at that URL — which is fine: the warning has to come first.
     #[tokio::test]
     async fn a_third_party_agent_is_announced_before_the_prompt_goes() {
-        let tool = InvokeAgentTool::new(
-            vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)],
-            None,
-        )
-        .with_external_agent_warning(true);
+        let tool =
+            InvokeAgentTool::new(vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)])
+                .with_external_agent_warning(true);
         let progress = watch_progress(&tool);
 
         let _ = tool
@@ -1093,10 +1046,8 @@ mod tests {
     /// it on. Which trust policy it should carry is not decided here.
     #[tokio::test]
     async fn nothing_is_said_when_the_flag_is_off() {
-        let tool = InvokeAgentTool::new(
-            vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)],
-            None,
-        );
+        let tool =
+            InvokeAgentTool::new(vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)]);
         let progress = watch_progress(&tool);
 
         let _ = tool
@@ -1122,11 +1073,9 @@ mod tests {
     async fn a_spent_cap_refuses_the_delegation_before_it_starts() {
         use crate::services::spend_gate::FixedSpendGate;
 
-        let tool = InvokeAgentTool::new(
-            vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)],
-            None,
-        )
-        .with_spend_gate(Arc::new(FixedSpendGate::refusing(12.5, 10.0)));
+        let tool =
+            InvokeAgentTool::new(vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)])
+                .with_spend_gate(Arc::new(FixedSpendGate::refusing(12.5, 10.0)));
         let progress = watch_progress(&tool);
 
         let err = tool
@@ -1189,11 +1138,9 @@ mod tests {
     async fn a_gate_under_the_cap_lets_the_delegation_through() {
         use crate::services::spend_gate::FixedSpendGate;
 
-        let tool = InvokeAgentTool::new(
-            vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)],
-            None,
-        )
-        .with_spend_gate(Arc::new(FixedSpendGate::permitting()));
+        let tool =
+            InvokeAgentTool::new(vec![make_agent("voucher", "http://127.0.0.1:1/a2a", true)])
+                .with_spend_gate(Arc::new(FixedSpendGate::permitting()));
         let progress = watch_progress(&tool);
 
         let err = tool
@@ -1223,7 +1170,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_not_found() {
-        let tool = InvokeAgentTool::new(vec![], None);
+        let tool = InvokeAgentTool::new(vec![]);
 
         let result = tool
             .call(
@@ -1245,7 +1192,7 @@ mod tests {
     #[tokio::test]
     async fn test_invoke_disabled_remote_agent() {
         let agent = make_agent("my-agent", "https://example.com/a2a", false);
-        let tool = InvokeAgentTool::new(vec![agent], None);
+        let tool = InvokeAgentTool::new(vec![agent]);
 
         let result = tool
             .call(
@@ -1266,7 +1213,7 @@ mod tests {
     /// carries is not found, and the error lists the roster's specs.
     #[tokio::test]
     async fn a_module_name_is_not_an_agent_and_the_roster_is_offered() {
-        let tool = InvokeAgentTool::new(vec![], None)
+        let tool = InvokeAgentTool::new(vec![])
             .with_local_agents(crate::agent_spec::roster_names_from(&[], None, None));
 
         let err = tool
@@ -1288,7 +1235,7 @@ mod tests {
     /// without one it says so rather than falling through to anything.
     #[tokio::test]
     async fn a_roster_spec_needs_the_broker() {
-        let tool = InvokeAgentTool::new(vec![], None).with_local_agents(["benford-analyst"]);
+        let tool = InvokeAgentTool::new(vec![]).with_local_agents(["benford-analyst"]);
 
         let err = tool
             .call(
@@ -1305,12 +1252,12 @@ mod tests {
             matches!(err, InvokeAgentError::InvocationFailed(_)),
             "{err}"
         );
-        assert!(err.to_string().contains("protocol gateway"), "{err}");
+        assert!(err.to_string().contains("broker connection"), "{err}");
     }
 
     #[tokio::test]
     async fn test_invoke_empty_agent_name() {
-        let tool = InvokeAgentTool::new(vec![], None);
+        let tool = InvokeAgentTool::new(vec![]);
 
         let result = tool
             .call(
@@ -1329,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_empty_prompt() {
-        let tool = InvokeAgentTool::new(vec![], None);
+        let tool = InvokeAgentTool::new(vec![]);
 
         let result = tool
             .call(
@@ -1353,8 +1300,7 @@ mod tests {
     async fn test_remote_agent_takes_precedence() {
         // When a remote agent and a local spec share a name, remote wins
         let remote = make_agent("shared-name", "https://example.com/a2a", false);
-        let tool =
-            InvokeAgentTool::new(vec![remote], Some(8420)).with_local_agents(["shared-name"]);
+        let tool = InvokeAgentTool::new(vec![remote]).with_local_agents(["shared-name"]);
 
         let result = tool
             .call(
@@ -1423,7 +1369,7 @@ mod tests {
                  from reviewer",
             ),
         ] {
-            let tool = InvokeAgentTool::new(vec![], None)
+            let tool = InvokeAgentTool::new(vec![])
                 .with_local_agents(vec![s("data-coder")])
                 .with_transport(Arc::new(Refusing(refusal.clone())));
             let progress = watch_progress(&tool);

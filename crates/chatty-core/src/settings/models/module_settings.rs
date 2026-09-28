@@ -4,7 +4,13 @@ use std::collections::HashMap;
 pub const LEGACY_FALLBACK_MODULE_DIR: &str = ".chatty/modules";
 
 /// Settings for the WASM module runtime and protocol gateway.
+///
+/// `deny_unknown_fields`: BI-7 (PL-D5, no backward compatibility) — there is
+/// no `loopback_roles` option and never was one to keep reading; a field
+/// this shape does not know is refused by name rather than silently
+/// dropped, exactly as `virtual_agents`' old shape already was.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleSettingsModel {
     /// Whether the module runtime is enabled. Defaults to `false`.
     #[serde(default)]
@@ -357,6 +363,17 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("virtual_agents"), "{err}");
+    }
+
+    /// BI-7 (PL-D5, no backward compatibility): there is no `loopback_roles`
+    /// option — a settings file naming one fails to load rather than being
+    /// read and ignored, exactly as an unknown field always has here.
+    #[test]
+    fn loopback_has_no_role_option() {
+        let err = serde_json::from_str::<ModuleSettingsModel>(r#"{"loopback_roles":true}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("loopback_roles"), "{err}");
     }
 
     /// AGE-406 Do item 3: `team.verification` is optional, round-trips, and
