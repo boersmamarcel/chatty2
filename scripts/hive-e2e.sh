@@ -18,6 +18,9 @@
 #   HIVE_REGISTRY_PORT    host port of the registry (default 8080)
 #   HIVE_RUNNER_PORT      host port of the runner (default 8081)
 #   HIVE_E2E_REPORT       markdown report path (default target/hive-e2e-report.md)
+#   CHATTY_HIVE_ROOT_KEY  the registry root public key chatty trusts for the
+#                         stack (default: the stack's own dev key, read from
+#                         the registry's `root_public_key=` startup log line)
 #
 # Needs: cargo, docker compose v2.24+ (`!reset`), curl, jq, and the fixtures
 # (scripts/build-wasm-fixtures.sh).
@@ -71,13 +74,31 @@ seed() {
     "$HIVE_DIR/scripts/seed-e2e.sh" "$root/target/wasm-fixtures"
 }
 
+# The stack's dev registry root public key (hive's `dev-root-key` service,
+# AGE-704), from the registry's startup log. chatty trusts it for the local
+# stack through CHATTY_HIVE_ROOT_KEY (hive-client `trust`, AGE-608).
+stack_root_key() {
+  compose logs --no-color registry 2>/dev/null |
+    sed -E 's/\x1b\[[0-9;]*m//g' |
+    grep -oE 'root_public_key="?[0-9a-f]{64}' |
+    tail -n1 |
+    grep -oE '[0-9a-f]{64}$' || true
+}
+
 run_tests() {
-  local data log status
+  local data log status root_key
+  root_key="${CHATTY_HIVE_ROOT_KEY:-$(stack_root_key)}"
+  if [[ -z "$root_key" ]]; then
+    echo "[hive-e2e] no root_public_key= line in the registry log of stack $project; is it up?" >&2
+    return 1
+  fi
+  echo "[hive-e2e] trusting the stack's registry root key $root_key" >&2
   data="$(mktemp -d)"
   log="$(mktemp)"
   mkdir -p "$(dirname "$report")"
   set +e
-  XDG_DATA_HOME="$data" \
+  CHATTY_HIVE_ROOT_KEY="$root_key" \
+    XDG_DATA_HOME="$data" \
     HIVE_E2E_BASE_URL="http://localhost:$registry_port" \
     HIVE_E2E_RUNNER_URL="http://localhost:$runner_port" \
     cargo test -p hive-e2e --tests --no-fail-fast -- --ignored --test-threads=1 2>&1 | tee "$log"
@@ -134,7 +155,7 @@ all)
   run_tests
   ;;
 *)
-  sed -n '2,24p' "$0"
+  sed -n '2,27p' "$0"
   exit 2
   ;;
 esac

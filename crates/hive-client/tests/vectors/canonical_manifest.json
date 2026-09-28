@@ -1,0 +1,1 @@
+{"capabilities":{"agent":true,"chat":false,"tools":["echo","résumé"]},"name":"vector-module","sha256":"24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29","version":"1.2.3-rc.1","wit_version":"0.2.0"}

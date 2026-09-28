@@ -3,9 +3,11 @@
 //! stack. The attacker controls the network or the registry; chatty must
 //! refuse what it cannot verify. PL-H5a (AGE-703) fixed rows 6.4, 6.5 and
 //! 6.7 (names, download cap, install record re-checked at load); PL-H5
-//! (AGE-608) fixes the signature rows 6.1, 6.2 and 6.6, aiming at the
-//! boundary PL-D3 (AGE-595) set: a registry root key compiled into chatty
-//! signs publisher keys; no TOFU.
+//! (AGE-608) fixed the signature rows 6.1, 6.2 and 6.6 at the boundary
+//! PL-D3 (AGE-595) set: the registry root key chatty holds certifies
+//! publisher keys, which sign a manifest naming the module; no TOFU. For
+//! the compose stack that root is its dev key, handed to chatty through
+//! `CHATTY_HIVE_ROOT_KEY` ([`hive_e2e::Stack`]).
 
 use hive_e2e::proxy::{Download, Payload, TamperProxy};
 use hive_e2e::{
@@ -38,9 +40,8 @@ async fn install(user: &User, proxy: &TamperProxy, name: &str) -> Result<String,
 
 // ── 6.1 ───────────────────────────────────────────────────────────────────
 
-/// 6.1: a download stripped of `x-signature` and `x-publisher-public-key`
-/// is refused. Red today: hive-client calls it `TrustLevel::Local` and the
-/// installer never reads the trust level (F4) — PL-H5 (AGE-608).
+/// 6.1: a download stripped of its `X-Hive-*` signing-chain headers is
+/// refused (F4, fixed by PL-H5, AGE-608).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s6_01_unsigned_download_is_refused() {
@@ -56,9 +57,9 @@ async fn s6_01_unsigned_download_is_refused() {
 
 // ── 6.2 ───────────────────────────────────────────────────────────────────
 
-/// 6.2: an attacker's own body, hash, signature and key — self-consistent,
-/// but by a key no registry root vouches for — are refused. Red today: the
-/// key arrives in the same response and is trusted (F4) — PL-H5 (AGE-608).
+/// 6.2: an attacker's own body and signing chain — self-consistent, naming
+/// the requested module, but certified by a root chatty does not trust —
+/// are refused (F4, fixed by PL-H5, AGE-608).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s6_02_attacker_signed_payload_is_refused() {
@@ -66,6 +67,8 @@ async fn s6_02_attacker_signed_payload_is_refused() {
     let (user, proxy) = through_proxy(&stack).await;
     proxy.set_download(Download::Swap(Payload::signed_by_attacker(
         stack.fixture(OTHER),
+        TARGET,
+        SEEDED_VERSION,
     )));
     let installed = install(&user, &proxy, TARGET).await;
     assert!(
@@ -161,8 +164,8 @@ async fn s6_05_oversized_download_is_aborted_at_the_cap() {
 // ── 6.6 ───────────────────────────────────────────────────────────────────
 
 /// 6.6: another module's genuine, signed download replayed under this
-/// module's name is refused. Red today: the signature covers only the hash,
-/// not name or version — PL-H5 (AGE-608), with PL-H7's signed manifest.
+/// module's name is refused: the signed manifest names the module and
+/// version (PL-H5, AGE-608, with AGE-704's signed manifest).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s6_06_signed_download_replayed_under_another_name_is_refused() {

@@ -83,7 +83,9 @@ pub fn validate_version(version: &str) -> Result<(), InstallError> {
 /// Download `name@version`'s `.wasm` from the registry, the one way the
 /// desktop does it: the name and version are validated first, the body is
 /// capped at [`hive_client::MAX_DOWNLOAD_BYTES`] while it streams, then
-/// hive-client checks the hash and signature. `on_progress` gets
+/// hive-client verifies the signing chain against its trusted registry root
+/// key and checks the signed manifest names `name@version` (PL-H5): an
+/// unsigned or unverifiable download is refused. `on_progress` gets
 /// `(bytes read, Content-Length or 0)` after each chunk.
 pub async fn download_wasm_module(
     client: &HiveRegistryClient,
@@ -97,14 +99,7 @@ pub async fn download_wasm_module(
     let total = begun.total_size;
     let wasm = begun.read_body(|read| on_progress(read, total)).await?;
     let download = client
-        .finalize_download(
-            wasm,
-            begun.registry_hash,
-            begun.signature,
-            begun.publisher_public_key,
-            name,
-            version,
-        )
+        .finalize_download(wasm, &begun.chain, name, version)
         .await?;
     Ok(download)
 }
@@ -147,7 +142,7 @@ pub fn install_wasm_module(
         description,
         Some(&wasm_filename),
         "local",
-        &download.manifest,
+        &with_signed_capabilities(&download.manifest, &download.signed_manifest.capabilities),
     );
     std::fs::write(dest.join("module.toml"), toml_content)?;
 
@@ -155,7 +150,7 @@ pub fn install_wasm_module(
     InstallRecord::new(
         &download.wasm,
         download.trust_level.clone(),
-        download.publisher_public_key.clone(),
+        Some(download.publisher_public_key.clone()),
     )
     .write(&dest)?;
 
@@ -393,6 +388,27 @@ fn toml_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// `manifest` (the version record's, which nobody signed) with its
+/// `capabilities` replaced by the ones the publisher signed, so the tools a
+/// module requests are exactly what the verified chain covers (PL-H5).
+fn with_signed_capabilities(
+    manifest: &serde_json::Value,
+    signed: &hive_client::verify::Capabilities,
+) -> serde_json::Value {
+    let mut manifest = match manifest {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    manifest.remove("capabilities");
+    if !signed.tools.is_empty() {
+        manifest.insert(
+            "capabilities".to_string(),
+            serde_json::json!({ "tools": signed.tools }),
+        );
+    }
+    serde_json::Value::Object(manifest)
 }
 
 /// Build a `module.toml` from the Hive manifest JSON. Falls back to a
@@ -802,8 +818,14 @@ mod tests {
             wasm_hash: String::new(),
             wasm,
             trust_level: TrustLevel::Signed,
-            signature: None,
-            publisher_public_key: Some("ab".repeat(32)),
+            publisher_public_key: "ab".repeat(32),
+            signed_manifest: hive_client::verify::SignedManifest {
+                capabilities: Default::default(),
+                name: String::new(),
+                sha256: String::new(),
+                version: String::new(),
+                wit_version: "0.3.0".to_string(),
+            },
             manifest: serde_json::json!({}),
         }
     }
@@ -939,6 +961,28 @@ mod tests {
         assert!(!configured.path().join("remote-mod").exists());
     }
 
+    #[test]
+    fn installed_capabilities_are_the_signed_ones() {
+        let modules = tempfile::tempdir().unwrap();
+        let mut download = download_of(b"\0asm".to_vec());
+        download.manifest = serde_json::json!({ "capabilities": { "tools": ["unsigned-tool"] } });
+        download.signed_manifest.capabilities.tools = vec!["signed-tool".to_string()];
+        install_wasm_module(
+            &download,
+            "caps-mod",
+            "1.0.0",
+            "caps-mod",
+            "",
+            "free",
+            modules.path(),
+            &mut ExtensionsModel::default(),
+        )
+        .unwrap();
+        let toml = std::fs::read_to_string(modules.path().join("caps-mod/module.toml")).unwrap();
+        assert!(toml.contains("tools = [\"signed-tool\"]"), "{toml}");
+        assert!(!toml.contains("unsigned-tool"), "{toml}");
+    }
+
     #[tokio::test]
     async fn download_capped_while_streaming() {
         use wiremock::matchers::{method, path};
@@ -948,11 +992,20 @@ mod tests {
         let body = vec![0u8; (hive_client::MAX_DOWNLOAD_BYTES + 1) as usize];
         Mock::given(method("GET"))
             .and(path("/api/modules/echo-agent/1.0.0"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .respond_with(
+                // Chain headers are present (the body is capped before
+                // anything is verified); their content does not matter here.
+                ResponseTemplate::new(200)
+                    .insert_header(hive_client::verify::HEADER_MANIFEST, "e30=")
+                    .insert_header(hive_client::verify::HEADER_MANIFEST_SIGNATURE, "AA==")
+                    .insert_header(hive_client::verify::HEADER_CERTIFICATE, "e30=")
+                    .insert_header(hive_client::verify::HEADER_CERTIFICATE_SIGNATURE, "AA==")
+                    .set_body_bytes(body),
+            )
             .mount(&server)
             .await;
         let modules = tempfile::tempdir().unwrap();
-        let client = HiveRegistryClient::new(server.uri());
+        let client = HiveRegistryClient::new(server.uri()).with_local_root_key(&"00".repeat(32));
 
         let mut read = 0;
         let result = download_wasm_module(&client, "echo-agent", "1.0.0", |n, _| read = n).await;
