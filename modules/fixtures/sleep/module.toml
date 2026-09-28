@@ -1,0 +1,8 @@
+[module]
+name = "sleep"
+version = "0.1.0"
+description = "Adversarial test fixture: sleep"
+wasm = "sleep.wasm"
+
+[capabilities]
+tools = ["sleep"]
