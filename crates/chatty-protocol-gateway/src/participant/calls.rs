@@ -300,6 +300,7 @@ impl BrokerCalls {
                 log: self.edges.clone(),
                 from: message.from_name.as_str().to_string(),
                 to: name.to_string(),
+                chain: vec![message.from_name.as_str().to_string()],
                 bytes: message.bytes() as u64,
                 outcome: None,
             }
