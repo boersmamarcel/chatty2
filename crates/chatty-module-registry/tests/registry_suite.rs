@@ -477,6 +477,11 @@ fn sandbox_1_9_registry_passes_config_and_files_root() {
     let mut reg = registry();
     let report = reg.scan_directory(tmp.path()).expect("scan_directory");
     assert!(report.failed.is_empty(), "{:?}", report.failed);
+    // Served on its own, a module is granted what it requests (PL-U4).
+    assert_eq!(
+        reg.requested_capabilities("config-reader"),
+        Some(&[chatty_wasm_runtime::Capability::Config][..])
+    );
 
     let config = reg.get("config-reader").expect("config-reader loaded");
     let mut config = config.blocking_lock();

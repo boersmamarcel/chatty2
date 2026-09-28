@@ -33,7 +33,7 @@ A plugin contributes **tools** to a chatty agent. It never runs a loop of its ow
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-Each host import is its own interface, one per **capability**, so the host can link only the capabilities an agent granted (PL-U4; today every import is linked). A plugin declares the ones it needs in `metadata().requested-capabilities`; `logging` is always granted. A component that never calls an import does not import it at all, so a plugin that only computes (like `benford`) imports nothing but `logging`.
+Each host import is its own interface, one per **capability**, so the host links only the capabilities an agent granted (PL-U4). A plugin declares the ones it needs in `metadata().requested-capabilities`; an agent spec's `[[plugins]].grants` names a subset (`llm`, `config`, `logging`, `file`, `file:<root>`, `billing`), and `logging` is always granted. An import the plugin was not granted is still satisfied, by a stub that refuses: `llm`, `file` and `billing` return `Err("capability <x> not granted to this agent")` to the guest, and `config::get`, which has no error channel, ends the call with that text as its reason. Either way the module instantiates and the refusal reaches the model in the tool result. A module served on its own by the gateway (no spec) is granted what it requests. A component that never calls an import does not import it at all, so a plugin that only computes (like `benford`) imports nothing but `logging`.
 
 Plugins are written against [`chatty-module-sdk`](../crates/chatty-module-sdk/): implement its `Plugin` trait and call `export!(MyPlugin)`. Both are wit-bindgen's own generated code, so the export names always match this file.
 
@@ -184,7 +184,7 @@ Capability `file`. Read a file under the plugin's **file root**: the directory i
 root = "weights"   # relative to the module directory
 ```
 
-The root is host-set (the runtime's `ModuleManifest::with_weights_root`), never a `[config]` key: a config value named `weights_root` grants nothing. A plugin without `[files]` can read no files. Most plugins never need this; ML inference plugins use it to load weights once at startup.
+The root is host-set (the runtime's `ModuleManifest::with_weights_root`), never a `[config]` key: a config value named `weights_root` grants nothing. The plugin reads it only when its agent grants `file`; `file:<root>` grants an absolute `<root>` instead. A plugin without `[files]` and without a `file:<root>` grant can read no files. Most plugins never need this; ML inference plugins use it to load weights once at startup.
 
 **Parameters**:
 - `path` — Relative to the file root. `/` and `\` both separate components.
@@ -310,7 +310,7 @@ interface plugin {
 
 #### `metadata`
 
-Who the plugin is and what it asks the host for. `name` and `version` match `[module]` in its `module.toml`. `requested-capabilities` is what an agent spec will be able to grant it: PL-U4 makes a grant it did not request a spec error, and answers an import it was not granted with `capability <x> not granted to this agent` (until then every import is linked); `config-keys` names the `config::get` keys it reads. Hive validates this at publish (PL-H7). Budget: 1 s.
+Who the plugin is and what it asks the host for. `name` and `version` match `[module]` in its `module.toml`. `requested-capabilities` is what an agent spec will be able to grant it: a grant it did not request fails the agent's build as a spec error (`plugin `<name>` is granted `<x>`, which it does not request`), and an import it was not granted answers `capability <x> not granted to this agent` (PL-U4); the host reads it at load from an instance granted nothing; `config-keys` names the `config::get` keys it reads. Hive validates this at publish (PL-H7). Budget: 1 s.
 
 #### `list-tools`
 

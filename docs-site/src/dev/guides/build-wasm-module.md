@@ -6,7 +6,7 @@
 
 A `wasm32-wasip2` component targeting `chatty:plugin@0.3.0`, built from the repo template, installed in the module directory, and listed in an agent spec so the agent's model can call its tools.
 
-A plugin contributes **tools**; it never runs a loop and is never an agent. It implements the [`Plugin`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs) trait: `metadata` (name, version, the host capabilities it requests, the config keys it reads), `list_tools` and `invoke_tool`. The host provides one import per capability: `llm::complete` (a completion on the calling agent's model; API keys stay on the host), `config::get` (the manifest's `[config]` table), `logging::log` (always granted), `file::read-bytes` (reads under a manifest-granted root) and `billing` (paid plugins). The contract is in the [WIT reference](../architecture/wit-reference.md).
+A plugin contributes **tools**; it never runs a loop and is never an agent. It implements the [`Plugin`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs) trait: `metadata` (name, version, the host capabilities it requests, the config keys it reads), `list_tools` and `invoke_tool`. The host provides one import per capability: `llm::complete` (a completion on the calling agent's model; API keys stay on the host), `config::get` (the manifest's `[config]` table), `logging::log` (always granted), `file::read-bytes` (reads under a manifest-granted root) and `billing` (paid plugins). The host links only the capabilities the agent's spec grants (`[[plugins]].grants`, a subset of what `metadata` requests); an ungranted import answers `capability <x> not granted to this agent`. The contract is in the [WIT reference](../architecture/wit-reference.md).
 
 ## Prerequisites
 
@@ -110,7 +110,7 @@ cargo test -p chatty-tui --test plugins_headless
 - [ ] `metadata().name`/`version` match `[module]` in `module.toml`
 - [ ] Every host import the plugin calls is in `requested_capabilities` (`logging` needs no request)
 - [ ] `.wasm` copied next to `module.toml`
-- [ ] An agent spec lists the plugin under `[[plugins]]`
+- [ ] An agent spec lists the plugin under `[[plugins]]`, with `grants` naming the capabilities it may use
 - [ ] Host-target unit tests for your tool logic
 
 ## Common mistakes

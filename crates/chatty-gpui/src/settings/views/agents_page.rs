@@ -6,7 +6,7 @@
 
 use crate::settings::models::agent_specs::served_names;
 use crate::settings::models::extensions_store::ExtensionsModel;
-use crate::settings::models::{AgentSpecsModel, ModuleSettingsModel};
+use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel, ModuleSettingsModel};
 use chatty_core::agent_spec::{AgentSpec, SpecListing};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -138,8 +138,8 @@ fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
 }
 
 /// What a spec declares, one fact per line: description, model and
-/// profile, plugins with the capabilities granted them, and who it may
-/// call and be called by.
+/// profile, plugins with the capabilities they request and are granted,
+/// and who it may call and be called by.
 fn spec_details(spec: &AgentSpec, cx: &App) -> Vec<AnyElement> {
     let mut lines = Vec::new();
     if let Some(description) = spec.agent.description.as_deref() {
@@ -167,12 +167,17 @@ fn spec_details(spec: &AgentSpec, cx: &App) -> Vec<AnyElement> {
                     .as_deref()
                     .map(|v| format!(" {v}"))
                     .unwrap_or_default();
-                let grants = if plugin.grants.is_empty() {
-                    "no capabilities".to_string()
-                } else {
-                    format!("grants {}", plugin.grants.join(", "))
-                };
-                format!("{}{version} ({grants})", plugin.module)
+                // What the loaded plugin requests, against what the spec
+                // grants it (PL-U4).
+                let requested = cx
+                    .try_global::<DiscoveredModulesModel>()
+                    .and_then(|dm| dm.modules.iter().find(|m| m.name == plugin.module))
+                    .and_then(|module| module.requested.as_deref());
+                format!(
+                    "{}{version} ({})",
+                    plugin.module,
+                    plugin.capabilities_summary(requested)
+                )
             })
             .collect();
         lines.push(detail(&format!("Plugins: {}", plugins.join("; ")), cx));
