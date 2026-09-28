@@ -1313,7 +1313,7 @@ mod tests {
                  from reviewer",
             ),
         ] {
-            let tool = InvokeAgentTool::new(vec![], None)
+            let tool = InvokeAgentTool::new(vec![])
                 .with_local_agents(vec![s("data-coder")])
                 .with_transport(Arc::new(Refusing(refusal.clone())));
             let progress = watch_progress(&tool);
