@@ -1205,6 +1205,7 @@ mod tests {
             chain: vec![],
             bytes: 0,
             outcome: outcome.into(),
+            usd: None,
         };
         let revision = trace.revision();
         for r in [
