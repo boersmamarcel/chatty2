@@ -1,6 +1,6 @@
 [package]
-name = "benford-agent"
-version = "0.1.0"
+name = "benford"
+version = "0.2.0"
 edition = "2021"
 
 [lib]

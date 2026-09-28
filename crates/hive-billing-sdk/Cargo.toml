@@ -14,8 +14,10 @@ serde_json = "1.0"
 hmac = "0.12"
 sha2 = "0.10"
 
-# WIT bindings for the billing interface
-wit-bindgen = "0.51.0"
+# The billing imports come from chatty-module-sdk, the one crate that
+# generates bindings for the plugin world: two generated worlds in one
+# component collide at link time (PL-E7 S8.5).
+chatty-module-sdk = { path = "../chatty-module-sdk" }
 
 # This crate is intentionally NOT part of the chatty workspace.
 # It targets wasm32-wasip2 (see .cargo/config.toml) and is compiled

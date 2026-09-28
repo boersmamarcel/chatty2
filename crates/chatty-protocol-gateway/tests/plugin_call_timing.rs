@@ -20,7 +20,7 @@ use chatty_core::tools::plugin_tool::{PluginApprovals, PluginHost, PluginTool, l
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_wasm_runtime::test_support::{FakeLlm, fixture_path};
-use chatty_wasm_runtime::{LlmProvider, ResourceLimits, WasmModule};
+use chatty_wasm_runtime::{LlmProvider, ResourceLimits, ToolCallRequest, WasmModule};
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -37,7 +37,7 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn in_process_plugin_call_vs_the_mcp_path() {
-    let echo_dir = fixture_path("echo-agent")
+    let echo_dir = fixture_path("echo")
         .parent()
         .expect("a fixture has a directory")
         .to_path_buf();
@@ -55,7 +55,7 @@ async fn in_process_plugin_call_vs_the_mcp_path() {
     );
     let plugins = load_plugins(
         &[PluginSpec {
-            module: "echo-agent".to_string(),
+            module: "echo".to_string(),
             ..PluginSpec::default()
         }],
         &host,
@@ -92,8 +92,8 @@ async fn in_process_plugin_call_vs_the_mcp_path() {
     let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
     let mut module = WasmModule::from_file(
         &engine,
-        &fixture_path("echo-agent"),
-        chatty_wasm_runtime::ModuleManifest::new("echo-agent"),
+        &fixture_path("echo"),
+        chatty_wasm_runtime::ModuleManifest::new("echo"),
         Arc::new(FakeLlm::default()),
         ResourceLimits::default(),
     )
@@ -102,13 +102,18 @@ async fn in_process_plugin_call_vs_the_mcp_path() {
     for i in 0..WARM_UP + CALLS {
         let started = Instant::now();
         let out = module
-            .invoke_tool("reverse", r#"{"input":"hello"}"#)
+            .invoke_tool(ToolCallRequest {
+                name: "reverse".to_string(),
+                arguments_json: r#"{"input":"hello"}"#.to_string(),
+                call_id: format!("call-{i}"),
+                caller: None,
+            })
             .await
             .expect("reverse runs");
         if i >= WARM_UP {
             direct.push(started.elapsed());
         }
-        assert_eq!(out, "olleh");
+        assert_eq!(out.content, "olleh");
     }
 
     // The MCP path: the gateway serving the same module, and rmcp.
@@ -126,7 +131,7 @@ async fn in_process_plugin_call_vs_the_mcp_path() {
     tokio::spawn(async move {
         axum::serve(tcp, router).await.ok();
     });
-    let transport = StreamableHttpClientTransport::from_uri(format!("{base}/mcp/echo-agent"));
+    let transport = StreamableHttpClientTransport::from_uri(format!("{base}/mcp/echo"));
     let client = ().serve(transport).await.expect("the MCP session opens");
 
     let mut over_mcp = Vec::with_capacity(CALLS);

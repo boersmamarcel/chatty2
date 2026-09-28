@@ -1,0 +1,244 @@
+package chatty:plugin@0.3.0;
+
+/// The contract between chatty (host) and a WASM plugin (guest).
+///
+/// A plugin contributes tools to a chatty agent; it never runs a loop of its
+/// own (PL-D1 option B). The agent that loads it calls `invoke-tool` when its
+/// model asks for one of the plugin's tools.
+///
+/// Host imports: one interface per capability (`llm`, `config`, `logging`,
+/// `file`, `billing`), so the host can link a subset (PL-U4). A plugin
+/// declares the ones it needs in `metadata().requested-capabilities`.
+/// Guest export: `plugin` — metadata, tool discovery, tool invocation.
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+/// Types shared between the host imports and the guest export.
+interface types {
+    /// Role of a message participant in an `llm::complete` conversation.
+    enum role {
+        system,
+        user,
+        assistant,
+        /// The result of a tool call, answering the assistant message that
+        /// requested it (`message.tool-call-id` names the call).
+        tool,
+    }
+
+    /// A tool call requested by the model in an `llm::complete` reply.
+    record tool-call {
+        /// Unique identifier for this tool call.
+        id: string,
+        /// Name of the tool to invoke.
+        name: string,
+        /// JSON-encoded arguments for the tool.
+        arguments: string,
+    }
+
+    /// A single message in an `llm::complete` conversation.
+    record message {
+        role: role,
+        content: string,
+        /// The tool calls an `assistant` message made (empty otherwise).
+        tool-calls: list<tool-call>,
+        /// For a `tool` message: the id of the call it answers.
+        tool-call-id: option<string>,
+    }
+
+    /// Token usage of one or more model calls.
+    record token-usage {
+        input-tokens: u32,
+        output-tokens: u32,
+    }
+
+    /// Response from the host's `llm::complete`.
+    record completion-response {
+        /// The text content of the completion.
+        content: string,
+        /// Any tool calls the model wants to make.
+        tool-calls: list<tool-call>,
+        /// Token usage for this completion.
+        usage: option<token-usage>,
+    }
+
+    /// A tool the plugin exposes.
+    record tool-definition {
+        /// Unique name within the plugin (e.g. "reverse"). The host shows it
+        /// to the model as `<plugin>__<tool>`.
+        name: string,
+        /// Human-readable description shown to the model.
+        description: string,
+        /// JSON Schema describing the tool's arguments.
+        parameters-schema: string,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host imports — one interface per capability
+// ---------------------------------------------------------------------------
+
+/// Capability `llm`: a completion on a host-managed model, run through the
+/// calling agent's provider client and counted against its turn.
+interface llm {
+    use types.{message, completion-response};
+
+    /// Run a completion.
+    ///
+    /// * `model`    — a configured model id; empty means the calling agent's
+    /// * `messages` — the conversation (the last message is the prompt)
+    /// * `tools`    — optional JSON-encoded tool definitions for the model
+    complete: func(model: string, messages: list<message>, tools: option<string>) -> result<completion-response, string>;
+}
+
+/// Capability `config`: string values from the plugin's `[config]` table.
+interface config {
+    /// Retrieve a configuration value by key; `none` if it is not set.
+    get: func(key: string) -> option<string>;
+}
+
+/// Capability `logging`: structured logs (always granted).
+interface logging {
+    /// Emit a log message.
+    ///
+    /// * `level`   — one of "trace", "debug", "info", "warn", "error"
+    /// * `message` — the log message
+    log: func(level: string, message: string);
+}
+
+/// Capability `file`: read-only access below the plugin's granted file root
+/// (`[files] root` in `module.toml`). A plugin without a root reads nothing.
+interface file {
+    /// Read the raw bytes of a file at `path`.
+    ///
+    /// `path` is relative to the file root; `/` and `\` both separate
+    /// components. The host rejects absolute paths, drive letters, `..`
+    /// components, any path whose resolved location (symlinks followed)
+    /// leaves the root, non-regular files, and files over 256 MiB.
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+}
+
+/// Capability `billing`: paid plugins reserve and settle Hive credits.
+interface billing {
+    /// Information about an acquired billing session.
+    record session-info {
+        /// Hive-signed session token (see `hive-billing-sdk`).
+        token: string,
+        /// User's current credit balance (informational).
+        balance-tokens: s64,
+        /// Tokens reserved for this session.
+        reserved-tokens: s64,
+        /// The plugin's pricing model at session creation.
+        pricing-model: string,
+    }
+
+    /// Reserve credits before doing work. Fails when the user has too few.
+    acquire-session: func(estimated-tokens: s64) -> result<session-info, string>;
+
+    /// Report actual usage after the work; settles the session.
+    report-usage: func(input-tokens: s64, output-tokens: s64) -> result<_, string>;
+}
+
+// ---------------------------------------------------------------------------
+// Guest export
+// ---------------------------------------------------------------------------
+
+/// What every chatty plugin implements.
+interface plugin {
+    use types.{tool-definition, token-usage};
+
+    /// A host capability a plugin may request. `logging` is always granted;
+    /// the agent spec grants a subset of the rest (PL-U4). An import whose
+    /// capability was not granted returns an error naming it.
+    enum capability {
+        llm,
+        config,
+        logging,
+        /// Read access below the file root the host grants.
+        file,
+        billing,
+    }
+
+    /// A `config::get` key the plugin reads.
+    record config-key {
+        name: string,
+        description: string,
+        /// The plugin cannot work without it.
+        required: bool,
+    }
+
+    /// Who the plugin is and what it asks the host for. The host reads it
+    /// at load; Hive validates it at publish.
+    record plugin-metadata {
+        /// Plugin name; matches `[module].name` in `module.toml`.
+        name: string,
+        /// Semver version; matches `[module].version`.
+        version: string,
+        description: string,
+        requested-capabilities: list<capability>,
+        config-keys: list<config-key>,
+    }
+
+    /// One tool call from the calling agent.
+    record tool-call-request {
+        /// A name from `list-tools`.
+        name: string,
+        /// The model's arguments, a JSON object encoded once.
+        arguments-json: string,
+        /// The model's id for this call.
+        call-id: string,
+        /// The calling agent's name, when the host knows it.
+        caller: option<string>,
+    }
+
+    /// A successful tool call.
+    record tool-result {
+        /// What the model sees: JSON or plain text.
+        content: string,
+        /// Model usage the tool spent through `llm::complete`, if any.
+        usage: option<token-usage>,
+    }
+
+    /// Why a tool call failed.
+    enum tool-error-kind {
+        /// No tool of that name.
+        unknown-tool,
+        /// The arguments did not parse or fail the schema.
+        invalid-arguments,
+        /// A host capability refused (not granted, no credits, bad path).
+        denied,
+        /// The tool ran and failed.
+        failed,
+    }
+
+    /// A failed tool call; `message` reaches the model.
+    record tool-error {
+        kind: tool-error-kind,
+        message: string,
+    }
+
+    /// Who the plugin is and what it requests.
+    metadata: func() -> plugin-metadata;
+
+    /// Every tool the plugin provides.
+    list-tools: func() -> list<tool-definition>;
+
+    /// Run one tool call.
+    invoke-tool: func(call: tool-call-request) -> result<tool-result, tool-error>;
+}
+
+// ---------------------------------------------------------------------------
+// World
+// ---------------------------------------------------------------------------
+
+/// The world every chatty plugin targets.
+world plugin-world {
+    import llm;
+    import config;
+    import logging;
+    import file;
+    import billing;
+
+    export plugin;
+}

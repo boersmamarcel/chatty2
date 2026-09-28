@@ -87,7 +87,7 @@ fn fixture_build_context() -> AgentBuildContext {
         module: module.to_string(),
         ..Default::default()
     };
-    let module_root = chatty_wasm_runtime::test_support::fixture_path("echo-agent")
+    let module_root = chatty_wasm_runtime::test_support::fixture_path("echo")
         .parent()
         .and_then(std::path::Path::parent)
         .expect("fixtures live in target/wasm-fixtures/<name>/")
@@ -96,7 +96,7 @@ fn fixture_build_context() -> AgentBuildContext {
         pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
         pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
         pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),
-        plugins: vec![plugin("slow-host"), plugin("echo-agent")],
+        plugins: vec![plugin("slow-host"), plugin("echo")],
         ..AgentBuildContext::from_services(AgentServices {
             exec_settings: Some(fixture_execution_settings()),
             plugin_host: crate::tools::plugin_tool::PluginHost {
@@ -204,7 +204,7 @@ fn tool_block_is_byte_identical_across_processes() {
     );
     let block = String::from_utf8_lossy(&first);
     let echo = block
-        .find("\"echo-agent__echo\"")
+        .find("\"echo__echo\"")
         .expect("the echo plugin's tools");
     let ask = block
         .find("\"slow-host__ask\"")

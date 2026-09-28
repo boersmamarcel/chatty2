@@ -1,0 +1,15 @@
+[module]
+name = "echo"
+version = "0.2.0"
+description = "Reference plugin: echo, reverse and count_words tools"
+wasm = "echo.wasm"
+
+[capabilities]
+tools = ["echo", "reverse", "count_words"]
+
+[protocols]
+mcp = true
+
+[resources]
+max_memory_mb = 32
+max_execution_ms = 5000

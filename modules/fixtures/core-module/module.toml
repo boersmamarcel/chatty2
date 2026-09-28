@@ -6,5 +6,3 @@ wasm = "core-module.wasm"
 
 [capabilities]
 tools = []
-chat = true
-agent = true

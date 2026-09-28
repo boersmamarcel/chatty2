@@ -17,7 +17,7 @@ The same compile, test and lint path GitHub runs, executed on your machine; and,
 
 ```bash
 make setup        # Linux deps + wasm32-wasip2 (once)
-make wasm-modules # echo-agent WASM for tests
+make wasm-modules # WASM plugins and fixtures for tests
 make ci           # matches the Rust path of GitHub Actions
 ```
 

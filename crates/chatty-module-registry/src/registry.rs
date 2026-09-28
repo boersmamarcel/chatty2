@@ -10,9 +10,9 @@
 //!
 //! ```text
 //! .chatty/modules/
-//! └── echo-agent/
+//! └── echo/
 //!     ├── module.toml
-//!     ├── echo_agent.wasm
+//!     ├── echo.wasm
 //!     └── .chatty-install.json   (only for modules chatty installed)
 //! ```
 //!

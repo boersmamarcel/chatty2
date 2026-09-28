@@ -34,7 +34,7 @@ help:
 	@echo "  make typecheck     cargo check --all-features"
 	@echo "  make wasm-modules  Build every WASM module and test fixture (needed by tests)"
 	@echo "  make wasm-template cargo-generate a module from templates/module and build it (needs cargo-generate)"
-	@echo "  make test-benford  benford-agent's own unit tests, on the host target"
+	@echo "  make test-benford  the benford plugin's own unit tests, on the host target"
 	@echo "  make lint-module-sdk  clippy chatty-module-sdk for wasm32-wasip2"
 	@echo "  make test-billing-sdk  hive-billing-sdk's tests, on the host target"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
@@ -119,13 +119,13 @@ wasm-template:
 	cargo build --manifest-path modules/ci-generated/Cargo.toml \
 		--target wasm32-wasip2 --release
 
-# benford-agent, chatty-module-sdk and hive-billing-sdk are standalone crates
+# benford, chatty-module-sdk and hive-billing-sdk are standalone crates
 # (their own `[workspace]`), so `make test`/`make lint` above never touch
 # them. Both test crates default to `wasm32-wasip2` via their own
 # `.cargo/config.toml`, which has no libtest runner, so the host target must
 # be explicit (AGE-600).
 test-benford:
-	cargo test --manifest-path modules/benford-agent/Cargo.toml --target x86_64-unknown-linux-gnu
+	cargo test --manifest-path modules/benford/Cargo.toml --target x86_64-unknown-linux-gnu
 
 lint-module-sdk:
 	cargo clippy --manifest-path crates/chatty-module-sdk/Cargo.toml --target wasm32-wasip2 -- -D warnings

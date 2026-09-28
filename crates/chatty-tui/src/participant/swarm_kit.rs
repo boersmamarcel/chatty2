@@ -2206,7 +2206,7 @@ async fn cancelled_permit_wait_makes_no_model_call() {
 
     let kit = SwarmKit::start(
         vec![
-            AgentDef::new("kit-m", "kit/m", Endpoint::Sse),
+            AgentDef::new("kit-m", "kit/m", Endpoint::Sse).sub_leader(),
             AgentDef::new("kit-g", "kit/g", Endpoint::Ndjson),
             AgentDef::new("kit-b", "kit/b", Endpoint::Sse),
         ],

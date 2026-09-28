@@ -5,6 +5,4 @@ description = "Adversarial test fixture: alloc"
 wasm = "alloc.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["alloc"]

@@ -5,6 +5,4 @@ description = "Adversarial test fixture: log-flood"
 wasm = "log-flood.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["flood"]

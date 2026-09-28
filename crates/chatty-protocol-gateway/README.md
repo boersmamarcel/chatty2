@@ -1,14 +1,15 @@
 # chatty-protocol-gateway
 
-HTTP server that exposes agents through three protocol surfaces
-simultaneously. All three use **plain HTTP + JSON over TCP** — there is no
-gRPC, no WebSocket (except MCP SSE), and no binary framing.
+HTTP server with two protocol surfaces, both **plain HTTP + JSON over TCP** —
+there is no gRPC, no WebSocket (except MCP SSE), and no binary framing:
 
-An agent behind those surfaces is either a **loaded WASM module** or a
-**local participant**: a worker process the broker spawned on a connection it
-made for it, served at the same `/a2a/{name}` routes (ADR-0011, ADR-0020).
-That connection is the one thing here that is not HTTP; see
-[Local participants](#local-participants).
+- **MCP** serves the tools of each loaded WASM plugin (`chatty:plugin@0.3.0`)
+  to external MCP clients. A plugin has tools and no loop of its own, so it
+  is never an agent and has no other route (PL-U3).
+- **A2A** serves agents: **local participants** (worker processes the broker
+  spawned on a connection it made for them) and **virtual agents** (ADR-0011,
+  ADR-0020). That connection is the one thing here that is not HTTP; see
+  [Local participants](#local-participants).
 
 ## Transport
 
@@ -16,13 +17,12 @@ That connection is the one thing here that is not HTTP; see
 
 | Protocol | Method | Content-Type |
 |----------|--------|-------------|
-| OpenAI completions | `POST /v1/{module}/chat/completions` | `application/json` |
 | MCP JSON-RPC | `POST /mcp/{module}` | `application/json` |
 | MCP SSE stream | `GET /mcp/{module}/sse` | `text/event-stream` |
 | MCP SSE message | `POST /mcp/{module}/sse?sessionId=…` | `application/json` |
-| A2A JSON-RPC | `POST /a2a/{module}` | `application/json` |
-| A2A streaming | `POST /a2a/{module}` (method: `message/stream`) | `text/event-stream` |
-| Agent card (per module) | `GET /a2a/{module}/.well-known/agent.json` | `application/json` |
+| A2A JSON-RPC | `POST /a2a/{agent}` | `application/json` |
+| A2A streaming | `POST /a2a/{agent}` (method: `message/stream`) | `text/event-stream` |
+| Agent card (per agent) | `GET /a2a/{agent}/.well-known/agent.json` | `application/json` |
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
 | Participant connection | broker-made `socketpair` per worker (`open_connection`) | newline-delimited JSON, v2 |
 
@@ -36,9 +36,9 @@ That connection is the one thing here that is not HTTP; see
   virtual agent. A request without `Host` (not a browser's) is served.
 - **Request bodies up to 10 MiB** (`MAX_REQUEST_BYTES`); a larger one is a
   **413** before any handler runs.
-- **`[protocols]`.** A module is served only on the protocols its manifest
-  enables; on the others it answers **404**, as if it were not loaded, and it
-  is left off the aggregated agent card when `a2a = false`.
+- **`[protocols] mcp`.** A plugin is served over MCP only when its manifest
+  sets `mcp = true`; otherwise it answers **404**, as if it were not loaded.
+  It is never on the aggregated agent card.
 - **One lock per module.** The registry is locked only to look a module up;
   the guest call runs under that module's own lock (`ModuleHandle`), on the
   blocking pool. Calls to one module queue; calls to different modules do
@@ -48,27 +48,14 @@ That connection is the one thing here that is not HTTP; see
 
 ## Protocol summary
 
-### 1 · OpenAI Completion API
+### 1 · MCP (Model Context Protocol)
 
-Speaks the OpenAI `POST /v1/chat/completions` shape. The full agentic loop
-(LLM ↔ tools) runs inside the WASM module. The caller receives a finished
-response in `choices[0].message.content` — intermediate tool calls are hidden.
-
-Every message reaches the guest with its role (`system`/`developer` →
-`system`, `user`, `assistant`; any other role is a 400), and a content-part
-array reaches it as its text parts joined. The request's `user` becomes the
-guest's `conversation_id`. The route does not stream: `stream: true` is a
-**400** ("streaming not supported"), not a JSON body a streaming client would
-misread.
-
-### 2 · MCP (Model Context Protocol)
-
-Speaks JSON-RPC 2.0 (`tools/list`, `tools/call`). There is **no** agentic
-loop on the gateway side — each call is a direct pass-through to the module's
-`list_tools` or `invoke_tool` WIT exports. The caller (an orchestrator or
-another LLM) decides when to call each tool and how to interpret the raw JSON
-output. `tools/call` hands the guest its `arguments` object JSON-encoded once,
-which is what the WIT's `args` is and what the tool's `inputSchema` describes.
+Speaks JSON-RPC 2.0 (`tools/list`, `tools/call`). Each call is a direct
+pass-through to the plugin's `list-tools` or `invoke-tool` WIT exports; the
+caller (an orchestrator or another LLM) decides when to call each tool and
+how to interpret its output. `tools/call` hands the guest its `arguments`
+object JSON-encoded once, as `tool-call-request.arguments-json` — what the
+tool's `inputSchema` describes.
 
 Two transports, one dispatcher:
 
@@ -80,18 +67,14 @@ Two transports, one dispatcher:
   as a `message` event. The stream stays open (keep-alives) until the client
   disconnects, which ends the session.
 
-### 3 · A2A (Agent-to-Agent)
+### 2 · A2A (Agent-to-Agent)
 
 Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `message/stream`,
-`tasks/get`). Like the Completion API, the agentic loop runs behind the
-gateway — inside the WASM module, or inside the participant process.
-
-Every text part of `message.parts` reaches the agent, joined by newlines. For
-a module, the gateway keeps the conversation per `contextId` (bounded: 1024
-contexts, 256 messages each): the next message in a context reaches the guest
-with the earlier turns in front of it, and `contextId` is the guest's
-`conversation_id`. A message without one starts a new context; the answer's
-`contextId` continues it. Task and context ids are random UUIDs.
+`tasks/get`) for participants and virtual agents; the agent's loop runs in
+its own process. Every text part of `message.parts` reaches the agent, joined
+by newlines. A module whose Hive metadata says `execution_mode = "remote"` is
+forwarded to the Hive runner until PL-H8b removes that path; a local plugin
+has no A2A route.
 
 **`message/send`** returns a complete JSON-RPC response:
 
@@ -113,11 +96,6 @@ data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-…","contextId":"…","statu
 The agent card advertises `"capabilities": { "streaming": true }` so clients
 can discover streaming support.
 
-> **Note:** The underlying WASM `chat` export is currently request/response,
-> so the gateway emits the full response as a single artifact chunk. When the
-> WIT interface gains a streaming chat export, this handler will emit
-> finer-grained token-level events without changing the SSE wire format.
-
 ## Architecture
 
 ```
@@ -125,9 +103,9 @@ can discover streaming support.
 HTTP client               │   chatty-protocol-gateway     │
                           │   (Axum HTTP server)          │
                           │                              │
-POST /v1/{m}/chat/…  ────►│ openai.rs handler            │
 POST /mcp/{m}        ────►│ mcp.rs handler               ├──► ModuleRegistry
-POST /a2a/{m}        ────►│ a2a.rs handler               │    (wasmtime instances)
+                          │                              │    (wasmtime instances)
+POST /a2a/{agent}    ────►│ a2a.rs handler               │
 GET  /.well-known/…  ────►│ a2a.rs handler               │
                           │            │                 │
                           │            ▼                 │
@@ -139,22 +117,14 @@ GET  /.well-known/…  ────►│ a2a.rs handler               │
 
 The gateway holds a single `ModuleRegistry` (behind an `Arc<RwLock<…>>`, read
 only to look a module up) whose modules each sit behind their own lock, and a
-single `ParticipantRegistry`. The module handlers call the WIT exports:
-
-| Handler | WIT export called |
-|---------|-------------------|
-| OpenAI  | `agent::chat`     |
-| MCP     | `agent::list-tools`, `agent::invoke-tool` |
-| A2A `message/send` | `agent::chat` |
-| A2A `message/stream` | `agent::chat` (SSE wrapper) |
+single `ParticipantRegistry`. Only the MCP handler calls a plugin, through
+its `plugin::list-tools` and `plugin::invoke-tool` exports.
 
 ## Local participants
 
 A worker on a broker-made connection that publishes an agent card and
-answers tasks is addressable at `/a2a/{name}` exactly like a module — same
-JSON-RPC methods, same SSE frames, so an A2A client cannot tell the two
-apart. **Participants are looked up first**, so a live process would shadow
-a module of the same name.
+answers tasks is addressable at `/a2a/{name}`, with the same JSON-RPC methods
+and SSE frames as any A2A agent.
 
 **The connection is the identity** (ADR-0020). The broker admits a node —
 `Directory::admit` names it `<spec>-<n>`, never reusing a name — creates a

@@ -14,7 +14,7 @@ use hive_e2e::{
 };
 
 /// The seeded module every row attacks, and a second one to swap in.
-const TARGET: &str = "echo-agent";
+const TARGET: &str = "echo";
 const OTHER: &str = "spin";
 
 /// A signed-in user whose client talks to the registry through a proxy.

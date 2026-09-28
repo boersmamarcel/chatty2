@@ -1,4 +1,4 @@
-//! S7 §4: 1 call/second to `benford-agent` for 60 minutes, sampling RSS, fd
+//! S7 §4: 1 call/second to `benford` for 60 minutes, sampling RSS, fd
 //! count, and fuel-exhaustion errors (AGE-603, plugin evaluation plan §3
 //! S7). Pre-PL-H1 (before AGE-604/#941), F2 predicted fuel-exhaustion errors
 //! would start once *cumulative* fuel ran out, since a `WasmModule`'s fuel
@@ -24,7 +24,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chatty_wasm_runtime::{ChatRequest, LlmProvider, Message, Role};
+use chatty_wasm_runtime::{LlmProvider, ToolCallRequest};
 
 /// Linux-only: current process RSS in KiB, from `/proc/self/status`.
 fn rss_kib() -> Option<u64> {
@@ -50,14 +50,12 @@ async fn main() {
         .unwrap_or(Duration::from_secs(60 * 60));
 
     let engine = common::engine();
-    // benford-agent's chat always calls llm::complete once per turn; a
-    // plain Text reply ends its agentic loop in one turn (see
-    // modules/benford-agent/src/lib.rs), so this is one host round trip per
-    // call, same as the gateway would make.
-    let llm: Arc<dyn LlmProvider> = common::fake_llm_many("audit: no anomalies found", 1 << 20);
-    let mut module = common::load_module(&engine, "benford-agent", llm);
+    // Each call is one `compute_benford_distribution` tool call, the work
+    // an agent's model asks the plugin for; the tool makes no host call.
+    let llm: Arc<dyn LlmProvider> = common::fake_llm_many("unused", 1);
+    let mut module = common::load_module(&engine, "benford", llm);
 
-    println!("# S7 soak: 1 call/s to benford-agent for {:?}", duration);
+    println!("# S7 soak: 1 call/s to benford for {:?}", duration);
     println!("elapsed_s,call,ok,error,rss_kib,fd_count");
 
     let start = Instant::now();
@@ -70,12 +68,12 @@ async fn main() {
         interval.tick().await;
         call_no += 1;
         let result = module
-            .chat(ChatRequest {
-                messages: vec![Message {
-                    role: Role::User,
-                    content: "12,34,56,78,910,1112,1314,1516,1718,1920".to_string(),
-                }],
-                conversation_id: "soak".to_string(),
+            .invoke_tool(ToolCallRequest {
+                name: "compute_benford_distribution".to_string(),
+                arguments_json: r#"{"numbers":[12,34,56,78,910,1112,1314,1516,1718,1920]}"#
+                    .to_string(),
+                call_id: format!("soak-{call_no}"),
+                caller: None,
             })
             .await;
 

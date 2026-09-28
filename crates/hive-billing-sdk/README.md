@@ -23,51 +23,56 @@ hive-billing-sdk = { path = "../../crates/hive-billing-sdk" }
 
 ## Quick Start
 
+The SDK is used inside a plugin's `invoke_tool` (a `chatty:plugin@0.3.0`
+plugin built on `chatty-module-sdk`). It uses `chatty-module-sdk`'s own
+`billing` imports, so the two crates link into one component.
+
 ```rust
 use chatty_module_sdk::*;
 use hive_billing_sdk::{configure_secret, require_session, report_usage};
 
-#[derive(Default)]
-struct MyPaidAgent;
+struct MyPaidPlugin;
 
-impl ModuleExports for MyPaidAgent {
-    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
-        // 1. Configure the JWT secret (do this once at module init)
-        //    In production, fetch this from Hive's well-known endpoint
-        configure_secret(env!("HIVE_JWT_SECRET"));
-        
-        // 2. Acquire and verify billing session
-        let session = require_session(5000)?; // Reserve 5000 tokens
-        
-        // Session is verified — safe to proceed
-        log::info(&format!(
-            "Session acquired: {} tokens reserved, balance: {}",
-            session.reserved_tokens, session.balance_tokens
-        ));
-        
-        // 3. Do actual work
-        let response = llm::complete(
-            "claude-sonnet-4-20250514",
-            &req.messages,
-            None
-        )?;
-        
-        // 4. Report actual usage
-        let input_tokens = response.usage.as_ref().map(|u| u.input_tokens).unwrap_or(0) as i64;
-        let output_tokens = response.usage.as_ref().map(|u| u.output_tokens).unwrap_or(0) as i64;
-        report_usage(&session, input_tokens, output_tokens)?;
-        
-        Ok(ChatResponse {
-            content: response.content,
-            tool_calls: vec![],
-            usage: response.usage,
-        })
+impl Plugin for MyPaidPlugin {
+    fn metadata() -> PluginMetadata {
+        PluginMetadata {
+            name: "my-paid-plugin".into(),
+            version: "0.1.0".into(),
+            description: "Summarises text, billed per token".into(),
+            requested_capabilities: vec![Capability::Llm, Capability::Billing],
+            config_keys: vec![],
+        }
     }
-    
-    // ... rest of implementation ...
+
+    fn list_tools() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "summarise".into(),
+            description: "Summarise the input text".into(),
+            parameters_schema: r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into(),
+        }]
+    }
+
+    fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+        // 1. Configure the JWT secret (once per instance)
+        configure_secret(env!("HIVE_JWT_SECRET"));
+
+        // 2. Acquire and verify a billing session (reserve 5000 tokens)
+        let session = require_session(5000).map_err(ToolError::denied)?;
+
+        // 3. Do the work
+        let prompt = Message::new(Role::User, call.arguments_json);
+        let response = llm::complete("", &[prompt], None).map_err(ToolError::failed)?;
+
+        // 4. Report the actual usage
+        let usage = response.usage.unwrap_or(TokenUsage { input_tokens: 0, output_tokens: 0 });
+        report_usage(&session, usage.input_tokens.into(), usage.output_tokens.into())
+            .map_err(ToolError::failed)?;
+
+        Ok(ToolResult { content: response.content, usage: Some(usage) })
+    }
 }
 
-export_module!(MyPaidAgent);
+export!(MyPaidPlugin);
 ```
 
 ## Trust Model
