@@ -51,6 +51,9 @@ pub struct VirtualAgentSpec {
     /// team's `verification` when it declared one and this agent's profile
     /// has a shell; `None` otherwise.
     pub verification: Option<String>,
+    /// The spec its workers run as: what the broker checks a call to or
+    /// from them against (PL-S2, [`SpecPolicy`](super::delegation_policy::SpecPolicy)).
+    pub spec: AgentSpec,
 }
 
 /// Resolve every virtual agent the broker should publish.
@@ -105,6 +108,7 @@ pub fn resolve_virtual_agents(
                 args,
                 endpoint,
                 verification: verification_for(spec, module_settings),
+                spec: spec.clone(),
             }
         })
         .collect()

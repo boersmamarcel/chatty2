@@ -181,6 +181,10 @@ pub enum CallError {
     /// Refused by policy (not on the tree, over an allowance, a cap).
     #[error("refused: {0}")]
     Refused(String),
+    /// A delegation the broker refused before anything was spawned: the
+    /// specs do not allow it, it closes a cycle, or it is too deep (PL-S2).
+    #[error(transparent)]
+    Delegation(crate::delegation::Refusal),
     #[error("cancelled: {0}")]
     Cancelled(String),
     /// The connection to the broker went away mid-call.
@@ -270,6 +274,15 @@ mod tests {
             json!({"kind": "spawn_context_refused",
                    "message": {"field": "roster", "reason": "wider than the caller's"}})
         );
+        let refused = CallError::Delegation(crate::Refusal::TooDeep { depth: 5, max: 4 });
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            json,
+            json!({"kind": "delegation",
+                   "message": {"reason": "too_deep", "depth": 5, "max": 4}})
+        );
+        assert_eq!(serde_json::from_value::<CallError>(json).unwrap(), refused);
+        assert_eq!(refused.to_string(), "too_deep: depth 5 > max 4");
     }
 
     struct Echo;

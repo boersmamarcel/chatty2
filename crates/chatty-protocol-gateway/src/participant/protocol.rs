@@ -99,7 +99,7 @@
 //! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 //! ```
 
-use chatty_fabric::{CallError, CallRequest, ConversationScope, NodeName, SpawnContext};
+use chatty_fabric::{CallChain, CallError, CallRequest, ConversationScope, NodeName, SpawnContext};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -270,7 +270,7 @@ impl std::fmt::Debug for TaskBearer {
 /// What [`BrokerFrame::Task`] carries past its id, in one value so the
 /// broker's submit path, a virtual agent's `run_task` and the worker's turn
 /// all take the same thing and a bearer cannot be dropped between them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DelegatedTask {
     pub text: String,
     /// `None` for a caller that presented no bearer — a desktop parent
@@ -289,6 +289,22 @@ pub struct DelegatedTask {
     /// clamped by the broker. `None` leaves a runner to its own defaults:
     /// the root's workspace and settings.
     pub spawn_context: Option<SpawnContext>,
+    /// The run a broker call starts: who called and the chain the broker
+    /// built for it (DP-2). Stays with the broker, like `caller`: a runner
+    /// records it in the broker's task table before the worker can call,
+    /// and it is not part of the task frame. `None` for a task no broker
+    /// call started (an A2A request over HTTP).
+    pub call: Option<CallStamp>,
+}
+
+/// What a broker call stamps on the task it starts (DP-2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallStamp {
+    /// The calling node's name; `None` for the in-process root.
+    pub caller: Option<String>,
+    /// The caller's chain plus the callee, built from the broker's own
+    /// task table.
+    pub chain: CallChain,
 }
 
 /// The header a broker worker's `invoke_agent` puts its caller token in, on
@@ -307,7 +323,14 @@ impl DelegatedTask {
             caller: None,
             capture_conversation: false,
             spawn_context: None,
+            call: None,
         }
+    }
+
+    /// The run a broker call starts (DP-2).
+    pub fn with_call(mut self, call: Option<CallStamp>) -> Self {
+        self.call = call;
+        self
     }
 
     /// The context the worker is spawned with (BI-5).

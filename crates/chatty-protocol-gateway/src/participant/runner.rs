@@ -44,7 +44,7 @@ use tracing::{debug, info};
 use super::budget::{EndpointBudget, EndpointPermit};
 use super::listener::{LocalConnection, open_connection};
 use super::protocol::{CALLER_ENV, DelegatedTask, ParticipantCard, ParticipantSkill};
-use super::registry::{ParticipantRegistry, TaskStream};
+use super::registry::{ParticipantRegistry, RunGuard, TaskStream};
 use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
 
 /// A worker's directory, and what to do with it once the worker is gone.
@@ -326,6 +326,13 @@ impl LocalRunner {
         // name, and an HTTP call carries it as the caller token.
         let permit = permit.map(|permit| permit.held_by(&name));
         let caller_token = name.clone();
+        // The run this task is, with the chain the broker stamped on it
+        // (DP-2): recorded before the worker exists, so its first call
+        // already extends it. Released when the worker is reaped.
+        let run = task.call.as_ref().and_then(|call| {
+            self.registry
+                .open_run(&name, call.caller.as_deref(), call.chain.clone())
+        });
 
         // Where it goes comes from the task's spawn context: the caller's
         // own tree and branch (BI-5). A task without one is the root's.
@@ -385,6 +392,7 @@ impl LocalRunner {
             stderr_tail,
             stderr_drain,
             _permit: permit,
+            _run: run,
         };
 
         self.await_registration(&mut worker).await?;
@@ -595,6 +603,8 @@ pub struct Worker {
     /// (ADR-0011 C6). Dropped with the worker, so the next queued task is
     /// admitted by the same event that frees the process and its workspace.
     _permit: Option<EndpointPermit>,
+    /// The run this worker serves in the broker's task table (DP-2).
+    _run: Option<RunGuard>,
 }
 
 impl std::fmt::Debug for Worker {
