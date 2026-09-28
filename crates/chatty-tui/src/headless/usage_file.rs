@@ -26,6 +26,8 @@
 //! | `duration_ms` | Wall-clock time since the run started |
 //! | `exit` | `running`, `completed`, `deadline`, `error` or `cancelled` |
 //! | `model` | The model identifier the run was started with |
+//! | `handoff_invalid_by_role` | A `--team` leader's roles → how many of their handoffs failed their schema (TD-2); absent when none did |
+//! | `failure_tags` | `["handoff_misread"]` when a handoff skipped a field its read rules require (TD-2); absent otherwise |
 //!
 //! The token counts cover the whole run: every pass, and what delegated
 //! agents reported spending on its behalf. A request cut off mid-stream (a
@@ -33,11 +35,13 @@
 //! counted. rig reports a missing cache or reasoning count as `0`, so `null`
 //! means "none reported", whichever of the two it was.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chatty_core::models::token_usage::{ApiCallUsage, TokenUsage};
+use chatty_core::services::handoff::HandoffLedger;
 use serde::Serialize;
 
 /// The `schema` the file is written with.
@@ -124,6 +128,8 @@ impl RunTotals {
             duration_ms,
             exit,
             model: model.to_string(),
+            handoff_invalid_by_role: BTreeMap::new(),
+            failure_tags: Vec::new(),
         }
     }
 }
@@ -145,6 +151,11 @@ pub struct UsageReport {
     pub duration_ms: u64,
     pub exit: RunExit,
     pub model: String,
+    /// TD-1's scorecard reads these two (TD-2, AGE-693).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub handoff_invalid_by_role: BTreeMap<String, u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_tags: Vec<String>,
 }
 
 /// Write `report` to `path` through a temporary file in the same directory
@@ -174,6 +185,8 @@ struct State {
     model: String,
     started: Instant,
     totals: RunTotals,
+    /// A `--team` leader's handoff record (TD-2).
+    handoffs: Option<HandoffLedger>,
     /// Set once the run's last word is written; later writes are dropped,
     /// so a checkpoint cannot overwrite how the run ended.
     finished: bool,
@@ -203,6 +216,7 @@ impl UsageRecorder {
                 model,
                 started: Instant::now(),
                 totals: RunTotals::default(),
+                handoffs: None,
                 finished: false,
                 warned: false,
             })),
@@ -216,6 +230,11 @@ impl UsageRecorder {
     /// The model the run is on, once it is known.
     pub fn set_model(&self, model: String) {
         self.lock().model = model;
+    }
+
+    /// Report `ledger`'s handoff counts and failure tags with the totals.
+    pub fn set_handoff_ledger(&self, ledger: Option<HandoffLedger>) {
+        self.lock().handoffs = ledger;
     }
 
     /// Whether the run writes a usage file at all.
@@ -255,7 +274,11 @@ impl UsageRecorder {
         }
         state.finished = last;
         let duration_ms = u64::try_from(state.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let report = state.totals.report(exit, duration_ms, &state.model);
+        let mut report = state.totals.report(exit, duration_ms, &state.model);
+        if let Some(ledger) = state.handoffs.as_ref() {
+            report.handoff_invalid_by_role = ledger.invalid_by_role();
+            report.failure_tags = ledger.failure_tags();
+        }
         if let Err(error) = write_atomic(&path, &report) {
             tracing::warn!(path = %path.display(), %error, "Could not write the usage file");
             // Headless and pipe runs log nowhere, so the one place a
@@ -374,6 +397,44 @@ mod tests {
         assert_eq!(report.follow_up_passes, 0);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["exit"], "running");
+    }
+
+    /// TD-2: a `--team` leader's handoff record goes in the file for TD-1's
+    /// scorecard, and nothing is added while it is empty.
+    #[test]
+    fn a_team_leaders_handoffs_are_reported_with_the_totals() {
+        use chatty_core::services::handoff::{HandoffContract, HandoffLedger};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let recorder = UsageRecorder::new(Some(path.clone()), "m".to_string());
+        let coder = HandoffContract {
+            role: "coder".to_string(),
+            schema: serde_json::json!({}),
+        };
+        let reviewer = HandoffContract {
+            role: "reviewer".to_string(),
+            schema: serde_json::json!({ "x-must-be-read": { "coder": ["files_changed"] } }),
+        };
+        let ledger = HandoffLedger::new([&coder, &reviewer]);
+        recorder.set_handoff_ledger(Some(ledger.clone()));
+
+        recorder.checkpoint();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(json.get("handoff_invalid_by_role").is_none(), "{json}");
+        assert!(json.get("failure_tags").is_none(), "{json}");
+
+        ledger.record(
+            "coder",
+            1,
+            Some(&serde_json::json!({ "files_changed": ["a.rs"] })),
+        );
+        ledger.record("reviewer", 0, Some(&serde_json::json!({ "verdict": "ok" })));
+        recorder.finish(RunExit::Completed);
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["handoff_invalid_by_role"]["coder"], 1);
+        assert_eq!(json["failure_tags"][0], "handoff_misread");
     }
 
     #[test]

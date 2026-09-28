@@ -301,6 +301,7 @@ impl AgentClient {
             role,
             spend_gate,
             team_skill,
+            handoff_ledger,
             unattended,
             answer_file,
             ask_user_enabled,
@@ -1383,6 +1384,10 @@ impl AgentClient {
         // (AGE-416); everyone else has no gate and no check.
         if let Some(gate) = spend_gate {
             invoke_agent_tool = invoke_agent_tool.with_spend_gate(gate);
+        }
+        // A `--team` leader records its roles' typed handoffs (TD-2).
+        if let Some(ledger) = handoff_ledger {
+            invoke_agent_tool = invoke_agent_tool.with_handoff_ledger(ledger);
         }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
 

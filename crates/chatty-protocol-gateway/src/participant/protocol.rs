@@ -99,7 +99,9 @@
 //! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 //! ```
 
-use chatty_fabric::{CallError, CallRequest, ConversationScope, NodeName, SpawnContext};
+use chatty_fabric::{
+    CallError, CallRequest, ConversationScope, HandoffContract, NodeName, SpawnContext,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -289,6 +291,10 @@ pub struct DelegatedTask {
     /// clamped by the broker. `None` leaves a runner to its own defaults:
     /// the root's workspace and settings.
     pub spawn_context: Option<SpawnContext>,
+    /// The role and JSON Schema the worker's final answer must match (TD-2,
+    /// AGE-693). Set by the runner of a role the team names a schema for;
+    /// `None` otherwise, and then absent from the task frame.
+    pub handoff: Option<HandoffContract>,
 }
 
 /// The header a broker worker's `invoke_agent` puts its caller token in, on
@@ -307,7 +313,14 @@ impl DelegatedTask {
             caller: None,
             capture_conversation: false,
             spawn_context: None,
+            handoff: None,
         }
+    }
+
+    /// The handoff contract the worker's answer must meet (TD-2).
+    pub fn with_handoff(mut self, handoff: Option<HandoffContract>) -> Self {
+        self.handoff = handoff;
+        self
     }
 
     /// The context the worker is spawned with (BI-5).
@@ -475,6 +488,10 @@ pub enum BrokerFrame {
         /// Absent on the wire for a task given without one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spawn_context: Option<SpawnContext>,
+        /// The role and schema the worker's final answer must match (TD-2,
+        /// AGE-693). Absent on the wire for a role without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff: Option<HandoffContract>,
     },
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
@@ -616,6 +633,7 @@ mod tests {
             bearer: None,
             capture_conversation: false,
             spawn_context: None,
+            handoff: None,
         })
         .unwrap();
         assert_eq!(json["type"], "task");
@@ -639,6 +657,7 @@ mod tests {
             bearer: Some(TaskBearer::new("eyJ.token")),
             capture_conversation: false,
             spawn_context: None,
+            handoff: None,
         })
         .unwrap();
         assert_eq!(json["bearer"], "eyJ.token");
@@ -668,6 +687,7 @@ mod tests {
             bearer: None,
             capture_conversation: true,
             spawn_context: None,
+            handoff: None,
         })
         .unwrap();
         assert_eq!(json["captureConversation"], true);
@@ -691,6 +711,7 @@ mod tests {
             bearer: Some(TaskBearer::new("secret-token")),
             capture_conversation: false,
             spawn_context: None,
+            handoff: None,
         };
         let printed = format!("{frame:?}");
         assert!(!printed.contains("secret-token"), "{printed}");

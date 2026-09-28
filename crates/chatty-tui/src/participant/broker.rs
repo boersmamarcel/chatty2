@@ -31,6 +31,7 @@
 //! forwarded to every worker (`common_args`); a settings-configured leader
 //! forwards nothing, since the child reads the same files.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,7 +44,7 @@ use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::tools::worker_executable;
-use chatty_fabric::{EdgeLog, Transport};
+use chatty_fabric::{EdgeLog, HandoffContract, Transport};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 #[cfg(test)]
@@ -102,7 +103,8 @@ impl Broker {
     /// (see [`provider_flags`]). `agents` is the roster's specs, already
     /// loaded; empty is the one default worker. `leader_model` is the model
     /// this leader runs: what a module's `llm::complete("")` is served by
-    /// (PL-H2, AGE-605).
+    /// (PL-H2, AGE-605). `handoffs` is the team's contract per role (TD-2,
+    /// AGE-693): each role's runner hands its workers theirs.
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         leader_model: &ModelConfig,
@@ -110,6 +112,7 @@ impl Broker {
         providers: &[ProviderConfig],
         module_settings: &ModuleSettingsModel,
         agents: &[AgentSpec],
+        handoffs: &BTreeMap<String, HandoffContract>,
         workspace_dir: Option<String>,
         auto_approve: bool,
         provider_flags: &[String],
@@ -119,8 +122,11 @@ impl Broker {
             common_args.push("--auto-approve".to_string());
         }
         common_args.extend(provider_flags.iter().cloned());
-        let specs =
+        let mut specs =
             resolve_virtual_agents(models, providers, module_settings, agents, &common_args);
+        for spec in &mut specs {
+            spec.handoff = handoffs.get(&spec.name).cloned();
+        }
         let llm: Arc<dyn LlmProvider> = Arc::new(PluginLlmProvider::new(
             leader_model.clone(),
             models.to_vec(),
@@ -346,6 +352,7 @@ impl PendingBroker {
         providers: Vec<ProviderConfig>,
         module_settings: ModuleSettingsModel,
         agents: Vec<AgentSpec>,
+        handoffs: BTreeMap<String, HandoffContract>,
         workspace_dir: Option<String>,
         auto_approve: bool,
         provider_flags: Vec<String>,
@@ -356,6 +363,7 @@ impl PendingBroker {
             let providers = providers.clone();
             let module_settings = module_settings.clone();
             let agents = agents.clone();
+            let handoffs = handoffs.clone();
             let workspace_dir = workspace_dir.clone();
             let provider_flags = provider_flags.clone();
             Box::pin(async move {
@@ -365,6 +373,7 @@ impl PendingBroker {
                     &providers,
                     &module_settings,
                     &agents,
+                    &handoffs,
                     workspace_dir,
                     auto_approve,
                     &provider_flags,
@@ -466,6 +475,7 @@ fn local_runners(
                 .with_args(spec.args)
                 .with_workspace_root(workspace_dir.clone())
                 .with_verification(spec.verification)
+                .with_handoff(spec.handoff)
                 .with_workspace_factory(worktree_factory());
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());

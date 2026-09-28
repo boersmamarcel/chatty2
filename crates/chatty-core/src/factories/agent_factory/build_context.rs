@@ -103,6 +103,10 @@ pub struct AgentBuildContext {
     /// Only chatty-tui's `--team` sets it, on top of [`Self::from_services`];
     /// a worker or an ordinary chat agent has none.
     pub team_skill: Option<TeamSkill>,
+    /// Where a `--team` leader's `invoke_agent` records its roles' typed
+    /// handoffs (TD-2, AGE-693). Only chatty-tui's `--team` sets it, and
+    /// only for a team that names `handoffs`.
+    pub handoff_ledger: Option<crate::services::handoff::HandoffLedger>,
     /// Nobody is watching this run (headless, pipe, a delegated worker):
     /// the system prompt says so, so the model finishes the work instead of
     /// offering to. Only chatty-tui's headless runner sets it.
@@ -293,6 +297,7 @@ impl AgentBuildContext {
             spend_gate: None,
             // Only a `--team` leader has one (see `AgentBuildContext::team_skill`).
             team_skill: None,
+            handoff_ledger: None,
             unattended: false,
             // Only chatty-tui's `--headless` knows its task up front.
             answer_file: None,

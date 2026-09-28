@@ -14,6 +14,7 @@
 
 mod directory;
 mod edge_log;
+mod handoff;
 mod origin;
 mod pending;
 mod task_table;
@@ -23,6 +24,7 @@ pub use directory::{
     ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState, ROOT_NAME,
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES};
+pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
 pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, wrap_message};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};

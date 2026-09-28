@@ -13,6 +13,7 @@ use crate::services::a2a_client::{
     trace_from_status_metadata, usage_from_status_metadata,
 };
 use crate::services::fabric_transport::progress_from_value;
+use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
@@ -106,6 +107,12 @@ pub struct InvokeAgentOutput {
     /// `trace` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<serde_json::Value>,
+    /// The worker's typed handoff (TD-2, AGE-693): the JSON its final
+    /// answer carried, already checked against its role's schema. Present
+    /// only when the team names a schema for that role; absent from the JSON
+    /// the model sees otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<serde_json::Value>,
     /// Messages that were waiting for this agent when the result came back
     /// (tree messages, TM-2), oldest first, each wrapped as untrusted data
     /// (`<message from="…" untrusted="true">…</message>`). This result is
@@ -131,6 +138,27 @@ pub enum InvokeAgentError {
     /// `402` body does.
     #[error(transparent)]
     CapExceeded(CapExceeded),
+    /// The worker's handoff failed its role's schema twice: once, and again
+    /// after the one follow-up turn that listed the errors (TD-2, AGE-693).
+    /// The model sees `Error: invoke_agent: handoff_invalid: <role>: …`.
+    /// `messages` are the caller's tree messages this failed result still
+    /// delivers (TM-2), listed after the errors.
+    #[error("handoff_invalid: {role}: {}{}", errors.join("; "), delivered_after_error(messages))]
+    HandoffInvalid {
+        role: String,
+        errors: Vec<String>,
+        messages: Vec<String>,
+    },
+}
+
+/// The tree messages a failed delegation still delivers (TM-2), as the
+/// tail of its error text; empty when there are none.
+fn delivered_after_error(messages: &[String]) -> String {
+    if messages.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nmessages:\n{}", messages.join("\n"))
+    }
 }
 
 /// Tool that invokes a named agent (remote A2A or local WASM module) with a prompt.
@@ -183,6 +211,10 @@ pub struct InvokeAgentTool {
     /// never reached over loopback HTTP; remote agents and modules still
     /// go through `A2aClient`.
     transport: Option<Arc<dyn Transport>>,
+    /// Where this leader records its roles' handoffs (TD-2, AGE-693): the
+    /// invalid count per role and read-rule misreads. Only a `--team`
+    /// leader whose team names `handoffs` has one.
+    handoff_ledger: Option<HandoffLedger>,
 }
 
 /// Where a broker hands a worker its caller token; the gateway's
@@ -215,7 +247,14 @@ impl InvokeAgentTool {
                 .filter(|token| !token.is_empty()),
             lazy_broker: None,
             transport: None,
+            handoff_ledger: None,
         }
+    }
+
+    /// Record every delegation's handoff in `ledger` (TD-2, AGE-693).
+    pub fn with_handoff_ledger(mut self, ledger: HandoffLedger) -> Self {
+        self.handoff_ledger = Some(ledger);
+        self
     }
 
     /// Reach local roles through `transport` instead of the gateway's
@@ -596,6 +635,7 @@ impl InvokeAgentTool {
         let mut usage = Vec::new();
         let mut trace = None;
         let mut conversation = None;
+        let mut handoff = HandoffReport::default();
 
         while let Some(event) = stream.next().await {
             match event {
@@ -617,6 +657,11 @@ impl InvokeAgentTool {
                                 ..line
                             })
                             .collect();
+                    }
+                    if state == "failed" || state == "completed" {
+                        // The handoff rides the terminal status either way
+                        // (TD-2, AGE-693).
+                        handoff = HandoffReport::from_status_metadata(metadata.as_ref());
                     }
                     if state == "failed" {
                         success = false;
@@ -677,6 +722,7 @@ impl InvokeAgentTool {
             usage,
             trace,
             conversation,
+            handoff,
             Vec::new(),
         )
     }
@@ -770,6 +816,7 @@ impl InvokeAgentTool {
         };
 
         let metadata = outcome.metadata.as_ref();
+        let handoff = HandoffReport::from_status_metadata(metadata);
         // The worker's spend rides on its terminal status; a failed task
         // spent its tokens too (AGE-415).
         let usage = usage_from_status_metadata(metadata)
@@ -797,6 +844,7 @@ impl InvokeAgentTool {
             usage,
             trace,
             conversation,
+            handoff,
             outcome.messages,
         )
     }
@@ -816,9 +864,14 @@ impl InvokeAgentTool {
         usage: Vec<TokenUsage>,
         trace: Option<String>,
         conversation: Option<serde_json::Value>,
+        handoff: HandoffReport,
         messages: Vec<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let response = response.trim().to_string();
+        let handoff_value = if success { handoff.handoff } else { None };
+        if let Some(ledger) = self.handoff_ledger.as_ref() {
+            ledger.record(agent, handoff.invalid_count, handoff_value.as_ref());
+        }
 
         if !success {
             let err_text = error_msg
@@ -830,15 +883,19 @@ impl InvokeAgentTool {
                 result: Some(err_text),
                 usage,
             });
+            if let Some((role, errors)) = handoff.invalid {
+                return Err(InvokeAgentError::HandoffInvalid {
+                    role,
+                    errors,
+                    messages,
+                });
+            }
             let mut failure = format!(
                 "Agent '{}' reported failure{}",
                 agent,
                 error_msg.map(|m| format!(": {}", m)).unwrap_or_default()
             );
-            if !messages.is_empty() {
-                failure.push_str("\n\nmessages:\n");
-                failure.push_str(&messages.join("\n"));
-            }
+            failure.push_str(&delivered_after_error(&messages));
             return Err(InvokeAgentError::InvocationFailed(failure));
         }
 
@@ -869,6 +926,7 @@ impl InvokeAgentTool {
             success: true,
             trace,
             conversation,
+            handoff: handoff_value,
             messages,
         })
     }

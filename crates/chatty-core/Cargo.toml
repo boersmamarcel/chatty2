@@ -32,6 +32,11 @@ async-stream.workspace = true
 reqwest.workspace = true
 glob.workspace = true
 similar.workspace = true
+# Typed handoffs (TD-2, AGE-693): a team names a JSON Schema per role and a
+# worker's answer is checked against it. The maintained Draft 2020-12
+# validator; default features off, so no HTTP `$ref` resolution (no
+# reqwest/rustls from here) and no IDNA tables.
+jsonschema = { version = "0.58", default-features = false }
 
 # Date/time
 chrono = { workspace = true, features = ["serde"] }
