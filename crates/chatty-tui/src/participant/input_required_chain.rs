@@ -105,7 +105,7 @@ impl Broker {
     /// The `invoke_agent` a level of the chain holds, addressing `agent`
     /// through this broker and re-asking its questions on `store`.
     fn invoke_agent(&self, agent: &str, store: Option<&ClarificationStore>) -> InvokeAgentTool {
-        let tool = InvokeAgentTool::new(vec![], vec![], Some(self.port)).with_local_agents([agent]);
+        let tool = InvokeAgentTool::new(vec![], Some(self.port)).with_local_agents([agent]);
         match store {
             Some(store) => tool.with_clarifications(store.get_pending_clarifications()),
             None => tool,
@@ -208,7 +208,7 @@ async fn child(broker: &Broker, grandchild: String) -> String {
         card,
         move |task, sink, inputs| async move {
             let store = scripted_session(&sink, inputs);
-            let tool = InvokeAgentTool::new(vec![], vec![], Some(port))
+            let tool = InvokeAgentTool::new(vec![], Some(port))
                 .with_local_agents([grandchild.as_str()])
                 .with_clarifications(store.get_pending_clarifications());
             sink(&SessionEvent::TurnStarted);
@@ -327,7 +327,7 @@ async fn child_over_its_connection(broker: &Broker, grandchild: String) -> Strin
     let transport = worker.transport();
     tokio::spawn(worker.serve_one_task(move |task, sink, inputs| async move {
         let store = scripted_session(&sink, inputs);
-        let tool = InvokeAgentTool::new(vec![], vec![], None)
+        let tool = InvokeAgentTool::new(vec![], None)
             .with_local_agents([grandchild.as_str()])
             .with_transport(transport)
             .with_clarifications(store.get_pending_clarifications());
@@ -365,7 +365,7 @@ async fn clarification_relays_across_two_hops() {
     let mut root_store = ClarificationStore::new();
     let (popover_tx, mut popover) = mpsc::unbounded_channel();
     root_store.set_notifier(popover_tx);
-    let tool = InvokeAgentTool::new(vec![], vec![], None)
+    let tool = InvokeAgentTool::new(vec![], None)
         .with_local_agents([child.as_str()])
         .with_transport(broker.transport.clone())
         .with_clarifications(root_store.get_pending_clarifications());

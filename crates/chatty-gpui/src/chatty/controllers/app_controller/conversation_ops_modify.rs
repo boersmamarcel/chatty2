@@ -234,14 +234,7 @@ impl ChattyApp {
                         let memory_service = await_memory_service(cx).await;
                         let embedding_service = get_embedding_service(cx);
                         let skill_service = get_skill_service(cx);
-                        let module_agents = cx
-                            .update(|cx| collect_module_agents(cx))
-                            .unwrap_or_default();
-                        let (gateway_port, local_agents) = cx
-                            .update(|cx| {
-                                cx.try_global::<crate::settings::models::ModuleSettingsModel>()
-                                    .map(|m| (m.gateway_port, m.virtual_agent_names()))
-                            })
+                        let (gateway_port, local_agents) = cx.update(|cx| gateway_and_roster(cx))
                             .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                             .ok()
                             .flatten()
@@ -279,7 +272,6 @@ impl ChattyApp {
                                 skill_service: Some(skill_service),
                                 search_settings,
                                 embedding_service,
-                                module_agents,
                                 gateway_port,
                                 lazy_broker,
                                 local_agents: local_agents.unwrap_or_default(),

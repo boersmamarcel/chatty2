@@ -24,7 +24,6 @@ pub fn extensions_page() -> SettingPage {
         .groups(vec![
             hive_account_group(),
             installed_extensions_group(),
-            local_modules_group(),
             marketplace_group(),
             add_custom_group(),
         ])
@@ -129,7 +128,7 @@ fn installed_extensions_group() -> SettingGroup {
                         let is_wasm_module = matches!(&ext.kind, ExtensionKind::WasmModule);
                         let kind_label = match &ext.kind {
                             ExtensionKind::McpServer(_) => "MCP",
-                            ExtensionKind::WasmModule => "Agent",
+                            ExtensionKind::WasmModule => "Plugin",
                             ExtensionKind::A2aAgent(_) => "A2A",
                         };
                         let status_icon = if ext.enabled { "🟢" } else { "⏸" };
@@ -357,7 +356,7 @@ fn installed_extensions_group() -> SettingGroup {
 
 /// The trust a loaded module has (PL-H5a): `Signed`/`Verified` from its
 /// install record, `Local` for one without a record.
-fn trust_badge(trust: &TrustLevel, cx: &App) -> Div {
+pub(crate) fn trust_badge(trust: &TrustLevel, cx: &App) -> Div {
     let (label, color) = match trust {
         TrustLevel::Local => ("Trust: local", cx.theme().muted_foreground),
         TrustLevel::Signed => ("Trust: signed", gpui::rgb(0x16A34A).into()),
@@ -371,87 +370,6 @@ fn trust_badge(trust: &TrustLevel, cx: &App) -> Div {
         .border_color(color)
         .text_color(color)
         .child(label)
-}
-
-// ── Local modules ──────────────────────────────────────────────────────────
-
-/// Modules in the module directory that were not installed from Hive (copied
-/// in by hand). They load as `TrustLevel::Local` (PL-H5a) and are listed
-/// here so they are visible as such, with the registry's load failure if
-/// they did not load.
-fn local_modules_group() -> SettingGroup {
-    SettingGroup::new()
-        .title("Local modules")
-        .description("Modules copied into the module directory by hand, not installed from Hive.")
-        .items(vec![SettingItem::render(|_options, _window, cx| {
-            let installed = cx.global::<ExtensionsModel>();
-            let local: Vec<_> = cx
-                .try_global::<DiscoveredModulesModel>()
-                .map(|dm| {
-                    dm.modules
-                        .iter()
-                        .filter(|m| {
-                            !installed.is_installed(&m.name)
-                                && !installed.is_installed(&m.directory_name)
-                        })
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            v_flex()
-                .w_full()
-                .gap_2()
-                .when(local.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("No hand-copied modules in the module directory."),
-                    )
-                })
-                .children(local.into_iter().map(|m| {
-                    let load_error = match &m.status {
-                        ModuleLoadStatus::Error(reason) => Some(reason.clone()),
-                        _ => None,
-                    };
-                    v_flex()
-                        .w_full()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .py_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(cx.theme().foreground)
-                                        .child(m.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!("v{} · {}/", m.version, m.directory_name)),
-                                )
-                                .when_some(m.trust_level.clone(), |el, trust| {
-                                    el.child(trust_badge(&trust, cx))
-                                }),
-                        )
-                        .when_some(load_error, |el, reason| {
-                            el.child(
-                                div()
-                                    .pl_6()
-                                    .pb_1()
-                                    .text_xs()
-                                    .text_color(cx.theme().danger)
-                                    .child(format!("Failed to load: {reason}")),
-                            )
-                        })
-                }))
-                .into_any_element()
-        })])
 }
 
 // ── Marketplace ────────────────────────────────────────────────────────────

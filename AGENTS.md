@@ -338,7 +338,8 @@ examples.
 | Rendering pipeline | [`docs/rendering-system.md`](docs/rendering-system.md) |
 | Token budget | [`docs/token-tracking.md`](docs/token-tracking.md) |
 | Agent memory | [`docs/agent-memory.md`](docs/agent-memory.md) |
-| WASM modules & A2A | [`docs/a2a-and-wasm-modules.md`](docs/a2a-and-wasm-modules.md) |
+| Agents, specs & A2A | [`docs/agents-and-specs.md`](docs/agents-and-specs.md) |
+| WASM plugins | [`docs/plugins.md`](docs/plugins.md) |
 | WIT reference | [`docs/wit-reference.md`](docs/wit-reference.md) |
 | Debugging the UI and streams | [`docs-site/src/dev/guides/debug.md`](docs-site/src/dev/guides/debug.md) |
 | Release process | [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md) |

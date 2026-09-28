@@ -698,7 +698,15 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         }
         Command::Agent(Some(prompt)) => Some(KeyAction::LaunchAgent(prompt)),
         Command::Agent(None) => {
-            engine.add_system_message("Usage: /agent <prompt>".to_string());
+            engine.add_system_message(
+                "Usage: /agent <prompt> or /agent <name> <prompt> (/agents lists the names)"
+                    .to_string(),
+            );
+            None
+        }
+        Command::Agents => {
+            let summary = engine.agents_summary();
+            engine.add_system_message(summary);
             None
         }
         Command::Clear => Some(KeyAction::ClearConversation),
@@ -816,7 +824,6 @@ mod tests {
                 embedding_service: None,
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
-                module_agents: Vec::new(),
                 spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,

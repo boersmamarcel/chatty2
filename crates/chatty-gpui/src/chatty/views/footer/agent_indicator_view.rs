@@ -1,5 +1,6 @@
-use crate::settings::models::extensions_store::{ExtensionKind, ExtensionSource, ExtensionsModel};
-use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use crate::settings::models::agent_specs::served_names;
+use crate::settings::models::extensions_store::ExtensionsModel;
+use crate::settings::models::{AgentSpecsModel, ModuleSettingsModel};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
@@ -17,7 +18,7 @@ struct AgentEntry {
     /// `"remote"` / `"remote_only"` → cloud; `"local"` / empty → local
     execution_mode: String,
     enabled: bool,
-    /// Extension ID for A2A agents (used for toggle), None for module agents.
+    /// Extension ID for A2A agents (used for toggle), None for specs.
     ext_id: Option<String>,
 }
 
@@ -52,86 +53,31 @@ impl RenderOnce for AgentIndicatorView {
             });
         }
 
-        // 2. WASM module agents from DiscoveredModulesModel
-        let discovered_modules = cx.try_global::<DiscoveredModulesModel>();
-        let discovered_by_name = discovered_modules
-            .as_ref()
-            .map(|dm| {
-                dm.modules
-                    .iter()
-                    .map(|module| (module.name.as_str(), module))
-                    .collect::<std::collections::HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-
-        for ext in &store.extensions {
-            if !matches!(ext.kind, ExtensionKind::WasmModule) {
-                continue;
-            }
-
-            let module_name = match &ext.source {
-                ExtensionSource::Hive { module_name, .. } => module_name.as_str(),
-                ExtensionSource::Custom => ext.id.as_str(),
-            };
-
-            if let Some(module) = discovered_by_name.get(module_name)
-                && !module.agent
-            {
-                continue;
-            }
-
-            let exec_mode = discovered_by_name
-                .get(module_name)
-                .map(|m| m.execution_mode.clone())
-                .unwrap_or_default();
-
+        // 2. The local roster: the agent specs the broker serves (PL-U5),
+        // when the module runtime — and so the broker — is on. A plugin is
+        // a tool inside a spec, never an agent of its own.
+        let broker_on = cx
+            .try_global::<ModuleSettingsModel>()
+            .is_some_and(|settings| settings.enabled);
+        let listings = if broker_on {
+            AgentSpecsModel::listings(cx)
+        } else {
+            Vec::new()
+        };
+        let served = if broker_on {
+            served_names(&listings, cx)
+        } else {
+            Vec::new()
+        };
+        for name in served {
             agents.push(AgentEntry {
-                name: ext.display_name.clone(),
-                kind_label: "Agent",
-                pricing_model: ext.pricing_model.clone(),
-                execution_mode: exec_mode,
-                enabled: ext.enabled,
-                ext_id: Some(ext.id.clone()),
+                name,
+                kind_label: "Spec",
+                pricing_model: None,
+                execution_mode: String::new(),
+                enabled: true,
+                ext_id: None,
             });
-        }
-
-        /*
-         * Keep discovery in the loop only to surface agents that are runtime-loaded
-         * but not yet present in the installed extensions store.
-         */
-        if let Some(dm) = discovered_modules {
-            for m in &dm.modules {
-                if m.agent
-                    && matches!(
-                        m.status,
-                        ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
-                    )
-                {
-                    if store.is_installed(&m.name) {
-                        continue;
-                    }
-
-                    let (name, enabled, pricing_model, ext_id) = store
-                        .find(&m.name)
-                        .map(|ext| {
-                            (
-                                ext.display_name.clone(),
-                                ext.enabled,
-                                ext.pricing_model.clone(),
-                                Some(ext.id.clone()),
-                            )
-                        })
-                        .unwrap_or((m.name.clone(), true, None, None));
-                    agents.push(AgentEntry {
-                        name,
-                        kind_label: "Agent",
-                        pricing_model,
-                        execution_mode: m.execution_mode.clone(),
-                        enabled,
-                        ext_id,
-                    });
-                }
-            }
         }
 
         let total_count = agents.len();

@@ -79,7 +79,7 @@ fn copy_via_command(program: &str, args: &[&str], text: &str) -> Result<()> {
 
 pub(super) fn run_sub_agent_process(
     executable: PathBuf,
-    model_id: String,
+    agent_args: Vec<String>,
     prompt: String,
     auto_approve: bool,
     event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -89,8 +89,7 @@ pub(super) fn run_sub_agent_process(
     let mut command = ProcessCommand::new(executable);
     command
         .arg("--headless")
-        .arg("--model")
-        .arg(model_id)
+        .args(agent_args)
         .arg("--message")
         .arg(prompt)
         .stdout(Stdio::piped())

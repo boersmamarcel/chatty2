@@ -9,11 +9,12 @@
 //! it's selected — see `slash_commands.rs` in chatty-gpui / `ui/input.rs` in
 //! chatty-tui.
 //!
-//! `/model`, `/tools`, `/modules`, `/update` and `/quit` are TUI-only by
-//! design, not an oversight: GPUI already exposes model selection, execution
-//! settings and module settings through dedicated UI (picker, Settings
-//! pages), has its own auto-update notification flow, and is closed like any
-//! other desktop window — a text command would just duplicate existing UI.
+//! `/model`, `/tools`, `/modules`, `/agents`, `/update` and `/quit` are
+//! TUI-only by design, not an oversight: GPUI already exposes model
+//! selection, execution settings, module settings and the agent roster
+//! through dedicated UI (picker, Settings pages), has its own auto-update
+//! notification flow, and is closed like any other desktop window — a text
+//! command would just duplicate existing UI.
 
 /// A single built-in slash command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,10 +71,19 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         command: "/agent",
-        description: "Launch a sub-agent with a prompt",
+        description: "Run an agent: /agent <name> <prompt>, or a sub-agent with a prompt",
         insert_text: "/agent ",
         execute_immediately: false,
         gpui: true,
+        tui: true,
+    },
+    SlashCommandSpec {
+        command: "/agents",
+        description: "List the agents /agent and invoke_agent can reach",
+        insert_text: "/agents",
+        execute_immediately: true,
+        // The desktop lists them on Settings → Agents.
+        gpui: false,
         tui: true,
     },
     SlashCommandSpec {
