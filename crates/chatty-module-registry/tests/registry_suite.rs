@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use chatty_module_registry::{ModuleManifest, ModuleRegistry, ScanReport};
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
-use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
+use chatty_wasm_runtime::{
+    CompletionResponse, LlmProvider, Message, ResourceLimits, ToolCallRequest, WasmModule,
+};
 
 struct NoopLlm;
 
@@ -28,7 +30,7 @@ impl LlmProvider for NoopLlm {
         _messages: Vec<Message>,
         _tools: Option<String>,
     ) -> Result<CompletionResponse, String> {
-        Err("noop: no test calls chat".to_string())
+        Err("noop: no test calls llm::complete".to_string())
     }
 }
 
@@ -138,7 +140,7 @@ fn sandbox_2_2_duplicate_names_are_surfaced_as_an_error() {
     stage(
         tmp.path(),
         "dir-b",
-        "echo-agent",
+        "echo",
         "[module]\nname = \"dup\"\nversion = \"2.0.0\"\nwasm = \"mod.wasm\"\n",
     );
     stage(
@@ -267,31 +269,14 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
     // The fixture grows a Vec 1 MiB at a time, so N MiB needs roughly
     // 2N MiB of linear memory (see chatty-wasm-runtime's sandbox suite, row
     // 1.6): 4 MiB fits a 32 MiB cap, 40 MiB does not.
-    let req = chatty_wasm_runtime::ChatRequest {
-        messages: vec![chatty_wasm_runtime::Message {
-            role: chatty_wasm_runtime::Role::User,
-            content: "4".to_string(),
-        }],
-        conversation_id: "c".to_string(),
-    };
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let resp = rt
-        .block_on(module.chat(req))
+    let resp = tool_text(&mut module, "alloc", "4")
         .expect("4 MiB is within the manifest's 32 MiB cap");
-    assert_eq!(resp.content, "allocated 4 MiB");
+    assert_eq!(resp, "allocated 4 MiB");
 
-    let over = chatty_wasm_runtime::ChatRequest {
-        messages: vec![chatty_wasm_runtime::Message {
-            role: chatty_wasm_runtime::Role::User,
-            content: "40".to_string(),
-        }],
-        conversation_id: "c".to_string(),
-    };
-    let err = rt
-        .block_on(module.chat(over))
+    let err = tool_text(&mut module, "alloc", "40")
         .expect_err("40 MiB is over the manifest's 32 MiB cap");
     assert!(
-        format!("{err:#}").contains("memory limit"),
+        err.contains("memory limit"),
         "expected the manifest's 32 MiB cap to fire, got: {err:#}"
     );
 }
@@ -322,20 +307,11 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
     let module = reg.get("slow-host").expect("slow-host registered");
     let mut module = module.blocking_lock();
 
-    let req = chatty_wasm_runtime::ChatRequest {
-        messages: vec![chatty_wasm_runtime::Message {
-            role: chatty_wasm_runtime::Role::User,
-            content: "x".to_string(),
-        }],
-        conversation_id: "c".to_string(),
-    };
-    let rt = tokio::runtime::Runtime::new().unwrap();
     let start = std::time::Instant::now();
-    let result = rt.block_on(module.chat(req));
+    let result = tool_text(&mut module, "ask", "x");
     let elapsed = start.elapsed();
 
-    assert!(result.is_err(), "expected a timeout error, got {result:?}");
-    let message = format!("{:#}", result.unwrap_err());
+    let message = result.expect_err("expected a timeout error");
     assert!(
         message.contains("timed out"),
         "expected the manifest's 300ms wall-clock limit to fire, got: {message} (elapsed {elapsed:?})"
@@ -460,16 +436,20 @@ fn sandbox_2_7_reload_with_broken_replacement_leaves_the_slot_empty() {
 // `file::read-bytes` reads under the granted root and nowhere else.
 // ---------------------------------------------------------------------------
 
-fn chat_text(module: &mut chatty_wasm_runtime::WasmModule, prompt: &str) -> Result<String, String> {
-    let req = chatty_wasm_runtime::ChatRequest {
-        messages: vec![chatty_wasm_runtime::Message {
-            role: chatty_wasm_runtime::Role::User,
-            content: prompt.to_string(),
-        }],
-        conversation_id: "c".to_string(),
-    };
+/// A fixture tool call with `{"input": input}`.
+fn call(tool: &str, input: &str) -> ToolCallRequest {
+    ToolCallRequest {
+        name: tool.to_string(),
+        arguments_json: serde_json::json!({ "input": input }).to_string(),
+        call_id: "c".to_string(),
+        caller: None,
+    }
+}
+
+/// Run a fixture's tool on a fresh runtime; its content or error text.
+fn tool_text(module: &mut WasmModule, tool: &str, input: &str) -> Result<String, String> {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(module.chat(req))
+    rt.block_on(module.invoke_tool(call(tool, input)))
         .map(|r| r.content)
         .map_err(|e| format!("{e:#}"))
 }
@@ -501,16 +481,16 @@ fn sandbox_1_9_registry_passes_config_and_files_root() {
     let config = reg.get("config-reader").expect("config-reader loaded");
     let mut config = config.blocking_lock();
     assert_eq!(
-        chat_text(&mut config, "greeting").unwrap(),
+        tool_text(&mut config, "get", "greeting").unwrap(),
         r#"Some("from module.toml")"#
     );
-    assert_eq!(chat_text(&mut config, "missing").unwrap(), "None");
+    assert_eq!(tool_text(&mut config, "get", "missing").unwrap(), "None");
 
     let reader = reg.get("file-reader").expect("file-reader loaded");
     let mut reader = reader.blocking_lock();
-    assert_eq!(chat_text(&mut reader, "w.bin").unwrap(), "7");
+    assert_eq!(tool_text(&mut reader, "read", "w.bin").unwrap(), "7");
     // The module's own files (manifest, .wasm) are outside the granted root.
-    let escape = chat_text(&mut reader, "../module.toml");
+    let escape = tool_text(&mut reader, "read", "../module.toml");
     assert!(escape.is_err(), "got {escape:?}");
 }
 
@@ -530,7 +510,7 @@ fn sandbox_1_9_no_files_section_grants_no_files() {
     reg.load(&dir).expect("file-reader loads");
     let reader = reg.get("file-reader").unwrap();
     let mut reader = reader.blocking_lock();
-    let err = chat_text(&mut reader, "w.bin").expect_err("no [files] section, no reads");
+    let err = tool_text(&mut reader, "read", "w.bin").expect_err("no [files] section, no reads");
     assert!(err.contains("no file root"), "{err}");
 }
 
@@ -592,25 +572,25 @@ fn staged_fixtures_scan_with_only_the_unloadable_ones_failing() {
         .to_path_buf();
     let mut reg = registry();
     let report = reg.scan_directory(&staged).expect("scan_directory");
-    // `core-module` is a core module, not a component; `wit-0.1` targets an
-    // older WIT package. Both are staged to be refused.
+    // `core-module` is a core module, not a component; `wit-0.1` and
+    // `wit-0.2` target older WIT packages. All are staged to be refused.
     assert_eq!(
         failed_dirs(&report),
-        vec!["core-module", "wit-0.1"],
+        vec!["core-module", "wit-0.1", "wit-0.2"],
         "{:?}",
         report.failed
     );
     assert!(report.remote.is_empty());
-    assert!(report.loaded_names().contains(&"echo-agent"));
+    assert!(report.loaded_names().contains(&"echo"));
 
     // The file-reader fixture's `[files] root = "weights"` is staged with it.
     let reader = reg.get("file-reader").expect("file-reader loaded");
     let mut reader = reader.blocking_lock();
-    assert_eq!(chat_text(&mut reader, "fixture.bin").unwrap(), "12");
+    assert_eq!(tool_text(&mut reader, "read", "fixture.bin").unwrap(), "12");
     let config = reg.get("config-reader").expect("config-reader loaded");
     let mut config = config.blocking_lock();
     assert_eq!(
-        chat_text(&mut config, "greeting").unwrap(),
+        tool_text(&mut config, "get", "greeting").unwrap(),
         r#"Some("hello from module.toml")"#
     );
 }

@@ -3,5 +3,5 @@ cargo_generate_version = ">=0.21"
 
 [placeholders.description]
 type = "string"
-prompt = "A short description of your agent"
-default = "My chatty WASM agent"
+prompt = "A short description of your plugin"
+default = "My chatty WASM plugin"

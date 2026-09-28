@@ -1,48 +1,50 @@
 use chatty_module_sdk::{
-    export_module, AgentCard, ChatRequest, ChatResponse, ModuleExports, Skill, ToolDefinition,
+    export, Plugin, PluginMetadata, ToolCallRequest, ToolDefinition, ToolError, ToolResult,
 };
 
-/// Replace `Agent` with your own agent type name.
-#[derive(Default)]
-pub struct Agent;
+/// Replace `MyPlugin` with your own plugin type name.
+pub struct MyPlugin;
 
-impl ModuleExports for Agent {
-    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
-        let msg = req
-            .messages
-            .last()
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-
-        Ok(ChatResponse {
-            content: format!("You said: {msg}"),
-            tool_calls: vec![],
-            usage: None,
-        })
-    }
-
-    fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
-        Err(format!("unknown tool: {name} (args: {args})"))
-    }
-
-    fn list_tools(&self) -> Vec<ToolDefinition> {
-        vec![]
-    }
-
-    fn get_agent_card(&self) -> AgentCard {
-        AgentCard {
+impl Plugin for MyPlugin {
+    fn metadata() -> PluginMetadata {
+        PluginMetadata {
             name: "{{project-name}}".to_string(),
-            display_name: "{{project-name}}".to_string(),
-            description: "{{description}}".to_string(),
             version: "0.1.0".to_string(),
-            skills: vec![Skill {
-                name: "default".to_string(),
-                description: "Default skill".to_string(),
-                examples: vec!["Say hello".to_string()],
-            }],
-            tools: vec![],
+            description: "{{description}}".to_string(),
+            // Add a `Capability` (e.g. `Capability::Llm`) for every host
+            // import a tool calls; an agent spec can only grant what is
+            // requested here. `logging` is always granted.
+            requested_capabilities: vec![],
+            config_keys: vec![],
+        }
+    }
+
+    fn list_tools() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "greet".to_string(),
+            description: "Greets the given name.".to_string(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Who to greet"}},
+                "required": ["name"],
+            })
+            .to_string(),
+        }]
+    }
+
+    fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+        match call.name.as_str() {
+            "greet" => {
+                let args: serde_json::Value = serde_json::from_str(&call.arguments_json)
+                    .map_err(|e| ToolError::invalid_arguments(format!("arguments are not JSON: {e}")))?;
+                let name = args["name"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::invalid_arguments("missing string argument `name`"))?;
+                Ok(ToolResult::text(format!("Hello, {name}!")))
+            }
+            other => Err(ToolError::unknown_tool(other)),
         }
     }
 }
 
-export_module!(Agent);
+export!(MyPlugin);

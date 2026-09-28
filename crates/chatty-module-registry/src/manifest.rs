@@ -16,20 +16,16 @@
 //!
 //! ```toml
 //! [module]
-//! name = "echo-agent"
-//! version = "0.1.0"
-//! description = "A simple echo agent for testing"
-//! wasm = "echo_agent.wasm"
+//! name = "echo"
+//! version = "0.2.0"
+//! description = "A simple echo plugin for testing"
+//! wasm = "echo.wasm"
 //!
 //! [capabilities]
 //! tools = ["echo", "reverse"]
-//! chat = true
-//! agent = true
 //!
 //! [protocols]
-//! openai_compat = true
 //! mcp = true
-//! a2a = true
 //!
 //! [resources]
 //! max_memory_mb = 64
@@ -95,16 +91,12 @@ pub(crate) struct RawCapabilities {
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
-    pub chat: bool,
-    #[serde(default)]
     pub agent: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawProtocols {
-    #[serde(default)]
-    pub openai_compat: bool,
     #[serde(default)]
     pub mcp: bool,
     #[serde(default)]
@@ -173,17 +165,18 @@ impl fmt::Display for ExecutionMode {
 pub struct ModuleCapabilities {
     /// Tool names the module exposes.
     pub tools: Vec<String>,
-    /// Whether the module implements the `chat` export.
-    pub chat: bool,
-    /// Whether the module acts as an autonomous agent.
+    /// Read only by the module-agent listing PL-U5 removes; a
+    /// `chatty:plugin@0.3.0` plugin is never an agent.
     pub agent: bool,
 }
 
 /// Protocol flags declared by a module.
 #[derive(Debug, Clone, Default)]
 pub struct ModuleProtocols {
-    pub openai_compat: bool,
+    /// Serve the plugin's tools to external MCP clients at `/mcp/{name}`.
     pub mcp: bool,
+    /// Read only by the module-agent listing PL-U5 removes and by remote
+    /// forwarding (PL-H8b); local plugins have no A2A route.
     pub a2a: bool,
 }
 
@@ -200,7 +193,7 @@ pub struct ModuleResourceLimits {
 /// Parsed and validated module manifest loaded from `module.toml`.
 #[derive(Debug, Clone)]
 pub struct ModuleManifest {
-    /// Module name, e.g. `"echo-agent"`.
+    /// Module name, e.g. `"echo"`.
     pub name: String,
     /// Semver-compatible version string, e.g. `"0.1.0"`.
     pub version: String,
@@ -328,11 +321,9 @@ impl ModuleManifest {
             execution_mode,
             capabilities: ModuleCapabilities {
                 tools: raw.capabilities.tools,
-                chat: raw.capabilities.chat,
                 agent: raw.capabilities.agent,
             },
             protocols: ModuleProtocols {
-                openai_compat: raw.protocols.openai_compat,
                 mcp: raw.protocols.mcp,
                 a2a: raw.protocols.a2a,
             },
@@ -404,20 +395,16 @@ mod tests {
 
     const FULL_TOML: &str = r#"
 [module]
-name = "echo-agent"
-version = "0.1.0"
-description = "A simple echo agent for testing"
-wasm = "echo_agent.wasm"
+name = "echo"
+version = "0.2.0"
+description = "A simple echo plugin for testing"
+wasm = "echo.wasm"
 
 [capabilities]
 tools = ["echo", "reverse"]
-chat = true
-agent = true
 
 [protocols]
-openai_compat = true
 mcp = true
-a2a = true
 
 [resources]
 max_memory_mb = 64
@@ -427,16 +414,14 @@ max_execution_ms = 30000
     #[test]
     fn full_manifest_parses() {
         let m = parse(FULL_TOML).expect("should parse");
-        assert_eq!(m.name, "echo-agent");
-        assert_eq!(m.version, "0.1.0");
-        assert_eq!(m.description, "A simple echo agent for testing");
-        assert_eq!(m.wasm_path, Some(PathBuf::from("/fake/echo_agent.wasm")));
+        assert_eq!(m.name, "echo");
+        assert_eq!(m.version, "0.2.0");
+        assert_eq!(m.description, "A simple echo plugin for testing");
+        assert_eq!(m.wasm_path, Some(PathBuf::from("/fake/echo.wasm")));
         assert_eq!(m.capabilities.tools, vec!["echo", "reverse"]);
-        assert!(m.capabilities.chat);
-        assert!(m.capabilities.agent);
-        assert!(m.protocols.openai_compat);
+        assert!(!m.capabilities.agent);
         assert!(m.protocols.mcp);
-        assert!(m.protocols.a2a);
+        assert!(!m.protocols.a2a);
         assert_eq!(m.resources.max_memory_mb, 64);
         assert_eq!(m.resources.max_execution_ms, 30000);
     }
@@ -454,9 +439,7 @@ wasm = "minimal.wasm"
         assert_eq!(m.version, "1.0.0");
         assert!(m.description.is_empty());
         assert!(m.capabilities.tools.is_empty());
-        assert!(!m.capabilities.chat);
         assert!(!m.capabilities.agent);
-        assert!(!m.protocols.openai_compat);
         assert!(!m.protocols.mcp);
         assert!(!m.protocols.a2a);
         assert_eq!(m.resources.max_memory_mb, 0);
@@ -570,6 +553,21 @@ wasm = "sub/mod.wasm"
             let toml = format!("{MINIMAL}{extra}");
             let err = parse(&toml).expect_err(&toml);
             assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+        }
+    }
+
+    /// `chat` and `openai_compat` described the 0.2.0 agent world, which
+    /// PL-U3 removed without a compatibility window: naming them is an error
+    /// that names the field.
+    #[test]
+    fn removed_agent_world_keys_are_refused() {
+        for (extra, field) in [
+            ("\n[capabilities]\nchat = true\n", "chat"),
+            ("\n[protocols]\nopenai_compat = true\n", "openai_compat"),
+        ] {
+            let toml = format!("{MINIMAL}{extra}");
+            let err = format!("{:#}", parse(&toml).expect_err(&toml));
+            assert!(err.contains(&format!("unknown field `{field}`")), "{err}");
         }
     }
 
