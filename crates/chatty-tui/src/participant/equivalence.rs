@@ -152,7 +152,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     let (_port, _registry, transport) =
         start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
-    let tool = InvokeAgentTool::new(vec![], vec![], None)
+    let tool = InvokeAgentTool::new(vec![])
         .with_local_agents([LOCAL_AGENT_NAME])
         .with_transport(transport);
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
@@ -553,7 +553,7 @@ mod evidence {
     async fn delegate(
         transport: Arc<dyn chatty_fabric::Transport>,
     ) -> (Result<String, String>, String) {
-        let tool = InvokeAgentTool::new(vec![], vec![], None)
+        let tool = InvokeAgentTool::new(vec![])
             .with_local_agents([LOCAL_AGENT_NAME])
             .with_transport(transport);
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
@@ -823,7 +823,7 @@ pub(super) mod named_virtual_agents {
     /// Delegate one task to `agent` through the real `invoke_agent`; the
     /// runner's stand-in child answers it.
     async fn delegate(broker: &Broker, agent: &str) {
-        let tool = InvokeAgentTool::new(vec![], vec![], None)
+        let tool = InvokeAgentTool::new(vec![])
             .with_local_agents([CODER, REVIEWER])
             .with_transport(broker.transport());
         tool.call(
@@ -1321,7 +1321,7 @@ mod spend_cap {
         transport: Arc<dyn chatty_fabric::Transport>,
         gate: Option<Arc<dyn SpendGate>>,
     ) -> InvokeAgentTool {
-        let tool = InvokeAgentTool::new(vec![], vec![], None)
+        let tool = InvokeAgentTool::new(vec![])
             .with_local_agents([LOCAL_AGENT_NAME])
             .with_transport(transport);
         match gate {

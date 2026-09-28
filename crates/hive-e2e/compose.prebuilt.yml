@@ -1,10 +1,8 @@
 # Override for hive's docker/docker-compose.yml (PL-E6, AGE-601): run the
 # registry and the runner from binaries built on the host by
-# `scripts/hive-e2e.sh build` — hive `main` with chatty-wasm-runtime patched
-# to this chatty2 checkout — instead of building hive's images, whose
-# Dockerfiles only see the hive repo and so can only build hive's pinned
-# chatty2 rev. Also drops Postgres' and MinIO's host ports: nothing on the
-# host talks to them, and they collide with other stacks.
+# `scripts/hive-e2e.sh build` instead of building hive's images, so the
+# nightly reuses its cargo cache. Also drops Postgres' and MinIO's host
+# ports: nothing on the host talks to them, and they collide with other stacks.
 #
 # Relative paths in an override resolve against the *first* compose file's
 # directory, so the binary directory comes in absolute, as

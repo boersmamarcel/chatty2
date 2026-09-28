@@ -103,7 +103,7 @@ impl Broker {
     /// through this broker's direct handle (ADR-0020, BI-7) and re-asking
     /// its questions on `store`.
     fn invoke_agent(&self, agent: &str, store: Option<&ClarificationStore>) -> InvokeAgentTool {
-        let tool = InvokeAgentTool::new(vec![], vec![], None)
+        let tool = InvokeAgentTool::new(vec![])
             .with_local_agents([agent])
             .with_transport(self.transport.clone());
         match store {
@@ -292,7 +292,7 @@ async fn child_over_its_connection(broker: &Broker, grandchild: String) -> Strin
     let transport = worker.transport();
     tokio::spawn(worker.serve_one_task(move |task, sink, inputs| async move {
         let store = scripted_session(&sink, inputs);
-        let tool = InvokeAgentTool::new(vec![], vec![], None)
+        let tool = InvokeAgentTool::new(vec![])
             .with_local_agents([grandchild.as_str()])
             .with_transport(transport)
             .with_clarifications(store.get_pending_clarifications());
@@ -330,7 +330,7 @@ async fn clarification_relays_across_two_hops() {
     let mut root_store = ClarificationStore::new();
     let (popover_tx, mut popover) = mpsc::unbounded_channel();
     root_store.set_notifier(popover_tx);
-    let tool = InvokeAgentTool::new(vec![], vec![], None)
+    let tool = InvokeAgentTool::new(vec![])
         .with_local_agents([child.as_str()])
         .with_transport(broker.transport.clone())
         .with_clarifications(root_store.get_pending_clarifications());

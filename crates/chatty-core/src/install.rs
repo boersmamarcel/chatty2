@@ -427,9 +427,10 @@ fn build_module_toml(
         ));
     }
 
-    // Capabilities — only what the Hive manifest declares. A
-    // `chatty:plugin@0.3.0` plugin has no `chat` (PL-U3), and `module.toml`
-    // refuses the key, so a manifest still carrying it is not copied over.
+    // Capabilities — only the tools the Hive manifest declares. A
+    // `chatty:plugin@0.3.0` plugin is never an agent: it has no `chat`
+    // (PL-U3) and no `agent` (PL-U5), and `module.toml` refuses both keys,
+    // so a manifest still carrying them is not copied over.
     if let Some(caps) = manifest.get("capabilities") {
         toml.push_str("\n[capabilities]\n");
         if let Some(tools) = caps.get("tools").and_then(|v| v.as_array()) {
@@ -442,20 +443,15 @@ fn build_module_toml(
                 toml.push_str(&format!("tools = [{}]\n", tool_list.join(", ")));
             }
         }
-        if caps.get("agent").and_then(|v| v.as_bool()).unwrap_or(false) {
-            toml.push_str("agent = true\n");
-        }
     }
 
-    // Protocols — only what the Hive manifest declares; a plugin is used
-    // through agent specs whatever it says, and served over MCP only when it
-    // asks. `openai_compat` went with `chat` (PL-U3) and is not copied over.
+    // Protocols — a plugin is used through agent specs whatever it says,
+    // and served over MCP only when it asks. `openai_compat` went with
+    // `chat` (PL-U3) and `a2a` with `agent` (PL-U5); neither is copied over.
     if let Some(protos) = manifest.get("protocols") {
         toml.push_str("\n[protocols]\n");
-        for key in &["mcp", "a2a"] {
-            if protos.get(key).and_then(|v| v.as_bool()).unwrap_or(false) {
-                toml.push_str(&format!("{key} = true\n"));
-            }
+        if protos.get("mcp").and_then(|v| v.as_bool()).unwrap_or(false) {
+            toml.push_str("mcp = true\n");
         }
     }
 
@@ -695,6 +691,7 @@ mod tests {
         // dropped: `module.toml` refuses them.
         assert!(!toml.contains("chat"), "{toml}");
         assert!(!toml.contains("openai_compat"), "{toml}");
+        assert!(!toml.contains("agent ="), "{toml}");
         chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
             .expect("the written module.toml parses");
     }
@@ -710,8 +707,12 @@ mod tests {
         // Remote modules must NOT have a wasm field
         assert!(!toml.contains("wasm ="));
         assert!(toml.contains("execution_mode = \"remote\""));
-        assert!(toml.contains("agent = true"));
-        assert!(toml.contains("a2a = true"));
+        // PL-U5: a Hive-installed module never becomes an agent, whatever
+        // its Hive manifest still says.
+        assert!(!toml.contains("agent ="), "{toml}");
+        assert!(!toml.contains("a2a ="), "{toml}");
+        chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
+            .expect("the written module.toml parses");
     }
 
     // ── Install hardening (PL-H5a, AGE-703) ──────────────────────────────

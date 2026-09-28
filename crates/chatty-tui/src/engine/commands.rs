@@ -8,11 +8,16 @@ use rig_core::completion::Message;
 use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
+use chatty_core::agent_spec::{AgentSpec, SpecListing};
 use chatty_core::models::conversation::ConversationMode;
+use chatty_core::services::agent_command::{
+    AgentCommandTarget, resolve_agent_command, spec_sub_agent_args,
+};
 use chatty_core::session::{
     BRING_BACK_SUMMARY, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
     refuse_reason, take_online,
 };
+use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 
 use super::{ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker, ToolPickerItem};
 use crate::events::AppEvent;
@@ -32,6 +37,86 @@ fn push_move_summary(out: &mut String, summary: &MoveSummary) {
     }
 }
 
+/// `/agents`' text: the remote agents, the roster's specs with what each
+/// declares, and the spec files the roster leaves out with the reason.
+pub(crate) fn format_agents_summary(
+    remote_agents: &[A2aAgentConfig],
+    roster: &[&str],
+    listings: &[SpecListing],
+) -> String {
+    let mut out = String::from("Agents (/agent <name> <prompt>, or invoke_agent):\n");
+    for name in roster {
+        let listing = listings
+            .iter()
+            .find(|listing| listing.name == *name && !listing.shadowed);
+        let line = match listing.map(|listing| (&listing.spec, &listing.source)) {
+            Some((Ok(spec), source)) => {
+                let mut facts = vec![format!(
+                    "model {}",
+                    spec.agent.model.as_deref().unwrap_or("default")
+                )];
+                if let Some(profile) = spec.tools.profile.as_deref() {
+                    facts.push(format!("profile {profile}"));
+                }
+                if !spec.plugins.is_empty() {
+                    let plugins: Vec<String> = spec
+                        .plugins
+                        .iter()
+                        .map(|plugin| match plugin.grants.as_slice() {
+                            [] => plugin.module.clone(),
+                            grants => format!("{} [{}]", plugin.module, grants.join(", ")),
+                        })
+                        .collect();
+                    facts.push(format!("plugins {}", plugins.join(", ")));
+                }
+                if !spec.swarm.delegates_to.is_empty() {
+                    facts.push(format!(
+                        "delegates to {}",
+                        spec.swarm.delegates_to.join(", ")
+                    ));
+                }
+                facts.push(source.label());
+                let description = spec.agent.description.as_deref().unwrap_or("");
+                format!("  {name} — {description} ({})", facts.join("; "))
+            }
+            _ => format!("  {name} — the default worker (model default; full tool set)"),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for agent in remote_agents {
+        out.push_str(&format!(
+            "  {} — remote A2A agent at {}{}\n",
+            agent.name,
+            agent.url,
+            if agent.enabled { "" } else { " (disabled)" }
+        ));
+    }
+    let left_out: Vec<String> = listings
+        .iter()
+        .filter(|listing| !roster.contains(&listing.name.as_str()))
+        .map(|listing| {
+            let why = match (&listing.spec, listing.shadowed) {
+                (_, true) => "shadowed by a nearer spec of the same name".to_string(),
+                (Err(error), false) => format!("does not load: {error}"),
+                (Ok(spec), false) if !spec.swarm.exposed => "exposed = false".to_string(),
+                (Ok(_), false) => "not in the declared roster".to_string(),
+            };
+            format!("  {} ({}) — {why}\n", listing.name, listing.source.label())
+        })
+        .collect();
+    if !left_out.is_empty() {
+        out.push_str("Not on the roster:\n");
+        for line in left_out {
+            out.push_str(&line);
+        }
+    }
+    out.push_str(
+        "\nSpecs live in <workspace>/.chatty/agents/<name>.toml and <data dir>/chatty/agents/.",
+    );
+    out
+}
+
 /// Parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -43,8 +128,10 @@ pub enum Command {
     Modules(Option<String>),
     /// /add-dir <directory> — expand file-access workspace to include a directory
     AddDir(Option<String>),
-    /// /agent [prompt] — launch a sub-agent in headless mode
+    /// /agent [name] <prompt> — run a roster agent or a headless sub-agent
     Agent(Option<String>),
+    /// /agents — list the agents /agent and invoke_agent can reach
+    Agents,
     /// /clear, /new — clear conversation and start fresh
     Clear,
     /// /compact — summarize older conversation turns
@@ -94,6 +181,7 @@ impl ChatEngine {
             "/modules" => Some(Command::Modules(arg)),
             "/add-dir" => Some(Command::AddDir(arg)),
             "/agent" => Some(Command::Agent(arg)),
+            "/agents" => Some(Command::Agents),
             "/clear" | "/new" => Some(Command::Clear),
             "/compact" => Some(Command::Compact),
             "/context" => Some(Command::Context),
@@ -478,9 +566,10 @@ impl ChatEngine {
         }
     }
 
-    /// Launch a sub-agent. If the first word matches a registered A2A agent,
-    /// dispatches via the A2A protocol with SSE streaming. Otherwise falls back
-    /// to invoking chatty-tui in headless mode.
+    /// `/agent …` (PL-U5): the first word names a remote A2A agent or a
+    /// spec on the local roster — the same roster `list_agents` lists — and
+    /// the rest is its prompt; otherwise the whole text is the default
+    /// sub-agent's prompt. A spec runs as a headless `chatty-tui --agent`.
     pub fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
         if self.is_sub_agent {
             bail!("Sub-agents cannot spawn further sub-agents");
@@ -488,32 +577,35 @@ impl ChatEngine {
 
         let prompt = prompt.trim();
         if prompt.is_empty() {
-            bail!("Usage: /agent <prompt>");
+            bail!("Usage: /agent <prompt> or /agent <name> <prompt>");
         }
 
-        // Check if first word is an A2A agent name
-        let (first_word, rest_of_prompt) = {
-            let mut words = prompt.splitn(2, char::is_whitespace);
-            let first = words.next().unwrap_or("").to_string();
-            let tail = words.next().unwrap_or("").trim().to_string();
-            (first, tail)
-        };
-
-        let a2a_match = if !rest_of_prompt.is_empty() {
-            self.remote_agents
-                .iter()
-                .find(|a| a.enabled && a.name == first_word)
-                .cloned()
-        } else {
-            None
-        };
-
-        if let Some(config) = a2a_match {
-            return self.launch_a2a_agent(config, rest_of_prompt);
+        match resolve_agent_command(prompt, &self.remote_agents, &self.agent_roster) {
+            AgentCommandTarget::Remote { config, prompt } => self.launch_a2a_agent(config, prompt),
+            AgentCommandTarget::Spec { spec, prompt } => {
+                self.launch_subprocess_agent(Some(&spec), &prompt)
+            }
+            AgentCommandTarget::Default { prompt } => self.launch_subprocess_agent(None, &prompt),
         }
+    }
 
-        // Fall back to headless subprocess
-        self.launch_subprocess_agent(prompt)
+    /// `/agents`: every agent `/agent` and `invoke_agent` can reach — the
+    /// remote A2A agents and the local roster's specs — plus the spec files
+    /// that are shadowed, hidden, or do not load, with why (PL-U5).
+    pub fn agents_summary(&mut self) -> String {
+        self.refresh_agent_roster();
+        let workspace = self
+            .execution_settings
+            .workspace_dir
+            .as_deref()
+            .map(Path::new);
+        let listings = chatty_core::agent_spec::inspect_agent_specs(workspace);
+        let roster: Vec<&str> = self
+            .agent_roster
+            .iter()
+            .map(|spec| spec.agent.name.as_str())
+            .collect();
+        format_agents_summary(&self.remote_agents, &roster, &listings)
     }
 
     /// Dispatch a task to a remote A2A agent via SSE streaming.
@@ -600,9 +692,9 @@ impl ChatEngine {
     }
 
     /// Launch a sub-agent by invoking chatty-tui in headless mode (subprocess fallback).
-    fn launch_subprocess_agent(&mut self, prompt: &str) -> Result<()> {
+    fn launch_subprocess_agent(&mut self, spec: Option<&AgentSpec>, prompt: &str) -> Result<()> {
         let executable = std::env::current_exe().context("Failed to resolve chatty-tui binary")?;
-        let model_id = self.model_config.id.clone();
+        let agent_args = spec_sub_agent_args(spec, &self.model_config.id);
         let prompt_owned = prompt.to_string();
         let auto_approve = matches!(
             self.execution_settings.approval_mode,
@@ -610,13 +702,16 @@ impl ChatEngine {
         );
         let event_tx = self.event_tx.clone();
 
-        self.add_system_message("Launching local sub-agent...".to_string());
+        self.add_system_message(match spec {
+            Some(spec) => format!("Launching agent '{}'...", spec.agent.name),
+            None => "Launching local sub-agent...".to_string(),
+        });
         self.transcript.mark_last_as_delegation_row();
 
         tokio::task::spawn_blocking(move || {
             let message = match super::helpers::run_sub_agent_process(
                 executable,
-                model_id,
+                agent_args,
                 prompt_owned,
                 auto_approve,
                 event_tx.clone(),
@@ -946,27 +1041,15 @@ impl ChatEngine {
     }
 
     pub fn module_settings_summary(&self) -> String {
-        let local_agents = self
-            .module_agents
-            .iter()
-            .filter(|agent| !matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
-            .count();
-        let remote_agents = self
-            .module_agents
-            .iter()
-            .filter(|agent| matches!(agent.execution_mode.as_str(), "remote" | "remote_only"))
-            .count();
         let broker_line = match self.broker_port {
             Some(port) => format!("\n- Broker: active on port {port} (not persisted)"),
             None => String::new(),
         };
         format!(
-            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}\n- Local module agents: {}\n- Remote module agents: {}{}\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
+            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}{}\n\nPlugins are tools inside an agent spec's [[plugins]], never agents; /agents lists the agents.\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
             self.module_settings.enabled,
             self.module_settings.module_dir,
             self.module_settings.gateway_port,
-            local_agents,
-            remote_agents,
             broker_line
         )
     }
@@ -1030,7 +1113,63 @@ async fn do_update_cli_if_installed() -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatEngine, Command};
+    use super::{ChatEngine, Command, format_agents_summary};
+    use chatty_core::agent_spec::{
+        WORKSPACE_AGENTS_DIR, inspect_agent_specs_from, roster_names_of,
+    };
+    use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+
+    /// PL-U5: `/agents` lists the roster's specs with what they declare,
+    /// the remote agents, and every spec file left out with the reason.
+    #[test]
+    fn agents_lists_the_roster_and_what_it_leaves_out() {
+        assert_eq!(ChatEngine::parse_command("/agents"), Some(Command::Agents));
+
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.toml"), "[agent]\nnme = \"broken\"\n").unwrap();
+        std::fs::write(
+            dir.join("hidden.toml"),
+            "[agent]\nname = \"hidden\"\n\n[swarm]\nexposed = false\n",
+        )
+        .unwrap();
+        let listings = inspect_agent_specs_from(Some(workspace.path()), None);
+        let roster = roster_names_of(&[], &listings);
+        let roster: Vec<&str> = roster.iter().map(String::as_str).collect();
+        let remote = A2aAgentConfig {
+            name: "voucher".to_string(),
+            url: "https://example.com/a2a".to_string(),
+            api_key: None,
+            enabled: false,
+            skills: Vec::new(),
+        };
+
+        let text = format_agents_summary(&[remote], &roster, &listings);
+        assert!(
+            text.contains("  local-agent — the default worker"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  benford-analyst — Audits a list of financial amounts"),
+            "{text}"
+        );
+        assert!(text.contains("plugins benford"), "{text}");
+        assert!(text.contains("profile reviewer"), "{text}");
+        assert!(
+            text.contains("delegates to local-coder, local-reviewer"),
+            "{text}"
+        );
+        assert!(
+            text.contains("voucher — remote A2A agent at https://example.com/a2a (disabled)"),
+            "{text}"
+        );
+        let left_out = text.split("Not on the roster:").nth(1).expect(&text);
+        assert!(left_out.contains("broken"), "{text}");
+        assert!(left_out.contains("does not load"), "{text}");
+        assert!(left_out.contains("hidden"), "{text}");
+        assert!(left_out.contains("exposed = false"), "{text}");
+    }
 
     #[test]
     fn parse_modules_command_variants() {
@@ -1092,7 +1231,6 @@ mod tests {
                 embedding_service: None,
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
-                module_agents: Vec::new(),
                 spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,
@@ -1164,7 +1302,6 @@ mod tests {
                 embedding_service: None,
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
-                module_agents: Vec::new(),
                 spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: Some(team),
                 is_sub_agent: false,

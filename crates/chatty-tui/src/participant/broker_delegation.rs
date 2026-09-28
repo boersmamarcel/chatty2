@@ -117,7 +117,7 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
     // Built exactly as `agent_factory::mod.rs` builds it when `--broker` has
     // a root broker: the leader's `invoke_agent` reaches its roles over the
     // root's direct handle into it (ADR-0020, BI-7), never over loopback.
-    let tool = InvokeAgentTool::new(vec![], vec![], None)
+    let tool = InvokeAgentTool::new(vec![])
         .with_local_agents([LOCAL_AGENT_NAME])
         .with_transport(broker.transport());
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
@@ -182,7 +182,7 @@ async fn delegate(
     .await
     .expect("the broker starts");
 
-    let tool = InvokeAgentTool::new(vec![], vec![], None)
+    let tool = InvokeAgentTool::new(vec![])
         .with_local_agents([LOCAL_AGENT_NAME])
         .with_transport(broker.transport());
 

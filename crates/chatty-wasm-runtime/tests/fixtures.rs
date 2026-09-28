@@ -30,6 +30,7 @@ const GOOD_FIXTURES: &[&str] = &[
     "threads",
     "padded",
     "billing",
+    "sleep",
 ];
 
 #[test]

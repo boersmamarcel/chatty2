@@ -22,6 +22,7 @@
 //! | **Repository** | Data persistence (load/save to disk) | `ConversationRepository` |
 
 pub mod a2a_client;
+pub mod agent_command;
 pub mod agent_loop_guard;
 pub mod agent_task_controller;
 #[cfg(feature = "browser")]

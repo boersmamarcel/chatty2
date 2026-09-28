@@ -119,7 +119,8 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/cwd` | Show working directory | Yes | Yes |
 | `/cd [dir]` | Change per-chat working directory | Yes | Yes |
 | `/add-dir <dir>` | Add workspace directory | Yes | Yes |
-| `/agent [name] <prompt>` | Launch local sub-agent or named A2A agent | Yes | Yes |
+| `/agent [name] <prompt>` | Run an agent spec on the local roster or a named A2A agent, else a local sub-agent | Yes | Yes |
+| `/agents` | List the agents `/agent` and `invoke_agent` reach, and the spec files left out | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
@@ -393,7 +394,7 @@ and the legacy `.chatty/modules` fallback become the platform data-dir default.
 | `gateway_port` | `u16` | `8420` | Local protocol gateway |
 | `default_endpoint_budget` | `usize` | `1` | Delegated workers the broker runs at once against one model endpoint when nothing more specific is known (ADR-0011 C6, AGE-305). Ollama's `OLLAMA_NUM_PARALLEL` / a provider's `num_parallel` beat it |
 | `endpoint_budgets` | `HashMap<String, usize>` | `{}` | Per-endpoint overrides keyed by the server's base URL (`http://localhost:11434`); beats the default and what the provider reports. Omitted when empty |
-| `virtual_agents` | `[string]` | `[]` | The broker's named workers (ADR-0011 C10, AGE-377), by agent spec name (AGE-614): each is `<name>.toml` in `.chatty/agents/`, the data directory's `chatty/agents/`, or the presets. Agent objects (the old `VirtualAgentConfig` shape) fail to load. Empty = the one `local-agent`. A `--team` run replaces this roster for that run only. Field table: [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process) |
+| `virtual_agents` | `[string]` | `[]` | The broker's named workers (ADR-0011 C10, AGE-377), by agent spec name (AGE-614): each is `<name>.toml` in `.chatty/agents/`, the data directory's `chatty/agents/`, or the presets. Agent objects (the old `VirtualAgentConfig` shape) fail to load. Empty = `local-agent` and every exposed spec (PL-U5). A `--team` run replaces this roster for that run only. Field table: [Agents and specs](../architecture/agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process) |
 | `team` | `TeamConfig` | `{}` | What the team shares: `verification` — a shell command run in each worker's worktree at task end, whose exit code and tail go into the evidence envelope (ADR-0011 C12, AGE-406). Omitted when empty |
 
 ---
@@ -819,6 +820,8 @@ cat > "$OUT/llms.txt" << EOF
 - [Rendering system](${SITE_BASE}/dev/architecture/rendering-system.html)
 - [Token tracking](${SITE_BASE}/dev/architecture/token-tracking.html)
 - [Agent memory](${SITE_BASE}/dev/architecture/agent-memory.html)
+- [Agents and specs](${SITE_BASE}/dev/architecture/agents-and-specs.html)
+- [Plugins](${SITE_BASE}/dev/architecture/plugins.html)
 
 ## Reference
 

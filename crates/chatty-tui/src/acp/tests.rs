@@ -43,7 +43,6 @@ fn test_server() -> Arc<Server> {
             embedding_service: None,
             user_secrets: Vec::new(),
             remote_agents: Vec::new(),
-            module_agents: Vec::new(),
             spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
             team: None,
             is_sub_agent: false,

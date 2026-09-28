@@ -38,8 +38,8 @@ use crate::settings::models::ExecutionSettingsModel;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::settings::models::execution_settings::set_tool_group;
 use crate::settings::models::search_settings::SearchSettingsModel;
+use crate::tools::PendingArtifacts;
 use crate::tools::plugin_tool::PluginHost;
-use crate::tools::{LocalModuleAgentSummary, PendingArtifacts};
 
 /// Contextual dependencies for building an agent.
 ///
@@ -65,7 +65,6 @@ pub struct AgentBuildContext {
     pub skill_service: Option<SkillService>,
     pub search_settings: Option<SearchSettingsModel>,
     pub embedding_service: Option<EmbeddingService>,
-    pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
     /// A broker that has not necessarily started yet (BI-2, AGE-634): when
     /// set, `list_agents`/`invoke_agent` start it themselves on first use
@@ -203,12 +202,12 @@ pub struct AgentServices {
     pub skill_service: Option<SkillService>,
     pub search_settings: Option<SearchSettingsModel>,
     pub embedding_service: Option<EmbeddingService>,
-    pub module_agents: Vec<LocalModuleAgentSummary>,
     pub gateway_port: Option<u16>,
     /// A broker that has not necessarily started yet (BI-2, AGE-634). See
     /// [`AgentBuildContext::lazy_broker`].
     pub lazy_broker: Option<Arc<dyn LazyBroker>>,
-    /// `ModuleSettingsModel::virtual_agent_names()` on the host's settings.
+    /// `ModuleSettingsModel::roster_names()` on the host's settings: the
+    /// broker's roster of agent specs (PL-U5).
     pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
     /// Where a spec's plugins are found (PL-U2): the host's module
@@ -255,7 +254,6 @@ impl AgentBuildContext {
             skill_service,
             search_settings,
             embedding_service,
-            module_agents,
             gateway_port,
             lazy_broker,
             local_agents,
@@ -282,7 +280,6 @@ impl AgentBuildContext {
             skill_service,
             search_settings,
             embedding_service,
-            module_agents,
             gateway_port,
             lazy_broker,
             local_agents,
@@ -479,14 +476,6 @@ mod tests {
             skill_service: None,
             search_settings: Some(search),
             embedding_service: None,
-            module_agents: vec![LocalModuleAgentSummary {
-                name: "echo".to_string(),
-                version: "0.1.0".to_string(),
-                description: "echoes".to_string(),
-                tools: Vec::new(),
-                supports_a2a: false,
-                execution_mode: "local".to_string(),
-            }],
             gateway_port: Some(4242),
             lazy_broker: None,
             local_agents: vec!["local-coder".to_string()],
@@ -512,8 +501,6 @@ mod tests {
             vec![("KEY".to_string(), "value".to_string())]
         );
         assert_eq!(ctx.search_settings.as_ref().unwrap().max_results, 42);
-        assert_eq!(ctx.module_agents.len(), 1);
-        assert_eq!(ctx.module_agents[0].name, "echo");
         assert_eq!(ctx.gateway_port, Some(4242));
         assert_eq!(ctx.local_agents, vec!["local-coder".to_string()]);
         assert_eq!(ctx.remote_agents.len(), 1);
