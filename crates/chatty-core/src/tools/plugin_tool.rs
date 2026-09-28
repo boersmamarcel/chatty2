@@ -21,6 +21,11 @@
 //! * **Errors** go through [`map_tool_error`](super::map_tool_error), so a
 //!   trap, a deadline or the guest's own error reaches the model with its
 //!   reason and the turn goes on.
+//! * **Grants** (PL-U4). The instance is linked against only what the
+//!   spec's `grants` name ([`Grant`]), plus `logging`; an ungranted import
+//!   refuses with `capability <x> not granted to this agent`, which the
+//!   model reads in the tool result. A grant the plugin's `metadata` does
+//!   not request fails the load as a spec error.
 //! * **Approvals** are a function of the spec's grants, not of the tool name
 //!   ([`plugin_needs_approval`]): a plugin granted nothing side-effecting
 //!   runs without asking.
@@ -34,11 +39,13 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chatty_module_registry::ModuleManifest;
-use chatty_wasm_runtime::{Engine, LlmProvider, ResourceLimits, ToolCallRequest, WasmModule};
+use chatty_wasm_runtime::{
+    Engine, LlmProvider, ResourceLimits, ToolCallRequest, UnrequestedGrant, WasmModule,
+};
 use rig_agent::tool::{DynamicTool, ToolOutput};
 use tokio::sync::Mutex;
 
-use crate::agent_spec::PluginSpec;
+use crate::agent_spec::{Grant, PluginSpec, SpecError, SpecErrors};
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::services::plugin_llm::{PluginLlmProvider, PluginUsage};
 use crate::settings::models::execution_settings::ApprovalMode;
@@ -52,11 +59,6 @@ pub const PLUGIN_TOOL_SEPARATOR: &str = "__";
 
 /// The longest tool name OpenAI-wire providers accept.
 pub const MAX_TOOL_NAME_LEN: usize = 64;
-
-/// Capabilities whose use changes something outside the plugin, so a call
-/// needs the user's approval (PL-U4 §4). `llm` costs money but counts
-/// against the budget instead; `config` and `logging` are read-only.
-pub const SIDE_EFFECTING_GRANTS: &[&str] = &["http", "file-write"];
 
 /// `<plugin>__<tool>`: the name a plugin's tool is advertised under.
 pub fn plugin_tool_name(plugin: &str, tool: &str) -> String {
@@ -81,11 +83,9 @@ pub fn is_provider_tool_name(name: &str) -> bool {
 }
 
 /// Whether a plugin granted `grants` must ask before each call: only when a
-/// grant is side-effecting ([`SIDE_EFFECTING_GRANTS`]).
-pub fn plugin_needs_approval(grants: &[String]) -> bool {
-    grants
-        .iter()
-        .any(|grant| SIDE_EFFECTING_GRANTS.contains(&grant.as_str()))
+/// grant is side-effecting ([`Grant::side_effecting`]).
+pub fn plugin_needs_approval(grants: &[Grant]) -> bool {
+    grants.iter().any(Grant::side_effecting)
 }
 
 /// What a host gives the factory to load a spec's plugins with.
@@ -122,7 +122,10 @@ pub struct LoadedPlugin {
     pub tools: Vec<PluginToolDef>,
     /// The `llm::complete` calls this instance made, not yet drained.
     pub usage: PluginUsage,
-    grants: Vec<String>,
+    /// What its `metadata` requests, by WIT name.
+    pub requested: Vec<String>,
+    /// What the spec granted it.
+    pub grants: Vec<Grant>,
     module: Arc<Mutex<WasmModule>>,
 }
 
@@ -244,14 +247,23 @@ pub fn load_plugin(
         .with_context(|| format!("plugin `{}`: the manifest names no wasm", spec.module))?;
 
     // What the guest reads: the manifest's `[config]` with the spec's on
-    // top, and the manifest's `[files].root` (PL-H3; nothing wider).
+    // top, and — only when `file` is granted — the grant's root, else the
+    // manifest's `[files].root` (PL-H3; nothing wider). It is linked against
+    // the spec's grants alone (PL-U4).
     let mut config = manifest.config.clone();
     config.extend(spec.config.clone());
-    let mut runtime_manifest = config.iter().fold(
-        chatty_wasm_runtime::ModuleManifest::new(&manifest.name),
-        |m, (key, value)| m.with_config(key, value),
-    );
-    if let Some(root) = &manifest.files_root {
+    let mut runtime_manifest = config
+        .iter()
+        .fold(
+            chatty_wasm_runtime::ModuleManifest::new(&manifest.name),
+            |m, (key, value)| m.with_config(key, value),
+        )
+        .with_grants(spec.grants.iter().map(Grant::capability));
+    let file_root = spec.grants.iter().find_map(|grant| match grant {
+        Grant::File { root } => Some(root.as_ref().or(manifest.files_root.as_ref())),
+        _ => None,
+    });
+    if let Some(Some(root)) = file_root {
         runtime_manifest = runtime_manifest.with_weights_root(root);
     }
 
@@ -276,7 +288,17 @@ pub fn load_plugin(
         provider,
         limits_for(&manifest, spec),
     )
-    .with_context(load_context)?;
+    .map_err(|err| match err.downcast_ref::<UnrequestedGrant>() {
+        Some(refused) => anyhow::Error::new(SpecErrors(vec![SpecError::UnrequestedGrant(
+            refused.to_string(),
+        )])),
+        None => err.context(load_context()),
+    })?;
+    let requested = module
+        .requested_capabilities()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
     let tools = module
         .list_tools()
         .with_context(|| format!("plugin `{}`: list-tools failed", spec.module))?
@@ -289,6 +311,7 @@ pub fn load_plugin(
         description: manifest.description,
         tools,
         usage,
+        requested,
         grants: spec.grants.clone(),
         module: Arc::new(Mutex::new(module)),
     })
@@ -584,16 +607,19 @@ mod tests {
     }
 
     /// PL-U2 §4: a call asks first only when a grant is side-effecting —
-    /// decided by the grants, never by what the tool is called.
+    /// decided by the grants, never by what the tool is called. No v1
+    /// capability is side-effecting (PL-U4 §4).
     #[test]
     fn approval_follows_the_grants_not_the_tool_name() {
-        let grants = |list: &[&str]| list.iter().map(|g| g.to_string()).collect::<Vec<_>>();
+        let grants = |list: &[&str]| {
+            list.iter()
+                .map(|g| g.parse::<Grant>().unwrap())
+                .collect::<Vec<_>>()
+        };
         assert!(!plugin_needs_approval(&grants(&[])));
         assert!(!plugin_needs_approval(&grants(&[
-            "llm", "config", "logging"
+            "llm", "config", "logging", "file", "billing"
         ])));
-        assert!(plugin_needs_approval(&grants(&["llm", "http"])));
-        assert!(plugin_needs_approval(&grants(&["file-write"])));
     }
 
     /// The module's `[resources]` and the spec's `limits` can only lower
@@ -691,17 +717,87 @@ mod tests {
     }
 
     /// A plugin granted a side-effecting capability asks before every call;
-    /// with no one to ask, the call is refused without running.
+    /// with no one to ask, the call is refused without running. (No v1
+    /// grant is side-effecting, so the tool is built as one would be.)
     #[tokio::test(flavor = "multi_thread")]
     async fn a_side_effecting_grant_needs_an_approver() {
-        let mut spec = plugin("echo");
-        spec.grants = vec!["http".to_string()];
-        let echo = load_one(spec).await.expect("echo loads");
-        let err = tool_of(&echo, "echo__reverse")
+        let echo = load_one(plugin("echo")).await.expect("echo loads");
+        let mut tool = tool_of(&echo, "echo__reverse");
+        tool.approvals = Some(PluginApprovals {
+            pending: None,
+            mode: ApprovalMode::AlwaysAsk,
+        });
+        let err = tool
             .call(serde_json::json!({ "input": "x" }))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("needs approval"), "{err}");
+    }
+
+    // -- grants (PL-U4) --------------------------------------------------------
+
+    /// PL-U4's first verify line: an echo plugin granted nothing (it
+    /// requests nothing) still loads and runs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_echo_plugin_granted_nothing_still_runs() {
+        let echo = load_one(plugin("echo")).await.expect("echo loads");
+        assert!(echo.requested.is_empty() && echo.grants.is_empty());
+        let out = tool_of(&echo, "echo__echo")
+            .call(serde_json::json!({ "input": "hi" }))
+            .await
+            .expect("echo runs with nothing granted");
+        assert_eq!(out, "hi");
+    }
+
+    /// PL-U4's third verify line: a spec granting `file` to a plugin that
+    /// does not request it fails as an invalid spec, naming the plugin, the
+    /// grant and what it does request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spec_granting_file_to_a_plugin_that_did_not_request_it_fails_validation() {
+        let mut spec = plugin("echo");
+        spec.grants = vec![Grant::File { root: None }];
+        let err = load_one(spec).await.err().expect("echo requests no `file`");
+        let message = format!("{err:#}");
+        assert!(err.downcast_ref::<SpecErrors>().is_some(), "{message}");
+        assert!(message.starts_with("invalid agent spec:"), "{message}");
+        assert!(
+            message.contains(
+                "plugin `echo` is granted `file`, which it does not request (it requests nothing)"
+            ),
+            "{message}"
+        );
+
+        // Granting what it requests loads.
+        let mut spec = plugin("config-reader");
+        spec.grants = vec![Grant::Config];
+        let reader = load_one(spec).await.expect("config is requested");
+        assert_eq!(reader.requested, ["config"]);
+    }
+
+    /// `file` reads below the module's `[files] root` only when granted;
+    /// `file:<root>` reads below that root instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_reads_follow_the_file_grant() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("granted.bin"), b"four").unwrap();
+        let read = |grants: Vec<Grant>, path: &'static str| async move {
+            let mut spec = plugin("file-reader");
+            spec.grants = grants;
+            let reader = load_one(spec).await.expect("file-reader loads");
+            tool_of(&reader, "file-reader__read")
+                .call(serde_json::json!({ "input": path }))
+                .await
+        };
+        let err = read(vec![], "granted.bin").await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("capability file not granted to this agent"),
+            "{err}"
+        );
+        let granted = Grant::File {
+            root: Some(root.path().to_path_buf()),
+        };
+        assert_eq!(read(vec![granted], "granted.bin").await.unwrap(), "4");
     }
 
     // -- inside a turn --------------------------------------------------------
@@ -896,6 +992,54 @@ mod tests {
         );
     }
 
+    /// PL-U4's second verify line, inside a turn: a `config-reader` plugin
+    /// the spec did not grant `config` still loads, its `config::get` is
+    /// refused, and the refusal is what the model reads as the tool result;
+    /// the turn goes on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_config_reader_not_granted_config_gets_the_refusal_in_its_tool_result() {
+        let key = "plugin-config-model";
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            key,
+            [
+                Reply::tool_call(
+                    "config-reader__get",
+                    serde_json::json!({ "input": "greeting" }),
+                ),
+                Reply::text("The plugin may not read its config."),
+            ],
+        ));
+        let (events, _session) = run_turn(
+            spec_with(vec![plugin("config-reader")], Some("coordinator")),
+            model(ProviderType::Ollama, key),
+            ollama(&daemon),
+        )
+        .await;
+        no_error(&events);
+
+        let refusal = "capability config not granted to this agent";
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ToolCallError { error, .. } => Some(error.clone()),
+                SessionEvent::ToolCallResult { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("the config-reader call reported back");
+        assert!(result.contains("config-reader__get"), "{result}");
+        assert!(result.contains(refusal), "{result}");
+        assert!(
+            !result.contains("hello from module.toml"),
+            "the value must not leak: {result}"
+        );
+        let requests = daemon.requests();
+        assert_eq!(requests.len(), 2, "the turn went on after the refusal");
+        assert!(
+            String::from_utf8_lossy(&requests[1].body).contains(refusal),
+            "the model reads the refusal"
+        );
+    }
+
     /// PL-U2's usage line: a plugin's `llm::complete` call is part of the
     /// turn's totals as a line of its own, attributed to the plugin and
     /// naming the model that served it and when — never a price of its own.
@@ -916,8 +1060,10 @@ mod tests {
                 Reply::text("The plugin says 4."),
             ],
         ));
+        let mut slow_host = plugin("slow-host");
+        slow_host.grants = vec![Grant::Llm];
         let (events, session) = run_turn(
-            spec_with(vec![plugin("slow-host")], Some("coordinator")),
+            spec_with(vec![slow_host], Some("coordinator")),
             model(ProviderType::Ollama, key),
             ollama(&daemon),
         )

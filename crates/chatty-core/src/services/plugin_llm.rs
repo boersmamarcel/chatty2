@@ -326,7 +326,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use chatty_wasm_runtime::test_support::fixture_path;
-    use chatty_wasm_runtime::{ModuleManifest, ResourceLimits, ToolCallRequest, WasmModule};
+    use chatty_wasm_runtime::{
+        Capability, ModuleManifest, ResourceLimits, ToolCallRequest, WasmModule,
+    };
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -743,7 +745,8 @@ mod tests {
         WasmModule::from_file(
             &engine,
             &fixture_path(name),
-            ModuleManifest::new(name),
+            // The fixtures here call `llm::complete`.
+            ModuleManifest::new(name).with_grants([Capability::Llm]),
             llm,
             limits,
         )

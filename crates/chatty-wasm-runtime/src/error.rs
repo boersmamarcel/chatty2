@@ -24,6 +24,10 @@ pub enum CallError {
     OutputTooLarge { bytes: usize, max_output_bytes: u64 },
     /// The host thread running the call panicked (a host bug, not the guest).
     HostPanic(String),
+    /// The guest called an import with no error channel (`config::get`)
+    /// whose capability it was not granted (PL-U4); `capability` is its
+    /// WIT name.
+    NotGranted { capability: &'static str },
 }
 
 impl fmt::Display for CallError {
@@ -52,6 +56,9 @@ impl fmt::Display for CallError {
                 "output too large: {bytes} bytes exceeds the {max_output_bytes}-byte cap"
             ),
             Self::HostPanic(message) => write!(f, "host panic during guest call: {message}"),
+            Self::NotGranted { capability } => {
+                write!(f, "capability {capability} not granted to this agent")
+            }
         }
     }
 }

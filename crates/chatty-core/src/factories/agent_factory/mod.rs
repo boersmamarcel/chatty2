@@ -1332,7 +1332,14 @@ impl AgentClient {
 
         // Create list_agents tool (registered when the role delegates)
         let mut list_agents_tool = ListAgentsTool::new(remote_agents.clone())
-            .with_local_workers(local_agents.iter().cloned());
+            .with_local_workers(local_agents.iter().cloned())
+            .with_spec_dirs(
+                exec_settings
+                    .as_ref()
+                    .and_then(|settings| settings.workspace_dir.as_ref())
+                    .map(std::path::PathBuf::from),
+                dirs::data_dir(),
+            );
         // With a gateway there is a live participant table to read, not just
         // the settings snapshot (ADR-0011 C5). A lazy broker takes priority
         // over an already-resolved port: a host that hands in both knows the

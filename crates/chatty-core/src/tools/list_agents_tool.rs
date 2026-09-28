@@ -13,12 +13,14 @@
 //! server.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_spec::{AgentSpec, Grant, load_agent_spec_from};
 use crate::services::lazy_broker::LazyBroker;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
@@ -74,6 +76,40 @@ pub struct AgentListing {
     /// `true` if an API key is configured for it (the value is never exposed).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_api_key: bool,
+    /// For a local agent with a spec: its plugins and what each may reach.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginGrants>,
+}
+
+/// One plugin of a local agent's spec, as its card shows it (PL-U4): what
+/// the agent granted it. A capability it was not granted is refused when
+/// the plugin calls it.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct PluginGrants {
+    pub module: String,
+    /// Granted capabilities by WIT name (`file:<root>` for a file root),
+    /// always with `logging`.
+    pub grants: Vec<String>,
+}
+
+impl PluginGrants {
+    fn of(spec: &AgentSpec) -> Vec<Self> {
+        spec.plugins
+            .iter()
+            .map(|plugin| {
+                let grants = std::iter::once(Grant::Logging)
+                    .chain(plugin.grants.iter().cloned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .map(|grant| grant.to_string())
+                    .collect();
+                Self {
+                    module: plugin.module.clone(),
+                    grants,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Output from the list_agents tool
@@ -108,6 +144,10 @@ pub struct ListAgentsTool {
     /// a worker's broker-made connection. When present, the live half is
     /// never read over loopback HTTP.
     transport: Option<Arc<dyn Transport>>,
+    /// Where a local agent's spec is looked up for its card's plugins:
+    /// the workspace and the data directory (then the presets).
+    spec_workspace: Option<PathBuf>,
+    spec_data_dir: Option<PathBuf>,
     http: reqwest::Client,
 }
 
@@ -119,6 +159,8 @@ impl ListAgentsTool {
             gateway_base_url: None,
             lazy_broker: None,
             transport: None,
+            spec_workspace: None,
+            spec_data_dir: dirs::data_dir(),
             http: reqwest::Client::new(),
         }
     }
@@ -143,6 +185,15 @@ impl ListAgentsTool {
     /// aggregated card over loopback HTTP (ADR-0020, BI-4).
     pub fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
         self.transport = Some(transport);
+        self
+    }
+
+    /// Look local agents' specs up under `workspace` and `data_dir` (then
+    /// the presets) for the plugins their cards show. Without it: the
+    /// platform data directory, then the presets.
+    pub fn with_spec_dirs(mut self, workspace: Option<PathBuf>, data_dir: Option<PathBuf>) -> Self {
+        self.spec_workspace = workspace;
+        self.spec_data_dir = data_dir;
         self
     }
 
@@ -254,6 +305,7 @@ impl Tool for ListAgentsTool {
                     enabled: agent.enabled,
                     skills: agent.skills.clone(),
                     has_api_key: agent.has_api_key(),
+                    plugins: Vec::new(),
                 },
             );
         }
@@ -280,7 +332,22 @@ impl Tool for ListAgentsTool {
                     enabled: true,
                     skills: Vec::new(),
                     has_api_key: false,
+                    plugins: Vec::new(),
                 });
+        }
+
+        // A local agent's card shows its spec's plugins and their grants
+        // (PL-U4): the spec is the authority on what a plugin may reach.
+        for listing in listings.values_mut() {
+            if listing.origin == AgentOrigin::Local
+                && let Ok(loaded) = load_agent_spec_from(
+                    &listing.name,
+                    self.spec_workspace.as_deref(),
+                    self.spec_data_dir.as_deref(),
+                )
+            {
+                listing.plugins = PluginGrants::of(&loaded.spec);
+            }
         }
 
         let agents: Vec<AgentListing> = listings.into_values().collect();
@@ -441,6 +508,7 @@ fn listing_from_card(card: &serde_json::Value) -> Option<AgentListing> {
         enabled: true,
         skills,
         has_api_key: false,
+        plugins: Vec::new(),
     })
 }
 
@@ -516,6 +584,49 @@ mod tests {
         )]))
         .await;
         assert!(!find(&output, "off-agent").enabled);
+    }
+
+    /// PL-U4: a local agent's card shows its spec's plugins and what each
+    /// was granted (always `logging`); an agent without a spec shows none.
+    #[tokio::test]
+    async fn a_local_agents_card_shows_its_plugins_grants() {
+        let workspace = tempfile::tempdir().unwrap();
+        let agents = workspace
+            .path()
+            .join(crate::agent_spec::WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("auditor.toml"),
+            "[agent]\nname = \"auditor\"\n\n\
+             [[plugins]]\nmodule = \"config-reader\"\ngrants = [\"config\"]\n\n\
+             [[plugins]]\nmodule = \"echo\"\n",
+        )
+        .unwrap();
+        let tool = ListAgentsTool::new(vec![])
+            .with_local_workers(["auditor", "local-agent"])
+            .with_spec_dirs(Some(workspace.path().to_path_buf()), None);
+
+        let output = list(&tool).await;
+        assert_eq!(
+            find(&output, "auditor").plugins,
+            [
+                PluginGrants {
+                    module: "config-reader".to_string(),
+                    grants: vec!["config".to_string(), "logging".to_string()],
+                },
+                PluginGrants {
+                    module: "echo".to_string(),
+                    grants: vec!["logging".to_string()],
+                },
+            ]
+        );
+        assert!(find(&output, "local-agent").plugins.is_empty());
+        let json = serde_json::to_value(&output.agents).unwrap();
+        assert_eq!(
+            json[0]["plugins"][0],
+            serde_json::json!({ "module": "config-reader", "grants": ["config", "logging"] })
+        );
+        assert!(json[1].get("plugins").is_none(), "{json}");
     }
 
     /// PL-U5: the roster's specs are this machine's workers, one kind of

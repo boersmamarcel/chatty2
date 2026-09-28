@@ -64,7 +64,7 @@ pub(crate) fn format_agents_summary(
                         .iter()
                         .map(|plugin| match plugin.grants.as_slice() {
                             [] => plugin.module.clone(),
-                            grants => format!("{} [{}]", plugin.module, grants.join(", ")),
+                            _ => format!("{} [{}]", plugin.module, plugin.grant_list()),
                         })
                         .collect();
                     facts.push(format!("plugins {}", plugins.join(", ")));
