@@ -116,8 +116,8 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
 
     // Built exactly as `agent_factory::mod.rs` builds it when `--broker` has
     // set `gateway_port = Some(broker.port)`.
-    let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
-        .with_local_agents([LOCAL_AGENT_NAME]);
+    let tool =
+        InvokeAgentTool::new(vec![], Some(broker.port)).with_local_agents([LOCAL_AGENT_NAME]);
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
     let result = tool
@@ -180,8 +180,8 @@ async fn delegate(
     .await
     .expect("the broker starts");
 
-    let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
-        .with_local_agents([LOCAL_AGENT_NAME]);
+    let tool =
+        InvokeAgentTool::new(vec![], Some(broker.port)).with_local_agents([LOCAL_AGENT_NAME]);
 
     let result = tool
         .call(

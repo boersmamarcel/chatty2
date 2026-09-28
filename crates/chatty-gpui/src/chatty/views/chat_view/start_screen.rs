@@ -14,13 +14,13 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::settings::models::agent_specs::served_names;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::{
-    DiscoveredModulesModel, ExtensionsModel, ModuleLoadStatus, ModuleSettingsModel,
-    SearchSettingsModel,
+    AgentSpecsModel, DiscoveredModulesModel, ExtensionsModel, ModuleLoadStatus,
+    ModuleSettingsModel, SearchSettingsModel,
 };
 
 use super::ChatView;
@@ -87,15 +87,6 @@ impl ChatView {
                     .count()
             })
             .unwrap_or(0);
-        let enabled_module_ids: HashSet<String> = extensions_model
-            .map(|model| {
-                model
-                    .wasm_module_ids()
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
         let loaded_module_count = discovered_modules
             .map(|model| {
                 model
@@ -110,23 +101,15 @@ impl ChatView {
                     .count()
             })
             .unwrap_or(0);
-        let enabled_module_agent_count = discovered_modules
-            .map(|model| {
-                model
-                    .modules
-                    .iter()
-                    .filter(|module| {
-                        module.agent
-                            && matches!(
-                                module.status,
-                                ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
-                            )
-                            && enabled_module_ids.contains(module.name.as_str())
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
+        // The local roster the broker serves when the module runtime is on
+        // (PL-U5): specs, never modules. Read from the cache the footer's
+        // agent indicator keeps current.
         let module_runtime_enabled = module_settings.is_some_and(|settings| settings.enabled);
+        let local_agent_count = if module_runtime_enabled {
+            served_names(&AgentSpecsModel::cached(cx), cx).len()
+        } else {
+            0
+        };
 
         let summary_badges = vec![
             render_status_badge(
@@ -141,7 +124,7 @@ impl ChatView {
             )
             .into_any_element(),
             render_status_badge(
-                format!("modules {loaded_module_count}"),
+                format!("plugins {loaded_module_count}"),
                 module_runtime_enabled && loaded_module_count > 0,
                 rgb(0xA855F7),
                 cx,
@@ -155,8 +138,8 @@ impl ChatView {
             )
             .into_any_element(),
             render_status_badge(
-                format!("agents {}", enabled_a2a_count + enabled_module_agent_count),
-                enabled_a2a_count + enabled_module_agent_count > 0,
+                format!("agents {}", enabled_a2a_count + local_agent_count),
+                enabled_a2a_count + local_agent_count > 0,
                 rgb(0x14B8A6),
                 cx,
             )

@@ -2,7 +2,7 @@
 
 **When to read this:** You want to give the agent more reach — MCP servers, remote agents and modules from the Hive marketplace, the built-in catalog, or a server of your own.
 
-**Settings → Extensions** is one page with five parts: your Hive account, what is installed, local modules you copied in by hand, the marketplace, and a form for custom servers. Enabled extensions show up on the new-conversation start screen and their tools become available on the next message.
+**Settings → Extensions** is one page with four parts: your Hive account, what is installed, the marketplace, and a form for custom servers. Plugins — WASM modules, from Hive or copied in by hand — are listed on their own page, **Settings → Plugins**. Enabled extensions show up on the new-conversation start screen and their tools become available on the next message.
 
 ## Hive marketplace
 
@@ -12,7 +12,7 @@ Hive is the registry Chatty installs extensions from; the address it is talking 
 
 | Badge | Meaning |
 |-------|---------|
-| **MCP** / **Agent** / **A2A** | What kind of extension it is — a tool server, a local module, or a remote agent |
+| **MCP** / **Plugin** / **A2A** | What kind of extension it is — a tool server, a WASM plugin, or a remote agent |
 | **• Local** | A module that runs on this machine |
 | **☁ Cloud** / **☁ Cloud Only** | Runs on the Hive runner; cloud-only modules cannot be switched local |
 | **↗ External** | An MCP server or agent at an external URL |
@@ -51,7 +51,7 @@ The server appears under **Installed** with an **↗ External** badge. The agent
 
 Modules are small programs that run inside Chatty, locally or on the Hive runner. The developer guide [Build a WASM module](../dev/guides/build-wasm-module.md) walks through it, with two worked examples: [write a plugin (echo)](../dev/start/tutorial-echo-agent.md) and [give an agent the plugin (benford)](../dev/start/tutorial-benford-agent.md).
 
-A module you copy into the module directory yourself is listed under **Local modules** with **Trust: local**: Chatty loads it because you put it there, but nothing vouches for it.
+A module is a **plugin**: tools an agent runs, never an agent of its own. Installing one adds it to the module directory and nothing more; an agent uses it once its spec lists the plugin under `[[plugins]]` and grants what it may do. **Settings → Plugins** lists every plugin with its tools, trust level and the agent specs that use it. A module you copy into the module directory yourself shows **Trust: local**: Chatty loads it because you put it there, but nothing vouches for it.
 
 If a module fails to load — an invalid `module.toml`, a missing `.wasm` file, a name that clashes with another installed module, or an installed `.wasm` that changed on disk since it was installed (`hash mismatch`) — its row shows **Failed to load:** with the reason, instead of failing silently. Reinstall a module that fails with a hash mismatch.
 

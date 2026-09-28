@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -26,7 +26,6 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
-use chatty_core::tools::LocalModuleAgentSummary;
 use chatty_core::tools::plugin_tool::PluginHost;
 
 use tokio::sync::mpsc;
@@ -373,7 +372,11 @@ pub struct ChatEngine {
     pub user_secrets: Vec<(String, String)>,
     /// Configured remote A2A agents available for `invoke_agent` and `/agent`.
     pub remote_agents: Vec<A2aAgentConfig>,
-    pub module_agents: Vec<LocalModuleAgentSummary>,
+    /// The local roster's specs, as `/agent` resolves a name and the splash
+    /// counts them (PL-U5): the team's, else what module settings declare,
+    /// else every exposed spec. Re-read on `/agents` and when the workspace
+    /// changes.
+    pub agent_roster: Vec<AgentSpec>,
     /// The agent spec this process runs as (AGE-614): `--agent`, a
     /// worker's `--agent-json`, a `--team` leader's, or a bare one, with
     /// the command line's overrides applied.
@@ -464,6 +467,27 @@ pub(crate) fn plugin_host(
     }
 }
 
+/// The local roster's specs (PL-U5): a `--team`'s agents, else the specs
+/// module settings declare, else every exposed spec the workspace reaches.
+/// A declared spec that does not load leaves it empty, with a warning.
+pub(crate) fn load_agent_roster(
+    team: Option<&Team>,
+    module_settings: &ModuleSettingsModel,
+    workspace: Option<&str>,
+) -> Vec<AgentSpec> {
+    if let Some(team) = team {
+        return team.agents.clone();
+    }
+    chatty_core::agent_spec::load_roster(&module_settings.virtual_agents, workspace.map(Path::new))
+        .unwrap_or_else(|error| {
+            warn!(
+                error = format!("{error:#}"),
+                "The declared agent roster does not load"
+            );
+            Vec::new()
+        })
+}
+
 /// Configuration for constructing a new `ChatEngine`.
 pub struct ChatEngineConfig {
     pub model_config: ModelConfig,
@@ -487,7 +511,6 @@ pub struct ChatEngineConfig {
     pub embedding_service: Option<chatty_core::services::EmbeddingService>,
     pub user_secrets: Vec<(String, String)>,
     pub remote_agents: Vec<A2aAgentConfig>,
-    pub module_agents: Vec<LocalModuleAgentSummary>,
     /// The agent spec this process runs as (AGE-614), validated at
     /// start-up: its role, disabled tool groups, skills and budgets reach
     /// the agent through `AgentBuildContext::from_spec`.
@@ -517,6 +540,11 @@ impl ChatEngine {
         });
         // Delegated lines are priced at the model they name (AGE-682).
         session.set_price_book(config.models.price_book());
+        let agent_roster = load_agent_roster(
+            config.team.as_ref(),
+            &config.module_settings,
+            config.execution_settings.workspace_dir.as_deref(),
+        );
         Self {
             session,
             hosted: None,
@@ -535,8 +563,8 @@ impl ChatEngine {
             skill_service,
             pending_clarification: None,
             user_secrets: config.user_secrets,
+            agent_roster,
             remote_agents: config.remote_agents,
-            module_agents: config.module_agents,
             spec: config.spec,
             pending_first_turn: config.team.as_ref().and_then(Team::first_turn_instruction),
             team: config.team,
@@ -595,6 +623,8 @@ impl ChatEngine {
     }
 
     pub fn refresh_workspace_context(&mut self) {
+        // Specs live under the workspace, so the roster moves with it.
+        self.refresh_agent_roster();
         let workspace_dir = self.execution_settings.workspace_dir.clone();
         let event_tx = self.event_tx.clone();
         tokio::task::spawn_blocking({
@@ -655,12 +685,26 @@ impl ChatEngine {
     /// The broker's virtual agents by name: the `--team` roster when this
     /// process leads a team (held apart from `module_settings`, which
     /// `/modules` saves to disk; AGE-382/AGE-407), else what module settings
-    /// declare.
+    /// declare, else every exposed spec (PL-U5).
     pub(crate) fn local_agents(&self) -> Vec<String> {
         match self.team.as_ref() {
             Some(team) => team.agent_names(),
-            None => self.module_settings.virtual_agent_names(),
+            None => self.module_settings.roster_names(
+                self.execution_settings
+                    .workspace_dir
+                    .as_deref()
+                    .map(std::path::Path::new),
+            ),
         }
+    }
+
+    /// Re-read the local roster's specs from the workspace (PL-U5).
+    pub(crate) fn refresh_agent_roster(&mut self) {
+        self.agent_roster = load_agent_roster(
+            self.team.as_ref(),
+            &self.module_settings,
+            self.execution_settings.workspace_dir.as_deref(),
+        );
     }
 
     /// Build the `AgentBuildContext` shared by `init_conversation` and
@@ -679,7 +723,6 @@ impl ChatEngine {
                 skill_service: Some(self.skill_service.clone()),
                 search_settings: self.search_settings.clone(),
                 embedding_service: self.embedding_service.clone(),
-                module_agents: self.module_agents.clone(),
                 gateway_port: self.broker_port.or(self
                     .module_settings
                     .enabled
@@ -1505,7 +1548,6 @@ mod tests {
                 embedding_service: None,
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
-                module_agents: Vec::new(),
                 spec: AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,
@@ -1887,7 +1929,6 @@ mod tests {
                 embedding_service: None,
                 user_secrets: Vec::new(),
                 remote_agents: Vec::new(),
-                module_agents: Vec::new(),
                 spec: AgentSpec::named("chatty"),
                 team: None,
                 is_sub_agent: false,

@@ -146,7 +146,7 @@ budget, AGE-440; `0` is no cap). A run without a human (`--headless`, `--pipe`, 
 worker) never takes the persisted turn cap: with no `--max-agent-turns` it runs
 uncapped under `--max-duration` (default `30m`, also for an explicit `0`). `--tools` / `--preamble` / `--model` on a `--team` leader override
 the team file's leader settings. Design and file format:
-[`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md).
+[`docs/agents-and-specs.md`](../../docs/agents-and-specs.md).
 
 ## Prerequisites
 

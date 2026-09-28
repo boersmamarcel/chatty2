@@ -1,4 +1,30 @@
 use super::*;
+use chatty_core::agent_spec::AgentSpec;
+use chatty_core::services::agent_command::{
+    AgentCommandTarget, resolve_agent_command, spec_sub_agent_args,
+};
+use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+
+/// The local roster's specs, from the workspace (PL-U5): what module
+/// settings declare, else every exposed spec. A declared spec that does not
+/// load leaves it empty, so `/agent` falls through to the default sub-agent.
+fn local_roster(cx: &App) -> Vec<AgentSpec> {
+    let workspace = cx
+        .try_global::<ExecutionSettingsModel>()
+        .and_then(|settings| settings.workspace_dir.clone());
+    let declared = cx
+        .try_global::<crate::settings::models::ModuleSettingsModel>()
+        .map(|m| m.virtual_agents.clone())
+        .unwrap_or_default();
+    chatty_core::agent_spec::load_roster(&declared, workspace.as_deref().map(std::path::Path::new))
+        .unwrap_or_else(|error| {
+            warn!(
+                error = format!("{error:#}"),
+                "The declared agent roster does not load"
+            );
+            Vec::new()
+        })
+}
 
 impl ChattyApp {
     // -----------------------------------------------------------------------
@@ -221,31 +247,34 @@ impl ChattyApp {
                 self.chat_view.update(cx, |view, cx| {
                     view.add_info_message(
                         "Usage: `/agent <prompt>` or `/agent <name> <prompt>` — \
-                         dispatch to a local sub-agent or a registered A2A agent."
+                         dispatch to a sub-agent, an agent spec (Settings → Agents) \
+                         or a registered A2A agent."
                             .to_string(),
                         cx,
                     );
                 });
             } else {
-                // Check if the first word matches a registered A2A agent name.
-                let (agent_name, prompt_for_agent) = {
-                    let mut words = rest.splitn(2, char::is_whitespace);
-                    let first = words.next().unwrap_or("").to_string();
-                    let tail = words.next().unwrap_or("").trim().to_string();
-                    (first, tail)
-                };
-
-                let is_a2a_agent = !prompt_for_agent.is_empty()
-                    && cx
-                        .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
-                        .and_then(|m| m.find_enabled_a2a(&agent_name).map(|_| true))
-                        .unwrap_or(false);
-
-                if is_a2a_agent {
-                    self.launch_a2a_agent(agent_name, prompt_for_agent, cx);
-                } else {
-                    // Fall back to local sub-agent with the entire rest as the prompt.
-                    self.launch_agent(rest, cx);
+                // The first word names a remote A2A agent or a spec on the
+                // local roster — the one `list_agents` lists — or it is part
+                // of the default sub-agent's prompt (PL-U5).
+                let remote_agents: Vec<A2aAgentConfig> = cx
+                    .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>(
+                    )
+                    .map(|m| {
+                        m.all_a2a_agents()
+                            .into_iter()
+                            .map(|(_, config, enabled)| A2aAgentConfig { enabled, ..config })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match resolve_agent_command(&rest, &remote_agents, &local_roster(cx)) {
+                    AgentCommandTarget::Remote { config, prompt } => {
+                        self.launch_a2a_agent(config.name, prompt, cx)
+                    }
+                    AgentCommandTarget::Spec { spec, prompt } => {
+                        self.launch_agent(prompt, Some(spec), cx)
+                    }
+                    AgentCommandTarget::Default { prompt } => self.launch_agent(prompt, None, cx),
                 }
             }
             return true;
@@ -410,8 +439,12 @@ impl ChattyApp {
     }
 
     /// `/agent <prompt>` — launch chatty-tui in headless mode with the given prompt.
-    fn launch_agent(&mut self, prompt: String, cx: &mut Context<Self>) {
-        info!(prompt = %prompt, "Slash command: launch sub-agent");
+    fn launch_agent(&mut self, prompt: String, spec: Option<AgentSpec>, cx: &mut Context<Self>) {
+        info!(
+            prompt = %prompt,
+            agent = ?spec.as_ref().map(|spec| &spec.agent.name),
+            "Slash command: launch sub-agent"
+        );
 
         // Capture the conversation where the sub-agent is launched so the result can be
         // routed back to the correct conversation even if the user navigates away.
@@ -433,7 +466,7 @@ impl ChattyApp {
                     Ok(_id) => {
                         app_entity
                             .update(cx, |app, cx| {
-                                app.launch_agent(prompt_clone, cx);
+                                app.launch_agent(prompt_clone, spec, cx);
                             })
                             .map_err(|e| warn!(error = ?e, "Failed to launch sub-agent after conversation creation"))
                             .ok();
@@ -459,12 +492,17 @@ impl ChattyApp {
             .unwrap_or_default();
 
         let chat_view = self.chat_view.clone();
+        let agent_args = spec_sub_agent_args(spec.as_ref(), &model_id);
 
         // Show immediate feedback and record the message index for live progress.
         // Clone the prompt for the display before it is moved into the async task.
         let prompt_for_display = prompt.clone();
         self.chat_view.update(cx, |view, cx| {
-            view.start_delegation_progress(&prompt_for_display, ToolSource::Local, cx);
+            let label = match &spec {
+                Some(spec) => format!("[Agent: {}] {prompt_for_display}", spec.agent.name),
+                None => prompt_for_display,
+            };
+            view.start_delegation_progress(&label, ToolSource::Local, cx);
         });
 
         // Channel for streaming stderr progress lines from the subprocess.
@@ -499,9 +537,7 @@ impl ChattyApp {
                         cmd.env("CHATTY_PDFIUM_LIB_DIR", frameworks_dir);
                     }
                 }
-                if !model_id.is_empty() {
-                    cmd.arg("--model").arg(&model_id);
-                }
+                cmd.args(&agent_args);
                 // Headless sub-agents always run with auto-approve: there is no UI
                 // available to show approval prompts, so without this flag any tool
                 // that requires approval will block indefinitely and never complete.

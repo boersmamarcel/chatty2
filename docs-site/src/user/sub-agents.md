@@ -20,7 +20,9 @@ When the workspace is a git repository, each spawned sub-agent works in its own 
 
 ## From the chat
 
-Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named remote agent you have installed as an [extension](./extensions.md) instead.
+Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; the built-in `benford-analyst` is one), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
+
+Every local agent is a spec, whoever wrote it. The desktop lists them all on **Settings → Agents** — name, model, role, the plugins each runs with and what they may do, whether other agents may call it — along with any spec file that doesn't load and why. In the terminal, `/agents` prints the same list.
 
 ## Let the agent decide
 
@@ -66,7 +68,7 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 ## Named workers and roles
 
-Out of the box every sub-agent is the same worker, `local-agent`: your default model with the parent's tools. You can instead declare **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
+Out of the box the parent can reach `local-agent` — your default model with the parent's tools — and every built-in or project spec that doesn't opt out with `exposed = false` under `[swarm]`. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
 
 Declare each worker as an **agent spec**: a small TOML file named after the worker, in your project's `.chatty/agents/` folder (or in Chatty's data folder under `chatty/agents/` to share it across projects — [where that is](./advanced.md)):
 
@@ -95,7 +97,7 @@ preamble = "You are the reviewer. Read the diff, run the tests, and report what 
 profile = "reviewer"
 ```
 
-Then list the workers by name in `module_settings.json`, next to your other settings. There is no settings page for this yet, so edit the file and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
+A spec file is picked up as soon as it exists (on the desktop, **Settings → Agents → Reload**). To narrow the roster to just some of them, list them by name in `module_settings.json`, next to your other settings, and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
 
 ```json
 {
@@ -116,7 +118,7 @@ A `module_settings.json` that still describes workers inline (the format before 
 | `budget.max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
 | `tools.disable` | Tool groups to remove on top of the role (`shell`, `fs-write`, `git`, …). |
 
-A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (`local-coder`, `local-reviewer`, `coder-reviewer-leader`). `chatty-tui --agent <name>` runs the terminal app as any spec.
+A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (`local-coder`, `local-reviewer`, `coder-reviewer-leader`, `benford-analyst`). `chatty-tui --agent <name>` runs the terminal app as any spec.
 
 The three roles:
 
@@ -130,7 +132,7 @@ A role only ever removes tools: it cannot turn on a tool group you switched off 
 
 `team.verification` is one command for the whole roster. When a worker finishes, Chatty commits its branch and then runs that command *itself* in the worker's tree — not through the worker — and puts the exit code and last lines into the `evidence` block the parent reads, next to the branch name, commit count and diff summary. That's the parent's proof that the coder's "tests pass" is true. It is skipped for a worker whose role has no shell, since that worker could not have built anything for it to check.
 
-Every worker still needs a way to run its side-effect tools without asking you, so under any approval mode other than **Auto-approve All** keep the roster to reading roles or run your leader with `--auto-approve` from the terminal ([Security & approvals](./security.md)). The full field reference, including how a worker is metered and started, is on the developer page: [Named virtual agents](../dev/architecture/a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
+Every worker still needs a way to run its side-effect tools without asking you, so under any approval mode other than **Auto-approve All** keep the roster to reading roles or run your leader with `--auto-approve` from the terminal ([Security & approvals](./security.md)). The full field reference, including how a worker is metered and started, is on the developer page: [Named virtual agents](../dev/architecture/agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
 ## Teams
 
@@ -143,7 +145,7 @@ chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
   -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
 ```
 
-`--model` (and `--tools` / `--preamble`) override the team's own leader settings when given. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/a2a-and-wasm-modules.md#teams).
+`--model` (and `--tools` / `--preamble`) override the team's own leader settings when given. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
 
 ## Next
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// An A2A agent is a remote HTTP service that implements the Agent-to-Agent
 /// (A2A) protocol: it exposes an agent card at `/.well-known/agent.json` and
 /// accepts `message/send` JSON-RPC requests at its base URL.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct A2aAgentConfig {
     /// User-visible name (also used as the first word of `/agent <name> <prompt>`).
     pub name: String,

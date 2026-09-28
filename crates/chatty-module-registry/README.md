@@ -41,7 +41,7 @@ settings. `.chatty/modules` (relative to the working directory) is only a
 last-resort fallback when the platform data directory can't be determined.
 Each subdirectory is one module: a `.wasm` plus a `module.toml`.
 
-See [`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md)
+See [`docs/plugins.md`](../../docs/plugins.md)
 for the end-to-end module flow.
 
 ## Build / test

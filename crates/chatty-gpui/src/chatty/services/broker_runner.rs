@@ -2,8 +2,9 @@
 //! (ADR-0011 C2 / AGE-301; named virtual agents, C10 / AGE-377).
 //!
 //! The gateway is started by the module-settings controller. This adds what
-//! turns it into a fleet broker: the virtual agents — `local-agent`, or the
-//! agent specs `module_settings.virtual_agents` names — that spawn one child
+//! turns it into a fleet broker: the virtual agents — the agent specs
+//! `module_settings.virtual_agents` names, else `local-agent` and every
+//! exposed spec (PL-U5) — that spawn one child
 //! per task on a connection the broker makes for it (ADR-0020), and the
 //! shared participant socket, which refuses every registration.
 //!

@@ -277,7 +277,6 @@ impl AgentClient {
             skill_service,
             search_settings,
             embedding_service,
-            module_agents,
             gateway_port,
             lazy_broker,
             local_agents,
@@ -1305,8 +1304,9 @@ impl AgentClient {
         // The broker's local workers exist exactly when the gateway that
         // serves them does (ADR-0011 C2); a live port or a broker that will
         // start one lazily on first use (BI-2, AGE-634) is the whole
-        // condition. Which names there are is module settings' decision
-        // (C10).
+        // condition. Which names there are is the roster's: the specs
+        // module settings or a team declare, else every exposed spec
+        // (C10, PL-U5).
         let local_agents: Vec<String> =
             if gateway_port.is_some() || lazy_broker.is_some() || fabric_transport.is_some() {
                 local_agents
@@ -1315,9 +1315,8 @@ impl AgentClient {
             };
 
         // Create list_agents tool (registered when the role delegates)
-        let mut list_agents_tool =
-            ListAgentsTool::new_with_modules(remote_agents.clone(), module_agents.clone())
-                .with_local_workers(local_agents.iter().cloned());
+        let mut list_agents_tool = ListAgentsTool::new(remote_agents.clone())
+            .with_local_workers(local_agents.iter().cloned());
         // With a gateway there is a live participant table to read, not just
         // the settings snapshot (ADR-0011 C5). A lazy broker takes priority
         // over an already-resolved port: a host that hands in both knows the
@@ -1344,13 +1343,12 @@ impl AgentClient {
             gateway_port
         };
         let mut invoke_agent_tool =
-            InvokeAgentTool::new(remote_agents, module_agents, eager_gateway_port)
-                .with_local_agents(local_agents);
+            InvokeAgentTool::new(remote_agents, eager_gateway_port).with_local_agents(local_agents);
         if let Some(broker) = lazy_broker {
             invoke_agent_tool = invoke_agent_tool.with_lazy_broker(broker);
         }
-        // ... and reaches its local roles over it too; remote agents and
-        // modules stay on `A2aClient`.
+        // ... and reaches its local roles over it too; remote agents stay on
+        // `A2aClient`.
         if let Some(transport) = fabric_transport {
             invoke_agent_tool = invoke_agent_tool.with_transport(transport);
         }

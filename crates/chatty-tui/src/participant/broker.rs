@@ -17,9 +17,8 @@
 //! participant socket that refuses every registration (ADR-0020) — minus the
 //! WASM module registry the desktop's gateway also serves: `--broker`
 //! exists to make the workers reachable, not to load modules, so the
-//! registry behind it is empty. Module agents chatty-tui already knows
-//! about (`--enable`/manifest discovery) are unaffected; they are a separate
-//! path from this gateway.
+//! registry behind it is empty. A plugin is never an agent (PL-U5): a
+//! worker loads the plugins its spec lists itself.
 //!
 //! Unlike the desktop, which binds a fixed configured port and one
 //! well-known socket path, a headless leader is meant to run many at once
@@ -101,7 +100,8 @@ impl Broker {
     /// no-human approval policy. `provider_flags` are the leader's own
     /// `--ollama`/`--openai-compat-url`/`--api-key`, forwarded verbatim
     /// (see [`provider_flags`]). `agents` is the roster's specs, already
-    /// loaded; empty is the one default worker. `leader_model` is the model
+    /// loaded (an empty team roster is the one default worker, as
+    /// `resolve_virtual_agents` resolves it). `leader_model` is the model
     /// this leader runs: what a module's `llm::complete("")` is served by
     /// (PL-H2, AGE-605). `handoffs` is the team's contract per role (TD-2,
     /// AGE-693): each role's runner hands its workers theirs.
@@ -642,7 +642,7 @@ mod tests {
         let broker: Arc<dyn chatty_core::services::lazy_broker::LazyBroker> = Arc::new(pending);
 
         let invoke_agent_tool =
-            chatty_core::tools::invoke_agent_tool::InvokeAgentTool::new(vec![], vec![], None)
+            chatty_core::tools::invoke_agent_tool::InvokeAgentTool::new(vec![], None)
                 .with_lazy_broker(broker.clone());
         let outcome = {
             use rig_agent::tool::{Tool, ToolContext};
