@@ -139,7 +139,9 @@ impl VirtualAgent for Scripted {
     /// What the local runner does, with the child a task on this runtime.
     fn run_task(&self, task: DelegatedTask) -> WorkerFuture<'_> {
         Box::pin(async move {
-            let LocalConnection { name, worker_end } = open_connection(&self.registry, &self.name)?;
+            let spawner = task.call.as_ref().and_then(|call| call.caller.as_deref());
+            let LocalConnection { name, worker_end } =
+                open_connection(&self.registry, &self.name, spawner)?;
             let run = task.call.as_ref().and_then(|call| {
                 self.registry
                     .open_run(&name, call.caller.as_deref(), call.chain.clone())

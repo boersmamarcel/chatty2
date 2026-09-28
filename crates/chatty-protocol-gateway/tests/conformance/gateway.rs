@@ -342,7 +342,7 @@ async fn s3_14_participant_cannot_take_a_modules_name() {
         version: "0.1.0".into(),
         ..Default::default()
     };
-    let connection = open_connection(&gw.participants, "echo").unwrap();
+    let connection = open_connection(&gw.participants, "echo", None).unwrap();
     connection.worker_end.set_nonblocking(true).unwrap();
     let stream = tokio::net::UnixStream::from_std(connection.worker_end).unwrap();
     let mut conn = ParticipantConnection::hello_over(stream, card)

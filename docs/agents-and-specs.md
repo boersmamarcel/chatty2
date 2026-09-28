@@ -401,9 +401,11 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
 "reason": …}`. It never starts a run and never interrupts one.
 
 - **Recipient.** The broker reads the sender from the connection and its owner
-  from the directory; `to` must be that owner's name — `root` (`ROOT_NAME`) when
-  the root asked for the worker, which the `welcome` says and the `to`
-  parameter's description repeats. A sibling, the sender itself, a name nobody
+  from the directory; `to` must be that owner's name. The owner is whoever
+  spawned the worker: the node whose `invoke_agent` started it, recorded when
+  the broker admits it, or `root` (`ROOT_NAME`) when the root asked. The
+  `welcome` says which, and the `to` parameter's description repeats it; a
+  sub-leader's workers message the sub-leader, never the root past it. A sibling, the sender itself, a name nobody
   has or a node of another conversation is `not_on_tree`; an owner that has
   ended is `recipient_ended`. Messages to a worker's live handles come with
   resumable conversations (RC-3).
