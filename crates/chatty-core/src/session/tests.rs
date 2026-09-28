@@ -1595,3 +1595,26 @@ mod turn_notification_wiring {
         );
     }
 }
+
+/// Tree messages (TM-2, delivery point b): what was waiting for the root
+/// opens its next human turn as one text part ahead of what was typed; a
+/// turn with nothing waiting is sent as typed.
+#[test]
+fn delivered_messages_open_the_turn() {
+    let typed = vec![UserContent::text("go on")];
+    assert_eq!(open_with_messages(typed.clone(), Vec::new()), typed);
+    let messages = vec![
+        "<message from=\"a-0\" untrusted=\"true\">one</message>".to_string(),
+        "<message from=\"b-0\" untrusted=\"true\">two</message>".to_string(),
+    ];
+    assert_eq!(
+        open_with_messages(typed, messages),
+        vec![
+            UserContent::text(
+                "<message from=\"a-0\" untrusted=\"true\">one</message>\n\
+                 <message from=\"b-0\" untrusted=\"true\">two</message>"
+            ),
+            UserContent::text("go on"),
+        ]
+    );
+}
