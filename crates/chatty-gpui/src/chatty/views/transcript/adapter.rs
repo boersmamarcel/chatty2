@@ -57,6 +57,15 @@ pub fn adapt_message_with_trace(
                 // show the same picture twice.
                 drop_artifact_cards_shown_inline(&mut blocks, &msg.attachments);
             }
+            // A delegation row whose callee delegated in turn: its runs, as
+            // a tree under the row (TB-4). Not part of the fold's work
+            // trace — it has its own header and stays when the turn folds.
+            if let Some(tree) = &msg.swarm_tree {
+                blocks.push(Block::SwarmTree {
+                    id: BlockId::from_parts(namespace, "swarm-tree"),
+                    tree: tree.clone(),
+                });
+            }
             if !msg.content.is_empty() {
                 blocks.push(Block::Text {
                     id: BlockId::from_parts(namespace, "text"),
@@ -759,6 +768,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, true);
         assert!(turn.collapsed);
@@ -804,6 +814,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turns = adapt_messages(&[msg], &[true]);
         assert_eq!(turns.len(), 1, "live turn must stay in the transcript");
@@ -857,6 +868,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -910,6 +922,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -956,6 +969,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1008,6 +1022,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1056,6 +1071,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         }
     }
 
@@ -1280,6 +1296,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1332,6 +1349,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1376,6 +1394,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(

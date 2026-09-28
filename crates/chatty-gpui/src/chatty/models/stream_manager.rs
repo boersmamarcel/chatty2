@@ -10,6 +10,7 @@ use gpui::{App, BorrowAppContext as _, EventEmitter, Task};
 use tracing::{debug, warn};
 
 use chatty_core::models::ConversationsStore;
+use chatty_core::services::swarm_trace::SwarmTrace;
 use chatty_core::session::SessionEvent;
 
 /// Minimum interval between batched TextChunk events, and the period of the
@@ -184,6 +185,12 @@ pub struct StreamState {
     /// desktop sink — the characterization harness drives
     /// `handle_session_event` directly.
     text_batch: Option<SharedTextBatch>,
+    /// Every event of the turn folded into its swarm's tree (TB-2), for the
+    /// transcript's swarm tree (TB-4). Only its revision is compared per
+    /// event; the tree is handed out when it moved.
+    swarm: SwarmTrace,
+    /// The swarm's revision last handed out with `SwarmTreeChanged`.
+    swarm_revision: u64,
 }
 
 /// Events emitted by StreamManager for decoupled UI updates.
@@ -254,6 +261,15 @@ pub enum StreamManagerEvent {
         turn: u32,
         /// This request's own tokens (input + output), not the run's total.
         tokens: u32,
+    },
+    /// The turn's swarm changed (TB-4): a run under one of its delegations
+    /// started, called a tool, reported spend or ended. Emitted only once
+    /// the turn has a swarm — a delegation whose callee delegated in turn —
+    /// and at most once per event that moved it, which the broker already
+    /// batches to four a second per node (TB-1).
+    SwarmTreeChanged {
+        conversation_id: String,
+        trace: Arc<SwarmTrace>,
     },
     StreamEnded {
         conversation_id: String,
@@ -422,6 +438,8 @@ impl StreamManager {
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
                 text_batch: None,
+                swarm: SwarmTrace::new(),
+                swarm_revision: 0,
             },
         );
 
@@ -485,6 +503,8 @@ impl StreamManager {
                 pending_text: String::with_capacity(256),
                 last_flush: Instant::now(),
                 text_batch: None,
+                swarm: SwarmTrace::new(),
+                swarm_revision: 0,
             },
         );
 
@@ -780,6 +800,9 @@ impl StreamManager {
         cx: &mut gpui::Context<Self>,
     ) {
         use chatty_core::session::SessionEvent;
+        // Folded before the match below consumes the event, and before
+        // `TurnEnded`/`Error` drop the stream with its trace.
+        self.fold_swarm(conv_id, &event, cx);
         match event {
             // `StreamStarted` is emitted by `register_stream`.
             SessionEvent::TurnStarted => {}
@@ -838,13 +861,12 @@ impl StreamManager {
                     cache_write_tokens: usage.cache_write_tokens,
                 });
             }
-            // The conversation's (`AgentSession::apply`), not the manager's.
+            // The conversation's (`AgentSession::apply`), not the manager's;
+            // `fold_swarm` above has already read the delegation's progress.
             SessionEvent::TurnMessages(_)
             | SessionEvent::Delegation(_)
             | SessionEvent::PluginUsage(_) => {}
-            // The swarm's batches (TB-1): the transcript's swarm tree
-            // renders them (TB-4), folded with every other event of the
-            // turn by `SwarmTrace::apply` (TB-2).
+            // The swarm's batches (TB-1), folded by `fold_swarm` above.
             SessionEvent::SwarmEvent(_) => {}
             SessionEvent::Error(error) => self.handle_chunk(conv_id, StreamChunk::Error(error), cx),
             // A cancelled turn still ends; `stop_stream` already reported a
@@ -860,6 +882,45 @@ impl StreamManager {
             // The caller's to inject as the next turn.
             SessionEvent::FollowUp(_) => {}
         }
+    }
+
+    /// Fold one event of the turn into its swarm's tree, and hand the tree
+    /// to the transcript when a delegation's progress or a swarm batch
+    /// moved it and the turn has a swarm: some run sits below the root's
+    /// callee. A delegation whose callee works alone keeps its plain row.
+    fn fold_swarm(
+        &mut self,
+        conv_id: &str,
+        event: &chatty_core::session::SessionEvent,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(state) = self.streams.get_mut(conv_id) else {
+            return;
+        };
+        state.swarm.apply(event);
+        // The root's own text, tools and usage move the trace too, but not
+        // the subtrees under its delegations, which is all the view draws.
+        if !matches!(
+            event,
+            chatty_core::session::SessionEvent::Delegation(_)
+                | chatty_core::session::SessionEvent::SwarmEvent(_)
+        ) {
+            return;
+        }
+        let revision = state.swarm.revision();
+        if revision == state.swarm_revision {
+            return;
+        }
+        let tree = state.swarm.tree();
+        let has_swarm = tree.len() > 2 && tree.preorder().into_iter().any(|id| tree.depth(id) >= 2);
+        if !has_swarm {
+            return;
+        }
+        state.swarm_revision = revision;
+        cx.emit(StreamManagerEvent::SwarmTreeChanged {
+            conversation_id: conv_id.to_string(),
+            trace: Arc::new(state.swarm.clone()),
+        });
     }
 
     /// Mark a stream as completed and emit StreamEnded.
@@ -1073,6 +1134,8 @@ mod tests {
             pending_text: String::new(),
             last_flush: Instant::now(),
             text_batch: None,
+            swarm: SwarmTrace::new(),
+            swarm_revision: 0,
         }
     }
 
@@ -1175,6 +1238,8 @@ mod tests {
                 pending_text: String::new(),
                 last_flush: Instant::now(),
                 text_batch: None,
+                swarm: SwarmTrace::new(),
+                swarm_revision: 0,
             },
         );
         assert!(mgr.is_streaming("conv-123"));
@@ -1605,5 +1670,71 @@ mod tests {
             handle_chunk_total.as_nanos() as f64 / RAW_CHUNKS as f64,
             flush_total.as_nanos() as f64 / FLUSH_CALLS as f64,
         );
+    }
+
+    /// The swarm tree (TB-4) arrives through this manager's own event path:
+    /// a lone delegation stays a plain row, the first nested run hands the
+    /// tree out, and the root's own text does not re-send it.
+    #[gpui::test]
+    async fn swarm_tree_arrives_through_the_stream_manager(cx: &mut gpui::TestAppContext) {
+        use chatty_core::models::message_types::ToolSource;
+        use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+        use chatty_fabric::{CallChain, SwarmEvent, SwarmItem};
+
+        let (manager, events) = subscribed_manager(cx);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let reviewer = CallChain::root("t-1").extend("reviewer").unwrap();
+        let coder = reviewer.extend("coder").unwrap();
+        let swarm_events = |events: &Rc<RefCell<Vec<StreamManagerEvent>>>| -> Vec<usize> {
+            events
+                .borrow()
+                .iter()
+                .filter_map(|e| match e {
+                    StreamManagerEvent::SwarmTreeChanged { trace, .. } => Some(trace.tree().len()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let send = |event: SessionEvent, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                manager.update(cx, |mgr, cx| {
+                    mgr.handle_session_event("conv-swarm", event, cx)
+                });
+            });
+            cx.run_until_parked();
+        };
+
+        cx.update(|cx| {
+            manager.update(cx, |mgr, cx| {
+                let task = cx.background_executor().spawn(async { Ok(()) });
+                mgr.register_stream("conv-swarm".into(), task, cancel_flag, None, cx);
+            });
+        });
+        send(
+            SessionEvent::Delegation(InvokeAgentProgress::Started {
+                agent_name: "reviewer".into(),
+                prompt: "review".into(),
+                source: ToolSource::Local,
+            }),
+            cx,
+        );
+        assert!(
+            swarm_events(&events).is_empty(),
+            "a lone callee has no tree"
+        );
+
+        send(
+            SessionEvent::SwarmEvent(SwarmEvent {
+                root_task_id: "t-1".into(),
+                node: "coder-0".into(),
+                chain: coder,
+                inner: vec![SwarmItem::TurnStarted],
+            }),
+            cx,
+        );
+        assert_eq!(swarm_events(&events), [3], "root, reviewer, coder-0");
+
+        send(SessionEvent::Text("the root's own words".into()), cx);
+        assert_eq!(swarm_events(&events), [3]);
     }
 }

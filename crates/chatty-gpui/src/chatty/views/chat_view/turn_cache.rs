@@ -177,6 +177,13 @@ pub(super) fn adapt_key(
     msg.attachments.hash(&mut hasher);
     collapsed.hash(&mut hasher);
 
+    // The chat view swaps in a new tree whenever the swarm changes, so its
+    // identity is enough (TB-4).
+    msg.swarm_tree
+        .as_ref()
+        .map(|tree| std::sync::Arc::as_ptr(tree) as usize)
+        .hash(&mut hasher);
+
     let Some(trace) = trace else {
         return hasher.finish();
     };
@@ -312,6 +319,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         }
     }
 

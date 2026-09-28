@@ -95,6 +95,9 @@ fn describe(event: &StreamManagerEvent) -> String {
         StreamManagerEvent::TurnProgress { turn, tokens, .. } => {
             format!("TurnProgress(turn={turn}, tokens={tokens})")
         }
+        StreamManagerEvent::SwarmTreeChanged { trace, .. } => {
+            format!("SwarmTreeChanged(nodes={})", trace.tree().len())
+        }
         StreamManagerEvent::StreamEnded {
             status,
             token_usage,

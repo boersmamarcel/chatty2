@@ -40,6 +40,7 @@ impl ChatView {
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         self.delegation_progress_msg_idx = None;
+        self.swarm_rows.clear();
         self.pending_approval = None;
         self.pending_clarification = None;
         self.agent_task_snapshot = None;
@@ -81,6 +82,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         });
 
         let idx = self.messages.len() - 1;
@@ -208,6 +210,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         });
         cx.notify();
         self.activate_sticky_scroll();

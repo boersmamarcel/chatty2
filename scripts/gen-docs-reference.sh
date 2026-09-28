@@ -703,6 +703,7 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | | `ClarificationRequested` | `conversation_id`, `id`, `questions` | `StreamManager` | `ChattyApp` → `ChatView` (ask-user card) |
 | | `TokenUsage` | `conversation_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | `StreamManager` | `ChattyApp` |
 | | `TurnProgress` | `conversation_id`, `turn`, `tokens` | `StreamManager` | `ChattyApp` → `ChatInputState` (live turn/token/elapsed indicator) |
+| | `SwarmTreeChanged` | `conversation_id`, `trace` | `StreamManager` | `ChattyApp` → `ChatView` (swarm tree under each delegation row, TB-4) |
 | | `StreamEnded` | `conversation_id`, `status`, `token_usage`, `trace_json`, … | `StreamManager` | `ChattyApp` (finalization) |
 | `SidebarEvent` | `NewChat` | — | `SidebarView` | `ChattyApp` |
 | | `OpenSettings` | — | `SidebarView` | `ChattyApp` |

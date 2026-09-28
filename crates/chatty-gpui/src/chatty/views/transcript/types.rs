@@ -1,10 +1,13 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chatty_core::models::message_types::{
     ApprovalBlock, ClarificationBlock, ThinkingBlock, ToolCallBlock,
 };
 use chatty_core::tools::data_query_tool::TablePreview;
+
+use super::swarm_tree::SwarmTree;
 
 /// Stable identifier for a transcript block. Never a list index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,6 +87,12 @@ pub enum Block {
         id: BlockId,
         preview: TablePreview,
     },
+    /// The runs under a delegation row, live while the turn streams
+    /// (TB-4, AGE-666). See `swarm_tree.rs`.
+    SwarmTree {
+        id: BlockId,
+        tree: Arc<SwarmTree>,
+    },
 }
 
 impl Block {
@@ -99,7 +108,8 @@ impl Block {
             | Self::Plan { id }
             | Self::Artifact { id, .. }
             | Self::ArtifactBatch { id, .. }
-            | Self::TablePreview { id, .. } => *id,
+            | Self::TablePreview { id, .. }
+            | Self::SwarmTree { id, .. } => *id,
         }
     }
 }

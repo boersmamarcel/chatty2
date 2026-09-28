@@ -50,6 +50,7 @@ mod plan;
 mod run_pin;
 mod session_changes;
 mod session_review_panel;
+mod swarm_tree;
 mod table;
 mod ticker;
 mod tool_row;
@@ -88,7 +89,7 @@ pub use artifact_kind::{
 pub use artifact_view::{
     ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view, presentation_on_open,
 };
-pub use block_render::render_typed_block;
+pub use block_render::{SwarmActions, render_typed_block};
 pub use clarification::{ChosenOption, ClarificationCard, ClarificationSummary};
 pub use diff::{DiffHunkList, DiffStatRow, word_spans};
 pub use diff_parse::parse_unified_diff;
@@ -97,6 +98,10 @@ pub use run_pin::{RunPin, RunPinKind};
 pub use session_changes::{
     FileChange, SessionChangeBar, TurnFileOverview, collect_file_changes_from_tools,
     file_change_from_tool, file_changes_from_turn, merge_file_changes,
+};
+pub use swarm_tree::{
+    AgentTranscript, OpenSwarmNode, SwarmNodeView, SwarmTree, SwarmTreeCard, adapt_swarm_tree,
+    delegation_callees,
 };
 pub use table::{extract_table_preview, render_table_preview_card};
 pub use ticker::HeadlineTicker;

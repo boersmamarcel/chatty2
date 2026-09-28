@@ -13,10 +13,22 @@ use super::artifact_card::ArtifactCard;
 use super::clarification::ClarificationSummary;
 use super::diff::DiffHunkList;
 use super::plan::PlanBlock;
+use super::swarm_tree::SwarmTreeCard;
 use super::table::render_table_preview_card;
 use super::types::Block;
 
 pub type ActivityToggle = Rc<dyn Fn(u64, &mut App)>;
+
+/// Open one agent's transcript: the turn's message index and the node's name.
+pub type OpenSwarmTranscript = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
+
+/// What a swarm tree's lines do: fold the card (by block id) and open one
+/// agent's transcript.
+#[derive(Clone)]
+pub struct SwarmActions {
+    pub toggle: ActivityToggle,
+    pub open_node: OpenSwarmTranscript,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_typed_block(
@@ -29,6 +41,7 @@ pub fn render_typed_block(
     turn_streaming: bool,
     on_activity_toggle: Option<ActivityToggle>,
     open_artifact: Option<&std::path::Path>,
+    swarm: Option<&SwarmActions>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -103,6 +116,22 @@ pub fn render_typed_block(
             cx,
         )
         .into_any_element(),
+        Block::SwarmTree { id, tree } => {
+            // Open until the user folds it: the tree is what a swarm run is
+            // for, so it should not hide behind a click.
+            let mut card = SwarmTreeCard::new(id.element_id(), tree.clone())
+                .open(activity_open.unwrap_or(true));
+            if let Some(swarm) = swarm {
+                let block_id = id.0;
+                let toggle = swarm.toggle.clone();
+                card = card.on_toggle(move |cx| toggle(block_id, cx));
+                let open_node = swarm.open_node.clone();
+                card = card.on_open_node(Rc::new(move |name, window, cx| {
+                    open_node(message_index, name, window, cx)
+                }));
+            }
+            card.into_any_element()
+        }
     }
 }
 
