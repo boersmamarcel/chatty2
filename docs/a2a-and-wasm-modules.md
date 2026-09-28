@@ -277,10 +277,16 @@ down to the ceiling.
 
 | Limit | Default = ceiling | Enforcement | Error |
 |:------|:------------------|:------------|:------|
-| **Fuel** | 10⁹ units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
+| **Fuel** | 10¹² units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
 | **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm::complete`, `file::read-bytes`, billing) stop waiting at the deadline | `deadline exceeded` |
 | **Memory** | 256 MiB | Store memory limiter | `memory limit` |
 | **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
+
+The fuel ceiling (AGE-708) is sized so a pure CPU-bound guest is bounded by the 60 s
+wall-clock ceiling, not by fuel: on this host, Wasmtime fuel runs at roughly
+1.5 × 10¹⁰ units/s for a tight arithmetic loop, so 10⁹ (PL-D3's original figure) was
+exhausted in well under a second — 10¹² keeps a pure spin running for over a minute of
+fuel, past the 60 s wall clock.
 
 `list-tools` and `get-agent-card` get a 1 s wall-clock budget. A guest trap or panic
 fails the call with `guest trap: <message>` (the panic message is read from the guest's
