@@ -62,6 +62,12 @@ pub enum InvokeAgentProgress {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         usage: Vec<TokenUsage>,
     },
+    /// What a run nested under this delegation did, tagged and batched by
+    /// the broker (TB-1). Only the root's delegations over its broker
+    /// receive these; the session emits each as
+    /// [`SessionEvent::SwarmEvent`](crate::session::SessionEvent::SwarmEvent),
+    /// not as delegation progress.
+    Swarm(chatty_fabric::SwarmEvent),
 }
 
 /// Shared slot for sending progress events from the tool to the stream loop.
@@ -658,6 +664,9 @@ impl InvokeAgentTool {
                     if let Some(progress) = progress_from_value(value) {
                         self.send_progress(progress);
                     }
+                }
+                Ok(CallEvent::Swarm(event)) => {
+                    self.send_progress(InvokeAgentProgress::Swarm(event));
                 }
                 Ok(CallEvent::InputRequired { task, request }) => {
                     let answered = match serde_json::from_value::<A2aClarificationRequest>(request)

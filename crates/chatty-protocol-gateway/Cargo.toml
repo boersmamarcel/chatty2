@@ -13,7 +13,7 @@ hive-client = { path = "../hive-client" }
 chatty-fabric = { path = "../chatty-fabric" }
 
 axum = "0.8"
-tokio = { workspace = true, features = ["sync", "net"] }
+tokio = { workspace = true, features = ["sync", "net", "time"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 serde = { workspace = true }

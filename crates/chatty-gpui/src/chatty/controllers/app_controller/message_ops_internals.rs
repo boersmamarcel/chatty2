@@ -417,6 +417,9 @@ impl DesktopSink {
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent finish"))
                     .ok();
             }
+            // Arrives as `SessionEvent::SwarmEvent`, never as delegation
+            // progress (TB-1).
+            InvokeAgentProgress::Swarm(_) => {}
         }
     }
 }

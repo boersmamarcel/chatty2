@@ -518,6 +518,9 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
     let mut lines = Vec::new();
     for event in &run.progress {
         lines.push(match event {
+            // The broker's batches of nested runs (TB-1) are not the
+            // delegation's own progress, which is what the goldens record.
+            InvokeAgentProgress::Swarm(_) => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),

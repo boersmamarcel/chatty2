@@ -819,7 +819,14 @@ fn describe(event: &SessionEvent) -> String {
             } => {
                 format!("Delegation(Finished success={success}, {result:?})")
             }
+            InvokeAgentProgress::Swarm(event) => format!("Delegation(Swarm {})", event.node),
         },
+        SessionEvent::SwarmEvent(event) => format!(
+            "SwarmEvent(node={:?}, chain={:?}, items={})",
+            event.node,
+            event.chain.chain,
+            event.inner.len()
+        ),
         SessionEvent::Error(error) => format!("Error(kind={:?}, {:?})", error.kind, error.message),
         SessionEvent::Cancelled => "Cancelled".to_string(),
         SessionEvent::TurnEnded => "TurnEnded".to_string(),

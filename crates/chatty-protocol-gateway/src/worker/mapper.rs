@@ -69,6 +69,16 @@
 //! lines merge only when they share a model, so the root sees one line per
 //! model however deep the tree below it, and its lines carry the whole tree.
 //!
+//! # A nested run's events (TB-1, AGE-663)
+//!
+//! A task sent with `swarmEvents` — a run nested under a listening root —
+//! also reports its own turns and tool events as `event` frames
+//! ([`TaskMapper::swarm_event`]), which the broker tags and forwards to the
+//! root. They are the worker's own: a grandchild's steps this worker
+//! passes up as `Delegation` progress are not among them, since the
+//! grandchild reports its own. Off by default, and then no `event` frame
+//! is ever built.
+//!
 //! # Conversation capture (RC-0, AGE-649)
 //!
 //! A resumable worker needs its own history back, not just its answer. This
@@ -110,6 +120,7 @@ use chatty_core::services::handoff::{
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
+use chatty_fabric::SwarmItem;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -304,6 +315,8 @@ pub struct TaskMapper {
     final_text: String,
     /// The handoff re-prompts the runner sent, each an invalid answer.
     handoff_follow_ups: u32,
+    /// Whether the broker asked for `event` frames (TB-1). Off by default.
+    swarm_events: bool,
 }
 
 impl TaskMapper {
@@ -323,7 +336,42 @@ impl TaskMapper {
             handoff: None,
             final_text: String::new(),
             handoff_follow_ups: 0,
+            swarm_events: false,
         }
+    }
+
+    /// Report this task's turns and tool events as `event` frames (TB-1).
+    pub fn with_swarm_events(mut self, swarm_events: bool) -> Self {
+        self.swarm_events = swarm_events;
+        self
+    }
+
+    /// The `event` frame for `event`, when the broker asked for them and
+    /// `event` is one of the worker's own turns or tool events (TB-1).
+    pub fn swarm_event(&self, event: &SessionEvent) -> Option<ParticipantFrame> {
+        if !self.swarm_events {
+            return None;
+        }
+        let item = match event {
+            SessionEvent::TurnStarted => SwarmItem::TurnStarted,
+            SessionEvent::ToolCallStarted { id, name } => SwarmItem::ToolCallStarted {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            SessionEvent::ToolCallResult { id, result } => SwarmItem::ToolCallResult {
+                id: id.clone(),
+                result: result.clone(),
+            },
+            SessionEvent::ToolCallError { id, error } => SwarmItem::ToolCallError {
+                id: id.clone(),
+                error: error.clone(),
+            },
+            _ => return None,
+        };
+        Some(ParticipantFrame::Event {
+            task_id: self.task_id.clone(),
+            event: item,
+        })
     }
 
     /// Check the task's final answer against `handoff` (TD-2, AGE-693).
