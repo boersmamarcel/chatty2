@@ -42,6 +42,38 @@ fn tool_shaped(c: &mut Criterion) {
         });
     });
 
+    // Direct, from a runtime worker thread: how an agent's tool call or the
+    // gateway's handler actually awaits it. The calls run inside one spawned
+    // task (timed from inside it), so the spawn hop is not counted.
+    group.bench_function("direct_wasm_module_invoke_tool_on_worker", |b| {
+        let engine = common::engine();
+        let llm: Arc<dyn LlmProvider> = common::fake_llm("unused");
+        let mut module = Some(common::load_module(&engine, "echo", llm));
+        b.iter_custom(|iters| {
+            let mut m = module.take().expect("module is returned by every batch");
+            let (m, elapsed) = rt
+                .block_on(rt.spawn(async move {
+                    let start = std::time::Instant::now();
+                    for _ in 0..iters {
+                        let resp = m
+                            .invoke_tool(ToolCallRequest {
+                                name: "echo".to_string(),
+                                arguments_json: r#"{"input":"hi"}"#.to_string(),
+                                call_id: "bench".to_string(),
+                                caller: None,
+                            })
+                            .await
+                            .expect("invoke_tool succeeds");
+                        black_box(resp);
+                    }
+                    (m, start.elapsed())
+                }))
+                .expect("the bench task completes");
+            module = Some(m);
+            elapsed
+        });
+    });
+
     // Through the gateway, MCP `tools/call`.
     group.bench_function("mcp_tools_call", |b| {
         let (base, _llm) = rt.block_on(common::start_gateway(&["echo"]));

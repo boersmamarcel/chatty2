@@ -233,3 +233,76 @@ rustc's `long_running_const_eval` lint at compile time). Used only for §1's
 "a 5 MiB module" cold-load row. Picked up automatically by
 `scripts/build-wasm-fixtures.sh`'s existing glob over `modules/fixtures/*/`
 with a `Cargo.toml`.
+
+## §5 PL-H1c (AGE-707): cutting the per-call hop — 2026-09-28
+
+PL-H1 ran every `invoke_tool` on `spawn_blocking`, so each call paid two
+cross-thread wake-ups (hand the guest to a blocking-pool thread, wake the
+awaiting task back). `perf record` over the direct bench shows that hop is
+the cost: the guest's own work (`call_raw`, lifting/lowering, `set_fuel`,
+`StderrTail::clear`, the echo tool's `logging::log`) is a small CPU slice,
+while the wall time goes to parking and unparking threads, which a shared
+box under load stretches further.
+
+**Change.** On a multi-threaded Tokio runtime the call now runs in place
+under `tokio::task::block_in_place` (the worker's other tasks move to
+another thread first, and WASI's sync bindings may `block_on` inside it);
+on a current-thread runtime it still hops to `spawn_blocking`, which is
+the only option there. A panic is caught with `catch_unwind` on the
+in-place path, so it is still `CallError::HostPanic` and the instance is
+dropped. Nothing else moved: fuel is refilled, the epoch deadline and the
+host-time deadline are armed before every call, the output cap is checked
+after it, and a trapped instance is never re-entered. Those per-call
+re-arms fit inside the remaining ~1.8 µs and are what the limits are, so
+they stay. The sandbox suite, `limits_are_clamped_to_ceilings`
+and `output_cap_enforced` are unchanged and green.
+
+**Numbers.** `cargo bench -p chatty-protocol-gateway --bench
+protocol_overhead`, `echo` tool, criterion median of 30 samples. Main at
+`67c8e759` (post-H1, post-U3) and this branch are the same bench binary
+built twice and run **interleaved**, three rounds, on the same box
+(i9-10940X, 28 threads; other agents' builds running, load average noted
+per round). Best of three:
+
+| Path | Before (main `67c8e759`) | After | Factor |
+| -- | -- | -- | -- |
+| direct `WasmModule::invoke_tool` (bench thread in `Runtime::block_on`) | 11.63 µs | 1.77 µs | **6.6×** |
+| direct `invoke_tool` from a runtime worker (new `_on_worker` bench) | 13.96 µs | 1.65 µs | **8.5×** |
+| MCP `tools/call` | 83.3 µs | 90.5 µs | ≈ (HTTP-bound) |
+
+All rounds (median per round; load average 1/5/15 min at the start):
+
+| Round | Build | Load | direct | on worker | MCP |
+| -- | -- | -- | -- | -- | -- |
+| 1 | before | 10.0/20.3/27.9 | 11.99 µs | 13.96 µs | 83.3 µs |
+| 1 | after | 7.6/18.4/27.0 | 1.77 µs | 1.65 µs | 90.5 µs |
+| 2 | before | 7.0/16.8/26.0 | 11.63 µs | 16.97 µs | 123.0 µs |
+| 2 | after | 11.3/16.3/25.4 | 1.93 µs | 1.79 µs | 126.4 µs |
+| 3 | before | 14.0/16.4/25.0 | 14.67 µs | 17.68 µs | 118.6 µs |
+| 3 | after | 16.0/16.7/24.7 | 1.90 µs | 2.85 µs | 212.9 µs |
+
+A direct call is back at the pre-H1 cost (§2: 1.63 µs) with every PL-H1
+limit still in place; against §2's post-H1 figure (34.9 µs, measured
+under heavier load) it is ~20×. The MCP route does not move: its ~85 µs is
+the HTTP round trip and JSON-RPC handling, not the guest call.
+
+**Trade-off.** Running in place means the *awaiting task* does not make
+progress until the guest returns: a `select!` branch or a `timeout` around
+`invoke_tool` in the same task waits for the call, bounded by the call's
+own deadline (60 s ceiling; a plugin tool typically takes milliseconds).
+Other tasks are unaffected. Before, dropping the future returned at once
+and the guest ran on in the background until its deadline.
+
+## §6 PL-H1b (AGE-706): WASI sleeps obey the deadline
+
+Not a performance change, recorded here because it closes the last way a
+guest call could outlive its deadline: a `wasi:clocks` subscription
+polled through `wasi:io/poll` (`std::thread::sleep`) blocked inside WASI's
+own `block_on`, out of the epoch's reach. The host's
+`wasi:clocks/monotonic-clock` now caps each subscription at the call
+deadline (`host::add_deadline_clock_to_linker`). With the new `sleep`
+fixture, a 5 s sleep under `max_execution_ms = 500` took 5.02 s before
+and ends `deadline exceeded` in under 1 s now
+(`wasi_sleep_past_deadline_is_interrupted`); a 50 ms sleep inside the
+budget still completes (`wasi_short_sleep_is_allowed`). A wait that ends
+before the deadline takes WASI's own path, so it costs nothing extra.

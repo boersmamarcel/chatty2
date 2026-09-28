@@ -1,15 +1,18 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, trace, warn};
+use wasmtime::component::{Linker, Resource};
 use wasmtime::{ResourceLimiter, StoreLimits};
+use wasmtime_wasi::bindings::clocks::monotonic_clock;
 use wasmtime_wasi::{
-    IoView, OutputStream, Pollable, ResourceTable, StdoutStream, StreamError, WasiCtx,
-    WasiCtxBuilder, WasiView,
+    DynPollable, IoImpl, IoView, OutputStream, Pollable, ResourceTable, StdoutStream, StreamError,
+    WasiCtx, WasiCtxBuilder, WasiImpl, WasiView,
 };
 
 use crate::bindings::chatty::plugin::billing::SessionInfo;
@@ -188,6 +191,9 @@ pub(crate) struct ModuleState {
     pub(crate) deadline: Option<Instant>,
     /// Set when a host import gave up because `deadline` passed.
     pub(crate) deadline_hit: bool,
+    /// Set when a WASI clock wait was cut short at `deadline` (AGE-706).
+    /// Shared with the pollable, which fires on WASI's own executor.
+    pub(crate) clock_deadline_hit: Arc<AtomicBool>,
     /// The last few KiB the guest wrote to stderr (e.g. a panic message).
     pub(crate) stderr: StderrTail,
     /// Static module configuration.
@@ -225,6 +231,7 @@ impl ModuleState {
             limiter,
             deadline: None,
             deadline_hit: false,
+            clock_deadline_hit: Arc::default(),
             stderr,
             manifest,
             llm_provider,
@@ -395,6 +402,110 @@ impl StdoutStream for StderrTail {
 
     fn isatty(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deadline-bounded WASI monotonic clock (AGE-706)
+// ---------------------------------------------------------------------------
+
+/// Replace `wasi:clocks/monotonic-clock` in `linker` (after
+/// `wasmtime_wasi::add_to_linker_sync` defined it) with [`DeadlineClock`].
+///
+/// A guest that sleeps (`std::thread::sleep`, i.e. `subscribe-duration` +
+/// `wasi:io/poll`) blocks inside WASI's own `block_on`, where no epoch check
+/// runs, so the epoch deadline alone can't end the call. The only waits a
+/// guest can start are clock subscriptions (the `WasiCtx` grants no
+/// sockets, files or stdin), so bounding those bounds every WASI wait.
+pub(crate) fn add_deadline_clock_to_linker(linker: &mut Linker<ModuleState>) -> anyhow::Result<()> {
+    linker.allow_shadowing(true);
+    let added = monotonic_clock::add_to_linker_get_host(linker, deadline_clock);
+    linker.allow_shadowing(false);
+    added
+}
+
+fn deadline_clock(state: &mut ModuleState) -> DeadlineClock<'_> {
+    DeadlineClock(state)
+}
+
+/// `wasi:clocks/monotonic-clock` with every subscription capped at the
+/// current call's deadline. `now` and `resolution`, and any wait that ends
+/// before the deadline, are WASI's own.
+struct DeadlineClock<'a>(&'a mut ModuleState);
+
+impl DeadlineClock<'_> {
+    fn wasi(&mut self) -> WasiImpl<&mut ModuleState> {
+        WasiImpl(IoImpl(&mut *self.0))
+    }
+
+    /// A pollable for a `wait`, or `None` when it ends by the deadline
+    /// (WASI's own pollable is used then).
+    ///
+    /// A wait past the deadline becomes one that fires *at* the deadline and
+    /// sets `clock_deadline_hit`, so the call fails with `deadline exceeded`
+    /// (and a guest still running afterwards is stopped by the epoch).
+    /// Longer waits are only cut short, not refused: a guest may subscribe a
+    /// long timeout and poll it beside a shorter one.
+    fn capped(&mut self, wait: Duration) -> anyhow::Result<Option<Resource<DynPollable>>> {
+        let Some(deadline) = self.0.deadline else {
+            return Ok(None);
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if wait <= remaining {
+            return Ok(None);
+        }
+        let cut = CutAtDeadline {
+            at: tokio::time::Instant::now() + remaining,
+            hit: Arc::clone(&self.0.clock_deadline_hit),
+        };
+        let resource = self.0.table.push(cut)?;
+        Ok(Some(wasmtime_wasi::subscribe(&mut self.0.table, resource)?))
+    }
+}
+
+impl monotonic_clock::Host for DeadlineClock<'_> {
+    fn now(&mut self) -> anyhow::Result<monotonic_clock::Instant> {
+        monotonic_clock::Host::now(&mut self.wasi())
+    }
+
+    fn resolution(&mut self) -> anyhow::Result<monotonic_clock::Duration> {
+        monotonic_clock::Host::resolution(&mut self.wasi())
+    }
+
+    fn subscribe_instant(
+        &mut self,
+        when: monotonic_clock::Instant,
+    ) -> anyhow::Result<Resource<DynPollable>> {
+        let now = monotonic_clock::Host::now(&mut self.wasi())?;
+        match self.capped(Duration::from_nanos(when.saturating_sub(now)))? {
+            Some(pollable) => Ok(pollable),
+            None => monotonic_clock::Host::subscribe_instant(&mut self.wasi(), when),
+        }
+    }
+
+    fn subscribe_duration(
+        &mut self,
+        duration: monotonic_clock::Duration,
+    ) -> anyhow::Result<Resource<DynPollable>> {
+        match self.capped(Duration::from_nanos(duration))? {
+            Some(pollable) => Ok(pollable),
+            None => monotonic_clock::Host::subscribe_duration(&mut self.wasi(), duration),
+        }
+    }
+}
+
+/// A clock wait cut short at the call deadline: ready at `at`, and marks
+/// `hit` when it fires.
+struct CutAtDeadline {
+    at: tokio::time::Instant,
+    hit: Arc<AtomicBool>,
+}
+
+#[wasmtime_wasi::async_trait]
+impl Pollable for CutAtDeadline {
+    async fn ready(&mut self) {
+        tokio::time::sleep_until(self.at).await;
+        self.hit.store(true, Ordering::Relaxed);
     }
 }
 
