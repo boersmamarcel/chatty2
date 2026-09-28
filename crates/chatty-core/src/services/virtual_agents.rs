@@ -51,6 +51,10 @@ pub struct VirtualAgentSpec {
     /// team's `verification` when it declared one and this agent's profile
     /// has a shell; `None` otherwise.
     pub verification: Option<String>,
+    /// The schema this agent's answers must match, when its team names one
+    /// (TD-2, AGE-693). Never set here: a team's `handoffs` are the
+    /// broker's to attach, since module settings have none.
+    pub handoff: Option<chatty_fabric::HandoffContract>,
 }
 
 /// Resolve every virtual agent the broker should publish.
@@ -105,6 +109,7 @@ pub fn resolve_virtual_agents(
                 args,
                 endpoint,
                 verification: verification_for(spec, module_settings),
+                handoff: None,
             }
         })
         .collect()
