@@ -960,7 +960,7 @@ mod tests {
         use super::super::protocol::{BrokerFrame, ParticipantCard};
 
         let (calls, registry) = broker(None);
-        let admitted = registry.admit("lead", AgentOrigin::Local).unwrap();
+        let admitted = registry.admit("lead", AgentOrigin::Local, None).unwrap();
         let (tx, mut outbound) = tokio::sync::mpsc::unbounded_channel();
         let lead = registry.register(admitted, ParticipantCard::default(), tx);
         let coder = registry.admit_under("coder", Some(&lead));

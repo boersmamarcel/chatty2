@@ -236,17 +236,40 @@ impl ParticipantRegistry {
     /// socket pair on this machine is [`AgentOrigin::Local`], a leased
     /// microVM's vsock [`AgentOrigin::Fleet`].
     ///
-    /// Every node is the root's for now: which node asked for a worker is
-    /// known once calls travel over the worker's connection (BI-4/BI-5).
-    pub fn admit(&self, spec: &str, origin: AgentOrigin) -> Result<AdmittedNode, DirectoryError> {
+    /// `owner` is the node whose call spawns this one — the calling node the
+    /// broker stamped on the task (DP-2) — or `None` when the root asked.
+    /// The directory records it, so the new node's tree is the real one:
+    /// its `welcome` names it, its `send_message` may address only it, and
+    /// its ancestors run through it (TM-2b). A name no node was admitted
+    /// under is refused, never quietly made the root's.
+    pub fn admit(
+        &self,
+        spec: &str,
+        origin: AgentOrigin,
+        owner: Option<&str>,
+    ) -> Result<AdmittedNode, DirectoryError> {
         let scope = ConversationScope::new(ROOT_SCOPE);
-        let node = self.lock().directory.admit(spec, None, scope)?;
-        debug!(node = %node.name(), spec, "Admitted a node");
+        let mut inner = self.lock();
+        let owner = owner
+            .map(|name| {
+                inner
+                    .directory
+                    .by_name(name)
+                    .map(|node| (node.id(), node.name().clone()))
+                    .ok_or_else(|| DirectoryError::UnknownOwnerName(name.to_string()))
+            })
+            .transpose()?;
+        let node = inner
+            .directory
+            .admit(spec, owner.as_ref().map(|(id, _)| *id), scope)?;
+        drop(inner);
+        let owner = owner.map(|(_, name)| name);
+        debug!(node = %node.name(), spec, ?owner, "Admitted a node");
         Ok(AdmittedNode {
             id: node.id(),
             name: node.name().clone(),
             scope: node.scope().clone(),
-            owner: None,
+            owner,
             origin,
         })
     }
@@ -690,16 +713,12 @@ impl ParticipantRegistry {
 #[cfg(test)]
 impl ParticipantRegistry {
     /// Admit a node as `spec` owned by the node named `owner`, or by the
-    /// root when `None`, and return its name. Admission under an owner is
-    /// the spawn request's (BI-5); tests of what an owner means start here.
+    /// root when `None`, as a spawn does, and return its name.
     pub(crate) fn admit_under(&self, spec: &str, owner: Option<&str>) -> String {
-        let mut inner = self.lock();
-        let owner = owner.map(|name| inner.directory.by_name(name).expect("the owner").id());
-        let node = inner
-            .directory
-            .admit(spec, owner, ConversationScope::new(ROOT_SCOPE))
-            .expect("admitted");
-        node.name().to_string()
+        self.admit(spec, AgentOrigin::Local, owner)
+            .expect("admitted")
+            .name()
+            .to_string()
     }
 
     /// Mark the node named `name` ended, as its connection closing does.
@@ -739,7 +758,9 @@ mod tests {
         spec: &str,
         origin: AgentOrigin,
     ) -> (String, mpsc::UnboundedReceiver<BrokerFrame>) {
-        let node = reg.admit(spec, origin).expect("a root node is admitted");
+        let node = reg
+            .admit(spec, origin, None)
+            .expect("a root node is admitted");
         let (tx, rx) = mpsc::unbounded_channel();
         (reg.register(node, card(spec), tx), rx)
     }
@@ -759,7 +780,7 @@ mod tests {
     #[test]
     fn the_cards_name_is_replaced_by_the_admitted_one() {
         let reg = ParticipantRegistry::new();
-        let node = reg.admit("local-coder", AgentOrigin::Local).unwrap();
+        let node = reg.admit("local-coder", AgentOrigin::Local, None).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let name = reg.register(node, card("evil"), tx);
 
@@ -773,12 +794,36 @@ mod tests {
         let reg = ParticipantRegistry::new();
         let (first, _outbound) = register(&reg, "worker");
         reg.deregister(&first);
-        let abandoned = reg.admit("worker", AgentOrigin::Local).unwrap();
+        let abandoned = reg.admit("worker", AgentOrigin::Local, None).unwrap();
         assert_eq!(abandoned.name(), "worker-1");
         reg.abandon(abandoned);
 
         let (third, _outbound) = register(&reg, "worker");
         assert_eq!(third, "worker-2");
+    }
+
+    /// A spawn records its caller as the new node's owner, and the welcome
+    /// names it; a caller no node was admitted under is refused rather
+    /// than made the root.
+    #[test]
+    fn a_spawn_is_owned_by_its_caller() {
+        let reg = ParticipantRegistry::new();
+        let lead = reg.admit("lead", AgentOrigin::Local, None).unwrap();
+        let worker = reg
+            .admit("worker", AgentOrigin::Local, Some(lead.name()))
+            .unwrap();
+        let BrokerFrame::Welcome { owner, .. } = worker.welcome() else {
+            panic!("a welcome");
+        };
+        assert_eq!(owner.as_ref().map(|o| o.as_str()), Some("lead-0"));
+        let (_, owner) = reg.node_and_owner(worker.name()).unwrap();
+        assert_eq!(owner.unwrap().name().as_str(), "lead-0");
+
+        assert_eq!(
+            reg.admit("worker", AgentOrigin::Local, Some("nobody-0"))
+                .err(),
+            Some(DirectoryError::UnknownOwnerName("nobody-0".to_string()))
+        );
     }
 
     #[tokio::test]

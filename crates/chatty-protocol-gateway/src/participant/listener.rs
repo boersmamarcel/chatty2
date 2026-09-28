@@ -116,15 +116,20 @@ pub struct LocalConnection {
     pub worker_end: std::os::unix::net::UnixStream,
 }
 
-/// Admit a node started as `spec`, make a socket pair for it, and serve the
+/// Admit a node started as `spec` for `owner` (see
+/// [`ParticipantRegistry::admit`]), make a socket pair for it, and serve the
 /// broker's end. Both ends are close-on-exec, so neither leaks into a
 /// process nobody meant to give it to; the spawner clears the flag on the
 /// worker's end in the one child that gets it.
 ///
 /// Must be called within a Tokio runtime.
-pub fn open_connection(registry: &ParticipantRegistry, spec: &str) -> io::Result<LocalConnection> {
+pub fn open_connection(
+    registry: &ParticipantRegistry,
+    spec: &str,
+    owner: Option<&str>,
+) -> io::Result<LocalConnection> {
     let node = registry
-        .admit(spec, AgentOrigin::Local)
+        .admit(spec, AgentOrigin::Local, owner)
         .map_err(io::Error::other)?;
     let name = node.name().to_string();
     let (broker_end, worker_end) = std::os::unix::net::UnixStream::pair()?;

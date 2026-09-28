@@ -425,7 +425,7 @@ mod tests {
     /// A callee on its own broker-made connection that answers its one task
     /// with `answer from <its name>` after `delay`.
     async fn callee(registry: &ParticipantRegistry, spec: &str, delay: Duration) -> String {
-        let LocalConnection { name, worker_end } = open_connection(registry, spec).unwrap();
+        let LocalConnection { name, worker_end } = open_connection(registry, spec, None).unwrap();
         worker_end.set_nonblocking(true).unwrap();
         let stream = UnixStream::from_std(worker_end).unwrap();
         let mut connection = ParticipantConnection::hello_over(stream, worker_card("test"))
@@ -495,7 +495,8 @@ mod tests {
         let fast = callee(&registry, "fast", Duration::from_millis(20)).await;
         let mid = callee(&registry, "mid", Duration::from_millis(300)).await;
 
-        let LocalConnection { name, worker_end } = open_connection(&registry, "caller").unwrap();
+        let LocalConnection { name, worker_end } =
+            open_connection(&registry, "caller", None).unwrap();
         worker_end.set_nonblocking(true).unwrap();
         let worker = WorkerConnection::connect(
             UnixStream::from_std(worker_end).unwrap(),
