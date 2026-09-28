@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
 use chatty_wasm_runtime::{
-    BillingProvider, CallError, ModuleManifest, ResourceLimits, SessionInfo, ToolCallRequest,
-    ToolErrorKind, ToolFailure, WasmModule,
+    BillingProvider, CallError, Capability, ModuleManifest, ResourceLimits, SessionInfo,
+    ToolCallRequest, ToolErrorKind, ToolFailure, UnrequestedGrant, WasmModule,
 };
 
 /// 2x the plan's floor tolerance for timing assertions (plan: +/- 200 ms).
@@ -172,7 +172,9 @@ async fn sandbox_1_1_good_fixtures_all_three_exports() {
 
     // config-reader: returns `config::get(<input>)`.
     {
-        let manifest = ModuleManifest::new("config-reader").with_config("greeting", "hi");
+        let manifest = ModuleManifest::new("config-reader")
+            .with_grants([Capability::Config])
+            .with_config("greeting", "hi");
         let mut m = load("config-reader", manifest, ResourceLimits::default());
         assert_eq!(
             m.run("get", "greeting").await.expect("get"),
@@ -184,7 +186,9 @@ async fn sandbox_1_1_good_fixtures_all_three_exports() {
     {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"hello").unwrap();
-        let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
+        let manifest = ModuleManifest::new("file-reader")
+            .with_grants([Capability::File])
+            .with_weights_root(tmp.path());
         let mut m = load("file-reader", manifest, ResourceLimits::default());
         assert_eq!(m.run("read", "a.bin").await.expect("read"), "5");
     }
@@ -339,7 +343,7 @@ async fn sandbox_1_4_slow_host_wall_clock_timeout_fires() {
     let mut m = WasmModule::from_file(
         &engine,
         &fixture_path("slow-host"),
-        ModuleManifest::new("slow-host"),
+        ModuleManifest::new("slow-host").with_grants([Capability::Llm]),
         llm,
         limits,
     )
@@ -702,7 +706,9 @@ async fn sandbox_1_8_file_reader_rejects_escapes() {
     std::fs::write(outside.path().join("secret"), b"nope").unwrap();
 
     let read = |path: &'static str, root: std::path::PathBuf| async move {
-        let manifest = ModuleManifest::new("file-reader").with_weights_root(root);
+        let manifest = ModuleManifest::new("file-reader")
+            .with_grants([Capability::File])
+            .with_weights_root(root);
         let mut m = load("file-reader", manifest, ResourceLimits::default());
         m.run("read", path).await
     };
@@ -729,6 +735,7 @@ async fn sandbox_1_8_file_reader_rejects_escapes() {
     // A config key named `weights_root` grants nothing: the root comes only
     // from the host (the registry's `[files] root`).
     let manifest = ModuleManifest::new("file-reader")
+        .with_grants([Capability::File])
         .with_config("weights_root", tmp.path().to_str().unwrap());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
     let result = m.run("read", "a.bin").await;
@@ -747,7 +754,9 @@ async fn sandbox_1_8_file_reader_rejects_symlink_escape() {
     std::os::unix::fs::symlink(outside.path().join("secret"), tmp.path().join("link")).unwrap();
     std::os::unix::fs::symlink(outside.path(), tmp.path().join("dir-link")).unwrap();
 
-    let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
+    let manifest = ModuleManifest::new("file-reader")
+        .with_grants([Capability::File])
+        .with_weights_root(tmp.path());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
     for path in ["link", "dir-link/secret"] {
         let result = m.run("read", path).await;
@@ -769,7 +778,9 @@ async fn sandbox_1_8_file_reader_rejects_oversized_file() {
     big.set_len(chatty_wasm_runtime::MAX_FILE_READ_BYTES + 1)
         .unwrap();
 
-    let manifest = ModuleManifest::new("file-reader").with_weights_root(tmp.path());
+    let manifest = ModuleManifest::new("file-reader")
+        .with_grants([Capability::File])
+        .with_weights_root(tmp.path());
     let mut m = load("file-reader", manifest, ResourceLimits::default());
     let result = m.run("read", "big.bin").await;
     let err = result.expect_err("a file above the read cap must be rejected");
@@ -790,13 +801,14 @@ async fn sandbox_1_8_file_reader_rejects_oversized_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_9_config_reader_with_and_without_config() {
-    let with_config =
-        ModuleManifest::new("config-reader").with_config("greeting", "configured-value");
+    let with_config = ModuleManifest::new("config-reader")
+        .with_grants([Capability::Config])
+        .with_config("greeting", "configured-value");
     let mut m = load("config-reader", with_config, ResourceLimits::default());
     let resp = m.run("get", "greeting").await.expect("get");
     assert_eq!(resp, r#"Some("configured-value")"#);
 
-    let without_config = ModuleManifest::new("config-reader");
+    let without_config = ModuleManifest::new("config-reader").with_grants([Capability::Config]);
     let mut m2 = load("config-reader", without_config, ResourceLimits::default());
     let resp2 = m2.run("get", "greeting").await.expect("get");
     assert_eq!(resp2, "None");
@@ -834,7 +846,7 @@ async fn sandbox_1_10_billing_with_and_without_provider() {
     let mut with = WasmModule::from_file_with_billing(
         &engine,
         &fixture_path("billing"),
-        ModuleManifest::new("billing"),
+        ModuleManifest::new("billing").with_grants([Capability::Billing]),
         Arc::new(FakeLlm::default()),
         Some(billing.clone()),
         ResourceLimits::default(),
@@ -848,7 +860,7 @@ async fn sandbox_1_10_billing_with_and_without_provider() {
     let mut without = WasmModule::from_file(
         &engine,
         &fixture_path("billing"),
-        ModuleManifest::new("billing"),
+        ModuleManifest::new("billing").with_grants([Capability::Billing]),
         Arc::new(FakeLlm::default()),
         ResourceLimits::default(),
     )
@@ -1033,4 +1045,158 @@ async fn sandbox_1_14_wasi_surface_grants_nothing_by_default() {
         resp, "hello",
         "a module with no declared WASI needs must still run normally"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 1.14 (grants, PL-U4) - the host links only the capabilities a module was
+// granted. An ungranted import is a stub that refuses with `capability <x>
+// not granted to this agent`, so the module still instantiates and the
+// refusal reaches the caller through the tool result; a grant the module did
+// not request fails the load.
+// ---------------------------------------------------------------------------
+
+/// A module granted nothing (the default) still loads and runs, linked
+/// against `logging` alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandbox_1_14_echo_granted_nothing_still_runs() {
+    let mut m = load(
+        "echo",
+        ModuleManifest::new("echo"),
+        ResourceLimits::default(),
+    );
+    assert!(m.requested_capabilities().is_empty());
+    assert_eq!(m.granted_capabilities(), [Capability::Logging]);
+    assert_eq!(m.run("reverse", "abc").await.expect("reverse"), "cba");
+}
+
+/// `config-reader` requests `config`; not granted it, its `config::get`
+/// (an import with no error channel) ends the call with the refusal as the
+/// reason, and the module keeps working for the next call.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandbox_1_14_config_reader_not_granted_config_is_refused() {
+    let manifest = ModuleManifest::new("config-reader").with_config("greeting", "hi");
+    let mut m = load("config-reader", manifest, ResourceLimits::default());
+    assert_eq!(m.requested_capabilities(), [Capability::Config]);
+    assert_eq!(m.granted_capabilities(), [Capability::Logging]);
+    for _ in 0..2 {
+        let err = m
+            .run("get", "greeting")
+            .await
+            .expect_err("config not granted");
+        assert_eq!(
+            call_error(&err),
+            &CallError::NotGranted {
+                capability: "config"
+            }
+        );
+        assert!(
+            format!("{err:#}").contains("capability config not granted to this agent"),
+            "{err:#}"
+        );
+    }
+}
+
+/// An ungranted import with an error channel hands the guest the refusal
+/// as its `Err`: `file`, `llm` and `billing` each reach the caller as the
+/// guest's own tool error carrying the refusal text.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandbox_1_14_ungranted_imports_refuse_through_the_guest() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.bin"), b"hello").unwrap();
+    let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
+    let cases = [
+        // A file root alone grants nothing without the `file` capability.
+        (
+            "file-reader",
+            "read",
+            "a.bin",
+            ModuleManifest::new("file-reader").with_weights_root(tmp.path()),
+            "file",
+        ),
+        (
+            "slow-host",
+            "ask",
+            "x",
+            ModuleManifest::new("slow-host"),
+            "llm",
+        ),
+        (
+            "billing",
+            "settle",
+            "3 4",
+            ModuleManifest::new("billing"),
+            "billing",
+        ),
+    ];
+    for (name, tool, input, manifest, capability) in cases {
+        let billing: Arc<dyn BillingProvider> = Arc::new(RecordingBilling::default());
+        let mut m = WasmModule::from_file_with_billing(
+            &engine,
+            &fixture_path(name),
+            manifest,
+            Arc::new(FakeLlm::default()),
+            Some(billing),
+            ResourceLimits::default(),
+        )
+        .unwrap_or_else(|e| panic!("`{name}` loads with nothing granted: {e:#}"));
+        let err = m.run(tool, input).await.expect_err("not granted");
+        let failure = err
+            .downcast_ref::<ToolFailure>()
+            .unwrap_or_else(|| panic!("`{name}`: expected the guest's tool error, got {err:#}"));
+        assert_eq!(
+            failure.message,
+            format!("capability {capability} not granted to this agent"),
+            "`{name}`"
+        );
+    }
+}
+
+/// A grant the module did not request is refused at load, naming the
+/// capability and what the module does request.
+#[test]
+fn sandbox_1_14_a_grant_the_module_did_not_request_fails_the_load() {
+    let limits = ResourceLimits::default();
+    let engine = WasmModule::build_engine(&limits).unwrap();
+    let err = WasmModule::from_file(
+        &engine,
+        &fixture_path("echo"),
+        ModuleManifest::new("echo").with_grants([Capability::File]),
+        Arc::new(FakeLlm::default()),
+        limits,
+    )
+    .err()
+    .expect("echo requests no `file`");
+    let refused = err
+        .downcast_ref::<UnrequestedGrant>()
+        .unwrap_or_else(|| panic!("expected an UnrequestedGrant, got {err:#}"));
+    assert_eq!(refused.unrequested, [Capability::File]);
+    assert!(
+        err.to_string()
+            .contains("plugin `echo` is granted `file`, which it does not request"),
+        "{err}"
+    );
+}
+
+/// A module granted what it requests reads through it; so does one served
+/// on its own with the grants it requested.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandbox_1_14_granted_capabilities_are_linked() {
+    for manifest in [
+        ModuleManifest::new("config-reader").with_grants([Capability::Config]),
+        ModuleManifest::new("config-reader").with_requested_grants(),
+    ] {
+        let mut m = load(
+            "config-reader",
+            manifest.with_config("greeting", "hi"),
+            ResourceLimits::default(),
+        );
+        assert_eq!(
+            m.granted_capabilities(),
+            [Capability::Config, Capability::Logging]
+        );
+        assert_eq!(
+            m.run("get", "greeting").await.expect("get"),
+            r#"Some("hi")"#
+        );
+    }
 }

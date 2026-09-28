@@ -14,14 +14,16 @@ use wasmtime::{Config, Engine, EngineWeak, Store, Trap};
 
 use crate::bindings::PluginWorld;
 use crate::bindings::chatty::plugin::types::ToolDefinition;
+use crate::bindings::exports::chatty::plugin::plugin::Capability;
 use crate::bindings::exports::chatty::plugin::plugin::{
     PluginMetadata, ToolCallRequest, ToolResult,
 };
 use crate::error::{CallError, ToolFailure};
+use crate::grants::{self, NotGranted};
 use crate::host::{
     BillingProvider, LlmProvider, ModuleManifest, ModuleState, add_deadline_clock_to_linker,
 };
-use crate::limits::{EPOCH_TICK, METADATA_CALL_MS, ResourceLimits};
+use crate::limits::{EPOCH_TICK, MAX_OUTPUT_BYTES_CEILING, METADATA_CALL_MS, ResourceLimits};
 
 // ---------------------------------------------------------------------------
 // Epoch ticker
@@ -105,6 +107,10 @@ pub struct WasmModule {
     billing_provider: Option<Arc<dyn BillingProvider>>,
     /// Per-call limits.
     limits: ResourceLimits,
+    /// What the plugin's `metadata` requests.
+    requested: Vec<Capability>,
+    /// What it is linked against (always including `logging`).
+    granted: Vec<Capability>,
     /// `None` after a trap, until the next call re-instantiates.
     instance: Option<Instance>,
     /// Metrics from the most recent invocation.
@@ -224,33 +230,57 @@ impl WasmModule {
     ) -> Result<Self> {
         check_world(engine, &component)?;
 
-        let mut linker: Linker<ModuleState> = Linker::new(engine);
-
-        // Add WASI Preview 2 host implementations first — modules compiled
-        // for wasm32-wasip2 import WASI interfaces (e.g. wasi:io/poll) from
-        // the host even when they don't actively use them.
-        wasmtime_wasi::add_to_linker_sync(&mut linker).context("failed to add WASI to linker")?;
-        // ...with every clock wait capped at the call deadline (AGE-706).
-        add_deadline_clock_to_linker(&mut linker)
-            .context("failed to add the deadline-bounded WASI clock to linker")?;
-
-        PluginWorld::add_to_linker(&mut linker, |state| state)
-            .context("failed to add host imports to linker")?;
-
+        // Read what the plugin requests from an instance granted nothing,
+        // then link what was granted (PL-U4).
         let mut module = Self {
             engine: engine.clone(),
             component,
-            linker,
+            linker: build_linker(engine, &[Capability::Logging])?,
             manifest,
             llm_provider,
             billing_provider,
             limits,
+            requested: Vec::new(),
+            granted: vec![Capability::Logging],
             instance: None,
             last_metrics: None,
         };
         // Instantiate now so a module that can't instantiate fails to load.
         module.instance = Some(module.instantiate()?);
+        let requested = module.read_requested()?;
+        let granted = grants::resolve(&module.manifest.name, &module.manifest.grants, &requested)?;
+        if granted != module.granted {
+            module.linker = build_linker(engine, &granted)?;
+            module.instance = Some(module.instantiate()?);
+        }
+        debug!(module = %module.manifest.name, ?requested, ?granted, "capabilities linked");
+        module.requested = requested;
+        module.granted = granted;
         Ok(module)
+    }
+
+    /// `metadata().requested-capabilities`, read at load. Bounded by the
+    /// output ceiling rather than a lowered per-call cap: a cap meant for
+    /// tool results must not stop the module from loading.
+    fn read_requested(&mut self) -> Result<Vec<Capability>> {
+        let cap = self.limits.max_output_bytes;
+        self.limits.max_output_bytes = cap.max(MAX_OUTPUT_BYTES_CEILING);
+        let metadata = self.metadata();
+        self.limits.max_output_bytes = cap;
+        Ok(metadata
+            .context("failed to read the plugin's requested capabilities")?
+            .requested_capabilities)
+    }
+
+    /// The capabilities the plugin's `metadata` requests.
+    pub fn requested_capabilities(&self) -> &[Capability] {
+        &self.requested
+    }
+
+    /// The capabilities the plugin is linked against: what was granted, and
+    /// `logging`, in WIT order.
+    pub fn granted_capabilities(&self) -> &[Capability] {
+        &self.granted
     }
 
     /// Create a fresh store and instance of the component.
@@ -462,6 +492,21 @@ impl WasmModule {
     }
 }
 
+/// A linker with WASI (its clock bounded by the call deadline) and the
+/// plugin imports, the capabilities in `granted` real and the rest refused.
+fn build_linker(engine: &Engine, granted: &[Capability]) -> Result<Linker<ModuleState>> {
+    let mut linker: Linker<ModuleState> = Linker::new(engine);
+    // WASI Preview 2 first — modules compiled for wasm32-wasip2 import WASI
+    // interfaces (e.g. wasi:io/poll) from the host even when they don't
+    // actively use them.
+    wasmtime_wasi::add_to_linker_sync(&mut linker).context("failed to add WASI to linker")?;
+    // ...with every clock wait capped at the call deadline (AGE-706).
+    add_deadline_clock_to_linker(&mut linker)
+        .context("failed to add the deadline-bounded WASI clock to linker")?;
+    grants::add_to_linker(&mut linker, granted).context("failed to add host imports to linker")?;
+    Ok(linker)
+}
+
 /// Refuse a component that does not export `chatty:plugin/plugin@0.3.0`,
 /// naming the world it does target (PL-D1: no older world is adapted).
 fn check_world(engine: &Engine, component: &Component) -> Result<()> {
@@ -620,6 +665,11 @@ fn classify_trap(
         },
         _ if state.limiter.memory_denied => CallError::MemoryLimit {
             max_memory_bytes: limits.max_memory_bytes,
+        },
+        _ if err.downcast_ref::<NotGranted>().is_some() => CallError::NotGranted {
+            capability: err
+                .downcast_ref::<NotGranted>()
+                .map_or("unknown", |refused| refused.0.name()),
         },
         _ => {
             let cause = err.root_cause().to_string();

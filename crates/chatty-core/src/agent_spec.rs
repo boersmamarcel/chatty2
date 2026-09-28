@@ -20,6 +20,7 @@
 //! [[plugins]]                   # its tools become the agent's (PL-U2)
 //! module = "benford"
 //! version = "^0.2"
+//! grants = ["llm"]              # a subset of what it requests (PL-U4)
 //!
 //! [swarm]
 //! delegates_to = ["local-coder"]
@@ -139,14 +140,120 @@ pub struct PluginSpec {
     /// A semver requirement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Capabilities this agent grants the plugin.
+    /// Capabilities this agent grants the plugin: a subset of what its
+    /// `metadata` requests (PL-U4). `logging` is always granted; nothing
+    /// else is unless listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grants: Vec<String>,
+    pub grants: Vec<Grant>,
     /// What the plugin's `config::get` reads.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub config: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "PluginLimits::is_empty")]
     pub limits: PluginLimits,
+}
+
+/// A capability a spec grants a plugin (PL-D3, PL-U4). Written as its WIT
+/// name — `llm`, `config`, `logging`, `file`, `billing` — or `file:<root>`.
+///
+/// * `llm` runs completions on the calling agent's model. It costs money, so
+///   its usage counts against the turn's budget, but it asks no approval.
+/// * `config` reads the plugin's `[config]` (the module's, with the spec's
+///   `config` on top).
+/// * `logging` is always granted; listing it changes nothing.
+/// * `file` reads below the module's own `[files] root`; `file:<root>` reads
+///   below `<root>` (an absolute path) instead. Read-only either way.
+/// * `billing` reserves and settles Hive credits.
+///
+/// No v1 capability is side-effecting ([`Grant::side_effecting`]); `http` is
+/// not a capability in v1 (PL-D3).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Grant {
+    Llm,
+    Config,
+    Logging,
+    /// `root` is `None` for `file`: the module's `[files] root`.
+    File {
+        root: Option<PathBuf>,
+    },
+    Billing,
+}
+
+/// The grants a spec may write, for error messages.
+const GRANT_NAMES: &str = "llm, config, logging, file, file:<root>, billing";
+
+impl Grant {
+    /// The WIT capability this grant links.
+    pub fn capability(&self) -> chatty_wasm_runtime::Capability {
+        use chatty_wasm_runtime::Capability;
+        match self {
+            Self::Llm => Capability::Llm,
+            Self::Config => Capability::Config,
+            Self::Logging => Capability::Logging,
+            Self::File { .. } => Capability::File,
+            Self::Billing => Capability::Billing,
+        }
+    }
+
+    /// Whether using it changes something outside the plugin, so each call
+    /// needs the user's approval under the agent's approval mode (PL-U4 §4).
+    /// None of v1's does: `file` is read-only, and `llm` and `billing` cost
+    /// money but are counted against the budget instead. A future `http` or
+    /// `file-write` would be.
+    pub fn side_effecting(&self) -> bool {
+        match self {
+            Self::Llm | Self::Config | Self::Logging | Self::File { .. } | Self::Billing => false,
+        }
+    }
+}
+
+impl std::str::FromStr for Grant {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if let Some(root) = text.strip_prefix("file:") {
+            let root = PathBuf::from(root);
+            if !root.is_absolute() {
+                return Err(format!(
+                    "grant `{text}`: the root of `file:<root>` must be an absolute path"
+                ));
+            }
+            return Ok(Self::File { root: Some(root) });
+        }
+        match text {
+            "llm" => Ok(Self::Llm),
+            "config" => Ok(Self::Config),
+            "logging" => Ok(Self::Logging),
+            "file" => Ok(Self::File { root: None }),
+            "billing" => Ok(Self::Billing),
+            other => Err(format!(
+                "`{other}` is not a capability a plugin can be granted (valid: {GRANT_NAMES})"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File { root: Some(root) } => write!(f, "file:{}", root.display()),
+            other => f.write_str(other.capability().name()),
+        }
+    }
+}
+
+impl TryFrom<String> for Grant {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        text.parse()
+    }
+}
+
+impl From<Grant> for String {
+    fn from(grant: Grant) -> Self {
+        grant.to_string()
+    }
 }
 
 /// A plugin's resource ceilings, named as `module.toml` names them.
@@ -239,6 +346,9 @@ pub enum SpecError {
     BadModel(String),
     DuplicatePlugin(String),
     BadPlugin(String),
+    /// A grant the plugin does not request. Found when the plugin loads:
+    /// what it requests is in its `metadata`.
+    UnrequestedGrant(String),
     BadDuration(String),
     BadCap(f64),
 }
@@ -265,6 +375,7 @@ impl std::fmt::Display for SpecError {
                 write!(f, "plugins lists module '{module}' more than once")
             }
             Self::BadPlugin(why) => write!(f, "plugins: {why}"),
+            Self::UnrequestedGrant(why) => write!(f, "plugins: {why}"),
             Self::BadDuration(why) => write!(f, "budget.max_duration: {why}"),
             Self::BadCap(cap) => write!(f, "budget.cap_usd {cap} is not a positive amount"),
         }
@@ -360,6 +471,17 @@ impl AgentSpec {
                 errors.push(SpecError::BadPlugin("a plugin names no module".to_string()));
             } else if !modules.insert(plugin.module.as_str()) {
                 errors.push(SpecError::DuplicatePlugin(plugin.module.clone()));
+            }
+            let file_grants = plugin
+                .grants
+                .iter()
+                .filter(|grant| matches!(grant, Grant::File { .. }))
+                .count();
+            if file_grants > 1 {
+                errors.push(SpecError::BadPlugin(format!(
+                    "`{}` is granted `file` more than once; grant one root",
+                    plugin.module
+                )));
             }
         }
         if let Some(duration) = self.budget.max_duration.as_deref()
@@ -622,6 +744,61 @@ cap_usd = 2.0
         let json = hidden.to_json().unwrap();
         assert!(json.contains(r#""exposed":false"#), "{json}");
         assert_eq!(AgentSpec::from_json(&json).unwrap(), hidden);
+    }
+
+    /// PL-U4: grants are capabilities by WIT name, or `file:<root>` with an
+    /// absolute root; anything else (`http` included, not in v1) fails the
+    /// parse naming the valid ones, and two file roots fail validation.
+    #[test]
+    fn plugin_grants_are_capabilities() {
+        let root = std::env::temp_dir().join("weights");
+        let file_root = format!("file:{}", root.display());
+        let spec = AgentSpec::from_toml(&format!(
+            "[agent]\nname = \"a\"\n[[plugins]]\nmodule = \"m\"\n\
+             grants = [\"llm\", \"config\", \"logging\", \"billing\", {file_root:?}]\n"
+        ))
+        .expect("every v1 capability parses");
+        assert_eq!(
+            spec.plugins[0].grants,
+            [
+                Grant::Llm,
+                Grant::Config,
+                Grant::Logging,
+                Grant::Billing,
+                Grant::File { root: Some(root) },
+            ]
+        );
+        let back = AgentSpec::from_toml(&spec.to_toml().unwrap()).unwrap();
+        assert_eq!(back, spec, "grants round-trip as their names");
+
+        for (grant, why) in [
+            ("http", "`http` is not a capability a plugin can be granted"),
+            ("file:weights", "must be an absolute path"),
+        ] {
+            let err = AgentSpec::from_toml(&format!(
+                "[agent]\nname = \"a\"\n[[plugins]]\nmodule = \"m\"\ngrants = [{grant:?}]\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(why), "{grant}: {err}");
+        }
+
+        let mut spec = AgentSpec::named("a");
+        spec.plugins = vec![PluginSpec {
+            module: "m".to_string(),
+            grants: vec![
+                Grant::File { root: None },
+                Grant::File {
+                    root: Some(std::env::temp_dir()),
+                },
+            ],
+            ..PluginSpec::default()
+        }];
+        let err = spec.validate(None).unwrap_err().to_string();
+        assert!(
+            err.contains("`m` is granted `file` more than once"),
+            "{err}"
+        );
     }
 
     #[test]

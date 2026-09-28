@@ -387,12 +387,15 @@ impl ModuleRegistry {
 
         // The runtime's manifest carries what the guest sees: `[config]`
         // through `config::get`, `[files].root` through `file::read-bytes`.
+        // A module served here has no agent spec to grant from: installing
+        // it granted what its `metadata` requests (PL-U4).
         let mut runtime_manifest = manifest
             .config
             .iter()
             .fold(RuntimeManifest::new(&manifest.name), |m, (key, value)| {
                 m.with_config(key, value)
-            });
+            })
+            .with_requested_grants();
         if let Some(root) = &manifest.files_root {
             runtime_manifest = runtime_manifest.with_weights_root(root);
         }

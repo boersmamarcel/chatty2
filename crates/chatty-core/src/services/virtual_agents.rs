@@ -297,7 +297,7 @@ mod tests {
         auditor.plugins = vec![crate::agent_spec::PluginSpec {
             module: "benford-agent".to_string(),
             version: Some("^0.1".to_string()),
-            grants: vec!["llm".to_string()],
+            grants: vec![crate::agent_spec::Grant::Llm],
             config: [("threshold".to_string(), "0.05".to_string())].into(),
             limits: crate::agent_spec::PluginLimits {
                 max_memory_mb: Some(64),

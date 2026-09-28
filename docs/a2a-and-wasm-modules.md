@@ -151,7 +151,8 @@ type reference. A component targeting any other world (the old agent-shaped
 chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK`.
 
 **Host imports**, one interface per capability (a plugin lists the ones it
-needs in `metadata().requested-capabilities`; PL-U4 will link only granted ones):
+needs in `metadata().requested-capabilities`; the host links only what the agent's
+spec grants, and refuses the rest with `capability <x> not granted to this agent`, PL-U4):
 
 | Interface | Function | Purpose |
 |:----------|:---------|:--------|
@@ -694,7 +695,7 @@ skills = ["coder-reviewer"]        # read_skill names, named in the preamble
 [[plugins]]                        # its tools become this agent's (PL-U2)
 module = "benford"
 version = "^0.2"                   # checked against the module's [module].version
-grants = ["llm"]                   # "http" / "file-write" would make every call ask first
+grants = ["llm"]                   # a subset of what it requests; logging is always granted
 limits = { max_execution_ms = 5000 }  # lowers the module's [resources], never raises them
 
 [swarm]
@@ -748,8 +749,12 @@ what the transcript shows ("Ran echo.reverse"). A call goes straight into the
 instance under PL-H1's per-call limits — about 40 µs, against about 1 ms through the
 gateway's `/mcp/{module}` — and a trap, deadline or guest error comes back to the model as
 the tool's error, with its reason, and the turn goes on. The spec is the plugin's
-allow-list: a tool profile does not remove it. A call asks for approval only when the
-spec grants the plugin a side-effecting capability (`http`, `file-write`). Under
+allow-list: a tool profile does not remove it. The plugin is linked against only the
+capabilities the spec grants (PL-U4); an ungranted one it calls is refused with
+`capability <x> not granted to this agent`, which the model reads, and a grant the plugin
+does not request fails the build as a spec error. A call would ask for approval only if
+the spec granted a side-effecting capability; none of v1's is (`file` is read-only, and
+`llm` and `billing` cost money but count against the budget). Under
 `--tool-loading dynamic` each plugin is one `load_tools` group named after it. What a
 plugin spends through `llm::complete` runs on the calling agent's model and is recorded
 as its own usage line on the turn, naming the plugin and the model that served it. A
