@@ -381,7 +381,9 @@ directory as `call` frames on its own connection, never over loopback HTTP:
 | worker → broker | `call` | `id` (the worker's, unique on the connection), `method` (`invoke_agent`, `list_agents`, `send_message`), `params` |
 | broker → worker | `call_progress` | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
 | broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array |
-| broker → worker | `call_error` | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, …) |
+| broker → worker | `call_error` | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
+| broker → worker | `call_input_required` | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
+| worker → broker | `call_input` | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape as an `input` frame (BI-5) |
 
 ```text
 worker → {"v":2,"type":"call","id":1,"method":"invoke_agent","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
@@ -399,8 +401,46 @@ whose task failed is a `call_result` with `success: false`, not a
 `call_error`, so the caller renders it exactly as a failed A2A task. When a
 worker's connection closes, the broker cancels every call still in flight on
 it, which reaps the workers those calls started — so cancelling a leader's
-task reaps its whole subtree (invariant 11). A question a callee asks over a
-worker's call ends that call for now; relaying it across hops is BI-5.
+task reaps its whole subtree (invariant 11).
+
+**A question comes back down the call (BI-5, AGE-637).** When a callee parks
+its task on `ask_user`, the broker sends the calling worker
+`call_input_required` with the call's `id` and the parked task; the worker's
+`invoke_agent` re-asks it on the worker's own clarification store — which
+parks the worker's own task toward *its* caller — and sends the answer up as
+`call_input`. The broker delivers it only to the task that call parked, so a
+worker answers its own callees and nobody else's. A grandchild's question
+therefore reaches the root's human however many workers sit between them, and
+the answer descends the same hops
+(`clarification_relays_across_two_hops`):
+
+```text
+broker → {"v":2,"type":"call_input_required","id":1,"task":"task-…","request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}
+worker → {"v":2,"type":"call_input","id":1,"task":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}
+```
+
+**Spawn context: sub-leaders use the root broker (ADR-0020 invariants 5–6,
+BI-5, AGE-637).** Only a root process starts a broker. A sub-leader — a worker
+whose spec delegates in turn — is spawned with no `--broker`, and
+`--broker` inside a worker (`--participant-fd`) starts nothing: its calls go
+over its connection like any worker's. What its own broker used to decide
+travels on the spawn request as a `SpawnContext {workspace_root, base_branch,
+roster, verification, endpoint}` (on the `invoke_agent` call's `params` as
+`spawn_context`, and on the child's `task` frame). The broker sets it from the
+calling node's own context: the node's own worktree and branch and the roster
+it was given, with the verification command and endpoint the root's settings
+give the agent being spawned. So a sub-leader's worker gets its tree under the
+sub-leader's tree, on a branch that starts at the sub-leader's branch, and its
+evidence diffs against that branch (`grandchild_branches_from_its_subleader`).
+A call that brings a context of its own is clamped: accepted only if
+`workspace_root` lies inside the caller's own tree, `base_branch` is the
+caller's, `roster` is a subset of the caller's, `verification` is the root's
+(or none) and `endpoint` is the root's for that agent. Anything else ends the
+call with `call_error` `spawn_context_refused`, whose `message` is
+`{field, reason}` naming the field (`spawn_context_is_clamped`), so a
+`team.json` a model wrote into its worktree cannot loosen anything. A call to
+a virtual agent outside the caller's roster is `refused`. Usage folds up both
+hops through the root (`usage_folds_across_two_hops`).
 
 A worker **connects before it builds its agent**: `chatty-tui
 --participant-fd` says `hello`, gets `welcome`, and only then builds the agent
@@ -559,9 +599,11 @@ streams.
 Each worker runs in its own `git worktree` under the conversation's workspace
 (ADR-0012), through `chatty_core::services::worker_tree`: `.chatty/worktrees/<name>`
 on branch `sub-agent/<name>`, where `<name>` is the participant name (`local-coder-0`)
-unless that branch or directory already exists in the repository — a sub-leader's
-broker counts its own workers from zero, and a tree left from an earlier run keeps
-its branch — in which case it is the first free `<name>-N` (AGE-402). The evidence envelope
+unless that branch or directory already exists in the repository — another root
+process on the same repository counts its own workers from zero, and a tree left from
+an earlier run keeps its branch — in which case it is the first free `<name>-N`
+(AGE-402). A sub-leader's worker gets its tree under the sub-leader's, branched from
+the sub-leader's branch, and its evidence is measured against that branch (BI-5). The evidence envelope
 appended to the worker's answer names the branch actually created. In a repository, a
 tree that cannot be made fails the delegation; only a workspace that is not a
 repository runs its workers unisolated.

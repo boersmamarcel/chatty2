@@ -79,15 +79,14 @@ pub fn resolve_virtual_agents(
     declared
         .iter()
         .map(|spec| {
+            // No `--broker`, even for an agent that delegates in turn: a
+            // sub-leader delegates over the connection its broker makes for
+            // it, and only a root process starts a broker (BI-5). Which
+            // agents it may reach is the spawn context's roster.
             let mut args = vec![
                 AGENT_JSON_FLAG.to_string(),
                 spec.to_json().expect("an agent spec serializes"),
             ];
-            // An agent that delegates in turn needs a broker of its own —
-            // a sub-leader. Which agents it may reach is DP-1's to enforce.
-            if !spec.swarm.delegates_to.is_empty() {
-                args.push("--broker".to_string());
-            }
             args.extend(common_args.iter().cloned());
 
             let model = spec.agent.model.as_deref();
@@ -310,10 +309,10 @@ mod tests {
         assert_eq!(spec_in(&specs[0].args).plugins, auditor.plugins);
     }
 
-    /// A spec that delegates in turn is a sub-leader: its child runs a
-    /// broker of its own. One that does not, does not.
+    /// BI-5: a spec that delegates in turn is a sub-leader, and its child
+    /// starts no broker of its own: it delegates over its connection.
     #[test]
-    fn an_agent_that_delegates_gets_its_own_broker() {
+    fn a_sub_leader_is_spawned_without_a_broker_of_its_own() {
         let mut lead = AgentSpec::named("kit-lead");
         lead.swarm.delegates_to = vec!["*".to_string()];
         let specs = resolve_virtual_agents(
@@ -323,8 +322,10 @@ mod tests {
             &[lead, AgentSpec::named("kit-worker")],
             &[],
         );
-        assert_eq!(specs[0].args[2..], ["--broker".to_string()]);
-        assert_eq!(specs[1].args.len(), 2, "{:?}", specs[1].args);
+        for spec in &specs {
+            assert_eq!(spec.args.len(), 2, "{:?}", spec.args);
+            assert!(!spec.args.contains(&"--broker".to_string()));
+        }
     }
 
     /// The card says which model and which tool groups are missing, so the

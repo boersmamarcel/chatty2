@@ -499,10 +499,20 @@ impl GitService {
     /// rather than a last-writer-wins result neither of them reported.
     ///
     /// `name` is a single path segment; the worktree lands at
-    /// `<workspace>/.chatty/worktrees/<name>` and the branch is created there.
-    pub async fn worktree_add(&self, name: &str, branch: &str) -> Result<PathBuf> {
+    /// `<workspace>/.chatty/worktrees/<name>` and the branch is created there,
+    /// starting at `start_point` — a sub-leader's branch, for its worker
+    /// (BI-5) — or at this checkout's `HEAD` when that is `None`.
+    pub async fn worktree_add(
+        &self,
+        name: &str,
+        branch: &str,
+        start_point: Option<&str>,
+    ) -> Result<PathBuf> {
         Self::validate_worktree_name(name)?;
         Self::validate_branch_name(branch)?;
+        if let Some(start) = start_point {
+            Self::validate_branch_name(start)?;
+        }
 
         self.exclude_worktree_dir_locally().await?;
 
@@ -516,8 +526,9 @@ impl GitService {
             ));
         }
 
-        self.run_git(&["worktree", "add", "-b", branch, &rel])
-            .await?;
+        let mut args = vec!["worktree", "add", "-b", branch, &rel];
+        args.extend(start_point);
+        self.run_git(&args).await?;
 
         info!(worktree = %path.display(), branch = %branch, "Worktree created");
         Ok(path)
@@ -866,7 +877,7 @@ mod tests {
         git.commit("init").await.unwrap();
         assert!(!git.branch_exists("sub-agent/w1").await.unwrap());
 
-        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        let path = git.worktree_add("w1", "sub-agent/w1", None).await.unwrap();
         assert!(git.branch_exists("sub-agent/w1").await.unwrap());
         assert!(
             !git.branch_exists("sub-agent/w10").await.unwrap(),
@@ -883,7 +894,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_add_creates_an_isolated_checkout() {
         let (tmp, git) = create_test_repo().await;
-        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        let path = git.worktree_add("w1", "sub-agent/w1", None).await.unwrap();
 
         assert!(path.exists(), "worktree directory should exist");
         assert!(
@@ -907,7 +918,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_add_leaves_the_parent_repo_status_clean() {
         let (_tmp, git) = create_test_repo().await;
-        git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        git.worktree_add("w1", "sub-agent/w1", None).await.unwrap();
 
         let status = git.run_git(&["status", "--porcelain"]).await.unwrap();
         assert!(
@@ -931,7 +942,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_remove_refuses_to_discard_uncommitted_work() {
         let (_tmp, git) = create_test_repo().await;
-        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        let path = git.worktree_add("w1", "sub-agent/w1", None).await.unwrap();
 
         tokio::fs::write(path.join("worker.txt"), "unsaved work")
             .await
@@ -952,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn commit_all_captures_worker_output_then_removal_succeeds() {
         let (_tmp, git) = create_test_repo().await;
-        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        let path = git.worktree_add("w1", "sub-agent/w1", None).await.unwrap();
 
         tokio::fs::write(path.join("worker.txt"), "the answer")
             .await
@@ -985,7 +996,7 @@ mod tests {
     #[tokio::test]
     async fn commit_all_on_a_clean_tree_is_none() {
         let (_tmp, git) = create_test_repo().await;
-        let path = git.worktree_add("w1", "sub-agent/w1").await.unwrap();
+        let path = git.worktree_add("w1", "sub-agent/w1", None).await.unwrap();
         let worker_git = GitService::new(path.to_str().unwrap()).await.unwrap();
         assert!(
             worker_git.commit_all("nothing").await.unwrap().is_none(),

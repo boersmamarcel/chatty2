@@ -34,6 +34,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use chatty_fabric::SpawnContext;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -50,6 +51,9 @@ use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHan
 pub struct WorkerWorkspace {
     /// The child's working directory, and the root its tools are confined to.
     pub cwd: PathBuf,
+    /// The branch its output is committed to, when the directory is a
+    /// branch of its own: what the worker's own calls spawn from (BI-5).
+    pub branch: Option<String>,
     /// Collects the evidence envelope once the worker's task ends: it
     /// commits the tree and reads back the branch, the diff stat, the
     /// commit count and the team's verification result (AGE-406). Awaited
@@ -87,14 +91,30 @@ pub type EvidenceFactory = Box<dyn FnOnce() -> EvidenceFuture + Send>;
 /// `futures`, which this crate does not depend on.
 pub type WorkspaceFuture = Pin<Box<dyn Future<Output = Result<Option<WorkerWorkspace>>> + Send>>;
 
-/// Makes a directory for one worker, named by its participant name.
+/// What one worker's directory is made from: its participant name, and the
+/// part of its [`SpawnContext`] that says where (BI-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRequest {
+    /// The worker's participant name, which names its tree.
+    pub worker: String,
+    /// The tree to make it under: the caller's own. `None` isolates nothing.
+    pub workspace_root: Option<String>,
+    /// What its branch starts from and its evidence diffs against: the
+    /// caller's own branch. `None` is the root's `HEAD` and default branch.
+    pub base_branch: Option<String>,
+    /// The team's verification command for this worker (AGE-406).
+    pub verification: Option<String>,
+}
+
+/// Makes a directory for one worker.
 ///
 /// Async because making one is a `git worktree add` — a subprocess, not a
 /// `mkdir`. `Ok(None)` means "no isolation available" and the child runs
 /// where the broker does; that is a real fallback, not an error, because a
 /// workspace that is not a git repository has no worktree to give (AGE-314's
 /// open question).
-pub type WorkspaceFactory = Arc<dyn Fn(String) -> WorkspaceFuture + Send + Sync + 'static>;
+pub type WorkspaceFactory =
+    Arc<dyn Fn(WorkspaceRequest) -> WorkspaceFuture + Send + Sync + 'static>;
 
 /// The descriptor a worker finds its connection on. The runner places the
 /// worker's end of the socket pair there in the child, between fork and
@@ -128,6 +148,12 @@ pub struct LocalRunner {
     /// Extra arguments every child gets — the model id, `--auto-approve`.
     args: Vec<String>,
     workspace: Option<WorkspaceFactory>,
+    /// The root's workspace: where a task given without a spawn context
+    /// gets its tree (BI-5).
+    workspace_root: Option<String>,
+    /// The team's verification command for this agent, from the root's
+    /// settings (AGE-406).
+    verification: Option<String>,
     registry: ParticipantRegistry,
     /// The model endpoint its workers use, and the budget that meters it.
     /// `None` leaves the runner unmetered.
@@ -148,6 +174,8 @@ impl LocalRunner {
             executable: executable.into(),
             args: Vec::new(),
             workspace: None,
+            workspace_root: None,
+            verification: None,
             registry,
             endpoint: None,
             registration_timeout: REGISTRATION_TIMEOUT,
@@ -181,6 +209,20 @@ impl LocalRunner {
     /// Give each worker its own directory (ADR-0012).
     pub fn with_workspace_factory(mut self, factory: WorkspaceFactory) -> Self {
         self.workspace = Some(factory);
+        self
+    }
+
+    /// The root's workspace, under which a worker spawned for the root gets
+    /// its tree (BI-5). A sub-leader's worker gets its tree under the
+    /// sub-leader's, from the task's spawn context.
+    pub fn with_workspace_root(mut self, root: Option<String>) -> Self {
+        self.workspace_root = root;
+        self
+    }
+
+    /// The team's verification command for this agent's workers (AGE-406).
+    pub fn with_verification(mut self, command: Option<String>) -> Self {
+        self.verification = command;
         self
     }
 
@@ -285,12 +327,47 @@ impl LocalRunner {
         let permit = permit.map(|permit| permit.held_by(&name));
         let caller_token = name.clone();
 
+        // Where it goes comes from the task's spawn context: the caller's
+        // own tree and branch (BI-5). A task without one is the root's.
+        let request = match task.spawn_context.as_ref() {
+            Some(context) => WorkspaceRequest {
+                worker: name.clone(),
+                workspace_root: context.workspace_root.clone(),
+                base_branch: context.base_branch.clone(),
+                verification: context.verification.clone(),
+            },
+            None => WorkspaceRequest {
+                worker: name.clone(),
+                workspace_root: self.workspace_root.clone(),
+                base_branch: None,
+                verification: self.verification.clone(),
+            },
+        };
         let workspace = match self.workspace.as_ref() {
-            Some(factory) => factory(name.clone())
+            Some(factory) => factory(request.clone())
                 .await
                 .with_context(|| format!("failed to prepare a workspace for worker '{name}'"))?,
             None => None,
         };
+        // The node's own context, which its calls spawn from: its tree and
+        // branch, or its caller's when it got none of its own, and the
+        // roster it was given.
+        if let Some(context) = task.spawn_context.as_ref() {
+            let (tree, branch) = match workspace.as_ref() {
+                Some(w) => (Some(w.cwd.to_string_lossy().into_owned()), w.branch.clone()),
+                None => (request.workspace_root, request.base_branch),
+            };
+            self.registry.set_node_context(
+                &name,
+                SpawnContext {
+                    workspace_root: tree,
+                    base_branch: branch,
+                    roster: context.roster.clone(),
+                    verification: None,
+                    endpoint: None,
+                },
+            );
+        }
 
         let mut child = self.spawn(&name, &caller_token, &worker_end, workspace.as_ref())?;
         // The child holds its copy. The broker must not keep one: a dead
@@ -476,6 +553,18 @@ impl VirtualAgent for LocalRunner {
 
     fn registry(&self) -> &ParticipantRegistry {
         LocalRunner::registry(self)
+    }
+
+    fn workspace_root(&self) -> Option<&str> {
+        self.workspace_root.as_deref()
+    }
+
+    fn verification(&self) -> Option<&str> {
+        self.verification.as_deref()
+    }
+
+    fn endpoint(&self) -> Option<&str> {
+        LocalRunner::endpoint(self)
     }
 
     fn run_task(&self, task: DelegatedTask) -> WorkerFuture<'_> {
@@ -776,13 +865,17 @@ mod tests {
         let runner = runner(registry.clone(), &waiting_worker()).with_workspace_factory({
             let cwd = dir.path().to_path_buf();
             let released = released.clone();
-            Arc::new(move |worker: String| {
-                assert_eq!(worker, "local-agent-0", "the factory is told who it is for");
+            Arc::new(move |request: WorkspaceRequest| {
+                assert_eq!(
+                    request.worker, "local-agent-0",
+                    "the factory is told who it is for"
+                );
                 let cwd = cwd.clone();
                 let released = released.clone();
                 Box::pin(async move {
                     Ok(Some(WorkerWorkspace {
                         cwd,
+                        branch: None,
                         evidence: None,
                         on_exit: Box::new(move |_| {
                             released.store(true, Ordering::Relaxed);

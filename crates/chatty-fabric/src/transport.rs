@@ -21,6 +21,45 @@ pub struct InvokeAgentParams {
     pub handle: Option<String>,
     #[serde(default)]
     pub include_trace: bool,
+    /// Where the callee is spawned and what it may reach (BI-5). `None`,
+    /// which is what every `invoke_agent` sends, lets the broker derive it
+    /// from the calling node's own context; one given is clamped to that
+    /// context by the root broker and refused if it reaches outside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_context: Option<SpawnContext>,
+}
+
+/// What a spawned worker starts from: where its tree goes, what its branch
+/// starts from, which agents it may call, the command that verifies its
+/// work and the model endpoint it is metered on (ADR-0020, fabric spec
+/// §3.4, BI-5).
+///
+/// One broker per root process spawns every worker, sub-leaders' children
+/// included, so the context that used to live in a sub-leader's own broker
+/// travels on the spawn request instead. The broker sets it from the
+/// calling node's own context; a worker cannot widen it (invariant 6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnContext {
+    /// The tree the worker's own tree is made under: the caller's own tree.
+    /// `None` when there is no workspace to isolate in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    /// The branch the worker's branch starts from and its evidence diffs
+    /// against: the caller's own branch. `None` is the root's case: the
+    /// workspace's `HEAD`, measured against the default branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// The agents the worker may call, a subset of its caller's.
+    #[serde(default)]
+    pub roster: Vec<String>,
+    /// The team's verification command for this worker (AGE-406), from the
+    /// root's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+    /// The model endpoint the worker is metered on, from the root's
+    /// settings; `None` for an unmetered agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 /// `send_message`'s arguments as they cross the fabric (tree messages).
@@ -49,10 +88,9 @@ pub enum CallEvent {
     /// The callee parked its task on a question (`ask_user`, AGE-306).
     /// `request` is the question as the participant protocol carries it
     /// (`{id, questions}`); the caller answers with
-    /// [`Transport::answer`] on `task`. Only a transport that can carry the
-    /// answer back down yields this: the root's direct handle does, a
-    /// worker's connection does not yet (BI-5 relays questions across
-    /// hops).
+    /// [`Transport::answer`] on `task`. The root's direct handle and a
+    /// worker's connection both carry the answer back down, so a question
+    /// climbs any number of hops (BI-5).
     InputRequired { task: String, request: Value },
     /// The call's result. The last item of a successful stream.
     Result(Value),
@@ -87,9 +125,10 @@ pub enum CallError {
     #[error("unknown agent: {0}")]
     UnknownAgent(String),
     /// The root clamped a spawn context that reached outside the caller's
-    /// tree or roster.
-    #[error("spawn context refused: {0}")]
-    SpawnContextRefused(String),
+    /// own context: `field` names the part that did (`workspace_root`,
+    /// `base_branch`, `roster`, `verification` or `endpoint`).
+    #[error("spawn context refused: {field}: {reason}")]
+    SpawnContextRefused { field: String, reason: String },
     /// Refused by policy (not on the tree, over an allowance, a cap).
     #[error("refused: {0}")]
     Refused(String),
@@ -136,6 +175,7 @@ mod tests {
             prompt: "fix it".into(),
             handle: None,
             include_trace: false,
+            spawn_context: None,
         });
         assert_eq!(
             serde_json::to_value(&invoke).unwrap(),
@@ -159,8 +199,13 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(CallError::SpawnContextRefused("outside tree".into())).unwrap(),
-            json!({"kind": "spawn_context_refused", "message": "outside tree"})
+            serde_json::to_value(CallError::SpawnContextRefused {
+                field: "roster".into(),
+                reason: "wider than the caller's".into()
+            })
+            .unwrap(),
+            json!({"kind": "spawn_context_refused",
+                   "message": {"field": "roster", "reason": "wider than the caller's"}})
         );
     }
 
@@ -190,6 +235,7 @@ mod tests {
                     prompt: "hi".into(),
                     handle: None,
                     include_trace: false,
+                    spawn_context: None,
                 }))
                 .await
                 .unwrap()

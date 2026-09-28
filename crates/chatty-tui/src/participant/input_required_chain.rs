@@ -31,7 +31,7 @@ use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{ParticipantRegistry, open_connection};
 use chatty_protocol_gateway::worker::{
-    EventSink, InputReceiver, answer_clarifications, serve_one_task, worker_card,
+    EventSink, InputReceiver, WorkerConnection, answer_clarifications, serve_one_task, worker_card,
 };
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use rig_agent::tool::{Tool, ToolContext};
@@ -63,6 +63,8 @@ impl LlmProvider for NoopProvider {
 struct Broker {
     port: u16,
     participants: ParticipantRegistry,
+    /// The root's direct handle into it (BI-4).
+    transport: Arc<dyn chatty_fabric::Transport>,
 }
 
 impl Broker {
@@ -73,6 +75,7 @@ impl Broker {
         ));
         let gateway = ProtocolGateway::new(modules, 0);
         let participants = gateway.participants();
+        let transport = gateway.transport();
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = tcp.local_addr().unwrap().port();
@@ -81,7 +84,11 @@ impl Broker {
             axum::serve(tcp, router).await.ok();
         });
 
-        Self { port, participants }
+        Self {
+            port,
+            participants,
+            transport,
+        }
     }
 
     /// The worker's end of a connection this broker made for a node
@@ -303,6 +310,102 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
     );
 
     // Nothing is left parked: the tasks closed with their terminal status.
+    assert_eq!(broker.participants.open_task_count(&child), 0);
+    assert_eq!(broker.participants.open_task_count(&grandchild), 0);
+}
+
+/// The child for [`clarification_relays_across_two_hops`]: as [`child`],
+/// but its `invoke_agent` reaches the grandchild over the connection the
+/// broker made for it (ADR-0020), not over loopback — so the grandchild's
+/// question comes down that connection as `call_input_required` and the
+/// child's answer goes back up it as `call_input` (BI-5).
+async fn child_over_its_connection(broker: &Broker, grandchild: String) -> String {
+    let (stream, name) = broker.connect(CHILD);
+    let worker = WorkerConnection::connect(stream, worker_card("test"))
+        .await
+        .expect("the broker welcomes the child");
+    let transport = worker.transport();
+    tokio::spawn(worker.serve_one_task(move |task, sink, inputs| async move {
+        let store = scripted_session(&sink, inputs);
+        let tool = InvokeAgentTool::new(vec![], vec![], None)
+            .with_local_agents([grandchild.as_str()])
+            .with_transport(transport)
+            .with_clarifications(store.get_pending_clarifications());
+        sink(&SessionEvent::TurnStarted);
+        tool_started(&sink, "invoke_agent");
+        let out = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: grandchild.clone(),
+                    prompt: task.text,
+                    include_trace: false,
+                },
+            )
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        tool_finished(&sink, "invoke_agent", &out.response);
+        sink(&SessionEvent::Text(out.response));
+        Ok(())
+    }));
+    broker.await_registration(&name).await;
+    name
+}
+
+/// BI-5: the chain above with every hop through the one root broker — the
+/// root on its direct handle, the child over its connection. The
+/// grandchild's `ask_user` reaches the root's clarification store, and the
+/// root's answer comes back down both hops; no request crosses loopback.
+#[tokio::test]
+async fn clarification_relays_across_two_hops() {
+    let broker = Broker::start().await;
+    let grandchild = grandchild(&broker).await;
+    let child = child_over_its_connection(&broker, grandchild.clone()).await;
+
+    let mut root_store = ClarificationStore::new();
+    let (popover_tx, mut popover) = mpsc::unbounded_channel();
+    root_store.set_notifier(popover_tx);
+    let tool = InvokeAgentTool::new(vec![], vec![], None)
+        .with_local_agents([child.as_str()])
+        .with_transport(broker.transport.clone())
+        .with_clarifications(root_store.get_pending_clarifications());
+
+    let delegation = tokio::spawn({
+        let child = child.clone();
+        async move {
+            tool.call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: child,
+                    prompt: "Set up the database.".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+        }
+    });
+
+    let asked = tokio::time::timeout(DEADLINE, popover.recv())
+        .await
+        .expect("the grandchild's question reaches the root before the deadline")
+        .expect("the root's store announces it");
+    assert_eq!(asked.questions, vec![the_question()]);
+    assert!(root_store.resolve(
+        &asked.id,
+        vec![ClarificationAnswer {
+            id: "q1".to_string(),
+            answer: "SQLite".to_string(),
+            custom: false,
+        }]
+    ));
+
+    let out = tokio::time::timeout(DEADLINE, delegation)
+        .await
+        .expect("the chain finishes before the deadline")
+        .expect("the delegation task did not panic")
+        .expect("the delegation succeeded");
+    assert!(out.success);
+    assert_eq!(out.response, "Using SQLite.", "the answer came back down");
     assert_eq!(broker.participants.open_task_count(&child), 0);
     assert_eq!(broker.participants.open_task_count(&grandchild), 0);
 }

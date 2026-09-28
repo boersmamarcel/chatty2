@@ -183,8 +183,8 @@ participant → {"v":2,"type":"status","taskId":"task-…","state":"completed"}
 ```
 
 `scope` is the conversation the node works for and `owner` the node that
-asked for it; until the spawn request carries them (BI-5) every node is the
-root's, in scope `root`.
+asked for it; for now every node is the root's, in scope `root`. The task
+frame also carries the node's `spawnContext` (BI-5, below).
 
 `status` states are A2A's (`submitted`, `working`, `input-required`,
 `completed`, `failed`, `canceled`); the terminal three end the task.
@@ -225,6 +225,27 @@ A call that cannot run ends with `call_error` (`{"kind":"unknown_agent","message
 a callee whose task failed ends with a `call_result` whose `success` is false.
 The in-process root uses `ProtocolGateway::transport()`, the same calls with no
 socket.
+
+**A callee's question comes back down the call** (BI-5). When a callee parks
+its task, the broker tells the calling worker with `call_input_required`, and
+the worker's answer goes up as `call_input`, in the `input` frame's shape. The
+broker delivers it only to the task that call parked.
+
+```
+broker      → {"v":2,"type":"call_input_required","id":1,"task":"task-…","request":{"id":"req-…","questions":[…]}}
+participant → {"v":2,"type":"call_input","id":1,"task":"task-…","input":{"requestId":"req-…","answers":[…]}}
+```
+
+**The spawn context rides the request** (ADR-0020 invariants 5–6, BI-5). Only
+a root process runs a broker; a sub-leader delegates over its connection. A
+worker a call starts is spawned with a `SpawnContext {workspace_root,
+base_branch, roster, verification, endpoint}` the broker derives from the
+calling node's own (its tree, its branch, its roster; the root's verification
+command and endpoint for the agent), so a sub-leader's worker branches from the
+sub-leader's branch. A call may bring one as `params.spawn_context`; it is
+clamped to the caller's own and refused otherwise with `call_error`
+`{"kind":"spawn_context_refused","message":{"field":…,"reason":…}}`
+(`participant::spawn_context`).
 
 `invoke_agent` is the caller: it re-asks the question on its own agent's
 `ask_user` store, so a human behind it sees the ordinary popover, and an agent

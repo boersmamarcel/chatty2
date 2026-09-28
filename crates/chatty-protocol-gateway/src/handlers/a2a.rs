@@ -315,7 +315,8 @@ async fn handle_message_send(
         tracing::info!(agent = module_name, "A2A: starting a worker");
         let task = DelegatedTask::new(content)
             .with_bearer(bearer)
-            .with_caller(caller);
+            .with_caller(caller)
+            .with_spawn_context(Some(root_spawn_context(state, runner.as_ref())));
         return a2a_participant::runner_message_send(runner.as_ref(), id, task).await;
     }
 
@@ -433,7 +434,8 @@ async fn handle_message_stream(
         tracing::info!(agent = module_name, "A2A stream: starting a worker");
         let task = DelegatedTask::new(content)
             .with_bearer(bearer)
-            .with_caller(caller);
+            .with_caller(caller)
+            .with_spawn_context(Some(root_spawn_context(state, runner.as_ref())));
         return a2a_participant::runner_message_stream(runner.as_ref(), id, task).await;
     }
 
@@ -715,6 +717,17 @@ async fn handle_tasks_get(
 }
 
 // ---------------------------------------------------------------------------
+/// The context a worker started over HTTP is spawned with: the root's
+/// (BI-5). Only the root reaches a role over loopback; a worker's calls
+/// travel over its connection, where the broker knows who is calling.
+fn root_spawn_context(
+    state: &GatewayState,
+    runner: &dyn crate::participant::VirtualAgent,
+) -> chatty_fabric::SpawnContext {
+    use crate::participant::spawn_context;
+    spawn_context::derive(&spawn_context::root(&state.runners, runner), runner)
+}
+
 // Helper: the caller's `Authorization: Bearer` token, if any (AGE-371)
 // ---------------------------------------------------------------------------
 
