@@ -853,9 +853,45 @@ beside it.
 | `verification` | Optional. The team's verification command (`team.verification` above) for the run. |
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
 | `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
+| `handoffs` | Optional. Role → a JSON Schema its handoff must match, as a path relative to the team directory (see *Typed handoffs* below). |
 
 A `team.json` in the old shape — a `leader` object, agent objects in `agents` — fails to
 load with an error naming the field.
+
+**Typed handoffs (TD-2, AGE-693).** A team can make what one role hands the next
+explicit and checkable. `handoffs` names a JSON Schema per roster role:
+
+```json
+{
+  "leader": "coordinator",
+  "agents": ["coder", "reviewer"],
+  "handoffs": {
+    "coder": "schemas/change.json",
+    "reviewer": "schemas/review.json"
+  }
+}
+```
+
+Every schema is read and compiled when the team loads; a missing file, a file that is
+not JSON, a schema that does not compile (remote `$ref`s are not fetched), or a role
+that is not in `agents` fails `--team` before anything runs. A worker running as a role
+with a schema is told the schema with its task and must end its final answer with
+exactly one fenced `json` block matching it:
+
+- **valid:** the parsed JSON comes back on the leader's `invoke_agent` result as
+  `handoff`;
+- **invalid, the first time:** the worker gets one follow-up turn listing the schema
+  errors;
+- **invalid again:** the task fails and the leader's model sees
+  `Error: invoke_agent: handoff_invalid: <role>: <errors>`.
+
+A schema may add read rules, `"x-must-be-read": {"coder": ["files_changed"]}`: each
+value of the coder's latest `files_changed` must appear in this role's handoff. The
+leader checks them and records a miss as the `handoff_misread` failure tag, with no
+retry. A headless `--team` leader's `--usage-file` carries
+`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, each absent when
+empty. A team without `handoffs` behaves exactly as before, down to the bytes on the
+worker's socket.
 
 `chatty-tui --team <id>` runs as that team's leader. It implies `--broker`, declares the
 roster from the team file (nothing is written back to `module_settings.json`), runs as

@@ -172,7 +172,9 @@ impl WorkerConnection {
         // parent's transcript wrong, which is the thing being measured.
         let (frames_tx, mut frames_rx) = mpsc::unbounded_channel::<ParticipantFrame>();
         let mapper = Arc::new(Mutex::new(
-            TaskMapper::new(task_id.clone()).with_capture_conversation(task.capture_conversation),
+            TaskMapper::new(task_id.clone())
+                .with_capture_conversation(task.capture_conversation)
+                .with_handoff(task.handoff.clone()),
         ));
 
         let sink: EventSink = {
@@ -366,13 +368,15 @@ async fn next_task(
                 bearer,
                 capture_conversation,
                 spawn_context,
+                handoff,
             } => {
                 return Ok(Some((
                     task_id,
                     DelegatedTask::new(text)
                         .with_bearer(bearer)
                         .with_capture_conversation(capture_conversation)
-                        .with_spawn_context(spawn_context),
+                        .with_spawn_context(spawn_context)
+                        .with_handoff(handoff),
                 )));
             }
             BrokerFrame::Cancel { task_id } => {

@@ -713,6 +713,9 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 providers.clone(),
                 broker_module_settings.clone(),
                 broker_agents.clone(),
+                team.as_ref()
+                    .map(|team| team.handoffs.clone())
+                    .unwrap_or_default(),
                 execution_settings.workspace_dir.clone(),
                 matches!(
                     execution_settings.approval_mode,

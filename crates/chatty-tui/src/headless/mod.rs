@@ -271,6 +271,8 @@ pub async fn run_headless(
     // a turn the model itself ended is read by `announces_untaken_step`.
     let mut last_call_text = String::new();
     let mut announced_step_nudges = 0usize;
+    // A worker's handoff is sent back once when it fails its schema (TD-2).
+    let mut handoff_sent_back = false;
 
     loop {
         let event = match backstop {
@@ -748,6 +750,19 @@ pub async fn run_headless(
                         "Answer file was not created; requesting a compact finalization pass."
                     );
                     send_answer_file_finalization_prompt(&mut engine, &message, false);
+                    continue;
+                }
+                // The run would end here: a worker whose role has a
+                // handoff schema gets its answer sent back once when the
+                // last model call's text does not match it (TD-2,
+                // AGE-693). A second miss fails the task, which the frame
+                // mapper decides from the same text.
+                if !handoff_sent_back
+                    && let Some(prompt) = engine.handoff_follow_up(&final_call_text)
+                {
+                    handoff_sent_back = true;
+                    eprintln!("The handoff does not match its schema; sending it back once.");
+                    engine.send_handoff_follow_up(prompt);
                     continue;
                 }
                 break;
