@@ -1201,6 +1201,8 @@ impl ChatEngine {
                 self.transcript.delegation_progress(line);
                 EngineAction::Redraw
             }
+            // The swarm tree's input (TB-1); `/swarm` renders it (TB-5).
+            AppEvent::SwarmEvent(_) => EngineAction::None,
             AppEvent::Delegation(progress) => {
                 self.session.note_delegation(&progress);
                 let line = helpers::delegation_line(&progress);

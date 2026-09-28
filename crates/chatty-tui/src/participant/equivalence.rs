@@ -167,7 +167,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
             InvokeAgentProgress::Finished {
                 usage: reported, ..
             } => usage = reported,
-            InvokeAgentProgress::Started { .. } => {}
+            InvokeAgentProgress::Started { .. } | InvokeAgentProgress::Swarm(_) => {}
         }
     }
 
