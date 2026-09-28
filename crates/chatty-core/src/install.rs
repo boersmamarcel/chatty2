@@ -480,6 +480,20 @@ fn build_module_toml(
         }
     }
 
+    // Config — the registry stores only the key names the author declared
+    // (never values, API spec §6.1). Each key is written empty so the user
+    // sees exactly what the plugin expects them to fill in before it loads;
+    // an author who declared no `[config]` keys gets no `[config]` table.
+    if let Some(keys) = manifest.get("config_keys").and_then(|v| v.as_array()) {
+        let names: Vec<&str> = keys.iter().filter_map(|k| k.as_str()).collect();
+        if !names.is_empty() {
+            toml.push_str("\n[config]\n");
+            for key in names {
+                toml.push_str(&format!("{key} = \"\"\n"));
+            }
+        }
+    }
+
     toml
 }
 
@@ -677,7 +691,8 @@ mod tests {
             "resources": {
                 "max_memory_mb": 32,
                 "max_execution_ms": 5000
-            }
+            },
+            "config_keys": ["api_key", "model"]
         });
         let toml = build_module_toml(
             "echo-agent",
@@ -691,12 +706,59 @@ mod tests {
         assert!(toml.contains("mcp = true"));
         assert!(!toml.contains("a2a = true"));
         assert!(toml.contains("max_memory_mb = 32"));
+        assert!(toml.contains("api_key = \"\""));
+        assert!(toml.contains("model = \"\""));
         // The 0.2.0 agent-world keys a Hive manifest may still carry are
         // dropped: `module.toml` refuses them.
         assert!(!toml.contains("chat"), "{toml}");
         assert!(!toml.contains("openai_compat"), "{toml}");
         chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
             .expect("the written module.toml parses");
+    }
+
+    #[test]
+    fn build_module_toml_config_keys_never_carry_values() {
+        // The registry stores only the key names an author declared under
+        // `[config]` (API spec §6.1); it never stores the values (an author
+        // never publishes secrets to the registry). The installed
+        // `module.toml` writes each key with an empty string so the user
+        // sees exactly what to fill in — never a value from anywhere else.
+        let manifest = serde_json::json!({
+            "config_keys": ["greeting", "endpoint_url"]
+        });
+        let toml = build_module_toml(
+            "configurable-mod",
+            "1.0.0",
+            "Needs config",
+            Some("m.wasm"),
+            "local",
+            &manifest,
+        );
+        assert!(toml.contains("[config]"));
+        assert!(toml.contains("greeting = \"\""));
+        assert!(toml.contains("endpoint_url = \"\""));
+        let parsed =
+            chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
+                .expect("the written module.toml parses");
+        assert_eq!(parsed.config.get("greeting").map(String::as_str), Some(""));
+        assert_eq!(
+            parsed.config.get("endpoint_url").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn build_module_toml_no_config_keys_writes_no_config_table() {
+        let manifest = serde_json::json!({ "config_keys": [] });
+        let toml = build_module_toml(
+            "no-config-mod",
+            "1.0.0",
+            "No config",
+            Some("m.wasm"),
+            "local",
+            &manifest,
+        );
+        assert!(!toml.contains("[config]"));
     }
 
     #[test]

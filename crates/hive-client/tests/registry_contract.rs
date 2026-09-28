@@ -123,17 +123,15 @@ async fn register_login_refresh_and_logout() {
 
 // ── Browse ────────────────────────────────────────────────────────────────
 
-/// `GET /api/search` answers a `ModuleList`. No live recording exists: the
-/// registry's search 500s on every query (found by the PL-E6 nightly,
-/// proposed for PL-H7, AGE-610), so this replays the list recording, which
-/// is the same type. Replace it with a real recording once search works.
+/// `GET /api/search` answers a `ModuleList` (PL-H7, AGE-610, fixed the 500
+/// every query used to get).
 #[tokio::test]
 async fn search() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/search"))
         .and(query_param("q", "echo-agent"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(recorded("modules")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(recorded("search")))
         .expect(1)
         .mount(&server)
         .await;
@@ -161,6 +159,9 @@ async fn get_module() {
     assert_eq!(module.name, "echo-agent");
     assert_eq!(module.latest_version.as_deref(), Some("0.1.0"));
     assert_eq!(module.execution_mode, "local");
+    // The single-module endpoint embeds the latest version's stored
+    // manifest (API spec §6.3); the list/search endpoints do not.
+    assert!(module.manifest.is_some());
 }
 
 #[tokio::test]
@@ -186,9 +187,7 @@ async fn list_versions() {
 }
 
 #[tokio::test]
-#[ignore = "known defect: PL-H7 (AGE-610)"]
 async fn list_categories() {
-    // The registry sends `slug`; hive-client's `Category` wants `name`.
     let server = MockServer::start().await;
     serve(&server, "GET", "/api/categories", "categories").await;
     let categories = anonymous(&server).list_categories().await.unwrap();
