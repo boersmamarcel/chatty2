@@ -150,13 +150,19 @@ impl BrokerCalls {
     pub fn call(&self, caller: Caller, request: CallRequest) -> CallStream {
         match request {
             CallRequest::InvokeAgent(params) => {
+                // Checked first: a refused call spawns nothing and does not
+                // touch the caller's permit either (PL-S2).
+                let (edge, stamp) = match self.admit(&caller, &params) {
+                    Ok(admitted) => admitted,
+                    Err(refused) => return refused,
+                };
                 // Released now, before the callee queues for a slot that
                 // may be this very one.
                 let child = match &caller {
                     Caller::Node(name) => self.registry.node_permit(name).map(|p| p.child_call()),
                     Caller::Root => None,
                 };
-                let call = self.invoke(caller, params);
+                let call = self.invoke(caller, params, edge, stamp);
                 match child {
                     Some(child) => gated(child, call),
                     None => call,
@@ -260,10 +266,16 @@ impl BrokerCalls {
         Value::Array(participants.chain(runners).collect())
     }
 
-    fn invoke(&self, caller: Caller, params: InvokeAgentParams) -> CallStream {
-        let registry = self.registry.clone();
-        let runner = self.runners.get(&params.agent).cloned();
-        let caller_chain = self.caller_chain(&caller);
+    /// Who may call whom, and how far, before anything is spawned,
+    /// submitted or permitted (PL-S2): the call's edge-log row and the stamp
+    /// for the run it starts, or its refusal, already logged. An agent
+    /// nobody serves is unknown, which [`invoke`](Self::invoke) says.
+    fn admit(
+        &self,
+        caller: &Caller,
+        params: &InvokeAgentParams,
+    ) -> Result<(EdgeGuard, Option<CallStamp>), CallStream> {
+        let caller_chain = self.caller_chain(caller);
         let mut edge = EdgeGuard {
             log: self.edges.clone(),
             from: caller.name().to_string(),
@@ -272,21 +284,29 @@ impl BrokerCalls {
             bytes: params.prompt.len() as u64,
             outcome: None,
         };
-        // Who may call whom, and how far, before anything is spawned,
-        // submitted or permitted (PL-S2). An agent nobody serves is
-        // unknown, which the path below says.
-        let stamp = if runner.is_some() || registry.is_registered(&params.agent) {
-            match self.check(&caller, caller_chain, &params.agent) {
-                Ok(stamp) => Some(stamp),
-                Err(refusal) => {
-                    warn!(caller = %caller.name(), agent = %params.agent, %refusal, "Refused a call");
-                    edge.refused(&refusal.to_string());
-                    return futures::stream::iter([Err(CallError::Delegation(refusal))]).boxed();
-                }
+        if !self.runners.contains_key(&params.agent) && !self.registry.is_registered(&params.agent)
+        {
+            return Ok((edge, None));
+        }
+        match self.check(caller, caller_chain, &params.agent) {
+            Ok(stamp) => Ok((edge, Some(stamp))),
+            Err(refusal) => {
+                warn!(caller = %caller.name(), agent = %params.agent, %refusal, "Refused a call");
+                edge.refused(&refusal.to_string());
+                Err(futures::stream::iter([Err(CallError::Delegation(refusal))]).boxed())
             }
-        } else {
-            None
-        };
+        }
+    }
+
+    fn invoke(
+        &self,
+        caller: Caller,
+        params: InvokeAgentParams,
+        mut edge: EdgeGuard,
+        stamp: Option<CallStamp>,
+    ) -> CallStream {
+        let registry = self.registry.clone();
+        let runner = self.runners.get(&params.agent).cloned();
         // A worker the call starts gets its context from the caller's own
         // (BI-5); a context that reaches outside it ends the call here.
         let spawn = match runner.as_ref() {

@@ -117,8 +117,8 @@ async fn cycle_refused_before_spawn() {
 /// depth 5 before it is spawned.
 #[tokio::test]
 async fn depth_limit_enforced() {
-    // Alternate endpoints, each wide enough for the two levels on it: every
-    // level holds its slot while the one below works.
+    // Alternate endpoints at the default budget of one: a level waiting on
+    // its call does not hold its slot (BI-6).
     let roster = (1..=5)
         .map(|n| {
             let endpoint = if n % 2 == 1 {
@@ -135,7 +135,7 @@ async fn depth_limit_enforced() {
             Reply::text(format!("level {n} done.")),
         ]
     };
-    let kit = SwarmKit::start_with_budget(
+    let kit = SwarmKit::start(
         roster,
         Script::new()
             .route("kit/1", step(1))
@@ -143,7 +143,6 @@ async fn depth_limit_enforced() {
         Script::new()
             .route("kit/2", step(2))
             .route("kit/4", step(4)),
-        3,
     )
     .await;
 

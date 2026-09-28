@@ -152,35 +152,17 @@ impl SwarmKit {
     /// `sse` and the NDJSON one from `ndjson`. The workspace holds one file,
     /// `README.md` (`# Chatty`).
     pub async fn start(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
-        Self::start_with(roster, sse, ndjson, false, None).await
-    }
-
-    /// As [`start`](Self::start), with every endpoint's budget `budget`
-    /// instead of the default one: a chain deeper than two holds a slot on
-    /// each endpoint per level while its callee works.
-    pub async fn start_with_budget(
-        roster: Vec<AgentDef>,
-        sse: Script,
-        ndjson: Script,
-        budget: usize,
-    ) -> Self {
-        Self::start_with(roster, sse, ndjson, false, Some(budget)).await
+        Self::start_with(roster, sse, ndjson, false).await
     }
 
     /// As [`start`](Self::start), with the workspace a git repository on
     /// `main` whose one commit holds `README.md`, so every worker gets a
     /// `git worktree` of its own (BI-5).
     pub async fn start_in_repo(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
-        Self::start_with(roster, sse, ndjson, true, None).await
+        Self::start_with(roster, sse, ndjson, true).await
     }
 
-    async fn start_with(
-        roster: Vec<AgentDef>,
-        sse: Script,
-        ndjson: Script,
-        repo: bool,
-        budget: Option<usize>,
-    ) -> Self {
+    async fn start_with(roster: Vec<AgentDef>, sse: Script, ndjson: Script, repo: bool) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
         let sse = FakeDaemon::scripted(sse);
@@ -251,13 +233,10 @@ impl SwarmKit {
             )
             .expect("spec file");
         }
-        let mut module_settings = ModuleSettingsModel {
+        let module_settings = ModuleSettingsModel {
             virtual_agents: roster.iter().map(|agent| agent.name.clone()).collect(),
             ..ModuleSettingsModel::default()
         };
-        if let Some(budget) = budget {
-            module_settings.default_endpoint_budget = budget;
-        }
         let execution = ExecutionSettingsModel {
             enabled: true,
             workspace_dir: Some(workspace.to_string_lossy().into_owned()),
