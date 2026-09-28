@@ -764,6 +764,39 @@ pub fn roster_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<Str
     names
 }
 
+/// The workspace a conversation's own roster and the broker's roster must
+/// both resolve from (AGE-719, PL-U5b): the conversation's own working
+/// directory when it has one, else the process's shared default. The
+/// broker (refreshed from the shared default, or the active conversation's
+/// working directory when it has one) and a conversation's own agent build
+/// call this with the same two inputs, so neither can privately pick a
+/// different workspace for the same conversation.
+pub fn roster_workspace<'a>(
+    default_workspace: Option<&'a Path>,
+    conversation_working_dir: Option<&'a Path>,
+) -> Option<&'a Path> {
+    conversation_working_dir.or(default_workspace)
+}
+
+/// Whether a conversation may safely publish the names [`roster_workspace`]
+/// found for it as its `local_agents`.
+///
+/// `broker_is_live` is whether a broker/gateway is actually running right
+/// now; `broker_workspace` is the workspace it was last built to serve
+/// (meaningless when no broker is live). No broker yet means nothing to
+/// disagree with — the roster names are the best guess available until one
+/// starts. Once a broker *is* running, though, its workspace is ground
+/// truth: a conversation whose own resolved workspace does not match it
+/// must not list names the live broker cannot reach (the "Do" section of
+/// AGE-719 — fail loudly rather than list an agent that can't be reached).
+pub fn roster_workspace_matches(
+    conversation_workspace: Option<&Path>,
+    broker_workspace: Option<&Path>,
+    broker_is_live: bool,
+) -> bool {
+    !broker_is_live || conversation_workspace == broker_workspace
+}
+
 /// Every spec a workspace can reach that others may call, in lookup order
 /// and once per name: `local-agent` first (a bare spec unless a spec
 /// directory defines one), then each first definition whose
@@ -1326,5 +1359,132 @@ cap_usd = 2.0
             ]
         );
         assert_eq!(roster[0].agent.preamble.as_deref(), Some("Be brief."));
+    }
+
+    /// AGE-719 (PL-U5b): `roster_workspace` is the one place that picks
+    /// between a conversation's own working directory and the shared
+    /// default — the broker and a conversation's own agent build must call
+    /// it with the same two inputs to ever agree.
+    #[test]
+    fn roster_workspace_prefers_the_conversation_s_own_directory() {
+        let default_ws = Path::new("/default");
+        let conv_ws = Path::new("/conversation-own-dir");
+        assert_eq!(
+            roster_workspace(Some(default_ws), Some(conv_ws)),
+            Some(conv_ws)
+        );
+        assert_eq!(roster_workspace(Some(default_ws), None), Some(default_ws));
+        assert_eq!(roster_workspace(None, None), None);
+    }
+
+    #[test]
+    fn roster_workspace_matches_is_permissive_before_a_broker_exists() {
+        let a = Path::new("/a");
+        let b = Path::new("/b");
+        // No broker running yet: nothing to disagree with.
+        assert!(roster_workspace_matches(Some(a), Some(b), false));
+        assert!(roster_workspace_matches(Some(a), None, false));
+        // A live broker built for a different workspace: disagreement.
+        assert!(!roster_workspace_matches(Some(a), Some(b), true));
+        assert!(!roster_workspace_matches(Some(a), None, true));
+        assert!(!roster_workspace_matches(None, Some(b), true));
+        // A live broker built for the same workspace: agreement.
+        assert!(roster_workspace_matches(Some(a), Some(a), true));
+        assert!(roster_workspace_matches(None, None, true));
+    }
+
+    /// AGE-719 (PL-U5b), test named by the issue: a conversation whose own
+    /// working directory defines a spec the shared/default workspace does
+    /// not lists it — because `roster_workspace` resolves to *its* own
+    /// directory, the same directory `load_roster`/`roster_names` (what the
+    /// broker itself scans from, PL-U5) then reads. Before AGE-719, the
+    /// conversation-build path read the shared default directly and never
+    /// consulted the conversation's own working directory at all, so a
+    /// per-chat spec was invisible to `roster_names` even though a
+    /// conversation whose *default* happened to equal its own directory
+    /// would have found it — i.e., the two paths could read different
+    /// workspaces for the same conversation.
+    #[test]
+    fn per_chat_workspace_specs_are_served() {
+        let default_workspace = tempfile::tempdir().unwrap();
+        let conversation_workspace = tempfile::tempdir().unwrap();
+        let conv_agents_dir = conversation_workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&conv_agents_dir).unwrap();
+        std::fs::write(
+            conv_agents_dir.join("per-chat-agent.toml"),
+            "[agent]\nname = \"per-chat-agent\"\n",
+        )
+        .unwrap();
+
+        // The shared default workspace has no such spec.
+        let default_names = roster_names_from(&[], Some(default_workspace.path()), None);
+        assert!(
+            !default_names.contains(&"per-chat-agent".to_string()),
+            "the default workspace must not see the conversation's own spec: {default_names:?}"
+        );
+
+        // The conversation's own working directory does — resolved through
+        // the one function both the broker and the conversation build call.
+        let resolved = roster_workspace(
+            Some(default_workspace.path()),
+            Some(conversation_workspace.path()),
+        );
+        assert_eq!(resolved, Some(conversation_workspace.path()));
+        let conversation_names = roster_names_from(&[], resolved, None);
+        assert!(
+            conversation_names.contains(&"per-chat-agent".to_string()),
+            "the conversation's own workspace must serve its own spec: {conversation_names:?}"
+        );
+
+        // `invoke_agent` reaches it: `load_roster` (what a real task
+        // dispatch loads the spec from) resolves the same spec by name.
+        let loaded = load_roster_from(&["per-chat-agent".to_string()], resolved, None).unwrap();
+        assert_eq!(names(&loaded), ["per-chat-agent"]);
+    }
+
+    /// AGE-719 (PL-U5b), test named by the issue: two conversations with
+    /// different workspaces each see exactly their own workspace's roster —
+    /// no cross-conversation leakage — and `roster_workspace_matches` is the
+    /// gate that keeps a conversation from listing a name a live broker,
+    /// built for some *other* workspace, does not actually serve.
+    #[test]
+    fn roster_and_list_agree() {
+        let workspace_a = tempfile::tempdir().unwrap();
+        let workspace_b = tempfile::tempdir().unwrap();
+        for (dir, agent_name) in [
+            (workspace_a.path(), "alpha-agent"),
+            (workspace_b.path(), "beta-agent"),
+        ] {
+            let agents_dir = dir.join(WORKSPACE_AGENTS_DIR);
+            std::fs::create_dir_all(&agents_dir).unwrap();
+            std::fs::write(
+                agents_dir.join(format!("{agent_name}.toml")),
+                format!("[agent]\nname = \"{agent_name}\"\n"),
+            )
+            .unwrap();
+        }
+
+        let names_a = roster_names_from(&[], Some(workspace_a.path()), None);
+        let names_b = roster_names_from(&[], Some(workspace_b.path()), None);
+        assert!(names_a.contains(&"alpha-agent".to_string()));
+        assert!(!names_a.contains(&"beta-agent".to_string()));
+        assert!(names_b.contains(&"beta-agent".to_string()));
+        assert!(!names_b.contains(&"alpha-agent".to_string()));
+
+        // Conversation A's own list_agents agrees with a broker actually
+        // built for workspace A ...
+        assert!(roster_workspace_matches(
+            Some(workspace_a.path()),
+            Some(workspace_a.path()),
+            true,
+        ));
+        // ... but must refuse to agree — fail loudly, not silently list an
+        // unreachable agent — against a broker built for workspace B while
+        // conversation A is the one being served.
+        assert!(!roster_workspace_matches(
+            Some(workspace_a.path()),
+            Some(workspace_b.path()),
+            true,
+        ));
     }
 }
