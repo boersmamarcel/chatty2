@@ -18,9 +18,9 @@ use tracing::info;
 use chatty_module_registry::ModuleRegistry;
 use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
 
-use crate::handlers::a2a::{self, Contexts};
+use crate::handlers::a2a;
+use crate::handlers::index;
 use crate::handlers::mcp::{self, SseSessions};
-use crate::handlers::{index, openai};
 use crate::participant::{BrokerCalls, DirectTransport, ParticipantRegistry, VirtualAgent};
 use chatty_fabric::{EdgeLog, Transport};
 
@@ -40,17 +40,14 @@ pub struct GatewayState {
     /// Credit checks are skipped for modules NOT in this set.
     /// An empty set means no paid modules — all credit checks are skipped.
     pub paid_modules: Arc<HashSet<String>>,
-    /// Processes registered over the participant socket (ADR-0011). Shares
-    /// the `/a2a/{name}` namespace with modules and is consulted first.
+    /// Processes registered over the participant socket (ADR-0011), served
+    /// at `/a2a/{name}` and consulted first.
     pub participants: ParticipantRegistry,
     /// The agents that have no participant until a task arrives: each
     /// starts one, routes the task to it, and reaps it (ADR-0011 C2
     /// locally, C8 hosted). Keyed by the name callers address, in name
     /// order so the aggregated card is stable (ADR-0011 C10).
     pub runners: Arc<BTreeMap<String, Arc<dyn VirtualAgent>>>,
-    /// A2A conversation history per `contextId`, so a module's second turn
-    /// sees its first.
-    pub(crate) contexts: Contexts,
     /// Open `GET /mcp/{m}/sse` streams, by session id.
     pub(crate) sse_sessions: SseSessions,
     /// What runs calls over worker connections (BI-4). Held, never read:
@@ -300,7 +297,6 @@ impl ProtocolGateway {
             paid_modules: Arc::new(self.paid_modules.clone()),
             participants: self.participants.clone(),
             runners: Arc::new(self.runners.clone()),
-            contexts: Contexts::default(),
             sse_sessions: SseSessions::default(),
             calls: self.calls(),
             routes: self.routes.clone(),
@@ -311,27 +307,15 @@ impl ProtocolGateway {
             .route("/", get(index::index))
             // ── Aggregated A2A agent card ────────────────────────────────────
             .route("/.well-known/agent.json", get(a2a::aggregated_agent_card))
-            // ── OpenAI-compatible endpoints ──────────────────────────────────
-            .route(
-                "/v1/{module}/chat/completions",
-                post(openai::chat_completions_module),
-            )
-            .route(
-                "/v1/chat/completions",
-                post(openai::chat_completions_routed),
-            )
             // ── MCP endpoints ────────────────────────────────────────────────
             .route("/mcp/{module}", post(mcp::mcp_jsonrpc))
             .route(
                 "/mcp/{module}/sse",
                 get(mcp::mcp_sse).post(mcp::mcp_sse_message),
             )
-            // ── A2A endpoints ────────────────────────────────────────────────
-            .route(
-                "/a2a/{module}/.well-known/agent.json",
-                get(a2a::module_agent_card),
-            )
-            .route("/a2a/{module}", post(a2a::a2a_jsonrpc))
+            // ── A2A endpoints (participants and virtual agents) ──────────────
+            .route("/a2a/{agent}/.well-known/agent.json", get(a2a::agent_card))
+            .route("/a2a/{agent}", post(a2a::a2a_jsonrpc))
             // ── Shared state ─────────────────────────────────────────────────
             .with_state(state)
             // ── Every route ──────────────────────────────────────────────────
@@ -406,7 +390,7 @@ impl ProtocolGateway {
 // Shared utilities available to handler modules
 // ---------------------------------------------------------------------------
 
-/// A fresh random id for tasks, contexts and completions.
+/// A fresh random id for tasks and tool calls.
 pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }

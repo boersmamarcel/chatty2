@@ -82,7 +82,7 @@ crates/hive-billing-sdk/
 │   └── lib.rs                   # Main SDK implementation (12.8 KB)
 ├── tests/
 │   └── jwt_tests.rs             # Integration tests (6.5 KB)
-├── Cargo.toml                   # Dependencies: hmac, sha2, base64, wit-bindgen
+├── Cargo.toml                   # Dependencies: hmac, sha2, base64, chatty-module-sdk
 ├── README.md                    # Comprehensive documentation (7.3 KB)
 └── CHANGELOG.md                 # Version history
 ```
@@ -93,15 +93,16 @@ crates/hive-billing-sdk/
 use chatty_module_sdk::*;
 use hive_billing_sdk::{configure_secret, require_session, report_usage};
 
-fn chat(req: ChatRequest) -> Result<ChatResponse, String> {
+// Inside a plugin's `invoke_tool`:
+fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
     configure_secret(env!("HIVE_JWT_SECRET"));
-    
-    let session = require_session(5000)?;  // Reserve 5K tokens
-    
+
+    let session = require_session(5000).map_err(ToolError::denied)?; // Reserve 5K tokens
+
     // ... do work ...
-    
-    report_usage(&session, actual_input, actual_output)?;
-    Ok(response)
+
+    report_usage(&session, actual_input, actual_output).map_err(ToolError::failed)?;
+    Ok(result)
 }
 ```
 

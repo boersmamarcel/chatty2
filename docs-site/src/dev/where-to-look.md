@@ -38,7 +38,7 @@ flowchart TD
 | [Contribute to the docs](./guides/contribute-docs.md) | Editing this site |
 | [For AI agents](./agents.md) | The workspace map coding agents read first |
 
-Tutorials (learn by building) live under [Start here](./start/build-and-run.md): [your first change](./start/first-change.md), [echo-agent](./start/tutorial-echo-agent.md), [benford-agent](./start/tutorial-benford-agent.md).
+Tutorials (learn by building) live under [Start here](./start/build-and-run.md): [your first change](./start/first-change.md), [write a plugin (echo)](./start/tutorial-echo-agent.md), [give an agent the plugin (benford)](./start/tutorial-benford-agent.md).
 
 ## Cheat sheet
 

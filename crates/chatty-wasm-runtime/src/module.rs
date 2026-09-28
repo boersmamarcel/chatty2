@@ -2,17 +2,19 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::convert::Infallible;
+
 use anyhow::{Context, Result};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, EngineWeak, Store, Trap};
 
-use crate::bindings::Module;
-use crate::bindings::chatty::module::types::{
-    AgentCard, ChatRequest, ChatResponse, ToolDefinition,
+use crate::bindings::PluginWorld;
+use crate::bindings::chatty::plugin::types::ToolDefinition;
+use crate::bindings::exports::chatty::plugin::plugin::{
+    PluginMetadata, ToolCallRequest, ToolResult,
 };
-use crate::error::CallError;
+use crate::error::{CallError, ToolFailure};
 use crate::host::{BillingProvider, LlmProvider, ModuleManifest, ModuleState};
 use crate::limits::{EPOCH_TICK, METADATA_CALL_MS, ResourceLimits};
 
@@ -75,15 +77,15 @@ pub struct InvocationMetrics {
 /// A live component instance: the store and the typed export bindings.
 struct Instance {
     store: Store<ModuleState>,
-    bindings: Module,
+    bindings: PluginWorld,
 }
 
-/// A loaded WASM component module.
+/// A loaded WASM plugin: a component exporting `chatty:plugin/plugin@0.3.0`.
 ///
 /// Every export call runs under the per-call [`ResourceLimits`]: fuel is
 /// refilled and an epoch deadline is set before each call, and the call runs
-/// off the async executor (`spawn_blocking` for `chat` / `invoke_tool`, a
-/// scoped thread for the metadata exports), so a guest trap, panic or memory
+/// off the async executor (`spawn_blocking` for `invoke_tool`, a scoped
+/// thread for the metadata exports), so a guest trap, panic or memory
 /// failure comes back as a [`CallError`] and never takes the host down.
 ///
 /// A call that traps drops its instance; the next call instantiates the
@@ -99,8 +101,6 @@ pub struct WasmModule {
     limits: ResourceLimits,
     /// `None` after a trap, until the next call re-instantiates.
     instance: Option<Instance>,
-    /// Progress channel for the next `chat` (see [`Self::set_progress_sender`]).
-    progress_tx: Option<UnboundedSender<String>>,
     /// Metrics from the most recent invocation.
     last_metrics: Option<InvocationMetrics>,
 }
@@ -216,6 +216,8 @@ impl WasmModule {
         billing_provider: Option<Arc<dyn BillingProvider>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
+        check_world(engine, &component)?;
+
         let mut linker: Linker<ModuleState> = Linker::new(engine);
 
         // Add WASI Preview 2 host implementations first — modules compiled
@@ -223,7 +225,7 @@ impl WasmModule {
         // the host even when they don't actively use them.
         wasmtime_wasi::add_to_linker_sync(&mut linker).context("failed to add WASI to linker")?;
 
-        Module::add_to_linker(&mut linker, |state| state)
+        PluginWorld::add_to_linker(&mut linker, |state| state)
             .context("failed to add host imports to linker")?;
 
         let mut module = Self {
@@ -235,7 +237,6 @@ impl WasmModule {
             billing_provider,
             limits,
             instance: None,
-            progress_tx: None,
             last_metrics: None,
         };
         // Instantiate now so a module that can't instantiate fails to load.
@@ -259,9 +260,9 @@ impl WasmModule {
             .context("failed to set fuel")?;
         store.set_epoch_deadline(epoch_ticks(self.limits.max_execution_ms));
 
-        let bindings = Module::instantiate(&mut store, &self.component, &self.linker)
+        let bindings = PluginWorld::instantiate(&mut store, &self.component, &self.linker)
             .context("failed to instantiate WASM module")?;
-        debug!(module = %self.manifest.name, "WASM module instantiated (chatty:module@0.2.0)");
+        debug!(module = %self.manifest.name, "WASM plugin instantiated ({})", crate::WIT_PACKAGE);
         Ok(Instance { store, bindings })
     }
 
@@ -277,37 +278,30 @@ impl WasmModule {
     }
 
     // -----------------------------------------------------------------------
-    // Progress channel
-    // -----------------------------------------------------------------------
-
-    /// Install a progress sender so module log messages are forwarded as
-    /// real-time progress events during the next `chat()`.
-    pub fn set_progress_sender(&mut self, tx: UnboundedSender<String>) {
-        self.progress_tx = Some(tx);
-    }
-
-    // -----------------------------------------------------------------------
     // Guest export wrappers
     // -----------------------------------------------------------------------
 
-    /// Call the `agent::chat` export under the per-call limits.
+    /// Call `plugin::invoke-tool` under the per-call limits.
     ///
-    /// Returns the chat response, the guest's own error, or a [`CallError`]
-    /// (fuel, deadline, memory, trap, output size).
-    /// Call [`Self::last_invocation_metrics`] after this to get execution metrics.
-    pub async fn chat(&mut self, req: ChatRequest) -> Result<ChatResponse> {
+    /// Returns the tool's result; the guest's own `tool-error` as a
+    /// [`ToolFailure`] (reach it with `err.downcast_ref::<ToolFailure>()`); or a [`CallError`] (fuel,
+    /// deadline, memory, trap, output size). Call
+    /// [`Self::last_invocation_metrics`] after this for execution metrics.
+    pub async fn invoke_tool(&mut self, call: ToolCallRequest) -> Result<ToolResult> {
         let result = self
             .call_blocking(
-                "chat",
-                move |bindings, store| bindings.chatty_module_agent().call_chat(store, &req),
-                chat_response_size,
+                "invoke-tool",
+                move |bindings, store| {
+                    bindings
+                        .chatty_plugin_plugin()
+                        .call_invoke_tool(store, &call)
+                        .map(|result| result.map_err(ToolFailure::from))
+                },
+                tool_result_size,
             )
             .await;
-        // The progress sender belongs to this one chat.
-        self.progress_tx = None;
-
-        if let (Ok(resp), Some(metrics)) = (&result, self.last_metrics.as_mut())
-            && let Some(usage) = &resp.usage
+        if let (Ok(result), Some(metrics)) = (&result, self.last_metrics.as_mut())
+            && let Some(usage) = &result.usage
         {
             metrics.input_tokens = Some(usage.input_tokens);
             metrics.output_tokens = Some(usage.output_tokens);
@@ -315,46 +309,32 @@ impl WasmModule {
         result
     }
 
-    /// Call the `agent::invoke-tool` export under the per-call limits.
-    pub async fn invoke_tool(&mut self, name: &str, args: &str) -> Result<String> {
-        let (name, args) = (name.to_string(), args.to_string());
-        self.call_blocking(
-            "invoke-tool",
-            move |bindings, store| {
-                bindings
-                    .chatty_module_agent()
-                    .call_invoke_tool(store, &name, &args)
-            },
-            String::len,
-        )
-        .await
-    }
-
-    /// Call the `agent::list-tools` export (budget: [`METADATA_CALL_MS`]).
+    /// Call `plugin::list-tools` (budget: [`METADATA_CALL_MS`]).
     pub fn list_tools(&mut self) -> Result<Vec<ToolDefinition>> {
         self.call_metadata(
             "list-tools",
             |bindings, store| {
                 bindings
-                    .chatty_module_agent()
+                    .chatty_plugin_plugin()
                     .call_list_tools(store)
                     .map(Ok)
             },
-            |tools| tools.iter().map(tool_definition_size).sum(),
+            |tools: &Result<Vec<ToolDefinition>, Infallible>| match tools {
+                Ok(tools) => tools.iter().map(tool_definition_size).sum(),
+                Err(never) => match *never {},
+            },
         )
     }
 
-    /// Call the `agent::get-agent-card` export (budget: [`METADATA_CALL_MS`]).
-    pub fn agent_card(&mut self) -> Result<AgentCard> {
+    /// Call `plugin::metadata` (budget: [`METADATA_CALL_MS`]).
+    pub fn metadata(&mut self) -> Result<PluginMetadata> {
         self.call_metadata(
-            "get-agent-card",
-            |bindings, store| {
-                bindings
-                    .chatty_module_agent()
-                    .call_get_agent_card(store)
-                    .map(Ok)
+            "metadata",
+            |bindings, store| bindings.chatty_plugin_plugin().call_metadata(store).map(Ok),
+            |metadata: &Result<PluginMetadata, Infallible>| match metadata {
+                Ok(metadata) => metadata_size(metadata),
+                Err(never) => match *never {},
             },
-            agent_card_size,
         )
     }
 
@@ -367,29 +347,32 @@ impl WasmModule {
             .unwrap_or(0)
     }
 
-    /// Get the metrics from the most recent invocation (chat or invoke_tool).
+    /// Get the metrics from the most recent invocation.
     pub fn last_invocation_metrics(&self) -> Option<InvocationMetrics> {
         self.last_metrics.clone()
     }
 
     /// Run `call` on the blocking pool under the full per-call limits, and
     /// record [`InvocationMetrics`] for it.
-    async fn call_blocking<O: Send + 'static>(
+    async fn call_blocking<O, E>(
         &mut self,
         export: &'static str,
-        call: impl FnOnce(&Module, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, String>>
+        call: impl FnOnce(&PluginWorld, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, E>>
         + Send
         + 'static,
-        size: fn(&O) -> usize,
-    ) -> Result<O> {
+        size: fn(&Result<O, E>) -> usize,
+    ) -> Result<O>
+    where
+        O: Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         let mut instance = self.take_instance()?;
         let limits = self.limits.clone();
-        let progress_tx = self.progress_tx.clone();
         let start = Instant::now();
 
         let joined = tokio::task::spawn_blocking(move || {
             let budget = limits.max_execution_ms;
-            let report = run_export(&mut instance, &limits, budget, progress_tx, call, size);
+            let report = run_export(&mut instance, &limits, budget, call, size);
             (instance, report)
         })
         .await;
@@ -414,20 +397,24 @@ impl WasmModule {
 
     /// Run a metadata export on a scoped thread (off any async executor)
     /// with a [`METADATA_CALL_MS`] budget.
-    fn call_metadata<O: Send>(
+    fn call_metadata<O, E>(
         &mut self,
         export: &'static str,
-        call: impl FnOnce(&Module, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, String>>
+        call: impl FnOnce(&PluginWorld, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, E>>
         + Send,
-        size: fn(&O) -> usize,
-    ) -> Result<O> {
+        size: fn(&Result<O, E>) -> usize,
+    ) -> Result<O>
+    where
+        O: Send,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         let mut instance = self.take_instance()?;
         let limits = &self.limits;
         let budget = METADATA_CALL_MS.min(limits.max_execution_ms);
 
         let joined = std::thread::scope(|scope| {
             scope
-                .spawn(|| run_export(&mut instance, limits, budget, None, call, size))
+                .spawn(|| run_export(&mut instance, limits, budget, call, size))
                 .join()
         });
         let result = match joined {
@@ -443,12 +430,53 @@ impl WasmModule {
     }
 }
 
-/// Flatten a call's outcome into the wrapper's `Result`.
-fn finish<O>(export: &str, result: Result<Result<O, String>>) -> Result<O> {
+/// Refuse a component that does not export `chatty:plugin/plugin@0.3.0`,
+/// naming the world it does target (PL-D1: no older world is adapted).
+fn check_world(engine: &Engine, component: &Component) -> Result<()> {
+    let ty = component.component_type();
+    let exports: Vec<String> = ty
+        .exports(engine)
+        .map(|(name, _)| name.to_string())
+        .collect();
+    if exports.iter().any(|name| name == crate::PLUGIN_EXPORT) {
+        return Ok(());
+    }
+    let found = exports
+        .iter()
+        .find_map(|name| world_package(name))
+        .unwrap_or_else(|| "no chatty world".to_string());
+    anyhow::bail!(
+        "module targets {found}; this chatty supports {} — rebuild it with the current SDK",
+        crate::WIT_PACKAGE
+    )
+}
+
+/// The package an export belongs to, `chatty:module@0.2.0` for
+/// `chatty:module/agent@0.2.0`, when it is a chatty interface.
+fn world_package(export: &str) -> Option<String> {
+    let (package, rest) = export.split_once('/')?;
+    if !package.starts_with("chatty:") {
+        return None;
+    }
+    Some(match rest.split_once('@') {
+        Some((_, version)) => format!("{package}@{version}"),
+        None => package.to_string(),
+    })
+}
+
+/// Flatten a call's outcome into the wrapper's `Result`: the guest's own
+/// error keeps its type (downcast to it), a limit or trap stays a
+/// [`CallError`].
+fn finish<O, E>(export: &str, result: Result<Result<O, E>>) -> Result<O>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     match result {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(message)) => Err(anyhow::anyhow!("agent::{export} returned error: {message}")),
-        Err(e) => Err(e.context(format!("agent::{export} failed"))),
+        Ok(Err(guest)) => {
+            Err(anyhow::Error::new(guest).context(format!("plugin::{export} returned an error")))
+        }
+        Err(e) => Err(e.context(format!("plugin::{export} failed"))),
     }
 }
 
@@ -457,9 +485,9 @@ fn finish<O>(export: &str, result: Result<Result<O, String>>) -> Result<O> {
 // ---------------------------------------------------------------------------
 
 /// What one export call produced.
-struct CallReport<O> {
+struct CallReport<O, E> {
     /// The guest's own `Ok`/`Err`, or why the call failed.
-    result: Result<Result<O, String>>,
+    result: Result<Result<O, E>>,
     /// Fuel used, from this call's own budget.
     fuel_consumed: u64,
     /// The call trapped; the instance must not be entered again.
@@ -474,14 +502,13 @@ fn epoch_ticks(ms: u64) -> u64 {
 /// Refill fuel, arm the epoch deadline and the host-time deadline, run
 /// `call`, then map how it ended. Runs on whatever thread calls it; callers
 /// keep it off async executor threads (WASI's sync bindings `block_on`).
-fn run_export<O>(
+fn run_export<O, E>(
     instance: &mut Instance,
     limits: &ResourceLimits,
     budget_ms: u64,
-    progress_tx: Option<UnboundedSender<String>>,
-    call: impl FnOnce(&Module, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, String>>,
-    size: fn(&O) -> usize,
-) -> CallReport<O> {
+    call: impl FnOnce(&PluginWorld, &mut Store<ModuleState>) -> wasmtime::Result<Result<O, E>>,
+    size: fn(&Result<O, E>) -> usize,
+) -> CallReport<O, E> {
     let store = &mut instance.store;
     if let Err(e) = store.set_fuel(limits.max_fuel) {
         return CallReport {
@@ -497,7 +524,6 @@ fn run_export<O>(
         state.deadline_hit = false;
         state.limiter.memory_denied = false;
         state.stderr.clear();
-        state.progress_tx = progress_tx;
     }
 
     let outcome = call(&instance.bindings, store);
@@ -507,7 +533,6 @@ fn run_export<O>(
         .saturating_sub(store.get_fuel().unwrap_or(0));
     let state = store.data_mut();
     state.deadline = None;
-    state.progress_tx = None;
     let deadline = CallError::DeadlineExceeded {
         max_execution_ms: budget_ms,
     };
@@ -516,10 +541,7 @@ fn run_export<O>(
         Err(err) => (Err(classify_trap(&err, state, limits, budget_ms)), true),
         Ok(_) if state.deadline_hit => (Err(deadline), false),
         Ok(returned) => {
-            let bytes = match &returned {
-                Ok(value) => size(value),
-                Err(message) => message.len(),
-            };
+            let bytes = size(&returned);
             let result = if bytes as u64 > limits.max_output_bytes {
                 Err(CallError::OutputTooLarge {
                     bytes,
@@ -588,34 +610,26 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 // Output sizes (for the per-call output cap)
 // ---------------------------------------------------------------------------
 
-fn chat_response_size(resp: &ChatResponse) -> usize {
-    resp.content.len()
-        + resp
-            .tool_calls
-            .iter()
-            .map(|c| c.id.len() + c.name.len() + c.arguments.len())
-            .sum::<usize>()
+fn tool_result_size(result: &Result<ToolResult, ToolFailure>) -> usize {
+    match result {
+        Ok(result) => result.content.len(),
+        Err(error) => error.message.len(),
+    }
 }
 
 fn tool_definition_size(tool: &ToolDefinition) -> usize {
     tool.name.len() + tool.description.len() + tool.parameters_schema.len()
 }
 
-fn agent_card_size(card: &AgentCard) -> usize {
-    card.name.len()
-        + card.display_name.len()
-        + card.description.len()
-        + card.version.len()
-        + card
-            .skills
+fn metadata_size(metadata: &PluginMetadata) -> usize {
+    metadata.name.len()
+        + metadata.version.len()
+        + metadata.description.len()
+        + metadata
+            .config_keys
             .iter()
-            .map(|s| {
-                s.name.len()
-                    + s.description.len()
-                    + s.examples.iter().map(String::len).sum::<usize>()
-            })
+            .map(|k| k.name.len() + k.description.len())
             .sum::<usize>()
-        + card.tools.iter().map(tool_definition_size).sum::<usize>()
 }
 
 // ---------------------------------------------------------------------------
@@ -625,7 +639,7 @@ fn agent_card_size(card: &AgentCard) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bindings::chatty::module::types::{CompletionResponse, Message};
+    use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
 
     struct MockProvider;
 

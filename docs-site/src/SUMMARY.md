@@ -26,8 +26,8 @@
 
 - [Start here](./dev/start/build-and-run.md)
   - [Your first change: add a tool](./dev/start/first-change.md)
-  - [Tutorial: echo-agent](./dev/start/tutorial-echo-agent.md)
-  - [Tutorial: benford-agent](./dev/start/tutorial-benford-agent.md)
+  - [Tutorial: write a plugin (echo)](./dev/start/tutorial-echo-agent.md)
+  - [Tutorial: give an agent the plugin (benford)](./dev/start/tutorial-benford-agent.md)
 - [How-to](./dev/where-to-look.md)
   - [Add an LLM provider](./dev/guides/add-provider.md)
   - [Add a slash command](./dev/guides/add-slash-command.md)

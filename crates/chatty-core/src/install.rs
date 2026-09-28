@@ -427,8 +427,9 @@ fn build_module_toml(
         ));
     }
 
-    // Capabilities — use Hive manifest if present, otherwise default to
-    // chat + agent since marketplace modules are expected to be usable.
+    // Capabilities — only what the Hive manifest declares. A
+    // `chatty:plugin@0.3.0` plugin has no `chat` (PL-U3), and `module.toml`
+    // refuses the key, so a manifest still carrying it is not copied over.
     if let Some(caps) = manifest.get("capabilities") {
         toml.push_str("\n[capabilities]\n");
         if let Some(tools) = caps.get("tools").and_then(|v| v.as_array()) {
@@ -441,30 +442,21 @@ fn build_module_toml(
                 toml.push_str(&format!("tools = [{}]\n", tool_list.join(", ")));
             }
         }
-        if caps.get("chat").and_then(|v| v.as_bool()).unwrap_or(false) {
-            toml.push_str("chat = true\n");
-        }
         if caps.get("agent").and_then(|v| v.as_bool()).unwrap_or(false) {
             toml.push_str("agent = true\n");
         }
-    } else {
-        // No capabilities declared — assume the module supports chat and
-        // agent mode. The module scanner will validate by loading the WASM.
-        toml.push_str("\n[capabilities]\nchat = true\nagent = true\n");
     }
 
-    // Protocols — use Hive manifest if present, otherwise default to a2a = true
-    // since every chatty-module-sdk module implements the WIT agent interface
-    // which IS the A2A protocol.
+    // Protocols — only what the Hive manifest declares; a plugin is used
+    // through agent specs whatever it says, and served over MCP only when it
+    // asks. `openai_compat` went with `chat` (PL-U3) and is not copied over.
     if let Some(protos) = manifest.get("protocols") {
         toml.push_str("\n[protocols]\n");
-        for key in &["openai_compat", "mcp", "a2a"] {
+        for key in &["mcp", "a2a"] {
             if protos.get(key).and_then(|v| v.as_bool()).unwrap_or(false) {
                 toml.push_str(&format!("{key} = true\n"));
             }
         }
-    } else {
-        toml.push_str("\n[protocols]\na2a = true\n");
     }
 
     // Resources
@@ -661,11 +653,12 @@ mod tests {
         assert!(toml.contains("wasm = \"test-mod.wasm\""));
         // local is default — execution_mode should NOT be written
         assert!(!toml.contains("execution_mode"));
-        // No capabilities in manifest → defaults to chat + agent
-        assert!(toml.contains("chat = true"));
-        assert!(toml.contains("agent = true"));
-        // No protocols in manifest → defaults to a2a = true
-        assert!(toml.contains("a2a = true"));
+        // Nothing declared, nothing written: a plugin is not an agent and
+        // is served over no protocol unless it asks.
+        assert!(!toml.contains("[capabilities]"));
+        assert!(!toml.contains("[protocols]"));
+        chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
+            .expect("the written module.toml parses");
     }
 
     #[test]
@@ -695,10 +688,15 @@ mod tests {
             &manifest,
         );
         assert!(toml.contains("tools = [\"echo\", \"reverse\"]"));
-        assert!(toml.contains("chat = true"));
         assert!(toml.contains("mcp = true"));
         assert!(!toml.contains("a2a = true"));
         assert!(toml.contains("max_memory_mb = 32"));
+        // The 0.2.0 agent-world keys a Hive manifest may still carry are
+        // dropped: `module.toml` refuses them.
+        assert!(!toml.contains("chat"), "{toml}");
+        assert!(!toml.contains("openai_compat"), "{toml}");
+        chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
+            .expect("the written module.toml parses");
     }
 
     #[test]

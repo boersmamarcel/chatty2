@@ -91,7 +91,7 @@ make fmt              # cargo fmt
 make fmt-check        # cargo fmt --check
 make wasm-modules     # build every WASM module and test fixture (needed by tests)
 make wasm-template    # cargo-generate a module from templates/module and build it (needs cargo-generate)
-make test-benford     # benford-agent's own unit tests, on the host target
+make test-benford     # the benford plugin's own unit tests, on the host target
 make lint-module-sdk  # clippy chatty-module-sdk for wasm32-wasip2
 make test-billing-sdk # hive-billing-sdk's tests, on the host target
 make docs-gen         # regenerate docs/generated reference pages
@@ -154,17 +154,14 @@ constrained sandbox or CI runner.
 
 ### WASM module prebuild
 
-`crates/chatty-protocol-gateway/tests/echo_agent_e2e.rs` loads
-`modules/echo-agent/echo_agent.wasm`, which is git-ignored. Build it (once
-per checkout) before running the full test suite; without it those tests
-fail at once with the absolute path they looked at and this command:
+Tests that load real plugins (`echo_plugin_e2e`, the sandbox, registry and
+conformance suites, `plugins_headless`) read them from `target/wasm-fixtures/`,
+which is build output. Build them (once per checkout) before running the full
+test suite; without them those tests fail at once with the path they looked
+at and this command:
 
 ```bash
-make wasm-modules
-# or:
-rustup target add wasm32-wasip2
-cd modules/echo-agent && cargo build --target wasm32-wasip2 --release \
-  && cp target/wasm32-wasip2/release/echo_agent.wasm .
+make wasm-modules   # scripts/build-wasm-fixtures.sh; needs the wasm32-wasip2 target
 ```
 
 ## Running
@@ -262,19 +259,19 @@ examples.
    `--test-threads=1` for an unrelated runner flake — that isn't a
    regression to "fix".
 
-3. **WASM module prebuild.** The `echo_agent_e2e` tests fail immediately,
+3. **WASM plugin prebuild.** The tests that load plugins fail immediately,
    naming the missing path and `make wasm-modules`, if you haven't built
-   the module on this checkout.
+   them on this checkout.
 
 4. **Linux system packages.** GPUI needs a long list of `lib*-dev`
    packages. Run `make setup` (or `scripts/setup-linux.sh`) on a fresh
    machine.
 
 5. **Standalone crates, own lockfiles, wasm32 by default.**
-   `crates/hive-billing-sdk/`, `modules/benford-agent/` and
+   `crates/hive-billing-sdk/`, `modules/benford/` and
    `crates/chatty-module-sdk/` each declare their own `[workspace]` and
    `Cargo.lock` (intentional) — bump their deps in that lockfile, not the
-   root one. `hive-billing-sdk` and `benford-agent` also default to
+   root one. `hive-billing-sdk` and `benford` also default to
    `wasm32-wasip2` via their own `.cargo/config.toml`, which has no libtest
    runner, so `cargo test` there needs an explicit host target:
    `cargo test --manifest-path <crate>/Cargo.toml --target x86_64-unknown-linux-gnu`
@@ -365,8 +362,9 @@ These are only the non-obvious caveats of a headless cloud build VM.
   run `sudo update-alternatives --set cc /usr/bin/gcc` and
   `sudo update-alternatives --set c++ /usr/bin/g++`.
 
-- **`modules/echo-agent/echo_agent.wasm` is git-ignored** and required by
-  some integration tests; run `make wasm-modules` after a fresh checkout.
+- **The WASM fixtures under `target/wasm-fixtures/` are build output** and
+  required by some integration tests; run `make wasm-modules` after a fresh
+  checkout.
 
 - **Disk.** A full `--all-features` test build needs about 16 GiB of
   `target/`; see [`docs/build-disk-usage.md`](docs/build-disk-usage.md)

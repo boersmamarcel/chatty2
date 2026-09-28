@@ -1,4 +1,5 @@
 //! Index handler: `GET /` — JSON listing of all modules and their endpoints.
+//! A plugin is served over MCP only (PL-U3).
 
 use axum::{Json, extract::State, response::IntoResponse};
 use serde_json::{Value, json};
@@ -19,47 +20,24 @@ pub(crate) async fn index(State(state): State<GatewayState>) -> impl IntoRespons
                 .manifest(name)
                 .map(|m| {
                     json!({
-                        "openai_compat": m.protocols.openai_compat,
                         "mcp": m.protocols.mcp,
-                        "a2a": m.protocols.a2a,
                     })
                 })
                 .unwrap_or(json!({}));
 
             let mut endpoints = Vec::<Value>::new();
 
-            if let Some(manifest) = reg.manifest(name) {
-                if manifest.protocols.openai_compat {
-                    endpoints.push(json!({
-                        "method": "POST",
-                        "path": format!("/v1/{}/chat/completions", name),
-                        "description": "OpenAI-compatible chat completion"
-                    }));
-                }
-                if manifest.protocols.mcp {
-                    endpoints.push(json!({
-                        "method": "POST",
-                        "path": format!("/mcp/{}", name),
-                        "description": "MCP JSON-RPC (tools/list, tools/call)"
-                    }));
-                    endpoints.push(json!({
-                        "method": "GET",
-                        "path": format!("/mcp/{}/sse", name),
-                        "description": "MCP SSE transport"
-                    }));
-                }
-                if manifest.protocols.a2a {
-                    endpoints.push(json!({
-                        "method": "GET",
-                        "path": format!("/a2a/{}/.well-known/agent.json", name),
-                        "description": "A2A agent card"
-                    }));
-                    endpoints.push(json!({
-                        "method": "POST",
-                        "path": format!("/a2a/{}", name),
-                        "description": "A2A JSON-RPC (message/send, tasks/get)"
-                    }));
-                }
+            if reg.manifest(name).is_some_and(|m| m.protocols.mcp) {
+                endpoints.push(json!({
+                    "method": "POST",
+                    "path": format!("/mcp/{}", name),
+                    "description": "MCP JSON-RPC (tools/list, tools/call)"
+                }));
+                endpoints.push(json!({
+                    "method": "GET",
+                    "path": format!("/mcp/{}/sse", name),
+                    "description": "MCP SSE transport"
+                }));
             }
 
             json!({
@@ -74,8 +52,7 @@ pub(crate) async fn index(State(state): State<GatewayState>) -> impl IntoRespons
         "gateway": "chatty-protocol-gateway",
         "modules": modules,
         "global_endpoints": [
-            { "method": "GET", "path": "/.well-known/agent.json", "description": "Aggregated A2A agent card" },
-            { "method": "POST", "path": "/v1/chat/completions", "description": "OpenAI-compatible chat completion (model-routed via module:{name})" },
+            { "method": "GET", "path": "/.well-known/agent.json", "description": "Aggregated A2A agent card (participants and virtual agents)" },
         ]
     }))
 }

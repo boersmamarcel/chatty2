@@ -1,5 +1,6 @@
-//! `chatty-protocol-gateway` — HTTP server exposing WASM modules via OpenAI,
-//! MCP, and A2A protocols simultaneously.
+//! `chatty-protocol-gateway` — HTTP server exposing WASM plugins' tools over
+//! MCP, and the broker's agents (local participants and virtual agents) over
+//! A2A.
 //!
 //! # Routes
 //!
@@ -7,21 +8,21 @@
 //! |--------|------|-------------|
 //! | `GET`  | `/` | JSON list of modules and endpoints |
 //! | `GET`  | `/.well-known/agent.json` | Aggregated A2A agent card |
-//! | `POST` | `/v1/{module}/chat/completions` | OpenAI-compatible chat completion |
-//! | `POST` | `/v1/chat/completions` | Routes by model field (`module:{name}`) |
 //! | `POST` | `/mcp/{module}` | MCP JSON-RPC (`tools/list`, `tools/call`) |
 //! | `GET`  | `/mcp/{module}/sse` | MCP SSE transport: opens the event stream |
 //! | `POST` | `/mcp/{module}/sse?sessionId=…` | MCP SSE transport: a client message |
-//! | `GET`  | `/a2a/{module}/.well-known/agent.json` | Per-module A2A agent card |
-//! | `POST` | `/a2a/{module}` | A2A JSON-RPC (`message/send`, `tasks/get`) |
+//! | `GET`  | `/a2a/{agent}/.well-known/agent.json` | Per-agent A2A card |
+//! | `POST` | `/a2a/{agent}` | A2A JSON-RPC (`message/send`, `message/stream`, `tasks/get`) |
 //!
-//! A module is served only on the protocols its `[protocols]` table enables;
-//! the others answer 404 for it. Every route refuses a non-loopback `Host` or
-//! `Origin` (DNS rebinding) and a body over [`MAX_REQUEST_BYTES`].
+//! A `chatty:plugin@0.3.0` plugin contributes tools and never runs a loop of
+//! its own (PL-D1 option B), so it is served over MCP only, and only when its
+//! `[protocols] mcp` flag is set; otherwise it answers 404. There is no
+//! OpenAI route and no module A2A route (PL-U3). Every route refuses a
+//! non-loopback `Host` or `Origin` (DNS rebinding) and a body over
+//! [`MAX_REQUEST_BYTES`].
 //!
-//! `{module}` also resolves a *local participant* — a process registered
-//! over the participant socket (see [`participant`]). Participants are
-//! looked up first, so a live process shadows a module of the same name.
+//! `{agent}` resolves a *local participant* — a process registered over the
+//! participant socket (see [`participant`]) — or a virtual agent.
 //!
 //! # Quick start
 //!

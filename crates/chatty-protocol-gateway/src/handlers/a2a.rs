@@ -1,14 +1,17 @@
 //! A2A (Agent-to-Agent) protocol handlers.
 //!
+//! The agents served here are local participants and virtual agents (the
+//! broker's workers). A WASM plugin is never an agent (`chatty:plugin@0.3.0`
+//! has no `chat` export, PL-U3), so no module is served over A2A; a module
+//! whose registry metadata says `remote` is still forwarded to the Hive
+//! runner until PL-H8b removes that path.
+//!
 //! Routes:
-//! - `GET  /a2a/{module}/.well-known/agent.json` — per-module agent card
-//! - `POST /a2a/{module}` — A2A JSON-RPC (`message/send`, `message/stream`,
+//! - `GET  /a2a/{agent}/.well-known/agent.json` — per-agent card
+//! - `POST /a2a/{agent}` — A2A JSON-RPC (`message/send`, `message/stream`,
 //!   `tasks/get`); a `message/send` whose `message.taskId` names a task
 //!   parked in `input-required` answers it instead of starting a new one
 //! - `GET  /.well-known/agent.json` — aggregated gateway agent card
-
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 
 use axum::{
     Json,
@@ -20,7 +23,6 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use chatty_wasm_runtime::{AgentCard, ChatRequest, Message, Role};
 use serde_json::{Value, json};
 
 use crate::gateway::GatewayState;
@@ -30,16 +32,14 @@ use chatty_fabric::AgentOrigin;
 use super::a2a_participant;
 use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
-    json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
+    json_rpc_error, module_not_found, module_not_found_json,
 };
-use super::module_call::{self, Protocol};
-use super::openai::should_route_remotely;
 
 // ---------------------------------------------------------------------------
-// Handler: GET /a2a/{module}/.well-known/agent.json
+// Handler: GET /a2a/{agent}/.well-known/agent.json
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn module_agent_card(
+pub(crate) async fn agent_card(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
 ) -> impl IntoResponse {
@@ -58,18 +58,7 @@ pub(crate) async fn module_agent_card(
             .into_response();
     }
 
-    let Some(module) = module_call::module_for(&state, &module_name, Protocol::A2a).await else {
-        return module_not_found_json(&module_name);
-    };
-
-    match module_call::blocking(module, |m| m.agent_card()).await {
-        Ok(card) => (StatusCode::OK, Json(agent_card_to_json(&card))).into_response(),
-        Err(e) => (
-            module_call::failure_status(&e),
-            Json(json!({ "error": format!("{e:#}") })),
-        )
-            .into_response(),
-    }
+    module_not_found_json(&module_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -78,29 +67,13 @@ pub(crate) async fn module_agent_card(
 
 pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> impl IntoResponse {
     state.routes.count_directory();
-    // Only the modules served over A2A are agents of this gateway.
-    let modules: Vec<_> = {
-        let reg = state.registry.read().await;
-        reg.module_names()
-            .filter(|name| reg.manifest(name).is_some_and(|m| m.protocols.a2a))
-            .filter_map(|name| reg.get(name))
-            .collect()
-    };
-
     let mut agents: Vec<Value> = Vec::new();
 
     // Every agent on this card says where it came from (ADR-0011 C5): a
     // caller cannot tell a child process from a third-party URL by name
-    // alone, and the broker is the only thing that knows.
-    for module in modules {
-        if let Ok(card) = module_call::blocking(module, |m| m.agent_card()).await {
-            agents.push(with_origin(agent_card_to_json(&card), AgentOrigin::Local));
-        }
-    }
-
-    // Registered processes are agents of this gateway too (ADR-0011); a
-    // caller reading the aggregated card should see everything it can
-    // address, not only what happens to be a WASM module.
+    // alone, and the broker is the only thing that knows. Registered
+    // processes are agents of this gateway (ADR-0011); a WASM plugin never
+    // is (PL-U3).
     for agent in state.participants.agents() {
         agents.push(with_origin(
             a2a_participant::card_to_json(&agent.card),
@@ -137,6 +110,34 @@ fn with_origin(mut card: Value, origin: AgentOrigin) -> Value {
         object.insert("origin".to_string(), json!(origin.as_str()));
     }
     card
+}
+
+/// Returns true when the module's registry metadata says it should run on
+/// the remote runner (`execution_mode` ∈ {`remote`, `remote_only`}).
+/// Falls back to local on errors / when no hive_client is configured.
+async fn should_route_remotely(module_name: &str, state: &GatewayState) -> bool {
+    let Some(ref hive_client) = state.hive_client else {
+        return false;
+    };
+    match hive_client.get_module(module_name).await {
+        Ok(metadata) => {
+            let exec_mode = metadata.execution_mode.as_str();
+            tracing::debug!(
+                module = module_name,
+                execution_mode = exec_mode,
+                "Checked module execution mode"
+            );
+            matches!(exec_mode, "remote" | "remote_only")
+        }
+        Err(e) => {
+            tracing::warn!(
+                module = module_name,
+                error = %e,
+                "Failed to fetch module metadata, assuming local execution"
+            );
+            false
+        }
+    }
 }
 
 async fn forward_remote_a2a_jsonrpc(
@@ -262,7 +263,7 @@ pub(crate) async fn a2a_jsonrpc(
 }
 
 // ---------------------------------------------------------------------------
-// message/send: forward to module's chat export
+// message/send: route to a participant, a virtual agent or the remote runner
 // ---------------------------------------------------------------------------
 
 async fn handle_message_send(
@@ -321,8 +322,7 @@ async fn handle_message_send(
     }
 
     // Remote routing: if the registry says this module is `remote`/`remote_only`,
-    // forward to the hive-runner's A2A endpoint so the remote execution keeps
-    // the same JSON-RPC shape as local module execution.
+    // forward to the hive-runner's A2A endpoint (removed by PL-H8b).
     if should_route_remotely(module_name, state).await {
         tracing::info!(module = module_name, "A2A: routing to remote runner");
         return match forward_remote_a2a_jsonrpc(
@@ -350,49 +350,7 @@ async fn handle_message_send(
         };
     }
 
-    let Some(module) = module_call::module_for(state, module_name, Protocol::A2a).await else {
-        return module_not_found(id, module_name);
-    };
-
-    // Pre-invocation credit check
-    if let Err(e) = module_call::check_credits(state, module_name).await {
-        return json_rpc_error(StatusCode::OK, id, -32000, e);
-    }
-    if let Err(e) = module_call::check_usage_reporting(state, module_name) {
-        return json_rpc_error(StatusCode::OK, id, -32000, e);
-    }
-
-    let turn = Turn::new(module_name, &params, content, &state.contexts);
-    let mut module = module.lock().await;
-    let result = module.chat(turn.request()).await;
-    let metrics = module.last_invocation_metrics();
-    drop(module);
-
-    match result {
-        Ok(resp) => {
-            module_call::record_usage(state, module_name, metrics);
-            let context_id = turn.context_id.clone();
-            turn.record(&resp.content);
-
-            json_rpc_ok(
-                id,
-                json!({
-                    "id": format!("task-{}", crate::gateway::new_id()),
-                    "contextId": context_id,
-                    "status": { "state": "completed" },
-                    "artifacts": [{
-                        "parts": [{ "type": "text", "text": resp.content }]
-                    }]
-                }),
-            )
-        }
-        Err(e) => json_rpc_error(
-            module_call::failure_status(&e),
-            id,
-            INTERNAL_ERROR,
-            format!("{e:#}"),
-        ),
-    }
+    module_not_found(id, module_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,9 +400,8 @@ async fn handle_message_stream(
     let task_id = format!("task-{}", crate::gateway::new_id());
     let module_name = module_name.to_string();
 
-    // Remote routing check must come BEFORE registry lookup — remote modules
-    // are not loaded into the local WASM registry (no binary), so checking the
-    // registry first would return 404 for them.
+    // Remote modules are not loaded into the local WASM registry (no
+    // binary); they are forwarded to the Hive runner (removed by PL-H8b).
     if should_route_remotely(&module_name, state).await {
         tracing::info!(module = %module_name, "A2A stream: routing to remote runner");
         return match forward_remote_a2a_jsonrpc(
@@ -483,213 +440,7 @@ async fn handle_message_stream(
         };
     }
 
-    let Some(module) = module_call::module_for(state, &module_name, Protocol::A2a).await else {
-        return module_not_found(id, &module_name);
-    };
-    if let Err(e) = module_call::check_credits(state, &module_name).await {
-        return json_rpc_error(StatusCode::OK, id, -32000, e);
-    }
-    if let Err(e) = module_call::check_usage_reporting(state, &module_name) {
-        return json_rpc_error(StatusCode::OK, id, -32000, e);
-    }
-
-    let turn = Turn::new(&module_name, &params, content, &state.contexts);
-    let context_id = turn.context_id.clone();
-
-    // Module log lines, forwarded as `working` progress while the call runs.
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    // The call runs in a task of its own, so a caller that disconnects does
-    // not cancel it: it runs to its end (bounded by the per-call deadline),
-    // records its turn, and releases the module (S3 row 3.9).
-    let mut chat_handle = tokio::spawn({
-        let state = state.clone();
-        let module_name = module_name.clone();
-        async move {
-            let mut module = module.lock_owned().await;
-            module.set_progress_sender(progress_tx);
-            let result = module.chat(turn.request()).await;
-            let metrics = module.last_invocation_metrics();
-            drop(module);
-            if let Ok(resp) = &result {
-                module_call::record_usage(&state, &module_name, metrics);
-                turn.record(&resp.content);
-            }
-            result
-        }
-    });
-
-    let event = move |result: Value| {
-        let mut result = result;
-        if let Some(object) = result.as_object_mut() {
-            object.insert("id".into(), json!(task_id));
-            object.insert("contextId".into(), json!(context_id));
-        }
-        let frame = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-        Ok::<_, std::convert::Infallible>(Event::default().data(frame.to_string()))
-    };
-    let working = |message: Option<&str>| match message {
-        None => json!({ "status": { "state": "working" }, "final": false }),
-        Some(text) => json!({
-            "status": {
-                "state": "working",
-                "message": { "parts": [{ "type": "text", "text": text }] }
-            },
-            "final": false
-        }),
-    };
-    let failed = |text: String| {
-        json!({
-            "status": {
-                "state": "failed",
-                "message": { "parts": [{ "type": "text", "text": text }] }
-            },
-            "final": true
-        })
-    };
-
-    let stream = async_stream::stream! {
-        yield event(working(None));
-
-        // Progress first (biased), until the call returns.
-        let joined = loop {
-            tokio::select! {
-                biased;
-                Some(line) = progress_rx.recv() => yield event(working(Some(&line))),
-                joined = &mut chat_handle => break joined,
-            }
-        };
-        while let Ok(line) = progress_rx.try_recv() {
-            yield event(working(Some(&line)));
-        }
-
-        match joined {
-            Ok(Ok(resp)) => {
-                yield event(json!({
-                    "artifact": {
-                        "parts": [{ "type": "text", "text": resp.content }],
-                        "index": 0,
-                        "lastChunk": true
-                    }
-                }));
-                yield event(json!({ "status": { "state": "completed" }, "final": true }));
-            }
-            Ok(Err(e)) => yield event(failed(format!("{e:#}"))),
-            Err(e) => yield event(failed(format!("Task panicked: {e}"))),
-        }
-    };
-
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// Conversation history per A2A context
-// ---------------------------------------------------------------------------
-
-/// How many contexts the gateway remembers; the oldest is forgotten first.
-const MAX_CONTEXTS: usize = 1024;
-/// How many messages one context keeps; the oldest are dropped first.
-const MAX_CONTEXT_MESSAGES: usize = 256;
-
-/// A2A conversation history, per module and `contextId`: what a module has
-/// been told and answered in a context, replayed in front of the context's
-/// next message. Bounded in contexts and in messages per context.
-#[derive(Clone, Default)]
-pub(crate) struct Contexts(Arc<Mutex<ContextMap>>);
-
-#[derive(Default)]
-struct ContextMap {
-    turns: HashMap<(String, String), Vec<Message>>,
-    /// Keys in first-seen order, for eviction.
-    order: VecDeque<(String, String)>,
-}
-
-impl Contexts {
-    fn history(&self, module: &str, context_id: &str) -> Vec<Message> {
-        self.lock()
-            .turns
-            .get(&(module.to_string(), context_id.to_string()))
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    fn record(&self, module: &str, context_id: &str, user: Message, reply: &str) {
-        let key = (module.to_string(), context_id.to_string());
-        let mut map = self.lock();
-        if !map.turns.contains_key(&key) {
-            map.order.push_back(key.clone());
-            while map.order.len() > MAX_CONTEXTS {
-                if let Some(oldest) = map.order.pop_front() {
-                    map.turns.remove(&oldest);
-                }
-            }
-        }
-        let messages = map.turns.entry(key).or_default();
-        messages.push(user);
-        messages.push(Message {
-            role: Role::Assistant,
-            content: reply.to_string(),
-        });
-        let excess = messages.len().saturating_sub(MAX_CONTEXT_MESSAGES);
-        messages.drain(..excess);
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ContextMap> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-/// One A2A turn against a module: the context it belongs to, the new user
-/// message, and the history in front of it.
-struct Turn {
-    module: String,
-    context_id: String,
-    user: Message,
-    history: Vec<Message>,
-    contexts: Contexts,
-}
-
-impl Turn {
-    /// The turn for `params`. A message without a `contextId` starts a new
-    /// context, whose id the answer carries so the caller can continue it.
-    fn new(module: &str, params: &Value, content: String, contexts: &Contexts) -> Self {
-        let context_id = params
-            .pointer("/message/contextId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(crate::gateway::new_id);
-        Self {
-            module: module.to_string(),
-            history: contexts.history(module, &context_id),
-            context_id,
-            user: Message {
-                role: Role::User,
-                content,
-            },
-            contexts: contexts.clone(),
-        }
-    }
-
-    /// The guest's request: the context's history, then this message.
-    fn request(&self) -> ChatRequest {
-        let mut messages = self.history.clone();
-        messages.push(self.user.clone());
-        ChatRequest {
-            messages,
-            conversation_id: self.context_id.clone(),
-        }
-    }
-
-    /// Remember this turn and the module's reply in the context.
-    fn record(self, reply: &str) {
-        self.contexts
-            .record(&self.module, &self.context_id, self.user, reply);
-    }
+    module_not_found(id, &module_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -770,33 +521,4 @@ fn prompt_text(params: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Helper: serialize an AgentCard to JSON
-// ---------------------------------------------------------------------------
-
-pub(crate) fn agent_card_to_json(card: &AgentCard) -> Value {
-    let skills: Vec<Value> = card
-        .skills
-        .iter()
-        .map(|s| {
-            json!({
-                "name": s.name,
-                "description": s.description,
-                "examples": s.examples,
-            })
-        })
-        .collect();
-
-    json!({
-        "name": card.name,
-        "displayName": card.display_name,
-        "description": card.description,
-        "version": card.version,
-        "skills": skills,
-        "capabilities": {
-            "streaming": true
-        },
-    })
 }

@@ -5,7 +5,6 @@ use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, trace, warn};
 use wasmtime::{ResourceLimiter, StoreLimits};
 use wasmtime_wasi::{
@@ -13,8 +12,8 @@ use wasmtime_wasi::{
     WasiCtxBuilder, WasiView,
 };
 
-use crate::bindings::chatty::module::billing::SessionInfo;
-use crate::bindings::chatty::module::types::{CompletionResponse, Message};
+use crate::bindings::chatty::plugin::billing::SessionInfo;
+use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
 use crate::limits::{MAX_FILE_READ_BYTES, ResourceLimits};
 
 // ---------------------------------------------------------------------------
@@ -56,7 +55,7 @@ pub trait LlmProvider: Send + Sync {
 /// ```rust,ignore
 /// use std::sync::Arc;
 /// use chatty_wasm_runtime::BillingProvider;
-/// use chatty_wasm_runtime::bindings::chatty::module::billing::SessionInfo;
+/// use chatty_wasm_runtime::SessionInfo;
 ///
 /// struct HiveBillingProvider {
 ///     hive_client: Arc<hive_client::HiveRegistryClient>,
@@ -202,8 +201,6 @@ pub(crate) struct ModuleState {
     pub(crate) wasi_ctx: WasiCtx,
     /// WASI resource table for tracking guest resources.
     pub(crate) table: ResourceTable,
-    /// Optional channel for streaming progress events to the gateway.
-    pub(crate) progress_tx: Option<UnboundedSender<String>>,
 }
 
 impl ModuleState {
@@ -234,7 +231,6 @@ impl ModuleState {
             billing_provider,
             wasi_ctx,
             table,
-            progress_tx: None,
         }
     }
 
@@ -432,9 +428,9 @@ unsafe impl Sync for ModuleState {}
 
 // The `types` interface only exports shared type definitions — no functions.
 // Wasmtime's bindgen! still requires an empty `Host` impl.
-impl crate::bindings::chatty::module::types::Host for ModuleState {}
+impl crate::bindings::chatty::plugin::types::Host for ModuleState {}
 
-impl crate::bindings::chatty::module::llm::Host for ModuleState {
+impl crate::bindings::chatty::plugin::llm::Host for ModuleState {
     fn complete(
         &mut self,
         model: String,
@@ -459,7 +455,7 @@ impl crate::bindings::chatty::module::llm::Host for ModuleState {
     }
 }
 
-impl crate::bindings::chatty::module::config::Host for ModuleState {
+impl crate::bindings::chatty::plugin::config::Host for ModuleState {
     fn get(&mut self, key: String) -> Option<String> {
         let value = self.manifest.get_config(&key);
         debug!(
@@ -472,7 +468,7 @@ impl crate::bindings::chatty::module::config::Host for ModuleState {
     }
 }
 
-impl crate::bindings::chatty::module::logging::Host for ModuleState {
+impl crate::bindings::chatty::plugin::logging::Host for ModuleState {
     fn log(&mut self, level: String, message: String) {
         let module = &self.manifest.name;
         match level.as_str() {
@@ -483,14 +479,10 @@ impl crate::bindings::chatty::module::logging::Host for ModuleState {
             "error" => error!(module = %module, "{}", message),
             other => info!(module = %module, level = %other, "{}", message),
         }
-        // Forward to progress channel for real-time streaming
-        if let Some(ref tx) = self.progress_tx {
-            let _ = tx.send(message);
-        }
     }
 }
 
-impl crate::bindings::chatty::module::billing::Host for ModuleState {
+impl crate::bindings::chatty::plugin::billing::Host for ModuleState {
     fn acquire_session(&mut self, estimated_tokens: i64) -> Result<SessionInfo, String> {
         debug!(
             module = %self.manifest.name,
@@ -543,7 +535,7 @@ impl crate::bindings::chatty::module::billing::Host for ModuleState {
     }
 }
 
-impl crate::bindings::chatty::module::file::Host for ModuleState {
+impl crate::bindings::chatty::plugin::file::Host for ModuleState {
     fn read_bytes(&mut self, path: String) -> Result<Vec<u8>, String> {
         let root = self.manifest.weights_root.clone().ok_or_else(|| {
             "file::read_bytes: this module was granted no file root ([files] root)".to_string()
@@ -711,7 +703,7 @@ mod tests {
 
     #[test]
     fn config_host_returns_value() {
-        use crate::bindings::chatty::module::config::Host;
+        use crate::bindings::chatty::plugin::config::Host;
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider {
             response: String::new(),
         });
@@ -729,14 +721,16 @@ mod tests {
 
     #[test]
     fn llm_host_routes_to_provider() {
-        use crate::bindings::chatty::module::llm::Host;
+        use crate::bindings::chatty::plugin::llm::Host;
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider {
             response: "!".to_string(),
         });
         let mut state = make_state(provider);
         let messages = vec![Message {
-            role: crate::bindings::chatty::module::types::Role::User,
+            role: crate::bindings::chatty::plugin::types::Role::User,
             content: "hello".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
         }];
         let result = state.complete("gpt-4".to_string(), messages, None);
         let resp = result.unwrap();
@@ -746,7 +740,7 @@ mod tests {
 
     #[test]
     fn llm_host_propagates_provider_error() {
-        use crate::bindings::chatty::module::llm::Host;
+        use crate::bindings::chatty::plugin::llm::Host;
         let provider: Arc<dyn LlmProvider> = Arc::new(ErrorProvider);
         let mut state = make_state(provider);
         let result = state.complete("gpt-4".to_string(), vec![], None);
@@ -783,7 +777,7 @@ mod tests {
 
     #[test]
     fn llm_host_stops_waiting_at_the_call_deadline() {
-        use crate::bindings::chatty::module::llm::Host;
+        use crate::bindings::chatty::plugin::llm::Host;
         let slow = std::time::Duration::from_secs(5);
         let mut state = make_state(Arc::new(SlowProvider(slow)));
         state.deadline = Some(Instant::now() + std::time::Duration::from_millis(100));
@@ -801,7 +795,7 @@ mod tests {
 
     #[test]
     fn llm_host_maps_a_provider_panic_to_an_error() {
-        use crate::bindings::chatty::module::llm::Host;
+        use crate::bindings::chatty::plugin::llm::Host;
         let mut state = make_state(Arc::new(PanickingProvider));
         state.deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
         let err = state.complete("m".to_string(), vec![], None).unwrap_err();
@@ -811,7 +805,7 @@ mod tests {
 
     #[test]
     fn logging_host_does_not_panic() {
-        use crate::bindings::chatty::module::logging::Host;
+        use crate::bindings::chatty::plugin::logging::Host;
         let provider: Arc<dyn LlmProvider> = Arc::new(EchoProvider {
             response: String::new(),
         });
@@ -911,7 +905,7 @@ mod tests {
 
     #[test]
     fn a_weights_root_config_key_grants_no_files() {
-        use crate::bindings::chatty::module::file::Host;
+        use crate::bindings::chatty::plugin::file::Host;
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("a.bin"), b"x").unwrap();
         let provider: Arc<dyn LlmProvider> = Arc::new(ErrorProvider);

@@ -5,9 +5,7 @@ description = "Adversarial test fixture: config-reader"
 wasm = "config-reader.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["get"]
 
 [config]
 greeting = "hello from module.toml"

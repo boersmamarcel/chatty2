@@ -57,3 +57,44 @@ impl fmt::Display for CallError {
 }
 
 impl std::error::Error for CallError {}
+
+use crate::bindings::exports::chatty::plugin::plugin::{ToolError, ToolErrorKind};
+
+impl ToolErrorKind {
+    /// The kind's WIT name (`unknown-tool`, `invalid-arguments`, …).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "unknown-tool",
+            Self::InvalidArguments => "invalid-arguments",
+            Self::Denied => "denied",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// A tool call the guest itself failed (its `tool-error`). Reach it from
+/// [`WasmModule::invoke_tool`](crate::WasmModule::invoke_tool)'s error with
+/// `err.downcast_ref::<ToolFailure>()`. `Display` is `<kind>: <message>`,
+/// which is what a model reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolFailure {
+    pub kind: ToolErrorKind,
+    pub message: String,
+}
+
+impl From<ToolError> for ToolFailure {
+    fn from(error: ToolError) -> Self {
+        Self {
+            kind: error.kind,
+            message: error.message,
+        }
+    }
+}
+
+impl fmt::Display for ToolFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.kind.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for ToolFailure {}

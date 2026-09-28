@@ -34,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chatty_module_registry::ModuleManifest;
-use chatty_wasm_runtime::{Engine, LlmProvider, ResourceLimits, WasmModule};
+use chatty_wasm_runtime::{Engine, LlmProvider, ResourceLimits, ToolCallRequest, WasmModule};
 use rig_agent::tool::{DynamicTool, ToolOutput};
 use tokio::sync::Mutex;
 
@@ -413,10 +413,21 @@ impl PluginTool {
                 ));
             }
         }
+        let call = ToolCallRequest {
+            name: self.def.tool.clone(),
+            arguments_json: args,
+            // rig hands a dynamic tool no call id; the guest gets a fresh one.
+            call_id: uuid::Uuid::new_v4().to_string(),
+            caller: None,
+        };
         let mut module = self.module.lock().await;
+        // `ToolResult.usage` is the guest's own account of what it spent
+        // through `llm::complete`; the host already counted each of those
+        // calls in the plugin's `PluginUsage`, so it is not added again.
         module
-            .invoke_tool(&self.def.tool, &args)
+            .invoke_tool(call)
             .await
+            .map(|result| result.content)
             .map_err(|e| ToolError::OperationFailed(format!("{e:#}")))
     }
 
@@ -470,7 +481,7 @@ mod tests {
     /// `target/wasm-fixtures`: one directory per staged module, each with
     /// its own `module.toml` — a module directory as a host has one.
     fn fixtures_root() -> PathBuf {
-        fixture_path("echo-agent")
+        fixture_path("echo")
             .parent()
             .and_then(|dir| dir.parent())
             .expect("fixtures live in target/wasm-fixtures/<name>/")
@@ -519,10 +530,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn plugin_with_a_tampered_install_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("echo-agent");
+        let dir = root.path().join("echo");
         std::fs::create_dir_all(&dir).unwrap();
-        let staged = fixture_path("echo-agent").parent().unwrap().to_path_buf();
-        for file in ["echo-agent.wasm", "module.toml"] {
+        let staged = fixture_path("echo").parent().unwrap().to_path_buf();
+        for file in ["echo.wasm", "module.toml"] {
             std::fs::copy(staged.join(file), dir.join(file)).unwrap();
         }
         chatty_module_registry::InstallRecord::new(
@@ -536,14 +547,10 @@ mod tests {
             module_roots: vec![root.path().to_path_buf()],
             ..PluginHost::default()
         };
-        let err = load_plugins(
-            &[plugin("echo-agent")],
-            &host,
-            &model(ProviderType::Ollama, "m"),
-        )
-        .await
-        .err()
-        .expect("a tampered plugin must not load");
+        let err = load_plugins(&[plugin("echo")], &host, &model(ProviderType::Ollama, "m"))
+            .await
+            .err()
+            .expect("a tampered plugin must not load");
         assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
     }
 
@@ -554,16 +561,16 @@ mod tests {
     /// is only the display name.
     #[test]
     fn plugin_tool_names_are_legal_on_every_provider() {
-        let name = plugin_tool_name("echo-agent", "reverse");
-        assert_eq!(name, "echo-agent__reverse");
+        let name = plugin_tool_name("echo", "reverse");
+        assert_eq!(name, "echo__reverse");
         assert!(is_provider_tool_name(&name));
-        assert!(!is_provider_tool_name("echo-agent.reverse"));
+        assert!(!is_provider_tool_name("echo.reverse"));
         assert!(!is_provider_tool_name(""));
         assert!(!is_provider_tool_name(&"a".repeat(MAX_TOOL_NAME_LEN + 1)));
         assert!(is_provider_tool_name(&"a".repeat(MAX_TOOL_NAME_LEN)));
         assert_eq!(
             plugin_tool_display_name(&name).as_deref(),
-            Some("echo-agent.reverse")
+            Some("echo.reverse")
         );
         assert_eq!(plugin_tool_display_name("read_file"), None);
 
@@ -572,7 +579,7 @@ mod tests {
             description: String::new(),
             parameters_schema: String::new(),
         };
-        let err = tool_def("echo-agent", too_long).unwrap_err().to_string();
+        let err = tool_def("echo", too_long).unwrap_err().to_string();
         assert!(err.contains("not a legal tool name"), "{err}");
     }
 
@@ -620,17 +627,10 @@ mod tests {
     /// its `reverse` tool runs in-process.
     #[tokio::test(flavor = "multi_thread")]
     async fn echo_plugin_reverse_runs_in_process() {
-        let echo = load_one(plugin("echo-agent")).await.expect("echo loads");
+        let echo = load_one(plugin("echo")).await.expect("echo loads");
         let names: Vec<_> = echo.tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "echo-agent__echo",
-                "echo-agent__reverse",
-                "echo-agent__count_words"
-            ]
-        );
-        let reverse = tool_of(&echo, "echo-agent__reverse");
+        assert_eq!(names, ["echo__echo", "echo__reverse", "echo__count_words"]);
+        let reverse = tool_of(&echo, "echo__reverse");
         assert_eq!(reverse.definition().tool, "reverse");
         let out = reverse
             .call(serde_json::json!({ "input": "hello" }))
@@ -650,20 +650,20 @@ mod tests {
             .to_string();
         assert!(err.contains("no module named `no-such-module`"), "{err}");
 
-        let mut wrong_version = plugin("echo-agent");
-        wrong_version.version = Some("^0.2".to_string());
+        let mut wrong_version = plugin("echo");
+        wrong_version.version = Some("^0.3".to_string());
         let err = format!(
             "{:#}",
             load_one(wrong_version)
                 .await
                 .err()
-                .expect("0.1.0 is not ^0.2")
+                .expect("0.2.0 is not ^0.3")
         );
-        assert!(err.contains("the spec asks for ^0.2"), "{err}");
+        assert!(err.contains("the spec asks for ^0.3"), "{err}");
 
-        let mut right_version = plugin("echo-agent");
-        right_version.version = Some("^0.1".to_string());
-        load_one(right_version).await.expect("0.1.0 is ^0.1");
+        let mut right_version = plugin("echo");
+        right_version.version = Some("^0.2".to_string());
+        load_one(right_version).await.expect("0.2.0 is ^0.2");
     }
 
     /// A `spin` plugin's tool runs past its (spec-lowered) deadline: the
@@ -694,10 +694,10 @@ mod tests {
     /// with no one to ask, the call is refused without running.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_side_effecting_grant_needs_an_approver() {
-        let mut spec = plugin("echo-agent");
+        let mut spec = plugin("echo");
         spec.grants = vec!["http".to_string()];
         let echo = load_one(spec).await.expect("echo loads");
-        let err = tool_of(&echo, "echo-agent__reverse")
+        let err = tool_of(&echo, "echo__reverse")
             .call(serde_json::json!({ "input": "x" }))
             .await
             .unwrap_err();
@@ -798,7 +798,7 @@ mod tests {
     }
 
     /// PL-U2's first verify line, in-process: a spec listing the echo
-    /// plugin gets `echo-agent__reverse` as a tool of its own, the model
+    /// plugin gets `echo__reverse` as a tool of its own, the model
     /// calls it, and the reversed string is the tool result it reads next.
     /// A `reviewer` profile does not take the plugin away: the spec is the
     /// plugin's allow-list.
@@ -808,15 +808,12 @@ mod tests {
         let daemon = FakeDaemon::scripted(Script::new().route(
             key,
             [
-                Reply::tool_call(
-                    "echo-agent__reverse",
-                    serde_json::json!({ "input": "hello" }),
-                ),
+                Reply::tool_call("echo__reverse", serde_json::json!({ "input": "hello" })),
                 Reply::text("It is olleh."),
             ],
         ));
         let (events, session) = run_turn(
-            spec_with(vec![plugin("echo-agent")], Some("reviewer")),
+            spec_with(vec![plugin("echo")], Some("reviewer")),
             model(ProviderType::Ollama, key),
             ollama(&daemon),
         )
@@ -825,10 +822,7 @@ mod tests {
 
         let requests = daemon.requests();
         let tools = tool_names(&requests[0]);
-        assert!(
-            tools.contains(&"echo-agent__reverse".to_string()),
-            "{tools:?}"
-        );
+        assert!(tools.contains(&"echo__reverse".to_string()), "{tools:?}");
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -911,7 +905,7 @@ mod tests {
         let daemon = FakeDaemon::scripted(Script::new().route(
             key,
             [
-                Reply::tool_call("slow-host__ask", serde_json::json!({ "question": "2+2?" })),
+                Reply::tool_call("slow-host__ask", serde_json::json!({ "input": "2+2?" })),
                 // The plugin's own request, on the calling agent's model.
                 Reply::Usage {
                     input: 70,
@@ -1038,7 +1032,7 @@ mod tests {
                 .with_api_key("sk-fake".to_string())
                 .with_base_url(server.uri());
             let (events, _) = run_turn(
-                spec_with(vec![plugin("echo-agent")], Some("coordinator")),
+                spec_with(vec![plugin("echo")], Some("coordinator")),
                 model(provider_type.clone(), "m"),
                 provider,
             )
@@ -1054,7 +1048,7 @@ mod tests {
             let dotted = reqwest::Client::new()
                 .post(server.uri())
                 .json(&serde_json::json!({ "tools": [
-                    { "type": "function", "function": { "name": "echo-agent.reverse" } }
+                    { "type": "function", "function": { "name": "echo.reverse" } }
                 ] }))
                 .send()
                 .await

@@ -51,16 +51,20 @@ impl Cell {
     }
 }
 
-/// One request against `module` through `base`: an OpenAI-route chat call
-/// that does not touch the fake LLM (plain echo, no "use llm").
+/// One MCP `tools/call` against `module` through `base` (the one route a
+/// plugin is served on, PL-U3); neither tool touches the fake LLM.
 async fn one_call(http: &reqwest::Client, base: &str, module: &str) {
-    let url = format!("{base}/v1/{module}/chat/completions");
+    let url = format!("{base}/mcp/{module}");
+    let params = match module {
+        "benford" => json!({
+            "name": "compute_benford_distribution",
+            "arguments": {"numbers": [123.4, 187.0, 1450.0, 212.5, 2999.0]},
+        }),
+        _ => json!({"name": "echo", "arguments": {"input": "hello"}}),
+    };
     let resp = http
         .post(&url)
-        .json(&json!({
-            "model": module,
-            "messages": [{"role": "user", "content": "hello"}],
-        }))
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}))
         .send()
         .await
         .unwrap_or_else(|e| panic!("request to {module}: {e}"));
@@ -105,28 +109,23 @@ async fn run_cell(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 28)]
 async fn main() {
-    let (base, _llm) = common::start_gateway(&["echo-agent", "benford-agent"]).await;
+    let (base, _llm) = common::start_gateway(&["echo", "benford"]).await;
     let base = Arc::new(base);
 
     println!(
-        "# S7 concurrency: {REQUESTS_PER_CLIENT} requests/client, OpenAI route, plain echo (no LLM call)"
+        "# S7 concurrency: {REQUESTS_PER_CLIENT} requests/client, MCP tools/call (no LLM call)"
     );
     for &clients in &[1usize, 8, 32] {
-        run_cell(
-            "one module (echo-agent)",
-            base.clone(),
-            clients,
-            &["echo-agent"],
-        )
-        .await
-        .report();
+        run_cell("one module (echo)", base.clone(), clients, &["echo"])
+            .await
+            .report();
     }
     for &clients in &[1usize, 8, 32] {
         run_cell(
             "two modules (echo+benford)",
             base.clone(),
             clients,
-            &["echo-agent", "benford-agent"],
+            &["echo", "benford"],
         )
         .await
         .report();

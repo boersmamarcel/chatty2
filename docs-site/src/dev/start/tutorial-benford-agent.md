@@ -1,236 +1,164 @@
-# Tutorial: benford-agent
+# Tutorial: give an agent the plugin (benford)
 
-**When to read this:** You want a WASM plugin that runs its **own agentic loop**
-— calling the host LLM, executing local tools, feeding results back, and
-returning a final report.
+**When to read this:** you have a plugin (or want one) and want an agent that
+uses it: a preamble that tells the model what to do, and the plugin's tools
+to do it with.
 
-**Full source:**
-[`modules/benford-agent/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/benford-agent)
-(~650 lines including unit tests). Also see
-[`modules/benford-agent/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford-agent/README.md)
-for curl examples across OpenAI, MCP, and A2A protocols.
+**Full source:** the plugin in
+[`modules/benford/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/benford)
+and the agent in
+[`crates/chatty-core/agents/benford-analyst.toml`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/agents/benford-analyst.toml).
 
 ## Prerequisites
 
-Complete [Tutorial: echo-agent](./tutorial-echo-agent.md) or
-[Build a WASM plugin](../guides/build-wasm-module.md) first if you are new to
-`ModuleExports` and `module.toml`. You need the `wasm32-wasip2` target
-(`make setup` installs it) and a configured LLM provider, because the agent
-calls the host LLM.
+Complete [Tutorial: write a plugin](./tutorial-echo-agent.md) first if you
+are new to the `Plugin` trait and `module.toml`. You need the `wasm32-wasip2`
+target (`make setup` installs it) and a configured model provider.
 
-## What it demonstrates
+## The split: the loop is the agent's, the tools are the plugin's
 
-Given a list of financial numbers, the agent:
+A Benford audit is "compute the first-digit distribution, test it, write a
+report". Two parts of that are arithmetic, one is judgement:
 
-1. Calls `llm::complete` with two tool definitions in JSON
-2. Executes `compute_benford_distribution` locally when the LLM requests it
-3. Executes `chi_square_test` with the returned counts
-4. Appends tool results to the message history and calls the LLM again
-5. Returns a professional audit report when the LLM stops requesting tools
+- **The plugin** (`benford`) does the arithmetic, deterministically, in the
+  WASM sandbox: `compute_benford_distribution` and `chi_square_test`.
+- **The agent** (`benford-analyst`) is chatty's own harness: a spec with a
+  forensic-auditor preamble and `plugins = [benford]`. Its model decides when
+  to call each tool and writes the report, with everything a chatty agent
+  has: approvals, trace, usage and budgets.
 
-The host does **not** orchestrate this loop — it only services individual
-`llm::complete` calls. All tool execution stays in WASM.
+The plugin never calls the model and never loops:
 
 ```mermaid
 sequenceDiagram
-  participant Guest as benford-agent WASM
-  participant Host as wasm-runtime llm import
-  participant LLM as Host LLM provider
+  participant Model as benford-analyst's model
+  participant Harness as chatty harness (AgentSession)
+  participant Plugin as benford plugin (WASM)
 
-  Guest->>Host: llm::complete(messages, tools=TOOLS_JSON)
-  Host->>LLM: chat + tool schemas
-  LLM-->>Host: tool_calls: compute_benford_distribution
-  Host-->>Guest: CompletionResponse
-
-  Guest->>Guest: invoke_tool("compute_benford_distribution", args)
-  Guest->>Guest: append tool results to messages
-
-  Guest->>Host: llm::complete(updated messages, tools=TOOLS_JSON)
-  Host->>LLM: chat + tool schemas
-  LLM-->>Host: tool_calls: chi_square_test
-  Host-->>Guest: CompletionResponse
-
-  Guest->>Guest: invoke_tool("chi_square_test", args)
-  Guest->>Guest: append tool results to messages
-
-  Guest->>Host: llm::complete(messages, tools=TOOLS_JSON)
-  Host->>LLM: chat + tool schemas
-  LLM-->>Host: final audit report (no tool_calls)
-  Host-->>Guest: CompletionResponse
-  Guest->>Guest: return ChatResponse
+  Harness->>Model: preamble + question, tools incl. benford__*
+  Model-->>Harness: call benford__compute_benford_distribution
+  Harness->>Plugin: invoke-tool(compute_benford_distribution, numbers)
+  Plugin-->>Harness: observed_counts, total_analyzed
+  Harness->>Model: tool result
+  Model-->>Harness: call benford__chi_square_test
+  Harness->>Plugin: invoke-tool(chi_square_test, counts, total)
+  Plugin-->>Harness: χ², risk level
+  Harness->>Model: tool result
+  Model-->>Harness: audit report
 ```
 
-## Step 1 — Tool schemas for the LLM
+## Step 1 — The plugin's tools
 
-Define tools once as a JSON array string. The host passes this to the
-configured provider:
-
-```rust
-const TOOLS_JSON: &str = r#"[
-  {
-    "name": "compute_benford_distribution",
-    "description": "Compute first-digit frequencies vs Benford's Law …",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "numbers": { "type": "array", "items": { "type": "number" } }
-      },
-      "required": ["numbers"]
-    }
-  },
-  {
-    "name": "chi_square_test",
-    "description": "Chi-square goodness-of-fit test …",
-    "parameters": { /* … */ }
-  }
-]"#;
-```
-
-[Full `TOOLS_JSON` → `src/lib.rs`](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford-agent/src/lib.rs)
-
-## Step 2 — The agentic loop in `chat`
-
-Core pattern (simplified from the source):
+`benford` is a plugin like `echo`: two tools, each parsing its JSON
+arguments and returning JSON. It requests no capability.
 
 ```rust
-const MAX_TURNS: usize = 6;
-
-fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
-    let mut messages = vec![
-        Message { role: Role::System, content: SYSTEM_PROMPT.into() },
-        Message { role: Role::User, content: last_user_message(&req) },
-    ];
-
-    for _turn in 0..MAX_TURNS {
-        let resp = chatty_module_sdk::llm::complete("", &messages, Some(TOOLS_JSON))?;
-
-        if resp.tool_calls.is_empty() {
-            return Ok(ChatResponse {
-                content: resp.content,
-                tool_calls: vec![],
-                usage: resp.usage,
-            });
-        }
-
-        // Record what the LLM requested
-        messages.push(/* assistant message summarising tool calls */);
-
-        // Execute each tool locally
-        let mut results = Vec::new();
-        for tc in &resp.tool_calls {
-            let out = self.invoke_tool(tc.name.clone(), tc.arguments.clone())?;
-            results.push(format!("[{}] → {}", tc.name, out));
-        }
-
-        // Feed results back as a user message
-        messages.push(Message {
-            role: Role::User,
-            content: format!("Tool results:\n{}", results.join("\n\n")),
-        });
-    }
-
-    // Fallback if max turns exceeded
-    let final_resp = chatty_module_sdk::llm::complete("", &messages, None)?;
-    Ok(ChatResponse { content: final_resp.content, /* … */ })
+fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+    let run = match call.name.as_str() {
+        "compute_benford_distribution" => compute_benford_distribution,
+        "chi_square_test" => chi_square_test,
+        other => return Err(ToolError::unknown_tool(other)),
+    };
+    run(&call.arguments_json)
+        .map(ToolResult::text)
+        .map_err(ToolError::invalid_arguments)
 }
 ```
 
-[Full loop with logging and fallbacks → `src/lib.rs`](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford-agent/src/lib.rs#L134-L255)
+[Full source → `src/lib.rs`](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford/src/lib.rs)
 
-## Step 3 — Pure-Rust tool implementations
-
-Tools parse JSON args with `serde_json` and return JSON strings. No host
-imports beyond logging:
-
-```rust
-fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
-    match name.as_str() {
-        "compute_benford_distribution" => compute_benford_distribution(&args),
-        "chi_square_test" => chi_square_test(&args),
-        _ => Err(format!("unknown tool: {name}")),
-    }
-}
-```
-
-Unit tests for the statistical functions run on the **host** target (no WASM
-required). The crate's own `.cargo/config.toml` defaults the build target to
-`wasm32-wasip2`, so a bare `cargo test` tries to *execute* the compiled
-`.wasm` as a native binary and fails with a permission error — pass the host
-target explicitly:
+Unit tests for the statistical functions run on the **host** target. The
+crate's `.cargo/config.toml` defaults the build target to `wasm32-wasip2`,
+so pass the host target explicitly:
 
 ```sh
-cd modules/benford-agent
+cd modules/benford
 cargo test --target x86_64-unknown-linux-gnu   # or your host's triple
 ```
 
-## Step 4 — Three ways callers reach the same logic
-
-The gateway exposes one WASM module on three protocol surfaces:
-
-| Protocol | Endpoint | Agentic loop? |
-|----------|----------|---------------|
-| OpenAI-compat | `POST /v1/benford-agent/chat/completions` | Yes — full report in `choices[0].message.content` |
-| A2A | `POST /a2a/benford-agent` | Yes — same narrative in `result.message.parts` |
-| MCP | `POST /mcp/benford-agent` | No — raw `tools/call` only; caller orchestrates |
-
-From Chatty's main agent (requires `[capabilities].agent = true` to be listed
-and `[protocols].a2a = true` to be invocable): ask the assistant to use it —
-e.g. "use benford-agent to analyze these invoice amounts: 1234 4521 891 2340
-567 8901" — which makes the assistant call `invoke_agent` after discovering
-`benford-agent` via `list_agents`. This is not the `/agent` slash command:
-that dispatches by name only to a *remote* A2A agent configured in Settings →
-A2A Agents, and would otherwise just start a generic local sub-agent with
-"benford-agent Analyze these invoice amounts: …" as its prompt.
-
-Or via curl (gateway running):
+## Step 2 — Build and install the plugin
 
 ```sh
-curl -X POST http://localhost:8420/a2a/benford-agent \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "parts": [{
-          "type": "text",
-          "text": "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
-        }]
-      }
-    }
-  }'
-```
-
-More examples (MCP step-by-step, response shapes):
-[benford-agent README — Protocol comparison](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford-agent/README.md#protocol-comparison).
-
-## Build and load
-
-```sh
-cd modules/benford-agent
+cd modules/benford
 cargo build --target wasm32-wasip2 --release
-cp target/wasm32-wasip2/release/benford_agent.wasm .
-cp -r . ~/.local/share/chatty/modules/benford-agent/
+cp target/wasm32-wasip2/release/benford.wasm .
+cp -r . ~/.local/share/chatty/modules/benford/
 ```
 
-Enable the module in **Settings → Extensions** (there is no separate
-"Modules" settings page).
+## Step 3 — The agent spec
+
+An agent is a spec (TOML): who it is, what it is told, what it may use. The
+`benford-analyst` preset ships with chatty:
+
+```toml
+[agent]
+name = "benford-analyst"
+description = "Audits a list of financial amounts against Benford's Law with a chi-square test"
+preamble = """
+You are a forensic financial auditor specialising in Benford's Law analysis. …
+1. Call benford__compute_benford_distribution with the numbers …
+2. Call benford__chi_square_test with those observed_counts, and total_analyzed as total.
+3. Write a concise, professional audit report …"""
+
+[tools]
+profile = "reviewer"
+disable = ["shell"]
+
+[[plugins]]
+module = "benford"
+version = "^0.2"
+```
+
+- `preamble` is the system prompt. It names the tools the way the model
+  sees them: `<plugin>__<tool>`.
+- `[tools]` narrows the native tools: a reviewer, and no shell.
+- `[[plugins]]` loads the plugin into this agent (one instance per agent),
+  resolved by name in the module directory; `version` is a semver range. The
+  spec is the plugin's allow-list: a tool profile does not hide plugin tools.
+
+To make your own, copy it to `.chatty/agents/<name>.toml` in a workspace (or
+`<data_dir>/chatty/agents/`) and change `name`; a workspace spec with the
+same name shadows the preset.
+
+## Step 4 — Run it
+
+```sh
+chatty-tui --agent benford-analyst --headless \
+  -m "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
+```
+
+The first digits are 1, 4, 8, 2, 5, 8, 2, 4, 7, so the plugin answers
+χ² ≈ 10.49 on 8 degrees of freedom: under the 15.507 critical value, risk
+`LOW`, digit 1 the most deviant. With nine numbers, that is the expected
+verdict; the report should say the sample is too small to show an anomaly.
+
+`crates/chatty-tui/tests/plugins_headless.rs`
+(`benford_analyst_preset_gives_the_chi_square_verdict`) runs exactly this
+against a scripted model and checks the verdict the plugin hands back.
+
+## Step 5 — Other ways in
+
+- **Over MCP**, for an external client, the plugin's tools alone:
+  `POST /mcp/benford` on the desktop's protocol gateway (`[protocols] mcp =
+  true`). The caller orchestrates; there is no report. See the
+  [benford README](https://github.com/boersmamarcel/chatty2/blob/main/modules/benford/README.md).
+- There is no OpenAI or A2A route for the plugin: it is not an agent. The
+  agent is the spec.
 
 ## Design notes
 
-- **Reuse `invoke_tool` inside `chat`** — MCP callers and the agentic loop share
-  the same tool implementations.
-- **Empty model string** — `llm::complete("", …)` uses the host default model.
-- **Message history** — append assistant turns (with tool-call summaries) and
-  user turns (with tool results) so the LLM has full context on the next call.
-- **Progress visibility** — `log::info` lines appear in A2A `message/stream`
-  progress events when invoked through the gateway.
+- **Deterministic work in the plugin, judgement in the agent.** The model
+  never does the statistics; the preamble tells it to take the χ² and the
+  risk level from the tool.
+- **Typed errors.** Bad arguments come back as `invalid-arguments: …`, which
+  the model reads and can correct on its next call.
+- **Nothing to re-implement.** Before PL-U3 the module ran its own six-turn
+  loop and fed tool results back as user messages; now the harness does the
+  loop, so compaction, approvals, trace and budgets apply for free.
 
 ## Further reading
 
 - [Build a WASM plugin](../guides/build-wasm-module.md) — quick start,
-  project layout, testing your module
-- [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md) — the
-  `invoke_agent` → gateway → `llm::complete` flow
-- [WIT reference — `llm` import](../architecture/wit-reference.md)
+  project layout, testing your plugin
+- [WIT reference](../architecture/wit-reference.md) — the
+  `chatty:plugin@0.3.0` contract
