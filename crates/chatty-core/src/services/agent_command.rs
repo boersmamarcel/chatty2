@@ -19,8 +19,8 @@ pub enum AgentCommandTarget {
         config: A2aAgentConfig,
         prompt: String,
     },
-    /// A spec on the local roster, run as a headless sub-agent with
-    /// `--agent <name>`.
+    /// A spec on the local roster, run as a turn of the conversation handed
+    /// to that agent through its own broker (AGE-744/AGE-747).
     Spec { spec: AgentSpec, prompt: String },
     /// The default sub-agent, with the whole text as its prompt.
     Default { prompt: String },
@@ -69,24 +69,6 @@ pub fn resolve_agent_command(
     AgentCommandTarget::Default {
         prompt: text.to_string(),
     }
-}
-
-/// The arguments a headless sub-agent for `spec` is started with, ahead of
-/// `--headless --message <prompt>`: `--agent <name>`, and `--model` only
-/// when the spec leaves the model to its host, since an explicit flag beats
-/// the spec's own.
-pub fn spec_sub_agent_args(spec: Option<&AgentSpec>, host_model: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(spec) = spec {
-        args.push("--agent".to_string());
-        args.push(spec.agent.name.clone());
-    }
-    let spec_has_model = spec.is_some_and(|spec| spec.agent.model.is_some());
-    if !spec_has_model && !host_model.is_empty() {
-        args.push("--model".to_string());
-        args.push(host_model.to_string());
-    }
-    args
 }
 
 #[cfg(test)]
@@ -168,21 +150,5 @@ mod tests {
             resolve_agent_command("local-coder go", &[remote("local-coder", true)], &roster),
             AgentCommandTarget::Remote { .. }
         ));
-    }
-
-    #[test]
-    fn a_spec_s_own_model_is_not_overridden() {
-        let mut spec = AgentSpec::named("analyst");
-        assert_eq!(
-            spec_sub_agent_args(Some(&spec), "gpt-x"),
-            ["--agent", "analyst", "--model", "gpt-x"]
-        );
-        spec.agent.model = Some("qwen3:4b".to_string());
-        assert_eq!(
-            spec_sub_agent_args(Some(&spec), "gpt-x"),
-            ["--agent", "analyst"]
-        );
-        assert_eq!(spec_sub_agent_args(None, "gpt-x"), ["--model", "gpt-x"]);
-        assert!(spec_sub_agent_args(None, "").is_empty());
     }
 }

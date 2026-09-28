@@ -18,7 +18,8 @@ use chatty_core::services::{
     AgentTaskSnapshot, McpService, MemoryService, StreamSurface, is_agent_todo_tool,
 };
 use chatty_core::session::{
-    AgentSession, AgentSessionConfig, HostedSession, TurnInput, TurnKind, turn_transport,
+    AgentSession, AgentSessionConfig, Delegation, HostedSession, TurnInput, TurnKind,
+    turn_transport,
 };
 use chatty_core::session::{Arrival, Decision, Mailbox, TurnEnd};
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
@@ -338,6 +339,25 @@ pub enum EngineAction {
     Redraw,
 }
 
+/// What the mailbox queues for a send: the display text, and — for
+/// `/agent <name> <prompt>` — the delegation to hand the turn to through the
+/// conversation's own broker instead of asking the model (AGE-747, mirrors
+/// the desktop's `QueuedSend`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueuedSend {
+    pub message: String,
+    pub delegation: Option<Delegation>,
+}
+
+impl QueuedSend {
+    fn message(message: String) -> Self {
+        Self {
+            message,
+            delegation: None,
+        }
+    }
+}
+
 /// The TUI's presentation state over one conversation. The conversation
 /// itself, the approval stores and the turn live in `session` (AGE-195);
 /// this type keeps what a terminal renders and translates the session's
@@ -406,7 +426,7 @@ pub struct ChatEngine {
     /// Messages that arrived while a turn was streaming — the user's, and
     /// the loop's own follow-ups (AGE-242 / D3) — sent one turn at a time
     /// once the in-flight turn ends (AGE-482).
-    mailbox: Mailbox<String>,
+    mailbox: Mailbox<QueuedSend>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
@@ -881,18 +901,36 @@ impl ChatEngine {
     /// is streaming, queue it in the mailbox to run once that turn ends
     /// (AGE-482).
     pub fn send_message(&mut self, message: String) {
+        let decision = self.mailbox.arrive(
+            Arrival::Message(QueuedSend::message(message.clone())),
+            self.is_streaming,
+        );
+        self.act_on(decision, &message);
+    }
+
+    /// `/agent <name> <prompt>`: a turn of the active conversation handed to
+    /// `delegation`'s agent through the conversation's own broker (ADR-0020),
+    /// so the delegation reaches it exactly as a model-issued `invoke_agent`
+    /// would (AGE-747). Queued like any message while a turn streams.
+    pub fn send_delegation(&mut self, delegation: Delegation) {
+        let text = delegation.user_text();
+        let send = QueuedSend {
+            message: text.clone(),
+            delegation: Some(delegation),
+        };
         let decision = self
             .mailbox
-            .arrive(Arrival::Message(message.clone()), self.is_streaming);
-        self.act_on(decision, &message);
+            .arrive(Arrival::Message(send), self.is_streaming);
+        self.act_on(decision, &text);
     }
 
     /// Run `message` *instead of* the turn in flight: the turn is cancelled
     /// and this message goes next, ahead of anything queued (`/now`).
     pub fn interrupt(&mut self, message: String) {
-        let decision = self
-            .mailbox
-            .arrive(Arrival::Interrupt(message.clone()), self.is_streaming);
+        let decision = self.mailbox.arrive(
+            Arrival::Interrupt(QueuedSend::message(message.clone())),
+            self.is_streaming,
+        );
         self.act_on(decision, &message);
     }
 
@@ -918,7 +956,7 @@ impl ChatEngine {
         self.mailbox.len()
     }
 
-    fn act_on(&mut self, decision: Decision<String>, text: &str) {
+    fn act_on(&mut self, decision: Decision<QueuedSend>, text: &str) {
         match decision {
             Decision::Dispatch(next) => self.send_message_inner(next.message, !next.follow_up),
             Decision::Queued { position, .. } => {
@@ -947,11 +985,11 @@ impl ChatEngine {
     /// the loop-guard/deadline `eprintln!` in headless) is the only visible
     /// signal (AGE-242 / D3, mirrors the desktop's `send_protocol_follow_up`).
     pub fn send_protocol_follow_up(&mut self, message: String) {
-        self.send_message_inner(message, false);
+        self.send_message_inner(QueuedSend::message(message), false);
     }
 
-    fn send_message_inner(&mut self, message: String, show_in_transcript: bool) {
-        let Some(input) = self.prepare_send(message, show_in_transcript) else {
+    fn send_message_inner(&mut self, send: QueuedSend, show_in_transcript: bool) {
+        let Some(input) = self.prepare_send(send, show_in_transcript) else {
             return;
         };
         let event_tx = self.event_tx.clone();
@@ -981,14 +1019,22 @@ impl ChatEngine {
     /// The display side of a send: the user bubble, the assistant
     /// placeholder, and the `TurnInput` the session gets. `None` when the
     /// engine is not ready or a turn is already streaming.
-    fn prepare_send(&mut self, message: String, show_in_transcript: bool) -> Option<TurnInput> {
+    fn prepare_send(&mut self, send: QueuedSend, show_in_transcript: bool) -> Option<TurnInput> {
         if !self.is_ready || self.is_streaming || self.session.conversation().is_none() {
             return None;
         }
+        let QueuedSend {
+            message,
+            delegation,
+        } = send;
 
         // Injected protocol follow-ups re-enter here; only a real human turn
-        // resets the todo protocol state (AGE-150).
-        let kind = if chatty_core::services::is_protocol_follow_up_text(&message) {
+        // resets the todo protocol state (AGE-150). A delegation is always a
+        // human turn: `/agent` names its own target, it is never the loop's
+        // own follow-up text.
+        let kind = if delegation.is_none()
+            && chatty_core::services::is_protocol_follow_up_text(&message)
+        {
             TurnKind::ProtocolFollowUp
         } else {
             TurnKind::Human
@@ -996,10 +1042,11 @@ impl ChatEngine {
 
         // A `--team` leader's first human turn opens with the skill to
         // follow (AGE-407); shown in the transcript too, since it is what
-        // the model was asked. Taken only by a human turn, so a protocol
-        // follow-up arriving first leaves it for the human turn after.
-        let message = match kind {
-            TurnKind::Human => match self.pending_first_turn.take() {
+        // the model was asked. Taken only by a human turn that is not a
+        // delegation, so a protocol follow-up or `/agent` arriving first
+        // leaves it for the human turn after.
+        let message = match (kind, &delegation) {
+            (TurnKind::Human, None) => match self.pending_first_turn.take() {
                 Some(instruction) => format!("{instruction}\n\n{message}"),
                 None => message,
             },
@@ -1028,9 +1075,12 @@ impl ChatEngine {
         });
 
         // The transcript keeps the `[Pasted text #N …]` reference the user
-        // sees; the model gets the paste in full (AGE-341).
+        // sees; the model gets the paste in full (AGE-341). A delegation's
+        // text is already just `/agent <name> <prompt>`, with nothing to
+        // expand.
         Some(TurnInput {
             kind,
+            delegation,
             ..TurnInput::text(self.pastes.expand(&message))
         })
     }
@@ -1164,11 +1214,11 @@ impl ChatEngine {
                 self.add_system_message(format!("Agent protocol follow-up: {}", prompt));
                 // Queued rather than dropped while a turn streams (AGE-242 /
                 // D3); the mailbox keeps the loop's one-slot rule.
-                match self
-                    .mailbox
-                    .arrive(Arrival::FollowUp(prompt), self.is_streaming)
-                {
-                    Decision::Dispatch(next) => self.send_protocol_follow_up(next.message),
+                match self.mailbox.arrive(
+                    Arrival::FollowUp(QueuedSend::message(prompt)),
+                    self.is_streaming,
+                ) {
+                    Decision::Dispatch(next) => self.send_protocol_follow_up(next.message.message),
                     Decision::Refused(refusal) => {
                         warn!(%refusal, "Dropping a later agent protocol follow-up");
                     }
@@ -1621,7 +1671,7 @@ mod tests {
         scenario: chatty_core::services::Scenario,
     ) {
         let input = engine
-            .prepare_send(message.to_string(), true)
+            .prepare_send(QueuedSend::message(message.to_string()), true)
             .expect("engine is ready and idle");
         let event_tx = engine.event_tx.clone();
         let turn = engine
@@ -1710,7 +1760,7 @@ mod tests {
     async fn a_message_sent_mid_turn_is_queued_and_runs_after_the_turn() {
         let (mut engine, mut event_rx) = test_engine().await;
         let input = engine
-            .prepare_send("first".to_string(), true)
+            .prepare_send(QueuedSend::message("first".to_string()), true)
             .expect("engine is ready and idle");
         assert!(engine.is_streaming);
 
@@ -1751,7 +1801,9 @@ mod tests {
     #[tokio::test]
     async fn stop_holds_the_queue_until_the_user_sends_again() {
         let (mut engine, mut event_rx) = test_engine().await;
-        let _ = engine.prepare_send("first".to_string(), true).unwrap();
+        let _ = engine
+            .prepare_send(QueuedSend::message("first".to_string()), true)
+            .unwrap();
         engine.send_message("second".to_string());
         engine.stop_stream();
         // The cancelled end arrives; nothing runs.
