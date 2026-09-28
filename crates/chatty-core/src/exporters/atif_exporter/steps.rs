@@ -122,6 +122,7 @@ pub(super) fn build_user_step(
         tool_calls: None,
         observation: None,
         metrics: None,
+        extra: None,
     }
 }
 
@@ -160,6 +161,7 @@ pub(super) fn build_agent_step(
                 tool_call_id: atif_id.clone(),
                 function_name: tc.function.name.clone(),
                 arguments: tc.function.arguments.clone(),
+                extra: plugin_extra(&tc.function.name),
             });
 
             // If we have output from the trace, add it to observation results
@@ -167,6 +169,7 @@ pub(super) fn build_agent_step(
                 observation_results.push(AtifObservationResult {
                     source_call_id: Some(atif_id),
                     content: Some(output.clone()),
+                    is_error: false,
                 });
             }
         }
@@ -195,6 +198,7 @@ pub(super) fn build_agent_step(
         tool_calls,
         observation,
         metrics,
+        extra: None,
     }
 }
 
@@ -264,5 +268,12 @@ pub(super) fn build_extra(
     AtifExtra {
         feedback: feedback_strings,
         regenerations: atif_regenerations,
+        swarm: None,
     }
+}
+
+/// The plugin attribution of a call to the tool advertised as `name`, when
+/// it is a plugin's (`<plugin>__<tool>`, TB-2).
+pub(super) fn plugin_extra(name: &str) -> Option<AtifToolCallExtra> {
+    crate::services::swarm_trace::plugin_of(name).map(|plugin| AtifToolCallExtra { plugin })
 }

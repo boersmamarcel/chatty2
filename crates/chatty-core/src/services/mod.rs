@@ -85,6 +85,9 @@ pub mod ssrf_guard;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stream_fixtures;
 pub mod stream_processor;
+/// One turn's swarm as a tree of agents, built live from the session's
+/// events and the broker's edge log (TB-2 / AGE-664).
+pub mod swarm_trace;
 /// The team directory: roster, leader role, verification, skill and turn
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
