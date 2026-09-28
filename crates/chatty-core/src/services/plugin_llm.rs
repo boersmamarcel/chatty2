@@ -166,8 +166,7 @@ async fn send(
     let model = completion_model(model_config, provider_config)
         .map_err(|e| format!("llm::complete: {e:#}"))?;
 
-    let mut history: Vec<rig_core::completion::Message> =
-        messages.into_iter().map(to_rig_message).collect();
+    let mut history = to_rig_messages(messages);
     let prompt = history
         .pop()
         .ok_or_else(|| "llm::complete: no messages".to_string())?;
@@ -229,12 +228,48 @@ async fn send(
     Ok((response, usage))
 }
 
-fn to_rig_message(message: Message) -> rig_core::completion::Message {
-    match message.role {
-        Role::System => rig_core::completion::Message::system(message.content),
-        Role::User => rig_core::completion::Message::user(message.content),
-        Role::Assistant => rig_core::completion::Message::assistant(message.content),
-    }
+/// The guest's conversation as rig messages. An `assistant` message keeps
+/// the tool calls it made; a `tool` message is the result of the call its
+/// `tool-call-id` names, under the tool name that call used.
+fn to_rig_messages(messages: Vec<Message>) -> Vec<rig_core::completion::Message> {
+    use rig_core::completion::Message as RigMessage;
+    use rig_core::message::{ToolResultContent, UserContent};
+
+    let mut tool_names = std::collections::HashMap::new();
+    messages
+        .into_iter()
+        .map(|message| match message.role {
+            Role::System => RigMessage::system(message.content),
+            Role::User => RigMessage::user(message.content),
+            Role::Assistant if message.tool_calls.is_empty() => {
+                RigMessage::assistant(message.content)
+            }
+            Role::Assistant => {
+                let mut content = Vec::new();
+                if !message.content.is_empty() {
+                    content.push(AssistantContent::text(message.content));
+                }
+                for call in message.tool_calls {
+                    tool_names.insert(call.id.clone(), call.name.clone());
+                    let arguments = serde_json::from_str(&call.arguments)
+                        .unwrap_or(serde_json::Value::String(call.arguments));
+                    content.push(AssistantContent::tool_call(call.id, call.name, arguments));
+                }
+                RigMessage::Assistant { id: None, content }
+            }
+            Role::Tool => {
+                let call_id = message.tool_call_id.unwrap_or_default();
+                let name = tool_names.get(&call_id).cloned().unwrap_or_default();
+                RigMessage::User {
+                    content: vec![UserContent::tool_result_from_wire(
+                        call_id,
+                        name,
+                        vec![ToolResultContent::text(message.content)],
+                    )],
+                }
+            }
+        })
+        .collect()
 }
 
 /// Normalize a JSON tools blob from a WASM module into tool definitions.
@@ -291,9 +326,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use chatty_wasm_runtime::test_support::fixture_path;
-    use chatty_wasm_runtime::{ChatRequest, ModuleManifest, ResourceLimits, WasmModule};
+    use chatty_wasm_runtime::{ModuleManifest, ResourceLimits, ToolCallRequest, WasmModule};
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::factories::agent_factory::openrouter_base_url;
@@ -331,6 +366,8 @@ mod tests {
         vec![Message {
             role: Role::User,
             content: "hi".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
         }]
     }
 
@@ -691,13 +728,13 @@ mod tests {
 
     // -- through the WASM host ----------------------------------------------
 
-    fn user_req(content: &str) -> ChatRequest {
-        ChatRequest {
-            messages: vec![Message {
-                role: Role::User,
-                content: content.to_string(),
-            }],
-            conversation_id: "plugin-llm".to_string(),
+    /// A fixture tool call with `{"input": input}`.
+    fn call(tool: &str, input: &str) -> ToolCallRequest {
+        ToolCallRequest {
+            name: tool.to_string(),
+            arguments_json: serde_json::json!({ "input": input }).to_string(),
+            call_id: "plugin-llm".to_string(),
+            caller: None,
         }
     }
 
@@ -713,43 +750,16 @@ mod tests {
         .unwrap_or_else(|e| panic!("fixture `{name}` failed to load: {e:#}"))
     }
 
-    /// benford-agent runs its whole loop — a tool call, the tool run inside
-    /// the guest, then the final report — against an OpenRouter endpoint of
-    /// the default shape, on default settings (no model named).
+    /// A plugin tool's `llm::complete` goes through the WASM host to an
+    /// OpenRouter endpoint of the default shape, on default settings (no
+    /// model named), and the call is accounted for.
     #[tokio::test(flavor = "multi_thread")]
-    async fn benford_agent_full_loop_against_openrouter() {
+    async fn a_plugin_tool_calls_the_model_against_openrouter() {
         let server = MockServer::start().await;
-        let mut tool_turn = ok_body();
-        tool_turn["choices"][0]["message"] = serde_json::json!({
-            "role": "assistant",
-            "content": null,
-            "tool_calls": [{
-                "id": "call_1",
-                "type": "function",
-                "function": {
-                    "name": "compute_benford_distribution",
-                    "arguments": "{\"numbers\":[123,234,345,1456,1789,2100,310,48,5]}",
-                },
-            }],
-        });
-        let mut report = ok_body();
-        report["choices"][0]["message"]["content"] = serde_json::json!("Audit report: LOW risk.");
-
-        // The second request carries the tool's result back; answer it with
-        // the report, and the first with the tool call.
         Mock::given(method("POST"))
             .and(path("/api/v1/chat/completions"))
-            .and(|req: &Request| String::from_utf8_lossy(&req.body).contains("Tool results"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(report))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
             .expect(1)
-            .with_priority(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(tool_turn))
-            .expect(1)
-            .with_priority(2)
             .mount(&server)
             .await;
 
@@ -759,13 +769,75 @@ mod tests {
             Handle::current(),
         ));
         let usage = llm.usage();
-        let mut module = load("benford-agent", llm, ResourceLimits::default());
+        let mut module = load("slow-host", llm, ResourceLimits::default());
         let reply = module
-            .chat(user_req("Audit: 123 234 345 1456 1789 2100 310 48 5"))
+            .invoke_tool(call("ask", "2+2?"))
             .await
-            .expect("benford-agent completes its loop");
-        assert_eq!(reply.content, "Audit report: LOW risk.");
-        assert_eq!(usage.take().len(), 2, "both model calls are accounted for");
+            .expect("the tool gets the model's reply");
+        assert_eq!(reply.content, "hi");
+        assert_eq!(usage.take().len(), 1, "the model call is accounted for");
+        let sent: serde_json::Value = server.received_requests().await.unwrap()[0]
+            .body_json()
+            .unwrap();
+        assert_eq!(sent["messages"][0]["role"], "user", "{sent}");
+        assert_eq!(sent["messages"][0]["content"][0]["text"], "2+2?", "{sent}");
+    }
+
+    /// A `tool` message (the role 0.3.0 added) reaches the provider as the
+    /// result of the call it names, after the assistant message that made
+    /// the call — not as a user message.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_message_reaches_the_provider_as_a_tool_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let root = format!("{}/api/v1", server.uri());
+        let provider = plugin_provider(
+            provider_config(ProviderType::OpenRouter, Some("sk"), Some(&root)),
+            Handle::current(),
+        );
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: "count".to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_7".to_string(),
+                    name: "count".to_string(),
+                    arguments: "{}".to_string(),
+                }],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "3".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("call_7".to_string()),
+            },
+        ];
+        let (result, _) = complete_off_executor(provider, "", messages, None).await;
+        assert_eq!(result.expect("the provider answers").content, "hi");
+        let sent: serde_json::Value = server.received_requests().await.unwrap()[0]
+            .body_json()
+            .unwrap();
+        let messages = sent["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3, "{sent}");
+        assert_eq!(messages[1]["role"], "assistant", "{sent}");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_7", "{sent}");
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "count");
+        assert_eq!(messages[2]["role"], "tool", "{sent}");
+        assert_eq!(messages[2]["tool_call_id"], "call_7", "{sent}");
+        assert_eq!(messages[2]["content"], "3", "{sent}");
     }
 
     /// The call's deadline still bounds a provider that answers late: the
@@ -795,7 +867,7 @@ mod tests {
 
         let start = Instant::now();
         let err = module
-            .chat(user_req("x"))
+            .invoke_tool(call("ask", "x"))
             .await
             .expect_err("the late reply is cut off");
         let elapsed = start.elapsed();

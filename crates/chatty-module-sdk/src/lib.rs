@@ -1,331 +1,255 @@
-//! `chatty-module-sdk` — SDK for authoring chatty WASM agent modules.
+//! `chatty-module-sdk` — the SDK for chatty WASM plugins (`chatty:plugin@0.3.0`).
 //!
-//! This crate targets `wasm32-wasip2` and provides:
+//! A plugin contributes tools to a chatty agent; the agent's own loop decides
+//! when to call them (PL-D1 option B). Compile to `wasm32-wasip2`.
 //!
-//! - **Types** re-exported from the WIT interface (`ChatRequest`, `ChatResponse`, etc.)
-//! - **Host imports** (`llm::complete`, `config::get`, `log::info`, etc.)
-//! - **[`ModuleExports`] trait** — the trait module authors implement
-//! - **[`export_module!`] macro** — wires the trait impl to the WIT guest exports
+//! - **Types** generated from `wit/chatty-plugin.wit` ([`ToolDefinition`],
+//!   [`ToolCallRequest`], [`ToolResult`], [`ToolError`], [`PluginMetadata`], …)
+//! - **Host imports**, one module per capability: [`llm`], [`config`],
+//!   [`log`], [`file`], [`billing`]
+//! - **[`Plugin`]**, the trait a plugin implements, and **[`export!`]**,
+//!   which wires it to the component's exports. Both come from wit-bindgen's
+//!   own generator, so the export names always match the WIT.
 //!
 //! # Quick start
 //!
 //! ```rust,ignore
 //! use chatty_module_sdk::*;
 //!
-//! #[derive(Default)]
-//! struct MyAgent;
+//! struct Shout;
 //!
-//! impl ModuleExports for MyAgent {
-//!     fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String> {
-//!         // Call the host LLM
-//!         let resp = llm::complete("claude-sonnet-4-20250514", &req.messages, None)?;
-//!         Ok(ChatResponse {
-//!             content: resp.content,
-//!             tool_calls: vec![],
-//!             usage: resp.usage,
-//!         })
-//!     }
-//!
-//!     fn invoke_tool(&self, _name: String, _args: String) -> Result<String, String> {
-//!         Err("no tools".into())
-//!     }
-//!
-//!     fn list_tools(&self) -> Vec<ToolDefinition> {
-//!         vec![]
-//!     }
-//!
-//!     fn get_agent_card(&self) -> AgentCard {
-//!         AgentCard {
-//!             name: "my-agent".into(),
-//!             display_name: "My Agent".into(),
-//!             description: "A demo agent".into(),
+//! impl Plugin for Shout {
+//!     fn metadata() -> PluginMetadata {
+//!         PluginMetadata {
+//!             name: "shout".into(),
 //!             version: "0.1.0".into(),
-//!             skills: vec![],
-//!             tools: vec![],
+//!             description: "Upper-cases text".into(),
+//!             requested_capabilities: vec![],
+//!             config_keys: vec![],
+//!         }
+//!     }
+//!
+//!     fn list_tools() -> Vec<ToolDefinition> {
+//!         vec![ToolDefinition {
+//!             name: "shout".into(),
+//!             description: "Upper-case the arguments".into(),
+//!             parameters_schema: r#"{"type":"object","properties":{"input":{"type":"string"}}}"#.into(),
+//!         }]
+//!     }
+//!
+//!     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+//!         match call.name.as_str() {
+//!             "shout" => Ok(ToolResult::text(call.arguments_json.to_uppercase())),
+//!             other => Err(ToolError::unknown_tool(other)),
 //!         }
 //!     }
 //! }
 //!
-//! export_module!(MyAgent);
+//! export!(Shout);
 //! ```
 
 // ---------------------------------------------------------------------------
 // WIT guest-side bindings
 // ---------------------------------------------------------------------------
-// Generated at the crate root so that types, import wrappers, and export
-// helper functions (the `_export_*_cabi` family) are all accessible via
-// `$crate::` from the `export_module!` macro.
+
 wit_bindgen::generate!({
-    world: "module",
+    world: "plugin-world",
     path: "../../wit",
+    // The export macro is generated too (no hand-written symbol names), and
+    // public so `export!` below can call it from a plugin crate.
+    pub_export_macro: true,
+    export_macro_name: "__export_plugin_world",
+    default_bindings_module: "::chatty_module_sdk",
 });
 
+/// The WIT package this SDK builds plugins for. The host refuses any other.
+pub const WIT_PACKAGE: &str = "chatty:plugin@0.3.0";
+
+// A WIT version bump must be deliberate: it changes what every host accepts,
+// so it has to update `WIT_PACKAGE` here and in chatty-wasm-runtime too. The
+// build fails loudly until both agree with the file.
+const _: () = assert!(
+    declares_package(
+        include_str!("../../../wit/chatty-plugin.wit"),
+        "package chatty:plugin@0.3.0;"
+    ),
+    "wit/chatty-plugin.wit no longer declares `package chatty:plugin@0.3.0;`: \
+     a WIT version bump must also update WIT_PACKAGE in chatty-module-sdk and \
+     chatty-wasm-runtime"
+);
+
+/// Whether `wit` contains `line` (a const-evaluable substring search).
+const fn declares_package(wit: &str, line: &str) -> bool {
+    let (wit, line) = (wit.as_bytes(), line.as_bytes());
+    let mut start = 0;
+    while start + line.len() <= wit.len() {
+        let mut i = 0;
+        while i < line.len() && wit[start + i] == line[i] {
+            i += 1;
+        }
+        if i == line.len() {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
-// Re-export WIT types for module authors
+// Re-exported WIT types
 // ---------------------------------------------------------------------------
 
-pub use chatty::module::types::{
-    AgentCard, ChatRequest, ChatResponse, CompletionResponse, Message, Role, Skill, TokenUsage,
-    ToolCall, ToolDefinition,
+pub use chatty::plugin::types::{
+    CompletionResponse, Message, Role, TokenUsage, ToolCall, ToolDefinition,
+};
+pub use exports::chatty::plugin::plugin::{
+    Capability, ConfigKey, Guest as Plugin, PluginMetadata, ToolCallRequest, ToolError,
+    ToolErrorKind, ToolResult,
 };
 
+/// Wire a [`Plugin`] implementation to the component's exports.
+///
+/// Call it exactly once, at the crate root of the plugin:
+///
+/// ```rust,ignore
+/// chatty_module_sdk::export!(MyPlugin);
+/// ```
+#[macro_export]
+macro_rules! export {
+    ($plugin:ident) => {
+        $crate::__export_plugin_world!($plugin with_types_in $crate);
+    };
+}
+
+impl ToolResult {
+    /// A result carrying `content` and no model usage.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            usage: None,
+        }
+    }
+}
+
+impl ToolError {
+    /// An error of `kind` whose `message` the model sees.
+    pub fn new(kind: ToolErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// No tool called `name`.
+    pub fn unknown_tool(name: &str) -> Self {
+        Self::new(ToolErrorKind::UnknownTool, format!("unknown tool: {name}"))
+    }
+
+    /// The arguments did not parse or did not match the schema.
+    pub fn invalid_arguments(message: impl Into<String>) -> Self {
+        Self::new(ToolErrorKind::InvalidArguments, message)
+    }
+
+    /// A host capability refused the call.
+    pub fn denied(message: impl Into<String>) -> Self {
+        Self::new(ToolErrorKind::Denied, message)
+    }
+
+    /// The tool ran and failed.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::new(ToolErrorKind::Failed, message)
+    }
+}
+
+impl Message {
+    /// A message with no tool calls and no tool-call id.
+    pub fn new(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Host import wrappers
+// Host imports, one module per capability
 // ---------------------------------------------------------------------------
 
-/// Host-provided LLM completion service.
-///
-/// Wraps the `llm::complete` host import with a typed Rust API.
+/// Capability `llm`: a completion on the calling agent's provider.
 pub mod llm {
     pub use super::{CompletionResponse, Message};
 
-    /// Run a completion against a host-managed LLM model.
-    ///
-    /// # Arguments
-    /// * `model`    — model identifier (e.g. `"claude-sonnet-4-20250514"`)
-    /// * `messages` — conversation history
-    /// * `tools`    — optional JSON-encoded tool definitions for the LLM
-    ///
-    /// # Returns
-    /// The completion response or an error string from the host.
+    /// Run a completion. An empty `model` is the calling agent's model; a
+    /// named one must be configured on the host. `tools` is an optional
+    /// JSON-encoded list of tool definitions for the model.
     pub fn complete(
         model: &str,
         messages: &[Message],
         tools: Option<&str>,
     ) -> Result<CompletionResponse, String> {
-        super::chatty::module::llm::complete(model, messages, tools)
+        super::chatty::plugin::llm::complete(model, messages, tools)
     }
 }
 
-/// Host-provided sandboxed file access for reading model weights.
-///
-/// Paths are resolved relative to the module's `weights-root` config key.
-/// Absolute paths and `..` components are rejected by the host.
+/// Capability `file`: read-only access below the plugin's granted file root.
 pub mod file {
-    /// Read the raw bytes of a file at `path`.
-    ///
-    /// `path` must be relative (no leading `/`, no `..` segments).
-    /// The host resolves it against the module's `weights_root` config value.
+    /// Read the raw bytes of `path`, relative to the file root (no leading
+    /// `/`, no `..`). A plugin granted no root reads nothing.
     pub fn read_bytes(path: &str) -> Result<Vec<u8>, String> {
-        super::chatty::module::file::read_bytes(path)
+        super::chatty::plugin::file::read_bytes(path)
     }
 }
 
-/// Host-provided key-value configuration.
-///
-/// Wraps the `config::get` host import.  Configuration values are set in the
-/// module's manifest on the host side.
+/// Capability `config`: values from the plugin's `[config]` table.
 pub mod config {
-    /// Retrieve a configuration value by key.
-    ///
-    /// Returns `None` if the key is not set in the module's manifest.
+    /// The value of `key`, or `None` when it is not set.
     pub fn get(key: &str) -> Option<String> {
-        super::chatty::module::config::get(key)
+        super::chatty::plugin::config::get(key)
     }
 }
 
-/// Host-provided structured logging.
-///
-/// Convenience wrappers around the `logging::log` host import, one per log level.
+/// Capability `logging` (always granted), one function per level.
 pub mod log {
     /// Log at **trace** level.
     pub fn trace(message: &str) {
-        super::chatty::module::logging::log("trace", message);
+        super::chatty::plugin::logging::log("trace", message);
     }
 
     /// Log at **debug** level.
     pub fn debug(message: &str) {
-        super::chatty::module::logging::log("debug", message);
+        super::chatty::plugin::logging::log("debug", message);
     }
 
     /// Log at **info** level.
     pub fn info(message: &str) {
-        super::chatty::module::logging::log("info", message);
+        super::chatty::plugin::logging::log("info", message);
     }
 
     /// Log at **warn** level.
     pub fn warn(message: &str) {
-        super::chatty::module::logging::log("warn", message);
+        super::chatty::plugin::logging::log("warn", message);
     }
 
     /// Log at **error** level.
     pub fn error(message: &str) {
-        super::chatty::module::logging::log("error", message);
+        super::chatty::plugin::logging::log("error", message);
     }
 }
 
-// ---------------------------------------------------------------------------
-// ModuleExports trait
-// ---------------------------------------------------------------------------
+/// Capability `billing`: the raw Hive billing imports. Paid plugins use them
+/// through `hive-billing-sdk`, which verifies the session token.
+pub mod billing {
+    pub use super::chatty::plugin::billing::SessionInfo;
 
-/// The trait every chatty WASM module must implement.
-///
-/// Implement this on a `#[derive(Default)]` struct, then call
-/// [`export_module!`] to wire it to the WIT guest exports.
-///
-/// The module is instantiated lazily on the first guest export call
-/// via [`Default::default()`].
-pub trait ModuleExports: Default + 'static {
-    /// Handle a chat request and return a response.
-    ///
-    /// May call host imports ([`llm::complete`], [`config::get`],
-    /// [`log::info`], etc.) during execution.
-    fn chat(&self, req: ChatRequest) -> Result<ChatResponse, String>;
+    /// Reserve `estimated_tokens` credits before doing work.
+    pub fn acquire_session(estimated_tokens: i64) -> Result<SessionInfo, String> {
+        super::chatty::plugin::billing::acquire_session(estimated_tokens)
+    }
 
-    /// Invoke a tool exposed by this module.
-    ///
-    /// * `name` — tool name (must match a name from [`list_tools`](Self::list_tools))
-    /// * `args` — JSON-encoded arguments
-    ///
-    /// Returns JSON-encoded output or an error string.
-    fn invoke_tool(&self, name: String, args: String) -> Result<String, String>;
-
-    /// List all tools this module provides.
-    fn list_tools(&self) -> Vec<ToolDefinition>;
-
-    /// Return the agent's metadata card.
-    fn get_agent_card(&self) -> AgentCard;
-}
-
-// ---------------------------------------------------------------------------
-// export_module! macro
-// ---------------------------------------------------------------------------
-
-/// Wire a [`ModuleExports`] implementation to the WIT guest exports.
-///
-/// Call this macro **exactly once** at the crate root of your module,
-/// passing the type that implements [`ModuleExports`].
-///
-/// ```rust,ignore
-/// export_module!(MyAgent);
-/// ```
-///
-/// The macro creates a lazily-initialised instance of your type (via
-/// [`Default::default()`]) and delegates every WIT export to the
-/// corresponding [`ModuleExports`] method.
-#[macro_export]
-macro_rules! export_module {
-    ($t:ty) => {
-        // Private wrapper that implements the generated Guest trait.
-        struct __ChattyGuest;
-
-        // Single shared instance of the user's module — lazily initialised
-        // via Default::default() on the first guest export call.
-        static __CHATTY_MODULE_INSTANCE: ::std::sync::OnceLock<$t> =
-            ::std::sync::OnceLock::new();
-
-        fn __chatty_get_instance() -> &'static $t {
-            __CHATTY_MODULE_INSTANCE
-                .get_or_init(|| <$t as ::core::default::Default>::default())
-        }
-
-        impl $crate::exports::chatty::module::agent::Guest for __ChattyGuest {
-            fn chat(
-                req: $crate::ChatRequest,
-            ) -> ::core::result::Result<$crate::ChatResponse, ::std::string::String> {
-                <$t as $crate::ModuleExports>::chat(__chatty_get_instance(), req)
-            }
-
-            fn invoke_tool(
-                name: ::std::string::String,
-                args: ::std::string::String,
-            ) -> ::core::result::Result<::std::string::String, ::std::string::String> {
-                <$t as $crate::ModuleExports>::invoke_tool(__chatty_get_instance(), name, args)
-            }
-
-            fn list_tools() -> ::std::vec::Vec<$crate::ToolDefinition> {
-                <$t as $crate::ModuleExports>::list_tools(__chatty_get_instance())
-            }
-
-            fn get_agent_card() -> $crate::AgentCard {
-                <$t as $crate::ModuleExports>::get_agent_card(__chatty_get_instance())
-            }
-        }
-
-        // Generate the component-model ABI glue that wires the WASM export
-        // names to the SDK's type-erased cabi helpers.
-        const _: () = {
-            #[unsafe(export_name = "chatty:module/agent@0.2.0#chat")]
-            unsafe extern "C" fn __chatty_export_chat(
-                arg0: *mut u8,
-                arg1: usize,
-                arg2: *mut u8,
-                arg3: usize,
-            ) -> *mut u8 {
-                unsafe {
-                    $crate::exports::chatty::module::agent::_export_chat_cabi::<
-                        __ChattyGuest,
-                    >(arg0, arg1, arg2, arg3)
-                }
-            }
-
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#chat")]
-            unsafe extern "C" fn __chatty_post_return_chat(arg0: *mut u8) {
-                unsafe {
-                    $crate::exports::chatty::module::agent::__post_return_chat::<
-                        __ChattyGuest,
-                    >(arg0)
-                }
-            }
-
-            #[unsafe(export_name = "chatty:module/agent@0.2.0#invoke-tool")]
-            unsafe extern "C" fn __chatty_export_invoke_tool(
-                arg0: *mut u8,
-                arg1: usize,
-                arg2: *mut u8,
-                arg3: usize,
-            ) -> *mut u8 {
-                unsafe {
-                    $crate::exports::chatty::module::agent::_export_invoke_tool_cabi::<
-                        __ChattyGuest,
-                    >(arg0, arg1, arg2, arg3)
-                }
-            }
-
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#invoke-tool")]
-            unsafe extern "C" fn __chatty_post_return_invoke_tool(arg0: *mut u8) {
-                unsafe {
-                    $crate::exports::chatty::module::agent::__post_return_invoke_tool::<
-                        __ChattyGuest,
-                    >(arg0)
-                }
-            }
-
-            #[unsafe(export_name = "chatty:module/agent@0.2.0#list-tools")]
-            unsafe extern "C" fn __chatty_export_list_tools() -> *mut u8 {
-                unsafe {
-                    $crate::exports::chatty::module::agent::_export_list_tools_cabi::<
-                        __ChattyGuest,
-                    >()
-                }
-            }
-
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#list-tools")]
-            unsafe extern "C" fn __chatty_post_return_list_tools(arg0: *mut u8) {
-                unsafe {
-                    $crate::exports::chatty::module::agent::__post_return_list_tools::<
-                        __ChattyGuest,
-                    >(arg0)
-                }
-            }
-
-            #[unsafe(export_name = "chatty:module/agent@0.2.0#get-agent-card")]
-            unsafe extern "C" fn __chatty_export_get_agent_card() -> *mut u8 {
-                unsafe {
-                    $crate::exports::chatty::module::agent::_export_get_agent_card_cabi::<
-                        __ChattyGuest,
-                    >()
-                }
-            }
-
-            #[unsafe(export_name = "cabi_post_chatty:module/agent@0.2.0#get-agent-card")]
-            unsafe extern "C" fn __chatty_post_return_get_agent_card(arg0: *mut u8) {
-                unsafe {
-                    $crate::exports::chatty::module::agent::__post_return_get_agent_card::<
-                        __ChattyGuest,
-                    >(arg0)
-                }
-            }
-        };
-    };
+    /// Report the actual usage; settles the session.
+    pub fn report_usage(input_tokens: i64, output_tokens: i64) -> Result<(), String> {
+        super::chatty::plugin::billing::report_usage(input_tokens, output_tokens)
+    }
 }

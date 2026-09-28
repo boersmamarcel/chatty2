@@ -3,9 +3,9 @@
 //! (PL-H5a, AGE-703).
 //!
 //! ```text
-//! <module_dir>/echo-agent/
+//! <module_dir>/echo/
 //! ├── module.toml
-//! ├── echo-agent.wasm
+//! ├── echo.wasm
 //! └── .chatty-install.json   {"sha256": "…", "trust_level": "signed", "publisher_key_id": "…"}
 //! ```
 //!

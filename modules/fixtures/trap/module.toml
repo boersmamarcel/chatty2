@@ -5,6 +5,4 @@ description = "Adversarial test fixture: trap"
 wasm = "trap.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["trap"]

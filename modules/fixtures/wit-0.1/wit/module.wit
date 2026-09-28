@@ -1,6 +1,6 @@
 // A hand-written stand-in for the retired `chatty:module@0.1.0` world: the
-// same agent export, under the old package version, so the host's 0.2.0
-// linker cannot find `chatty:module/agent@0.2.0` and must say so.
+// same agent export, under the old package version, so the host
+// loader refuses it, naming the world it targets.
 package chatty:module@0.1.0;
 
 interface agent {

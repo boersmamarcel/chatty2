@@ -5,6 +5,4 @@ description = "Adversarial test fixture: panic"
 wasm = "panic.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["panic"]

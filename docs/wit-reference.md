@@ -1,9 +1,11 @@
 # WIT Interface Reference
 
-> **Package**: `chatty:module@0.2.0`\
-> **Source**: [`wit/chatty-module.wit`](../wit/chatty-module.wit)
+> **Package**: `chatty:plugin@0.3.0`\
+> **Source**: [`wit/chatty-plugin.wit`](../wit/chatty-plugin.wit)
 
-This document describes the WIT (WebAssembly Interface Types) contract between chatty (the host) and WASM modules (guests). Every chatty WASM module must target the `module` world defined here.
+This document describes the WIT (WebAssembly Interface Types) contract between chatty (the host) and WASM plugins (guests). Every chatty plugin targets the `plugin-world` world defined here.
+
+A plugin contributes **tools** to a chatty agent. It never runs a loop of its own: the agent that loads it (an agent spec lists it under `[[plugins]]`) offers its tools to its model as `<plugin>__<tool>`, and calls `invoke-tool` when the model asks for one (PL-D1 option B). The same tools are served to external MCP clients at `/mcp/{plugin}` when the plugin's `module.toml` sets `[protocols] mcp = true`.
 
 ---
 
@@ -11,143 +13,105 @@ This document describes the WIT (WebAssembly Interface Types) contract between c
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                            chatty (host)                              │
+│                  chatty (host): an agent's harness                    │
 │                                                                        │
 │  ┌─────────┐  ┌──────────┐  ┌────────────┐  ┌────────┐  ┌──────────┐ │
 │  │   llm   │  │  config  │  │  logging   │  │  file  │  │ billing  │ │
 │  │ import  │  │  import  │  │  import    │  │ import │  │ import   │ │
 │  └────┬────┘  └────┬─────┘  └─────┬──────┘  └───┬────┘  └────┬─────┘ │
-│       │            │              │        (opt) │    (opt) │        │
+│       │ one interface per capability (requested in metadata)  │       │
 ├───────┼────────────┼──────────────┼──────────────┼───────────┼───────┤
 │       ▼            ▼              ▼              ▼           ▼       │
 │  ┌──────────────────────────────────────────────────────────────┐    │
-│  │                     WASM Module (guest)                       │   │
+│  │                     WASM plugin (guest)                       │   │
 │  │                                                                │   │
-│  │  exports: agent                                                │   │
-│  │    • chat(req) → response                                     │   │
-│  │    • invoke-tool(name, args) → result                         │   │
+│  │  exports: plugin                                               │   │
+│  │    • metadata() → name, version, requested capabilities, …     │   │
 │  │    • list-tools() → definitions                                │   │
-│  │    • get-agent-card() → card                                   │   │
+│  │    • invoke-tool(call) → result | typed error                  │   │
 │  └────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-`llm`, `config` and `logging` are used by every module. `file` and `billing`
-are optional imports — free modules never link `billing`, and only modules
-that read files from a granted root (e.g. ML modules loading weights) use
-`file`.
+Each host import is its own interface, one per **capability**, so the host can link only the capabilities an agent granted (PL-U4; today every import is linked). A plugin declares the ones it needs in `metadata().requested-capabilities`; `logging` is always granted. A component that never calls an import does not import it at all, so a plugin that only computes (like `benford`) imports nothing but `logging`.
+
+Plugins are written against [`chatty-module-sdk`](../crates/chatty-module-sdk/): implement its `Plugin` trait and call `export!(MyPlugin)`. Both are wit-bindgen's own generated code, so the export names always match this file.
 
 ---
 
 ## Shared Types (`types` interface)
 
-All types live in the `types` interface and are imported by other interfaces via `use`.
-
 ### `role` (enum)
 
-Role of a message participant.
+```wit
+enum role { system, user, assistant, tool }
+```
 
-| Variant     | Description                        |
-|:------------|:-----------------------------------|
-| `system`    | System/instruction message         |
-| `user`      | Message from the end user          |
-| `assistant` | Message from the AI assistant      |
-
-### `message` (record)
-
-A single message in a conversation.
-
-| Field     | Type     | Description              |
-|:----------|:---------|:-------------------------|
-| `role`    | `role`   | Who sent this message    |
-| `content` | `string` | The message text content |
+The role of a message in an `llm::complete` conversation. `tool` is the result of a tool call, answering the assistant message that requested it.
 
 ### `tool-call` (record)
 
-A tool call requested by the LLM.
+```wit
+record tool-call {
+    id: string,         // unique id of this call
+    name: string,       // tool name
+    arguments: string,  // JSON-encoded arguments
+}
+```
 
-| Field       | Type     | Description                            |
-|:------------|:---------|:---------------------------------------|
-| `id`        | `string` | Unique identifier for this tool call   |
-| `name`      | `string` | Name of the tool to invoke             |
-| `arguments` | `string` | JSON-encoded arguments for the tool    |
+A tool call the model asked for in an `llm::complete` reply.
+
+### `message` (record)
+
+```wit
+record message {
+    role: role,
+    content: string,
+    tool-calls: list<tool-call>,  // the calls an assistant message made
+    tool-call-id: option<string>, // for a tool message: the call it answers
+}
+```
+
+A plugin that runs a short tool exchange of its own inside one tool call feeds the model's calls back as an `assistant` message with `tool-calls`, then each result as a `tool` message whose `tool-call-id` names the call. The host sends them to the provider as a real assistant tool call and tool result, not as user text.
 
 ### `token-usage` (record)
 
-Token usage statistics for a completion.
-
-| Field           | Type  | Description                        |
-|:----------------|:------|:-----------------------------------|
-| `input-tokens`  | `u32` | Number of tokens in the prompt     |
-| `output-tokens` | `u32` | Number of tokens in the response   |
+```wit
+record token-usage {
+    input-tokens: u32,
+    output-tokens: u32,
+}
+```
 
 ### `completion-response` (record)
 
-Response from the host LLM completion API.
+```wit
+record completion-response {
+    content: string,
+    tool-calls: list<tool-call>,
+    usage: option<token-usage>,
+}
+```
 
-| Field        | Type                    | Description                          |
-|:-------------|:------------------------|:-------------------------------------|
-| `content`    | `string`                | The text content of the completion   |
-| `tool-calls` | `list<tool-call>`       | Any tool calls the LLM wants to make |
-| `usage`      | `option<token-usage>`   | Token usage for this completion      |
+What `llm::complete` returns. `usage.input-tokens` is the whole prompt (cached tokens included).
 
 ### `tool-definition` (record)
 
-A tool definition that a module exposes.
+```wit
+record tool-definition {
+    name: string,               // unique within the plugin, e.g. "reverse"
+    description: string,        // shown to the model
+    parameters-schema: string,  // JSON Schema of the arguments
+}
+```
 
-| Field               | Type     | Description                                  |
-|:--------------------|:---------|:---------------------------------------------|
-| `name`              | `string` | Unique name for the tool (e.g. `"web-search"`) |
-| `description`       | `string` | Human-readable description shown to the LLM  |
-| `parameters-schema` | `string` | JSON Schema describing the tool's parameters |
-
-### `skill` (record)
-
-A skill that the agent can perform.
-
-| Field         | Type           | Description                              |
-|:--------------|:---------------|:-----------------------------------------|
-| `name`        | `string`       | Unique name for the skill                |
-| `description` | `string`       | Human-readable description               |
-| `examples`    | `list<string>` | Example prompts that trigger this skill  |
-
-### `agent-card` (record)
-
-Metadata card describing the agent module.
-
-| Field          | Type                   | Description                                    |
-|:---------------|:-----------------------|:-----------------------------------------------|
-| `name`         | `string`               | Unique identifier (e.g. `"code-reviewer"`)     |
-| `display-name` | `string`               | Human-readable display name                    |
-| `description`  | `string`               | Description of what the agent does             |
-| `version`      | `string`               | Semver version of the agent module             |
-| `skills`       | `list<skill>`          | Skills the agent provides                      |
-| `tools`        | `list<tool-definition>`| Tools the agent exposes                        |
-
-### `chat-request` (record)
-
-Request sent to a guest agent's `chat` function.
-
-| Field             | Type             | Description                     |
-|:------------------|:-----------------|:--------------------------------|
-| `messages`        | `list<message>`  | The conversation history        |
-| `conversation-id` | `string`         | Unique identifier for this conversation |
-
-### `chat-response` (record)
-
-Response returned from a guest agent's `chat` function.
-
-| Field        | Type                  | Description                                  |
-|:-------------|:----------------------|:---------------------------------------------|
-| `content`    | `string`              | The agent's reply text                       |
-| `tool-calls` | `list<tool-call>`     | Tool calls the agent wants the host to run   |
-| `usage`      | `option<token-usage>` | Token usage for this response, if tracked    |
+The model sees the tool as `<plugin>__<tool>` (e.g. `echo__reverse`); the name must keep that under 64 characters of `[a-zA-Z0-9_-]`, or the plugin fails to load into an agent.
 
 ---
 
 ## Host Imports
 
-These interfaces are provided by chatty to every WASM module. They are the **only** host capabilities available — this keeps the trust surface minimal.
+These interfaces are provided by chatty. They are the **only** host capabilities a plugin has: no WASI environment, arguments, preopened directories or sockets.
 
 ### `llm` — LLM Completion
 
@@ -158,31 +122,23 @@ interface llm {
 }
 ```
 
-Call the host's LLM to generate completions. The host manages API keys, rate limiting, and model routing: the request goes through the same provider client the calling agent uses (`chatty_core::services::plugin_llm::PluginLlmProvider`), so OpenRouter, Ollama and Azure OpenAI (API key or Entra ID) all work.
+Capability `llm`. A completion that goes through the same provider client the calling agent uses (`chatty_core::services::plugin_llm::PluginLlmProvider`), so OpenRouter, Ollama and Azure OpenAI (API key or Entra ID) all work, and every call's usage is recorded as the plugin's own line in the calling turn's totals.
 
 **Parameters**:
-- `model` — Empty (`""`) for the calling agent's model, which is what most modules want. Otherwise a model identifier (e.g. `"claude-sonnet-4-20250514"`) or model id that must match a model configured in the host; any other name is refused with an error and no request is sent.
-- `messages` — Conversation history to send to the LLM.
-- `tools` — Optional JSON-encoded array of tool definitions for the LLM to use: the flat form (`name`, `description`, `parameters`) or the OpenAI wrapped form (`{"type": "function", "function": {...}}`). Pass `none` if the module doesn't need tool use in this completion.
+- `model` — Empty (`""`) for the calling agent's model, which is what most plugins want. Otherwise a model identifier or id that must match a model configured in the host; any other name is refused with an error and no request is sent.
+- `messages` — The conversation; the last message is the prompt.
+- `tools` — Optional JSON-encoded array of tool definitions for the model: the flat form (`name`, `description`, `parameters`) or the OpenAI wrapped form (`{"type": "function", "function": {...}}`).
 
-**Returns**: `result<completion-response, string>` — The completion or an error message. `usage.input-tokens` is the whole prompt (cached tokens included). The call is bounded by the module's per-call deadline: past it the host stops waiting and returns `deadline exceeded`.
+**Returns**: the completion or an error message. The call is bounded by the plugin's per-call deadline: past it the host stops waiting and returns `deadline exceeded`.
 
 **Example** (pseudocode):
 ```
-// Simple completion without tools
 let messages = [
-    { role: system, content: "You are a helpful code reviewer." },
-    { role: user, content: "Review this function: fn add(a: i32, b: i32) -> i32 { a + b }" },
+    { role: system, content: "Classify the sentiment.", tool-calls: [], tool-call-id: none },
+    { role: user, content: "I love it", tool-calls: [], tool-call-id: none },
 ];
-let response = llm::complete("claude-sonnet-4-20250514", messages, none);
-// response.content = "The function looks correct..."
-```
-
-**Example with tools** (pseudocode):
-```
-let tools = some("[{\"name\": \"search\", \"description\": \"Search code\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}}}}]");
-let response = llm::complete("gpt-4o", messages, tools);
-// response.tool-calls may contain: [{ id: "tc_1", name: "search", arguments: "{\"query\": \"error handling\"}" }]
+let response = llm::complete("", messages, none);
+// response.content = "positive"
 ```
 
 ### `config` — Configuration
@@ -193,7 +149,7 @@ interface config {
 }
 ```
 
-Read the module's configuration: the string → string `[config]` table of its `module.toml`. A non-string value there is a manifest error.
+Capability `config`. Read the plugin's configuration: the string → string `[config]` table of its `module.toml`. A non-string value there is a manifest error.
 
 ```toml
 [config]
@@ -221,20 +177,20 @@ interface file {
 }
 ```
 
-Read a file under the module's **file root**: the directory its `module.toml` grants with
+Capability `file`. Read a file under the plugin's **file root**: the directory its `module.toml` grants with
 
 ```toml
 [files]
 root = "weights"   # relative to the module directory
 ```
 
-The root is host-set (the runtime's `ModuleManifest::with_weights_root`), never a `[config]` key: a config value named `weights_root` grants nothing. A module without `[files]` can read no files. Free modules never need this; ML inference modules use it to load weights once at startup.
+The root is host-set (the runtime's `ModuleManifest::with_weights_root`), never a `[config]` key: a config value named `weights_root` grants nothing. A plugin without `[files]` can read no files. Most plugins never need this; ML inference plugins use it to load weights once at startup.
 
 **Parameters**:
 - `path` — Relative to the file root. `/` and `\` both separate components.
 
 **Returns**: the file's bytes, or an error when:
-- the module has no file root;
+- the plugin has no file root;
 - `path` is empty, absolute, has a drive letter (`:`), or a `..` component;
 - the path's resolved location (both sides canonicalized, symlinks followed) is outside the root — a symlink that stays inside the root is fine;
 - it is not a regular file, or is over **256 MiB** (`MAX_FILE_READ_BYTES`, checked before reading);
@@ -256,7 +212,7 @@ interface logging {
 }
 ```
 
-Emit log messages that appear in the host's log output.
+Capability `logging`, always granted. Emit log messages that appear in the host's log output (its `tracing` subscriber; nothing is queued for a caller).
 
 **Parameters**:
 - `level` — Log level: `"trace"`, `"debug"`, `"info"`, `"warn"`, or `"error"`.
@@ -269,7 +225,7 @@ logging::log("debug", "Analyzing 42 files");
 logging::log("error", "Failed to parse input: unexpected token");
 ```
 
-### `billing` — Paid Module Sessions (optional)
+### `billing` — Paid Plugin Sessions
 
 ```wit
 interface billing {
@@ -285,17 +241,20 @@ interface billing {
 }
 ```
 
-Only paid modules import this; free modules never call it (zero overhead). A
-paid module calls `acquire-session` before doing work — the host asks Hive to
+Capability `billing`. Only paid plugins use it; a component that never calls an
+import does not import it at all. A paid plugin calls `acquire-session` before doing work — the host asks Hive to
 reserve credits and returns a signed session token — then `report-usage` once
 the work is done, so Hive can settle the reservation against actual usage.
 
+`hive-billing-sdk` calls these through `chatty-module-sdk`'s `billing` module
+(it generates no bindings of its own), so a plugin can depend on both crates.
+
 **`session-info.token`** is a Hive-signed JWT. The current `hive-billing-sdk`
 verifies it with **HS256 (HMAC-SHA256) against a shared secret embedded in the
-module at compile time**, not an embedded *public* key: there is no Ed25519
+plugin at compile time**, not an embedded *public* key: there is no Ed25519
 verification today, only a documented future upgrade path
 (`crates/hive-billing-sdk/src/lib.rs`). HMAC-in-WASM is deterrence, not proof
-— a determined attacker can extract the secret from the compiled module — and
+— a determined attacker can extract the secret from the compiled plugin — and
 the crate's own doc comment says so; high-trust billing should run on Hive's
 Firecracker infrastructure, where verification happens server-side instead.
 
@@ -307,123 +266,89 @@ Firecracker infrastructure, where verification happens server-side instead.
 
 ---
 
-## Guest Exports
+## Guest Export
 
-Every chatty WASM module must export the `agent` interface.
-
-### `agent` — Agent Interface
+### `plugin` — Plugin Interface
 
 ```wit
-interface agent {
-    use types.{chat-request, chat-response, tool-definition, agent-card};
-    chat: func(req: chat-request) -> result<chat-response, string>;
-    invoke-tool: func(name: string, args: string) -> result<string, string>;
+interface plugin {
+    use types.{tool-definition, token-usage};
+
+    enum capability { llm, config, logging, file, billing }
+
+    record config-key { name: string, description: string, required: bool }
+
+    record plugin-metadata {
+        name: string,
+        version: string,
+        description: string,
+        requested-capabilities: list<capability>,
+        config-keys: list<config-key>,
+    }
+
+    record tool-call-request {
+        name: string,
+        arguments-json: string,
+        call-id: string,
+        caller: option<string>,
+    }
+
+    record tool-result {
+        content: string,
+        usage: option<token-usage>,
+    }
+
+    enum tool-error-kind { unknown-tool, invalid-arguments, denied, failed }
+
+    record tool-error { kind: tool-error-kind, message: string }
+
+    metadata: func() -> plugin-metadata;
     list-tools: func() -> list<tool-definition>;
-    get-agent-card: func() -> agent-card;
+    invoke-tool: func(call: tool-call-request) -> result<tool-result, tool-error>;
 }
 ```
 
-#### `chat`
+#### `metadata`
 
-Handle a chat request and return a response. This is the main entry point for conversational interaction.
-
-**Parameters**:
-- `req` — A `chat-request` containing the conversation history and conversation ID.
-
-**Returns**: `result<chat-response, string>` — The response or an error message.
-
-**Example** (pseudocode):
-```
-// Module receives a chat request
-let req = {
-    messages: [
-        { role: user, content: "Review this PR" },
-    ],
-    conversation-id: "conv-abc-123",
-};
-
-// Module can call host LLM
-let llm_response = llm::complete("claude-sonnet-4-20250514", req.messages, none);
-
-// Return response
-return ok({
-    content: llm_response.content,
-    tool-calls: [],
-    usage: llm_response.usage,
-});
-```
-
-#### `invoke-tool`
-
-Invoke a tool exposed by this module. The host calls this when an LLM response includes a tool call matching one of this module's tools.
-
-**Parameters**:
-- `name` — Tool name (must match a name from `list-tools`).
-- `args` — JSON-encoded arguments matching the tool's `parameters-schema`.
-
-**Returns**: `result<string, string>` — JSON-encoded tool output, or an error message.
-
-**Example** (pseudocode):
-```
-// Host calls: invoke-tool("search-code", "{\"query\": \"TODO\", \"language\": \"rust\"}")
-//
-// Module executes the tool logic and returns:
-// ok("{\"results\": [{\"file\": \"main.rs\", \"line\": 42, \"text\": \"// TODO: fix this\"}]}")
-//
-// On error:
-// err("Unknown tool: nonexistent-tool")
-```
+Who the plugin is and what it asks the host for. `name` and `version` match `[module]` in its `module.toml`. `requested-capabilities` is what an agent spec will be able to grant it: PL-U4 makes a grant it did not request a spec error, and answers an import it was not granted with `capability <x> not granted to this agent` (until then every import is linked); `config-keys` names the `config::get` keys it reads. Hive validates this at publish (PL-H7). Budget: 1 s.
 
 #### `list-tools`
 
-List all tools this module provides. Called by the host during module initialization.
+Every tool the plugin provides. Read once, when an agent loads the plugin. Budget: 1 s.
 
-**Returns**: `list<tool-definition>` — All tool definitions.
+#### `invoke-tool`
 
-**Example** (pseudocode):
-```
-return [
-    {
-        name: "search-code",
-        description: "Search for code patterns across the project",
-        parameters-schema: "{\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Search query\"}, \"language\": {\"type\": \"string\", \"description\": \"Filter by language\"}}, \"required\": [\"query\"]}",
-    },
-    {
-        name: "run-tests",
-        description: "Run the project's test suite",
-        parameters-schema: "{\"type\": \"object\", \"properties\": {\"filter\": {\"type\": \"string\", \"description\": \"Test name filter\"}}}",
-    },
-];
-```
+Run one tool call.
 
-#### `get-agent-card`
+- `name` — a name from `list-tools`.
+- `arguments-json` — the model's arguments object, JSON-encoded once, exactly what the tool's `parameters-schema` describes. A tool reads its own fields out of it.
+- `call-id` — an id for this call.
+- `caller` — the calling agent's name, when the host knows it.
 
-Return the agent's metadata card. Called by the host during module discovery.
+**Returns** `tool-result { content, usage }` — `content` is what the model sees (JSON or plain text); `usage` is the plugin's own account of model use, informational (the host already counts every `llm::complete` call) — or a `tool-error`:
 
-**Returns**: `agent-card` — The module's metadata.
+| `kind` | Meaning |
+|:-------|:--------|
+| `unknown-tool` | No tool of that name |
+| `invalid-arguments` | The arguments did not parse or fit the schema |
+| `denied` | A host capability refused (not granted, no credits, a path outside the file root) |
+| `failed` | The tool ran and failed |
 
-**Example** (pseudocode):
-```
-return {
-    name: "code-reviewer",
-    display-name: "Code Reviewer",
-    description: "Reviews code changes and suggests improvements",
-    version: "1.0.0",
-    skills: [
-        {
-            name: "review-pr",
-            description: "Review a pull request for issues and improvements",
-            examples: ["Review this PR", "Check my code changes"],
-        },
-    ],
-    tools: [
-        {
-            name: "search-code",
-            description: "Search for code patterns",
-            parameters-schema: "{\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}}, \"required\": [\"query\"]}",
-        },
-    ],
-};
+The model reads the error as `<kind>: <message>`, and the turn goes on. A limit (fuel, deadline, memory, output) or a trap is not a `tool-error`: the host reports it the same way, and the next call runs on a fresh instance after a trap.
+
+**Example** (Rust, with `chatty-module-sdk`):
+```rust
+fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
+    match call.name.as_str() {
+        "reverse" => {
+            let args: serde_json::Value = serde_json::from_str(&call.arguments_json)
+                .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
+            let input = args["input"].as_str().unwrap_or_default();
+            Ok(ToolResult::text(input.chars().rev().collect::<String>()))
+        }
+        other => Err(ToolError::unknown_tool(other)),
+    }
+}
 ```
 
 ---
@@ -431,27 +356,26 @@ return {
 ## World
 
 ```wit
-world module {
+world plugin-world {
     import llm;
     import config;
     import logging;
-    import file;      // optional: ML modules use this to load weights
-    import billing;   // optional: only called by paid modules
-    export agent;
+    import file;
+    import billing;
+
+    export plugin;
 }
 ```
-
-The `module` world is the compilation target for all chatty WASM modules. It wires together the host imports and the one guest export.
 
 ---
 
 ## Resource Limits
 
-Every call into a guest export (`chat`, `invoke-tool`, `list-tools`, `get-agent-card`)
+Every call into a guest export (`metadata`, `list-tools`, `invoke-tool`)
 runs inside a sandboxed Wasmtime instance under per-call limits
 (`crates/chatty-wasm-runtime/src/limits.rs`, `ResourceLimits`). Fuel and the wall-clock
-deadline are reset before each call, so a long-lived module never runs out of a
-lifetime budget. The defaults below are also the host ceilings: a module manifest's
+deadline are reset before each call, so a long-lived plugin never runs out of a
+lifetime budget. The defaults below are also the host ceilings: a plugin manifest's
 `[resources]` section may only lower a limit, never raise it — a larger value is
 clamped down to the ceiling.
 
@@ -462,7 +386,7 @@ clamped down to the ceiling.
 | **Memory** | 256 MiB | Store memory limiter | `memory limit` |
 | **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
 
-`list-tools` and `get-agent-card` get a fixed 1 s wall-clock budget regardless of the
+`metadata` and `list-tools` get a fixed 1 s wall-clock budget regardless of the
 call's own `max_execution_ms`.
 
 The fuel ceiling is sized so a CPU-bound guest is bounded by the 60 s wall clock, not
@@ -477,35 +401,22 @@ clock: it is refilled per call, and a manifest may still only lower it.
 
 ---
 
-## Versioning Strategy
+## Versioning
 
-The WIT package uses [semantic versioning](https://semver.org/): `chatty:module@MAJOR.MINOR.PATCH`.
+The package is `chatty:plugin@MAJOR.MINOR.PATCH`, and the host loads **exactly one** version: `chatty:plugin@0.3.0` today. A component that does not export `chatty:plugin/plugin@0.3.0` is refused at load with
 
-### Compatibility Rules
+```
+module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK
+```
 
-| Change Type               | Version Bump | Backward Compatible? |
-|:--------------------------|:-------------|:---------------------|
-| Add optional field to a record (via new record version) | Minor | Yes — old modules ignore it |
-| Add new function to an interface | Minor | Yes — host checks capability |
-| Add new interface to world imports | Minor | Yes — modules don't have to use it |
-| Remove or rename a field  | **Major**    | **No** — breaks existing modules |
-| Remove or rename a function | **Major**  | **No** — breaks existing modules |
-| Change a function signature | **Major**  | **No** — breaks existing modules |
-| Add new enum variant       | **Major**   | **No** — breaks exhaustive matches |
-| Add required export interface | **Major** | **No** — breaks existing modules |
+naming whatever world it does target. There is no adapter for an older world and no deprecation window (PL-D1): a version change means rebuilding every plugin against the new SDK.
 
-### Evolution Guidelines
+A version bump is deliberate. `chatty-module-sdk` and `chatty-wasm-runtime` each hold the package as a constant (`WIT_PACKAGE`) and assert at compile time that `wit/chatty-plugin.wit` declares it, so editing the file's `package` line fails both builds loudly until the constants are updated with it.
 
-1. **Additive changes only** in minor versions. New optional host imports (`file` and `billing` are the two shipped so far) can be added without breaking existing modules since a module that does not import them is unaffected. `http`, `fs` and `process` are hypothetical future examples of the same pattern, not imports that exist today.
+### History
 
-2. **New record fields** require creating a new record type (e.g. `chat-request-v2`) because WIT records are structurally typed — adding a field changes the ABI. The old type must be kept for backward compatibility.
-
-3. **New enum variants** are breaking because guest modules may use exhaustive matches. If a new role is needed, bump the major version.
-
-4. **Deprecation flow**: Mark functions/types as deprecated in comments for one minor version before removing in the next major version.
-
-5. **Single live version**: The host registers exactly one WIT package version in the linker — there are no adapter layers for older packages, and a module targeting a superseded version fails to instantiate. Bumping the package version means rebuilding every module against it.
-
-### Current Version: `0.2.0`
-
-Adds the optional `billing` and `file` interfaces over `0.1.0`, which is no longer loadable. The `0.x` series allows breaking changes in minor versions while the interface is being stabilized. Once `1.0.0` is released, the compatibility rules above apply strictly.
+| Version | Change |
+|:--------|:-------|
+| `0.3.0` | Plugin world (PL-U3): `plugin { metadata, list-tools, invoke-tool }` replaces `agent { chat, invoke-tool, list-tools, get-agent-card }`; typed tool calls, results and errors; plugin metadata with requested capabilities; `message.role` gains `tool`. No longer an agent: plugins contribute tools to agent specs. |
+| `0.2.0` | Agent world `chatty:module`, with the `file` and `billing` imports. Refused. |
+| `0.1.0` | First agent world. Refused. |

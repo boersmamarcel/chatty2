@@ -19,7 +19,7 @@ fn cold_load(c: &mut Criterion) {
     let llm: Arc<dyn LlmProvider> = common::fake_llm("unused");
 
     let mut group = c.benchmark_group("cold_load");
-    for fixture in ["echo-agent", "benford-agent", "padded"] {
+    for fixture in ["echo", "benford", "padded"] {
         group.bench_function(fixture, |b| {
             b.iter(|| black_box(common::load_module(&engine, fixture, llm.clone())));
         });
@@ -36,7 +36,7 @@ fn load_twenty_copies(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("load_20_copies");
     group.sample_size(10);
-    for fixture in ["echo-agent", "benford-agent"] {
+    for fixture in ["echo", "benford"] {
         group.bench_function(fixture, |b| {
             b.iter(|| {
                 let mods: Vec<_> = (0..20)

@@ -26,7 +26,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use chatty_wasm_runtime::ToolDefinition;
+use chatty_wasm_runtime::{ToolCallRequest, ToolDefinition};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -37,7 +37,7 @@ use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JsonRpcRequest, METHOD_NOT_FOUND,
     json_rpc_error, json_rpc_ok, module_not_found, module_not_found_json,
 };
-use super::module_call::{self, Protocol};
+use super::module_call;
 
 // ---------------------------------------------------------------------------
 // Handler: POST /mcp/{module}
@@ -64,7 +64,7 @@ async fn dispatch(module_name: &str, body: JsonRpcRequest, state: &GatewayState)
 
     let method = body.method.as_str();
     if matches!(method, "initialize" | "tools/list" | "tools/call") {
-        let Some(module) = module_call::module_for(state, module_name, Protocol::Mcp).await else {
+        let Some(module) = module_call::mcp_module(state, module_name).await else {
             return module_not_found(body.id, module_name);
         };
         return match method {
@@ -154,12 +154,17 @@ async fn handle_tools_call(
         }
     };
 
-    // The WIT contract: `args` is the tool's arguments object, JSON-encoded
-    // once — exactly what the tool's `inputSchema` describes.
-    let args = params
-        .get("arguments")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "{}".to_string());
+    // The WIT contract: `arguments-json` is the tool's arguments object,
+    // JSON-encoded once — exactly what the tool's `inputSchema` describes.
+    let call = ToolCallRequest {
+        name: tool_name,
+        arguments_json: params
+            .get("arguments")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "{}".to_string()),
+        call_id: crate::gateway::new_id(),
+        caller: None,
+    };
 
     // Pre-invocation credit check for paid modules only
     if let Err(e) = module_call::check_credits(state, module_name).await {
@@ -170,7 +175,7 @@ async fn handle_tools_call(
     }
 
     let mut module = module.lock().await;
-    let result = module.invoke_tool(&tool_name, &args).await;
+    let result = module.invoke_tool(call).await;
     let metrics = module.last_invocation_metrics();
     drop(module);
 
@@ -179,7 +184,7 @@ async fn handle_tools_call(
             module_call::record_usage(state, module_name, metrics);
             json_rpc_ok(
                 id,
-                json!({ "content": [{ "type": "text", "text": result }] }),
+                json!({ "content": [{ "type": "text", "text": result.content }] }),
             )
         }
         Err(e) => json_rpc_error(
@@ -255,7 +260,7 @@ pub(crate) async fn mcp_sse(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
 ) -> Response {
-    if module_call::module_for(&state, &module_name, Protocol::Mcp)
+    if module_call::mcp_module(&state, &module_name)
         .await
         .is_none()
     {

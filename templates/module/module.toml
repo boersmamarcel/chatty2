@@ -5,20 +5,17 @@ description = "{{description}}"
 wasm = "{{project-name | snake_case}}.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["greet"]
 
 [protocols]
-openai_compat = true
+# Serve the plugin's tools to external MCP clients at /mcp/{{project-name}}.
 mcp = true
-a2a = true
 
 [resources]
 max_memory_mb = 32
 max_execution_ms = 5000
 
-# Optional: string values the module reads with `config::get`.
+# Optional: string values the plugin reads with `config::get`.
 # [config]
 # greeting = "hello"
 

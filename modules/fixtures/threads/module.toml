@@ -5,6 +5,4 @@ description = "Adversarial test fixture: threads"
 wasm = "threads.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["spawn"]

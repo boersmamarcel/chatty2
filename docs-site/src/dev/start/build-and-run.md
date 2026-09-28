@@ -34,7 +34,7 @@ On Linux, `make setup` runs [`scripts/setup-linux.sh`](https://github.com/boersm
 make wasm-modules
 ```
 
-Some integration tests load real modules: `echo-agent`, `benford-agent` and the adversarial fixtures under `modules/fixtures/`. `make wasm-modules` runs `scripts/build-wasm-fixtures.sh`, which builds them all and stages each at `target/wasm-fixtures/<name>/<name>.wasm` beside its `module.toml`. It is build output, so run it once after every fresh clone (and again after `cargo clean`).
+Some integration tests load real plugins: `echo`, `benford` and the adversarial fixtures under `modules/fixtures/`. `make wasm-modules` runs `scripts/build-wasm-fixtures.sh`, which builds them all and stages each at `target/wasm-fixtures/<name>/<name>.wasm` beside its `module.toml`. It is build output, so run it once after every fresh clone (and again after `cargo clean`).
 
 ### 3. Run the terminal app headless against Ollama
 
