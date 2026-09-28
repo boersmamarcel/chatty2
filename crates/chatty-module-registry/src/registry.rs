@@ -41,7 +41,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use chatty_wasm_runtime::ModuleManifest as RuntimeManifest;
-use chatty_wasm_runtime::{Engine, LlmProvider, ResourceLimits, WasmModule};
+use chatty_wasm_runtime::{Capability, Engine, LlmProvider, ResourceLimits, WasmModule};
 
 use crate::install_record::verify_installed;
 use crate::manifest::ModuleManifest;
@@ -64,6 +64,8 @@ struct LoadedModule {
     trust_level: TrustLevel,
     /// Directory that the module was loaded from (needed for reload).
     module_dir: PathBuf,
+    /// What its `metadata` requests (PL-U4), read at load.
+    requested: Vec<Capability>,
     wasm: ModuleHandle,
 }
 
@@ -325,6 +327,12 @@ impl ModuleRegistry {
         self.modules.get(name).map(|m| m.trust_level.clone())
     }
 
+    /// The capabilities a registered module's `metadata` requests (PL-U4),
+    /// in its order. `None` if it is not registered.
+    pub fn requested_capabilities(&self, name: &str) -> Option<&[Capability]> {
+        self.modules.get(name).map(|m| m.requested.as_slice())
+    }
+
     /// Return an iterator over the names of all registered modules.
     pub fn module_names(&self) -> impl Iterator<Item = &str> {
         self.modules.keys().map(String::as_str)
@@ -426,6 +434,7 @@ impl ModuleRegistry {
                 manifest,
                 trust_level,
                 module_dir: module_dir.to_path_buf(),
+                requested: wasm.requested_capabilities().to_vec(),
                 wasm: Arc::new(Mutex::new(wasm)),
             },
         );

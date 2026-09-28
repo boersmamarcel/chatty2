@@ -32,7 +32,6 @@ use crate::settings::models::models_store::{ModelConfig, ModelsModel};
 use crate::settings::models::providers_store::ProviderModel;
 use crate::settings::models::training_settings::TrainingSettingsModel;
 use crate::settings::models::{AgentConfigEvent, AgentConfigNotifier, GlobalAgentConfigNotifier};
-use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 use crate::settings::models::{GlobalModelsNotifier, ModelsNotifierEvent};
 use chatty_core::exporters::atif_exporter::conversation_to_atif;
 use chatty_core::exporters::jsonl_exporter::{
@@ -44,7 +43,6 @@ use chatty_core::repositories::{ConversationData, ConversationRepository};
 use chatty_core::session::{
     AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind, turn_transport,
 };
-use chatty_core::tools::LocalModuleAgentSummary;
 
 mod conversation_ops;
 mod conversation_ops_modify;
@@ -55,45 +53,20 @@ mod slash_commands;
 
 pub(crate) use conversation_ops_modify::move_ui_enabled;
 
-/// Collect WASM module agents from the global `DiscoveredModulesModel` and convert them to
-/// `LocalModuleAgentSummary` values suitable for the `list_agents` tool.
-///
-/// Only modules with `agent = true`, a `Loaded` status, and enabled in `ExtensionsModel`
-/// are included.
-fn collect_module_agents(cx: &App) -> Vec<LocalModuleAgentSummary> {
-    let enabled_ids: std::collections::HashSet<&str> = cx
-        .try_global::<chatty_core::settings::models::extensions_store::ExtensionsModel>()
-        .map(|ext| {
-            ext.wasm_module_ids()
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>()
+/// The broker's gateway port and the local roster's names (PL-U5): the
+/// specs module settings declare, else every exposed spec the workspace
+/// reaches. `None` without module settings.
+fn gateway_and_roster(cx: &App) -> Option<(u16, Vec<String>)> {
+    let workspace = cx
+        .try_global::<crate::settings::models::ExecutionSettingsModel>()
+        .and_then(|settings| settings.workspace_dir.clone());
+    cx.try_global::<crate::settings::models::ModuleSettingsModel>()
+        .map(|m| {
+            (
+                m.gateway_port,
+                m.roster_names(workspace.as_deref().map(std::path::Path::new)),
+            )
         })
-        .unwrap_or_default();
-
-    cx.try_global::<DiscoveredModulesModel>()
-        .map(|model| {
-            model
-                .modules
-                .iter()
-                .filter(|m| {
-                    m.agent
-                        && matches!(
-                            m.status,
-                            ModuleLoadStatus::Loaded | ModuleLoadStatus::Remote
-                        )
-                        && enabled_ids.contains(m.name.as_str())
-                })
-                .map(|m| LocalModuleAgentSummary {
-                    name: m.name.clone(),
-                    version: m.version.clone(),
-                    description: m.description.clone(),
-                    tools: m.tools.clone(),
-                    supports_a2a: m.a2a,
-                    execution_mode: m.execution_mode.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
@@ -329,14 +302,8 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let memory_service = await_memory_service(cx).await;
     let embedding_service = get_embedding_service(cx);
     let skill_service = get_skill_service(cx);
-    let module_agents = cx
-        .update(|cx| collect_module_agents(cx))
-        .unwrap_or_default();
     let (gateway_port, local_agents) = cx
-        .update(|cx| {
-            cx.try_global::<crate::settings::models::ModuleSettingsModel>()
-                .map(|m| (m.gateway_port, m.virtual_agent_names()))
-        })
+        .update(|cx| gateway_and_roster(cx))
         .ok()
         .flatten()
         .unzip();
@@ -372,7 +339,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             skill_service: Some(skill_service),
             search_settings,
             embedding_service,
-            module_agents,
             gateway_port,
             lazy_broker,
             local_agents: local_agents.unwrap_or_default(),
@@ -926,7 +892,7 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
 
 /// Classify a built-in tool call by name into a [`ToolSource`] for data-egress badges.
 ///
-/// Internet-facing tools are classified here. Module agent calls (invoke_agent /
+/// Internet-facing tools are classified here. Agent calls (invoke_agent)
 /// are classified separately by [`classify_agent_source`].
 pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
     chatty_core::models::message_types::classify_tool_source(tool_name)
@@ -934,18 +900,10 @@ pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
 
 /// Classify an agent invocation by agent name into a [`ToolSource`].
 ///
-/// Checks the global [`DiscoveredModulesModel`] for remote WASM modules and the
-/// global [`ExtensionsModel`] for non-localhost A2A agents.
+/// Checks the global [`ExtensionsModel`] for non-localhost A2A agents; every
+/// other agent is a local spec (PL-U5 — a WASM module is never an agent).
 pub(super) fn classify_agent_source(agent_name: &str, cx: &App) -> ToolSource {
     use chatty_core::settings::models::extensions_store::ExtensionsModel;
-
-    // Remote WASM module on the Hive runner?
-    if let Some(discovered) = cx.try_global::<DiscoveredModulesModel>()
-        && let Some(entry) = discovered.modules.iter().find(|m| m.name == agent_name)
-        && (entry.execution_mode == "remote" || entry.execution_mode == "remote_only")
-    {
-        return ToolSource::HiveCloud;
-    }
 
     // Remote A2A agent with a non-localhost URL?
     if let Some(extensions) = cx.try_global::<ExtensionsModel>()

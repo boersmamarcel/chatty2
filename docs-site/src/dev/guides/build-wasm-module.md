@@ -130,7 +130,7 @@ cargo test -p chatty-tui --test plugins_headless
 | Topic | Doc |
 |-------|-----|
 | WIT types, host imports, the guest export, versioning | [WIT reference](../architecture/wit-reference.md) |
-| Gateway routes, manifest fields, resource limits, module directory per platform | [A2A and WASM modules](../architecture/a2a-and-wasm-modules.md) |
+| Gateway routes, manifest fields, resource limits, module directory per platform | [Plugins](../architecture/plugins.md) |
 | Crate stack diagram | [Component map](../architecture/component-map.md) |
 | Template source | [`templates/module/`](https://github.com/boersmamarcel/chatty2/tree/main/templates/module) |
 | Reference plugins | [`modules/echo/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/echo), [`modules/benford/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/benford) |

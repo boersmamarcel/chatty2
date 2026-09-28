@@ -63,7 +63,8 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`token-tracking.md`](token-tracking.md) | Context window, cost | Token budget accounting |
 | [`context-compaction.md`](context-compaction.md) | Long conversations, `/compact` | How compaction works |
 | [`agent-memory.md`](agent-memory.md) | Memory tools / skills | Persistent agent memory store |
-| [`a2a-and-wasm-modules.md`](a2a-and-wasm-modules.md) | WASM agents or A2A | Module flow, manifest, limits |
+| [`agents-and-specs.md`](agents-and-specs.md) | Agents, specs, A2A, the broker | The roster, `list_agents`/`invoke_agent`/`/agent`, specs, teams |
+| [`plugins.md`](plugins.md) | WASM plugins | Manifest, limits, a spec's plugins, MCP serving |
 | [`wit-reference.md`](wit-reference.md) | Authoring WASM modules | WIT interface schemas (reference) |
 | [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded catalog and community servers (reference) |
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Labels, version bump, changelog, GitHub Release |

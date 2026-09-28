@@ -22,15 +22,16 @@ pub struct DiscoveredModuleEntry {
     pub description: String,
     pub wasm_file: String,
     pub tools: Vec<String>,
-    pub agent: bool,
     pub mcp: bool,
-    pub a2a: bool,
     pub status: ModuleLoadStatus,
     /// `"local"`, `"remote"`, or `"remote_only"`.
     pub execution_mode: String,
     /// The trust a loaded module loaded at (PL-H5a): its install record's,
     /// or `Local` for one copied in by hand. `None` unless it loaded.
     pub trust_level: Option<TrustLevel>,
+    /// What its `metadata` requests (PL-U4), by capability name. `None`
+    /// unless it loaded.
+    pub requested: Option<Vec<String>>,
 }
 
 pub struct DiscoveredModulesModel {

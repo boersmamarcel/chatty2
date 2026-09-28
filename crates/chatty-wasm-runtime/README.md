@@ -34,7 +34,7 @@ file declares another package until `WIT_PACKAGE`/`PLUGIN_EXPORT` (and the
 SDK's `WIT_PACKAGE`) are updated with it.
 
 See [`docs/wit-reference.md`](../../docs/wit-reference.md) for the WIT
-schema and [`docs/a2a-and-wasm-modules.md`](../../docs/a2a-and-wasm-modules.md)
+schema and [`docs/plugins.md`](../../docs/plugins.md)
 for the broader module architecture.
 
 ## Build / test

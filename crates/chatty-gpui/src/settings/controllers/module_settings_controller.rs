@@ -132,8 +132,12 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
 
     let loaded = report.loaded.into_iter().map(|(dir, manifest)| {
         let trust_level = validation_registry.trust_level(&manifest.name);
+        let requested = validation_registry
+            .requested_capabilities(&manifest.name)
+            .map(|caps| caps.iter().map(|c| c.name().to_string()).collect());
         DiscoveredModuleEntry {
             trust_level,
+            requested,
             ..discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded)
         }
     });
@@ -190,12 +194,11 @@ fn discovered_entry(
         description: manifest.description,
         wasm_file,
         tools: manifest.capabilities.tools,
-        agent: manifest.capabilities.agent,
         mcp: manifest.protocols.mcp,
-        a2a: manifest.protocols.a2a,
         status,
         execution_mode: manifest.execution_mode.to_string(),
         trust_level: None,
+        requested: None,
     }
 }
 
@@ -208,12 +211,11 @@ fn invalid_manifest_entry(dir: &Path, status: ModuleLoadStatus) -> DiscoveredMod
         description: "Manifest could not be parsed.".to_string(),
         wasm_file: "unknown".to_string(),
         tools: Vec::new(),
-        agent: false,
         mcp: false,
-        a2a: false,
         status,
         execution_mode: "local".to_string(),
         trust_level: None,
+        requested: None,
     }
 }
 
@@ -248,8 +250,8 @@ fn apply_scan_snapshot(
     }
     cx.refresh_windows();
 
-    // Notify the active agent to rebuild so it picks up newly
-    // discovered (or removed) module agents.
+    // Notify the active agent to rebuild so it picks up newly discovered
+    // (or removed) plugins and the broker's roster.
     if let Some(notifier) = cx
         .try_global::<GlobalAgentConfigNotifier>()
         .and_then(|g| g.try_upgrade())
@@ -457,8 +459,9 @@ pub fn refresh_runtime(cx: &mut App) {
                     }
 
                     // ADR-0011 C2: the gateway is also the fleet broker.
-                    // Each virtual agent — `local-agent`, or the named team
-                    // module settings declare (C10) — spawns one child per
+                    // Each virtual agent — the roster's specs: what module
+                    // settings declare, else `local-agent` and every
+                    // exposed spec (C10, PL-U5) — spawns one child per
                     // delegated task, on a connection the broker makes for
                     // it (ADR-0020); the shared socket beside the HTTP port
                     // refuses every registration. Unix only — the runners do
@@ -557,12 +560,11 @@ mod refresh_runtime_tests {
             description: String::new(),
             wasm_file: format!("{name}.wasm"),
             tools: Vec::new(),
-            agent: true,
             mcp,
-            a2a: true,
             status: ModuleLoadStatus::Loaded,
             execution_mode: "local".to_string(),
             trust_level: None,
+            requested: None,
         }
     }
 

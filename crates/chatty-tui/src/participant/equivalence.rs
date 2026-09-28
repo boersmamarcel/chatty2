@@ -143,8 +143,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     let dir = tempfile::tempdir().expect("a dir for the stand-in worker");
     let (port, _registry) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
-    let tool =
-        InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+    let tool = InvokeAgentTool::new(vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
     let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
     let result = tool
@@ -540,8 +539,7 @@ mod evidence {
     /// Delegate one task to `local-agent` and return the answer the model
     /// reads plus every progress line the leader's transcript renders.
     async fn delegate(port: u16) -> (Result<String, String>, String) {
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+        let tool = InvokeAgentTool::new(vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
         let mut progress_rx = install_progress_channel(&tool.progress_slot());
 
         let result = tool
@@ -809,8 +807,8 @@ pub(super) mod named_virtual_agents {
     /// Delegate one task to `agent` through the real `invoke_agent`; the
     /// runner's stand-in child answers it.
     async fn delegate(broker: &Broker, agent: &str) {
-        let tool = InvokeAgentTool::new(vec![], vec![], Some(broker.port))
-            .with_local_agents([CODER, REVIEWER]);
+        let tool =
+            InvokeAgentTool::new(vec![], Some(broker.port)).with_local_agents([CODER, REVIEWER]);
         tool.call(
             &mut ToolContext::new(),
             InvokeAgentArgs {
@@ -1303,8 +1301,7 @@ mod spend_cap {
 
     /// `invoke_agent` as the factory builds it for a leader with a gate.
     fn leader_tool(port: u16, gate: Option<Arc<dyn SpendGate>>) -> InvokeAgentTool {
-        let tool =
-            InvokeAgentTool::new(vec![], vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
+        let tool = InvokeAgentTool::new(vec![], Some(port)).with_local_agents([LOCAL_AGENT_NAME]);
         match gate {
             Some(gate) => tool.with_spend_gate(gate),
             None => tool,
