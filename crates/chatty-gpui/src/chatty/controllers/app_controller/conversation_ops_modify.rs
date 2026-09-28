@@ -234,7 +234,8 @@ impl ChattyApp {
                         let memory_service = await_memory_service(cx).await;
                         let embedding_service = get_embedding_service(cx);
                         let skill_service = get_skill_service(cx);
-                        let (gateway_port, local_agents) = cx.update(|cx| gateway_and_roster(cx))
+                        let (gateway_port, local_agents) = cx
+                            .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
                             .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                             .ok()
                             .flatten()
