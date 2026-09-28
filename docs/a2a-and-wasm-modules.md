@@ -721,9 +721,9 @@ grants = ["llm"]                   # "http" / "file-write" would make every call
 limits = { max_execution_ms = 5000 }  # lowers the module's [resources], never raises them
 
 [swarm]
-delegates_to = ["local-coder"]     # non-empty: the worker runs a broker of its own
-exposed = true
-callers = ["coder-reviewer-leader"]
+delegates_to = ["local-coder"]     # whom it may call (names or * globs); empty = no agent tools
+exposed = true                     # others may call it (the default)
+callers = ["coder-reviewer-leader"]  # optional: only these may call it
 
 [budget]
 max_agent_turns = 30               # 0 = uncapped; the deadline applies
@@ -751,6 +751,9 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `tools.profile` | Optional. A named tool profile: `coordinator`, `coder` or `reviewer` — see below. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
+| `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
+| `swarm.exposed` | Optional, default `true`. `false`: no other agent may call it. |
+| `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. |
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
 | `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |
@@ -779,18 +782,19 @@ to the MCP server list — `/mcp/{module}` is for MCP clients outside chatty.
 
 **Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `tools.disable` removes
 whole tool *groups*, which is the wrong grain for a role — a reviewer wants `git_diff`
-but not `git_commit`, and a coder wants none of the agent tools. `tools.profile` names a profile
+but not `git_commit`. `tools.profile` names a profile
 instead: an allowlist of tool *names*, and the worker's whole tool set. Anything the
 profile does not name is dropped, MCP tools included, which is most of the point — a 4B
 coder used to be handed 53 tool schemas (~13k tokens) before it could read a file. A
 profile only ever removes tools: it cannot turn on a group the execution settings
-switched off.
+switched off. A profile does not decide delegation: `list_agents` and `invoke_agent`
+come with a non-empty `swarm.delegates_to`, on any profile or none, and no profile removes them.
 
 | Profile | What it can call |
 |---------|------------------|
-| `coordinator` | The read set below, plus the todo plan (`write_todos`, `update_todo`, `verify_completion`), `list_agents`, `invoke_agent` and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It delegates; it does not edit. |
-| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). No agent tools: a coder does not fan out further. |
-| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value. No writes, no commits, no delegation. |
+| `coordinator` | The read set below, plus the todo plan (`write_todos`, `update_todo`, `verify_completion`) and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It does not edit; the `coder-reviewer-leader` preset delegates because its spec lists `local-coder` and `local-reviewer`. |
+| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). |
+| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value. No writes, no commits. |
 
 The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
 `search_code`, `git_status`, `git_log`, `git_diff` (which takes a `base..head` `range`, so

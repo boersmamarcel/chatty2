@@ -36,6 +36,8 @@ pub struct ToolAvailability {
     pub ask_user: bool,
     pub terminal: bool,
     pub terminal_run: bool,
+    /// `list_agents` and `invoke_agent`: the agent may delegate (PL-S2 DP-1).
+    pub agents: bool,
     /// `send_message`: offered to every worker with a broker-made
     /// connection, whatever its delegation rights (tree messages, TM-1).
     pub send_message: bool,
@@ -48,9 +50,12 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
         String::from("update_todo"),
         String::from("verify_completion"),
         String::from("read_skill"),
-        String::from("list_agents"),
-        String::from("invoke_agent"),
     ]);
+
+    if tools.agents {
+        names.insert(String::from("list_agents"));
+        names.insert(String::from("invoke_agent"));
+    }
 
     if tools.ask_user {
         names.insert(String::from("ask_user"));
@@ -218,11 +223,11 @@ mod tests {
     #[test]
     fn always_includes_baseline_tools() {
         let names = active_native_tool_names(&ToolAvailability::default());
-        for tool in ["read_skill", "list_tools", "list_agents", "invoke_agent"] {
+        for tool in ["read_skill", "list_tools"] {
             assert!(names.contains(tool), "{tool} must always be present");
         }
-        // Baseline count: 7 always-on tools
-        assert_eq!(names.len(), 7);
+        // Baseline count: 5 always-on tools
+        assert_eq!(names.len(), 5);
     }
 
     #[test]
@@ -411,6 +416,8 @@ mod tests {
             ("publish_module", "publish_wasm_module"),
             ("terminal", "terminal_read"),
             ("terminal_run", "terminal_run"),
+            ("agents", "invoke_agent"),
+            ("agents", "list_agents"),
         ];
 
         for (flag, expected_tool) in cases {
@@ -426,6 +433,7 @@ mod tests {
                 "publish_module" => tools.publish_module = true,
                 "terminal" => tools.terminal = true,
                 "terminal_run" => tools.terminal_run = true,
+                "agents" => tools.agents = true,
                 _ => unreachable!(),
             }
             let names = active_native_tool_names(&tools);
@@ -491,6 +499,7 @@ mod tests {
             ask_user: true,
             terminal: true,
             terminal_run: true,
+            agents: true,
             send_message: true,
         };
         let names = active_native_tool_names(&all);
@@ -528,6 +537,8 @@ mod tests {
             "compile_typst",
             "terminal_read",
             "terminal_run",
+            "list_agents",
+            "invoke_agent",
         ] {
             assert!(
                 !names.contains(tool),
