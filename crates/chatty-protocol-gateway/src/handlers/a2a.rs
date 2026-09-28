@@ -344,6 +344,9 @@ async fn handle_message_send(
     if let Err(e) = module_call::check_credits(state, module_name).await {
         return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
+    if let Err(e) = module_call::check_usage_reporting(state, module_name) {
+        return json_rpc_error(StatusCode::OK, id, -32000, e);
+    }
 
     let turn = Turn::new(module_name, &params, content, &state.contexts);
     let mut module = module.lock().await;
@@ -469,6 +472,9 @@ async fn handle_message_stream(
         return module_not_found(id, &module_name);
     };
     if let Err(e) = module_call::check_credits(state, &module_name).await {
+        return json_rpc_error(StatusCode::OK, id, -32000, e);
+    }
+    if let Err(e) = module_call::check_usage_reporting(state, &module_name) {
         return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
 

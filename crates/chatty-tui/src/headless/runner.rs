@@ -347,6 +347,11 @@ impl HeadlessRunner {
                     None => self.config.module_settings.virtual_agent_names(),
                 },
                 remote_agents: self.config.remote_agents.clone(),
+                plugin_host: crate::engine::plugin_host(
+                    &self.config.module_settings,
+                    &self.config.models,
+                    &self.config.providers,
+                ),
             },
         )
         .context("the run's agent spec does not build")?;
@@ -480,6 +485,14 @@ impl HeadlessRunner {
             turns = turns.clamp(1, FINAL_PASS_TOOL_TURNS);
         }
         TurnBudget::run_share(turns, total, spent).with_deadline(deadline)
+    }
+
+    /// Whether a follow-up pass would still get a tool turn: an uncapped
+    /// run always does, a capped one until it has spent `max_agent_turns`
+    /// plus [`FINAL_PASS_TOOL_TURNS`].
+    pub(super) fn has_tool_turns_left(&self) -> bool {
+        let total = self.execution_settings.max_agent_turns as usize;
+        total == 0 || self.tool_turns_spent < total + FINAL_PASS_TOOL_TURNS
     }
 
     fn spawn_turn(&mut self, input: TurnInput) {
@@ -634,6 +647,13 @@ impl HeadlessRunner {
                 self.usage.checkpoint();
             }
             AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
+            AppEvent::PluginUsage(usage) => {
+                // Spent inside a tool, on the agent's behalf: the run's
+                // spend like a delegated worker's (PL-U2).
+                self.usage.update(|t| t.add_delegated(&usage));
+                self.usage.checkpoint();
+                self.session.note_plugin_usage(usage);
+            }
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
             AppEvent::Delegation(progress) => {
                 if let chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished {

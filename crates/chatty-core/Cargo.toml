@@ -102,11 +102,12 @@ chatty-fabric = { path = "../chatty-fabric" }
 
 # Hive registry client
 hive-client = { path = "../hive-client" }
-# The install record a WASM install leaves for the registry's load check (PL-H5a).
-chatty-module-registry = { path = "../chatty-module-registry" }
-semver.workspace = true
 # The `LlmProvider` a WASM plugin's `llm::complete` calls (services::plugin_llm).
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
+# A spec's plugins are resolved by their strict `module.toml` (tools::plugin_tool);
+# install.rs writes the install record the registry checks at load (PL-H5a).
+chatty-module-registry = { path = "../chatty-module-registry" }
+semver.workspace = true
 # The agent's persistent shell runs on its PTY (services::shell_service).
 chatty-terminal = { path = "../chatty-terminal" }
 

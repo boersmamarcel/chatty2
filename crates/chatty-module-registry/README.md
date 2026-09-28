@@ -10,20 +10,21 @@ and adds:
   `module.toml` manifests
 - **Manifest parsing** — typed `ModuleManifest` with capabilities,
   protocols, and resource limits
-- **A `notify`-based filesystem watcher** (`watch`) that can re-load changed
-  modules — implemented and tested, but not called by any production code
-  today; nothing hot-reloads a module yet
 - **Lifecycle** — load, unload, reload, enumerate currently loaded modules
 - **Install record** — a module chatty installed carries
   `.chatty-install.json` (`InstallRecord`: sha256, trust level, publisher
   key); every load re-hashes the `.wasm` against it and refuses a mismatch.
   A module without one loads as `TrustLevel::Local`
 
+There is no filesystem watcher: an agent that runs a module as a plugin
+loads its own instance when it is built (PL-U2), so a changed module is
+picked up by the next agent, and by `reload` or a new scan here.
+
 ## Public surface
 
 - [`ModuleRegistry`] — owns all loaded modules, exposes
-  `scan_directory`, `load`, `unload`, `reload`, `get`, `get_mut`, `manifest`,
-  `module_names`, `trust_level`, `len`, `is_empty`, and `watch`
+  `scan_directory`, `load`, `unload`, `reload`, `get`, `manifest`,
+  `module_names`, `trust_level`, `len` and `is_empty`
 - [`InstallRecord`], [`INSTALL_RECORD_FILE`], [`TrustLevel`] (hive-client's)
 - [`ModuleManifest`] + [`ModuleCapabilities`], [`ModuleProtocols`],
   [`ModuleResourceLimits`]

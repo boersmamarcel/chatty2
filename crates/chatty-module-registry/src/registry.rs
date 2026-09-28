@@ -1,8 +1,10 @@
 //! Module discovery, loading, and lifecycle management.
 //!
-//! [`ModuleRegistry`] scans a root directory for module subdirectories, loads
-//! each one as a [`WasmModule`], and provides hot-reload via the
-//! [`notify`] file-system watcher.
+//! [`ModuleRegistry`] scans a root directory for module subdirectories and
+//! loads each one as a [`WasmModule`]. A changed module is picked up by
+//! [`ModuleRegistry::reload`] or a new scan; an agent that runs a module as a
+//! plugin loads its own instance when it is built (PL-U2), so there is no
+//! file-system watcher.
 //!
 //! # Directory layout
 //!
@@ -35,8 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use chatty_wasm_runtime::ModuleManifest as RuntimeManifest;
@@ -337,66 +338,6 @@ impl ModuleRegistry {
     /// Return `true` if no modules are loaded.
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
-    }
-
-    // -----------------------------------------------------------------------
-    // File-system watching (hot-reload)
-    // -----------------------------------------------------------------------
-
-    /// Start a [`notify`] file-system watcher on `watch_dir`.
-    ///
-    /// Events are forwarded over an [`mpsc`] channel.  The caller is
-    /// responsible for receiving events and calling [`Self::reload`] /
-    /// [`Self::scan_directory`] as appropriate.
-    ///
-    /// The returned [`RecommendedWatcher`] must be kept alive; dropping it
-    /// stops the watcher.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use std::sync::Arc;
-    /// # use chatty_module_registry::ModuleRegistry;
-    /// # use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
-    /// # use chatty_wasm_runtime::ModuleManifest as RuntimeManifest;
-    /// # struct NoopProvider;
-    /// # impl LlmProvider for NoopProvider {
-    /// #     fn complete(&self, _: &str, _: Vec<chatty_wasm_runtime::Message>, _: Option<String>)
-    /// #         -> Result<chatty_wasm_runtime::CompletionResponse, String> { Err("noop".into()) }
-    /// # }
-    /// # async fn run() -> anyhow::Result<()> {
-    /// let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
-    /// let mut registry = ModuleRegistry::new(provider, ResourceLimits::default())?;
-    /// let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-    /// let _watcher = registry.watch(".chatty/modules", tx)?;
-    /// while let Some(event) = rx.recv().await {
-    ///     println!("fs event: {:?}", event);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn watch(
-        &self,
-        watch_dir: impl AsRef<Path>,
-        sender: mpsc::Sender<notify::Result<Event>>,
-    ) -> Result<RecommendedWatcher> {
-        let watch_dir = watch_dir.as_ref().to_path_buf();
-
-        let mut watcher = notify::recommended_watcher(move |res| {
-            // Best-effort send; log a warning if the channel is full or closed
-            // so that missed hot-reload events are visible in diagnostics.
-            if sender.try_send(res).is_err() {
-                warn!("fs watcher event dropped — channel full or closed");
-            }
-        })
-        .context("failed to create file-system watcher")?;
-
-        watcher
-            .watch(&watch_dir, RecursiveMode::Recursive)
-            .with_context(|| format!("failed to watch {}", watch_dir.display()))?;
-
-        info!(dir = %watch_dir.display(), "watching for module changes");
-        Ok(watcher)
     }
 
     // -----------------------------------------------------------------------

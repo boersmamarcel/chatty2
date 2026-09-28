@@ -10,7 +10,9 @@
 //! resolves through the same `ToolServerHandle` that
 //! `provider_builder.rs`'s agent uses to fill `CompletionRequest::tools`.
 //!
-//! MCP tools are deliberately excluded — their ordering is AGE-206.
+//! MCP tools are deliberately excluded — their ordering is AGE-206. A spec's
+//! plugin tools are included (PL-U2), with the plugins listed out of name
+//! order, so the block proves they are registered sorted by plugin.
 
 use std::process::Command;
 
@@ -81,12 +83,26 @@ fn fixture_provider_config() -> ProviderConfig {
 }
 
 fn fixture_build_context() -> AgentBuildContext {
+    let plugin = |module: &str| crate::agent_spec::PluginSpec {
+        module: module.to_string(),
+        ..Default::default()
+    };
+    let module_root = chatty_wasm_runtime::test_support::fixture_path("echo-agent")
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("fixtures live in target/wasm-fixtures/<name>/")
+        .to_path_buf();
     AgentBuildContext {
         pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
         pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
         pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),
+        plugins: vec![plugin("slow-host"), plugin("echo-agent")],
         ..AgentBuildContext::from_services(AgentServices {
             exec_settings: Some(fixture_execution_settings()),
+            plugin_host: crate::tools::plugin_tool::PluginHost {
+                module_roots: vec![module_root],
+                ..Default::default()
+            },
             ..AgentServices::default()
         })
     }
@@ -186,6 +202,14 @@ fn tool_block_is_byte_identical_across_processes() {
         !first.is_empty(),
         "the fixture agent produced an empty tool block"
     );
+    let block = String::from_utf8_lossy(&first);
+    let echo = block
+        .find("\"echo-agent__echo\"")
+        .expect("the echo plugin's tools");
+    let ask = block
+        .find("\"slow-host__ask\"")
+        .expect("the slow-host plugin's tool");
+    assert!(echo < ask, "plugins are registered in name order");
 }
 
 /// Child entry point. Ignored so a normal run does not build a second agent

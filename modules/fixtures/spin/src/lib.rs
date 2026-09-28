@@ -1,4 +1,5 @@
-//! Fixture `spin`: `chat` loops forever doing arithmetic (fuel exhaustion, wall-clock timeout).
+//! Fixture `spin`: `chat` and the `spin` tool loop forever doing arithmetic (fuel exhaustion,
+//! wall-clock timeout).
 use chatty_module_sdk::{export_module, ToolDefinition};
 use chatty_module_sdk::{AgentCard, ChatRequest, ChatResponse, ModuleExports, Role};
 
@@ -30,11 +31,19 @@ impl ModuleExports for Fixture {
             x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
         }
     }
-    fn invoke_tool(&self, name: String, _args: String) -> Result<String, String> {
-        Err(format!("unknown tool: {name}"))
+    fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
+        if name != "spin" {
+            return Err(format!("unknown tool: {name}"));
+        }
+        let mut x = args.len() as u64;
+        loop {
+            x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+        }
     }
     fn list_tools(&self) -> Vec<ToolDefinition> {
-        vec![]
+        let (name, description) = ("spin".into(), "Never returns.".into());
+        let parameters_schema = r#"{"type":"object","properties":{}}"#.into();
+        vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn get_agent_card(&self) -> AgentCard {
         card("spin", vec![])
