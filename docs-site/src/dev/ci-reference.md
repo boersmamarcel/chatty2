@@ -21,7 +21,7 @@ The Makefile mirrors `.github/workflows/ci.yml`; the workflow is the ground trut
 | `make fmt` | `cargo fmt` |
 | `make fmt-check` | `cargo fmt --check` |
 | `make typecheck` | `cargo check --all-features` |
-| `make wasm-modules` | Runs `scripts/build-wasm-fixtures.sh`: builds `echo-agent`, `benford-agent` and every `modules/fixtures/` crate for `wasm32-wasip2` (release) and stages each at `target/wasm-fixtures/<name>/<name>.wasm` next to its `module.toml` |
+| `make wasm-modules` | Runs `scripts/build-wasm-fixtures.sh`: builds the `echo` and `benford` plugins and every `modules/fixtures/` crate for `wasm32-wasip2` (release) and stages each at `target/wasm-fixtures/<name>/<name>.wasm` next to its `module.toml` |
 | `make run-gpui` | `cargo run -p chatty-gpui` |
 | `make run-tui` | `cargo run -p chatty-tui` |
 | `make ci` | `wasm-modules`, `test`, `fmt-check`, `lint`, `scripts/check-reserved.sh`, `scripts/check-rig-pins.sh` |

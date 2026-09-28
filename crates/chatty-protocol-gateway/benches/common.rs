@@ -32,9 +32,9 @@ pub fn engine() -> Engine {
     WasmModule::build_engine(&ResourceLimits::default()).expect("engine builds")
 }
 
-/// An `LlmProvider` that answers instantly with `reply`, for modules whose
-/// `chat` forwards to the host (F1/F2 do not apply to a provider that never
-/// sleeps and never loops). Scripted with enough repeats for a whole
+/// An `LlmProvider` that answers instantly with `reply`, for plugins whose
+/// tools call the host (F1/F2 do not apply to a provider that never sleeps
+/// and never loops). Scripted with enough repeats for a whole
 /// benchmark's iterations: `FakeLlm` errors past the end of its script.
 pub fn fake_llm(reply: &str) -> Arc<FakeLlm> {
     fake_llm_many(reply, 1_000_000)
@@ -63,7 +63,7 @@ pub fn load_module(engine: &Engine, fixture: &str, llm: Arc<dyn LlmProvider>) ->
     .unwrap_or_else(|e| panic!("{fixture} loads: {e:#}"))
 }
 
-/// Start a real gateway (OpenAI + MCP + A2A routes, no participant socket)
+/// Start a real gateway (MCP + A2A routes, no participant socket)
 /// serving `fixtures` exactly as shipped, with one `FakeLlm` behind every
 /// module's `llm::complete`. Returns the base URL and the fake provider.
 pub async fn start_gateway(fixtures: &[&str]) -> (String, Arc<FakeLlm>) {

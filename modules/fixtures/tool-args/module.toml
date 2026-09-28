@@ -6,5 +6,3 @@ wasm = "tool-args.wasm"
 
 [capabilities]
 tools = ["echo_args"]
-chat = true
-agent = true

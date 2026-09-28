@@ -19,4 +19,5 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
+serde_json.workspace = true
 chatty-wasm-runtime = { path = "../chatty-wasm-runtime", features = ["test-support"] }

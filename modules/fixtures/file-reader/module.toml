@@ -5,9 +5,7 @@ description = "Adversarial test fixture: file-reader"
 wasm = "file-reader.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["read"]
 
 [files]
 root = "weights"

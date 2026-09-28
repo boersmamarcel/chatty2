@@ -32,6 +32,7 @@ name = "fixture-padded"
 version = "0.1.0"
 dependencies = [
  "chatty-module-sdk",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
-//! What every protocol handler does around one guest call: find the module
-//! for a protocol, check credits, run metadata exports off the async
-//! workers, record usage, and pick the status for a failed call.
+//! What the MCP handler does around one guest call: find the module, check
+//! credits, run metadata exports off the async workers, record usage, and
+//! pick the status for a failed call. MCP is the one protocol a plugin is
+//! served on (PL-U3): it has tools, and no loop to answer OpenAI or A2A.
 //!
 //! The registry lock is held only for the lookup. The call itself runs
 //! under the module's own [`ModuleHandle`] lock, so modules never wait on
@@ -14,30 +15,16 @@ use chatty_wasm_runtime::{CallError, InvocationMetrics, WasmModule};
 
 use crate::gateway::GatewayState;
 
-/// The three protocol surfaces a module's `[protocols]` table switches.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Protocol {
-    OpenAi,
-    Mcp,
-    A2a,
-}
-
-/// The handle of `name`, if it is loaded **and** its manifest enables
-/// `protocol`. A disabled protocol answers exactly like a missing module
-/// (404): the module is not served there.
-pub(crate) async fn module_for(
-    state: &GatewayState,
-    name: &str,
-    protocol: Protocol,
-) -> Option<ModuleHandle> {
+/// The handle of `name`, if it is loaded **and** its manifest enables MCP
+/// (`[protocols] mcp = true`). A module without it answers exactly like a
+/// missing module (404): it is not served.
+pub(crate) async fn mcp_module(state: &GatewayState, name: &str) -> Option<ModuleHandle> {
     let reg = state.registry.read().await;
-    let protocols = &reg.manifest(name)?.protocols;
-    let enabled = match protocol {
-        Protocol::OpenAi => protocols.openai_compat,
-        Protocol::Mcp => protocols.mcp,
-        Protocol::A2a => protocols.a2a,
-    };
-    if enabled { reg.get(name) } else { None }
+    if reg.manifest(name)?.protocols.mcp {
+        reg.get(name)
+    } else {
+        None
+    }
 }
 
 /// The pre-invocation credit check for a paid module, taken before any
@@ -66,7 +53,7 @@ pub(crate) fn check_usage_reporting(state: &GatewayState, name: &str) -> Result<
     Ok(())
 }
 
-/// Run a synchronous export (`list_tools`, `agent_card`) under the module's
+/// Run a synchronous export (`list_tools`, `metadata`) under the module's
 /// lock on the blocking pool, so neither the wait for the guest nor the
 /// guest itself occupies a Tokio worker.
 pub(crate) async fn blocking<T: Send + 'static>(

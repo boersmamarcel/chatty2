@@ -1,0 +1,13 @@
+// A hand-written stand-in for the retired `chatty:module@0.2.0` world (the
+// agent-shaped world chatty spoke before `chatty:plugin@0.3.0`): its agent
+// export under the old package, so the host must refuse it at load with the
+// rebuild message.
+package chatty:module@0.2.0;
+
+interface agent {
+    get-agent-card: func() -> string;
+}
+
+world module {
+    export agent;
+}

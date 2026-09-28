@@ -426,21 +426,26 @@ pub fn local_module_registry() -> ModuleRegistry {
     ModuleRegistry::new(Arc::new(NoLocalLlm), ResourceLimits::default()).expect("a module registry")
 }
 
-/// POST one user message to the gateway's OpenAI route for `module`; the
-/// status and the assistant's content (or the whole body when there is none).
-pub async fn chat_via_gateway(gateway: &str, module: &str, prompt: &str) -> (StatusCode, String) {
+/// Send one A2A `message/send` for the remote `module` through the gateway,
+/// which forwards it to the runner (the one remote path left until PL-H8b
+/// removes it; the OpenAI route went with `chat`, PL-U3). The status and the
+/// answer's text (or the whole body when there is none).
+pub async fn send_via_gateway(gateway: &str, module: &str, prompt: &str) -> (StatusCode, String) {
     let (status, body) = send(
         reqwest::Client::new()
-            .post(format!("{gateway}/v1/{module}/chat/completions"))
+            .post(format!("{gateway}/a2a/{module}"))
             .timeout(Duration::from_secs(120))
             .json(&json!({
-                "model": module,
-                "messages": [{ "role": "user", "content": prompt }],
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "message/send",
+                "params": { "message": { "parts": [{ "kind": "text", "text": prompt }] } },
             })),
     )
     .await;
-    let content = body["choices"][0]["message"]["content"]
-        .as_str()
+    let content = body
+        .pointer("/result/artifacts/0/parts/0/text")
+        .and_then(|text| text.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| body.to_string());
     (status, content)

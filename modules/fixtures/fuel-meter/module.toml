@@ -5,6 +5,4 @@ description = "Adversarial test fixture: fuel-meter"
 wasm = "fuel-meter.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["burn"]

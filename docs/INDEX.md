@@ -33,8 +33,8 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 |---|---|
 | [`start/build-and-run.md`](../docs-site/src/dev/start/build-and-run.md) | Clone to running binary in 10 minutes |
 | [`start/first-change.md`](../docs-site/src/dev/start/first-change.md) | Add an LLM tool end to end |
-| [`start/tutorial-echo-agent.md`](../docs-site/src/dev/start/tutorial-echo-agent.md) | First WASM module tutorial |
-| [`start/tutorial-benford-agent.md`](../docs-site/src/dev/start/tutorial-benford-agent.md) | Agentic WASM module tutorial |
+| [`start/tutorial-echo-agent.md`](../docs-site/src/dev/start/tutorial-echo-agent.md) | First WASM plugin tutorial: write a plugin (echo) |
+| [`start/tutorial-benford-agent.md`](../docs-site/src/dev/start/tutorial-benford-agent.md) | Give an agent a plugin: the benford-analyst spec (benford) |
 | [`where-to-look.md`](../docs-site/src/dev/where-to-look.md) | Task → file/doc routing (How-to landing page) |
 | [`guides/add-provider.md`](../docs-site/src/dev/guides/add-provider.md) | Add an LLM provider |
 | [`guides/add-slash-command.md`](../docs-site/src/dev/guides/add-slash-command.md) | Add a `/` command to both front ends |

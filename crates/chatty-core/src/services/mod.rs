@@ -30,6 +30,8 @@ pub mod chart_svg_renderer;
 /// The summary a context compaction replaces older messages with.
 pub mod context_compaction;
 pub mod context_shaper;
+/// Who may call whom: delegation rights from the specs (PL-S2 DP-1).
+pub mod delegation_policy;
 pub mod embedding_service;
 pub mod error_collector_layer;
 /// A worker's calls over the connection its broker made (ADR-0020, BI-4).

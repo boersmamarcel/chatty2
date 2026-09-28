@@ -5,6 +5,4 @@ description = "Adversarial test fixture: huge-output"
 wasm = "huge-output.wasm"
 
 [capabilities]
-tools = []
-chat = true
-agent = true
+tools = ["emit"]

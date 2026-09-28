@@ -1,5 +1,5 @@
 //! Smoke test for the WASM test fixtures (AGE-596): every good fixture loads
-//! and answers `get-agent-card`. The behaviour suites live elsewhere; this only
+//! and answers `metadata`. The behaviour suites live elsewhere; this only
 //! proves the assets exist and instantiate.
 //!
 //! Needs `scripts/build-wasm-fixtures.sh` to have run once per checkout.
@@ -9,11 +9,12 @@ use std::sync::Arc;
 use chatty_wasm_runtime::test_support::{FakeLlm, fixture_path};
 use chatty_wasm_runtime::{ModuleManifest, ResourceLimits, WasmModule};
 
-/// Every fixture built on chatty-module-sdk, plus the two real modules.
-/// `wit-0.1` and `core-module` are built to fail loading, so they are not here.
+/// Every fixture built on chatty-module-sdk, plus the two real plugins.
+/// `wit-0.1`, `wit-0.2` and `core-module` are built to fail loading, so they
+/// are not here.
 const GOOD_FIXTURES: &[&str] = &[
-    "echo-agent",
-    "benford-agent",
+    "echo",
+    "benford",
     "spin",
     "slow-host",
     "fuel-meter",
@@ -27,6 +28,8 @@ const GOOD_FIXTURES: &[&str] = &[
     "log-flood",
     "tool-args",
     "threads",
+    "padded",
+    "billing",
 ];
 
 #[test]
@@ -42,9 +45,9 @@ fn fixtures_load() {
             limits.clone(),
         )
         .unwrap_or_else(|e| panic!("fixture `{name}` failed to load: {e:#}"));
-        let card = module
-            .agent_card()
-            .unwrap_or_else(|e| panic!("fixture `{name}` get-agent-card failed: {e:#}"));
-        assert_eq!(card.name, *name, "fixture `{name}` card name");
+        let metadata = module
+            .metadata()
+            .unwrap_or_else(|e| panic!("fixture `{name}` metadata failed: {e:#}"));
+        assert_eq!(metadata.name, *name, "fixture `{name}` metadata name");
     }
 }
