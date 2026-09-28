@@ -43,6 +43,9 @@ pub struct DisplayMessage {
     pub feedback: Option<MessageFeedback>,
     // Index into the conversation's history (parallel arrays) for this message
     pub history_index: Option<usize>,
+    /// A delegation row's runs, when its callee delegated in turn (TB-4).
+    /// Live-only: built from the turn's forwarded events, never persisted.
+    pub swarm_tree: Option<std::sync::Arc<super::transcript::SwarmTree>>,
 }
 
 /// Build GPUI elements from pre-parsed cached content.
@@ -924,6 +927,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: Some(1),
+            swarm_tree: None,
         }
     }
 

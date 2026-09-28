@@ -567,6 +567,8 @@ impl ChattyApp {
                             view.chat_input_state().update(cx, |input, cx| {
                                 input.set_streaming(true, cx);
                             });
+                            // A new stream folds a new swarm (TB-4).
+                            view.reset_swarm_rows();
                         }
                     });
                 });
@@ -723,6 +725,22 @@ impl ChattyApp {
                     }
                 });
             }
+            StreamManagerEvent::SwarmTreeChanged {
+                conversation_id,
+                trace,
+            } => {
+                // Priced at the roster's current rates, as the session prices
+                // the conversation's own lines (AGE-682).
+                let book = cx
+                    .try_global::<ModelsModel>()
+                    .map(|models| models.price_book())
+                    .unwrap_or_default();
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.set_swarm_trace(trace, &book, cx);
+                    }
+                });
+            }
             StreamManagerEvent::StreamEnded {
                 conversation_id,
                 epoch,
@@ -753,6 +771,14 @@ impl ChattyApp {
                     );
                     return;
                 }
+
+                // Nothing more arrives for this stream's swarm: a run still
+                // drawn as running was stopped with the turn (TB-4).
+                chat_view.update(cx, |view, cx| {
+                    if view.conversation_id() == Some(conversation_id) {
+                        view.settle_swarm_trees(cx);
+                    }
+                });
 
                 // Allow this conversation to be evicted again
                 if conversation_id != "__pending__" {

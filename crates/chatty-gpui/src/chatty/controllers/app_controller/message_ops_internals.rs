@@ -235,7 +235,12 @@ impl DesktopSink {
         }
 
         match event {
-            SessionEvent::Delegation(progress) => self.on_progress(progress),
+            SessionEvent::Delegation(progress) => {
+                // The row first, then the manager: the swarm tree the manager
+                // hands back hangs under a row the view already has (TB-4).
+                self.on_progress(progress.clone());
+                self.forward(SessionEvent::Delegation(progress));
+            }
             SessionEvent::FollowUp(prompt) => self.inject_follow_up(prompt),
             SessionEvent::Error(_) => {
                 // The manager drops the stream on an error, so the trace has
@@ -390,6 +395,7 @@ impl DesktopSink {
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
                             view.start_delegation_progress(&label, source, cx);
+                            view.note_swarm_row(&agent_name);
                         }
                     })
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent start"))

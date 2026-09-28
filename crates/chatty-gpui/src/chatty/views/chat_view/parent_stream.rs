@@ -69,6 +69,7 @@ mod tests {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         }
     }
 

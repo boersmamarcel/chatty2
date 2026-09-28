@@ -17,6 +17,8 @@ impl Render for ChattyApp {
         crate::boot_timing::checkpoint("open_to_first_frame");
 
         let dialog_layer = Root::render_dialog_layer(window, cx);
+        // A swarm tree line opens its agent's transcript in a sheet (TB-4).
+        let sheet_layer = Root::render_sheet_layer(window, cx);
         // Without this layer `window.push_notification` draws nothing in the
         // main window (AGE-567's "Couldn't copy the image" was invisible).
         let notification_layer = Root::render_notification_layer(window, cx);
@@ -195,6 +197,7 @@ impl Render for ChattyApp {
                     },
                 )
             })
+            .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)
     }

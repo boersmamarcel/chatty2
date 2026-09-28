@@ -47,6 +47,7 @@ mod history;
 mod parent_stream;
 mod scroll;
 mod start_screen;
+mod swarm;
 mod turn_cache;
 
 use chatty_core::models::clarification_store::{ClarifyingQuestion, MAX_CLARIFYING_QUESTIONS};
@@ -78,13 +79,13 @@ use super::trace_components::SystemTraceView;
 use super::transcript::{
     ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, ChosenOption,
     ClarificationCard, FileChange, LIVE_FADE_MS, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING,
-    PlanStrip, RunPin, RunPinKind, RunTally, SessionChangeBar, TableOpen, Turn, TurnFileOverview,
-    TurnRole, adapt_message_with_trace, attachment_image_path, block_visible_in_turn,
-    classify_tool, extract_table_preview, file_change_from_tool, file_changes_from_turn,
-    format_worked_for, format_working_for, is_lane_a_browser_tool, is_pdf_artifact_tool,
-    is_pdf_path, live_headline, merge_file_changes, new_artifact_view, phase_label,
-    plan_turn_index, produced_path_is_openable, read_artifact_source, render_typed_block,
-    resolve_artifact_path, tool_file_path, turn_has_work_fold,
+    PlanStrip, RunPin, RunPinKind, RunTally, SessionChangeBar, SwarmActions, TableOpen, Turn,
+    TurnFileOverview, TurnRole, adapt_message_with_trace, attachment_image_path,
+    block_visible_in_turn, classify_tool, extract_table_preview, file_change_from_tool,
+    file_changes_from_turn, format_worked_for, format_working_for, is_lane_a_browser_tool,
+    is_pdf_artifact_tool, is_pdf_path, live_headline, merge_file_changes, new_artifact_view,
+    phase_label, plan_turn_index, produced_path_is_openable, read_artifact_source,
+    render_typed_block, resolve_artifact_path, tool_file_path, turn_has_work_fold,
 };
 use crate::chatty::models::{GlobalStreamManager, MessageFeedback};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
@@ -164,6 +165,10 @@ pub struct ChatView {
     /// the row is finalized so parent-stream updates skip it. `None` when
     /// this conversation has no progress row.
     delegation_progress_msg_idx: Option<usize>,
+    /// The running stream's delegation rows, in the order they opened: each
+    /// row's message index and the spec it delegated to. The swarm tree
+    /// (TB-4) hangs each row's callee subtree under it; see `swarm.rs`.
+    swarm_rows: Vec<(usize, String)>,
     /// Animated "Thinking…" indicator entity. Owns its own rotation
     /// timer so the spinner + label keep updating even when no stream
     /// events are arriving (typical while a tool runs silently).
@@ -385,6 +390,21 @@ fn turn_fingerprint(
                     None => false.hash(&mut hasher),
                 }
             }
+            Block::SwarmTree { id, tree } => {
+                // Open (one line per agent) or folded to its header; each
+                // line's status and spend move while the swarm runs (TB-4).
+                activity_expanded.get(&id.0).hash(&mut hasher);
+                // Folded subtrees and opened "+N more" lines change the
+                // line count.
+                tree.folded.hash(&mut hasher);
+                tree.unfolded.hash(&mut hasher);
+                tree.nodes.len().hash(&mut hasher);
+                for node in &tree.nodes {
+                    std::mem::discriminant(&node.status).hash(&mut hasher);
+                    node.tokens.hash(&mut hasher);
+                    node.cost.map(f64::to_bits).hash(&mut hasher);
+                }
+            }
             // Fixed once emitted: their content cannot change under a cached
             // measurement. Listed one by one so a new block type has to make
             // this choice deliberately rather than inherit silence.
@@ -596,6 +616,7 @@ impl ChatView {
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
             delegation_progress_msg_idx: None,
+            swarm_rows: Vec::new(),
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
@@ -924,6 +945,7 @@ impl ChatView {
             attachments,
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -945,6 +967,7 @@ impl ChatView {
             attachments: Vec::new(),
             feedback: None,
             history_index: None,
+            swarm_tree: None,
         });
 
         // Reset the thinking indicator so the elapsed counter restarts
@@ -2572,6 +2595,36 @@ impl ChatView {
                 });
             })
         };
+        let swarm_actions = SwarmActions {
+            toggle: {
+                let entity = entity.clone();
+                Rc::new(move |block_id: u64, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        // Missing key → the tree is open; toggle folds it.
+                        let current = view.activity_expanded.get(&block_id).copied();
+                        view.activity_expanded
+                            .insert(block_id, !current.unwrap_or(true));
+                        cx.notify();
+                    });
+                })
+            },
+            fold_node: {
+                let entity = entity.clone();
+                Rc::new(move |msg_idx, name, fold, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.fold_swarm_node(msg_idx, &name, fold, cx)
+                    });
+                })
+            },
+            open_node: {
+                let entity = entity.clone();
+                Rc::new(move |msg_idx, name, window, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.open_swarm_node(msg_idx, name, window, cx);
+                    });
+                })
+            },
+        };
 
         // Folded turns keep receipts + the assistant message; only the
         // work trace (thinking / activity / diffs) is hidden.
@@ -2596,7 +2649,9 @@ impl ChatView {
             }
             let element = {
                 let activity_open = match block {
-                    Block::Activity { id, .. } => self.activity_expanded.get(&id.0).copied(),
+                    Block::Activity { id, .. } | Block::SwarmTree { id, .. } => {
+                        self.activity_expanded.get(&id.0).copied()
+                    }
                     _ => None,
                 };
                 render_typed_block(
@@ -2609,6 +2664,7 @@ impl ChatView {
                     turn.streaming,
                     Some(on_activity_toggle.clone()),
                     open_artifact.as_deref(),
+                    Some(&swarm_actions),
                     window,
                     cx,
                 )
@@ -3486,9 +3542,11 @@ mod fingerprint_tests {
         AgentTaskSnapshot, AgentTodoStatus, ApprovalState, Block, HashMap, Turn, TurnRole,
         turn_fingerprint,
     };
-    use crate::chatty::views::transcript::BlockId;
+    use crate::chatty::views::transcript::{BlockId, SwarmNodeView, SwarmTree};
     use chatty_core::models::message_types::ApprovalBlock;
     use chatty_core::services::AgentTodo;
+    use chatty_core::services::swarm_trace::NodeStatus;
+    use std::sync::Arc;
 
     fn turn_with(blocks: Vec<Block>) -> Turn {
         Turn {
@@ -3609,6 +3667,69 @@ mod fingerprint_tests {
         let mut with_reason = snapshot(vec![todo("first", AgentTodoStatus::Blocked)]);
         with_reason.todos[0].blocked_reason = Some("needs a credential".into());
         assert_ne!(fp(&turn, Some(&plain)), fp(&turn, Some(&with_reason)));
+    }
+
+    fn swarm(statuses: &[NodeStatus], tokens: u64) -> Turn {
+        let nodes = statuses
+            .iter()
+            .enumerate()
+            .map(|(ix, status)| SwarmNodeView {
+                name: format!("coder-{ix}"),
+                spec: "coder".into(),
+                model: Some("coder-model".into()),
+                status: status.clone(),
+                depth: usize::from(ix > 0),
+                parent: (ix > 0).then_some(0),
+                tokens,
+                cost: None,
+                usage: Vec::new(),
+                turns: 1,
+                text_bytes: 0,
+                tool_calls: Vec::new(),
+            })
+            .collect();
+        turn_with(vec![Block::SwarmTree {
+            id: BlockId(3),
+            tree: Arc::new(SwarmTree {
+                nodes,
+                ..SwarmTree::default()
+            }),
+        }])
+    }
+
+    #[test]
+    fn swarm_tree_fingerprint_changes_with_status() {
+        let running = swarm(&[NodeStatus::Running, NodeStatus::Running], 0);
+        assert_eq!(fp(&running, None), fp(&running, None));
+        // A node finishing, the tree growing, and spend arriving each re-measure.
+        let done = swarm(&[NodeStatus::Running, NodeStatus::Completed], 0);
+        assert_ne!(fp(&running, None), fp(&done, None));
+        let grown = swarm(
+            &[
+                NodeStatus::Running,
+                NodeStatus::Running,
+                NodeStatus::Running,
+            ],
+            0,
+        );
+        assert_ne!(fp(&running, None), fp(&grown, None));
+        let spent = swarm(&[NodeStatus::Running, NodeStatus::Running], 120);
+        assert_ne!(fp(&running, None), fp(&spent, None));
+        // Folding a subtree, or the whole card, changes its height too.
+        let Block::SwarmTree { tree, .. } = &running.blocks[0] else {
+            unreachable!()
+        };
+        let folded_node = turn_with(vec![Block::SwarmTree {
+            id: BlockId(3),
+            tree: Arc::new(tree.toggled("coder-0")),
+        }]);
+        assert_ne!(fp(&running, None), fp(&folded_node, None));
+        let mut folded = HashMap::new();
+        folded.insert(3, false);
+        assert_ne!(
+            turn_fingerprint(&running, &folded, None),
+            fp(&running, None)
+        );
     }
 
     #[test]
