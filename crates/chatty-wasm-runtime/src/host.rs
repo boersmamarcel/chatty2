@@ -17,6 +17,8 @@ use wasmtime_wasi::{
 
 use crate::bindings::chatty::plugin::billing::SessionInfo;
 use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
+use crate::bindings::exports::chatty::plugin::plugin::Capability;
+use crate::grants::Grants;
 use crate::limits::{MAX_FILE_READ_BYTES, ResourceLimits};
 
 // ---------------------------------------------------------------------------
@@ -141,6 +143,8 @@ pub struct ModuleManifest {
     /// The directory `file::read-bytes` resolves paths against. `None`
     /// means the module was granted no files and every read fails.
     weights_root: Option<PathBuf>,
+    /// The capabilities the module is linked against (PL-U4).
+    pub(crate) grants: Grants,
 }
 
 impl ModuleManifest {
@@ -151,7 +155,24 @@ impl ModuleManifest {
             name: name.into(),
             config: Default::default(),
             weights_root: None,
+            grants: Grants::default(),
         }
+    }
+
+    /// Grant exactly `capabilities` (besides `logging`, always granted).
+    /// Each must be one the plugin requests, or the load fails with an
+    /// [`UnrequestedGrant`](crate::UnrequestedGrant). Without this, a
+    /// module is granted nothing.
+    pub fn with_grants(mut self, capabilities: impl IntoIterator<Item = Capability>) -> Self {
+        self.grants = Grants::Only(capabilities.into_iter().collect());
+        self
+    }
+
+    /// Grant whatever the plugin's `metadata` requests: for a module served
+    /// on its own, with no agent spec to grant from.
+    pub fn with_requested_grants(mut self) -> Self {
+        self.grants = Grants::Requested;
+        self
     }
 
     /// Add or overwrite a configuration key-value pair.
@@ -160,9 +181,10 @@ impl ModuleManifest {
         self
     }
 
-    /// Grant the guest read access to the files under `root` (and nothing
-    /// else) through `file::read-bytes`. A config key named `weights_root`
-    /// grants nothing: the root is host-set, never guest-visible config.
+    /// The directory `file::read-bytes` reads under (and nothing else),
+    /// when the `file` capability is granted. A config key named
+    /// `weights_root` grants nothing: the root is host-set, never
+    /// guest-visible config.
     pub fn with_weights_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.weights_root = Some(root.into());
         self
@@ -567,7 +589,7 @@ impl crate::bindings::chatty::plugin::llm::Host for ModuleState {
 }
 
 impl crate::bindings::chatty::plugin::config::Host for ModuleState {
-    fn get(&mut self, key: String) -> Option<String> {
+    fn get(&mut self, key: String) -> wasmtime::Result<Option<String>> {
         let value = self.manifest.get_config(&key);
         debug!(
             module = %self.manifest.name,
@@ -575,7 +597,7 @@ impl crate::bindings::chatty::plugin::config::Host for ModuleState {
             found = value.is_some(),
             "config::get called by WASM module"
         );
-        value
+        Ok(value)
     }
 }
 
@@ -820,14 +842,14 @@ mod tests {
         });
         let mut state = make_state(provider);
         assert_eq!(
-            state.get("api_key".to_string()),
+            state.get("api_key".to_string()).unwrap(),
             Some("secret123".to_string())
         );
         assert_eq!(
-            state.get("endpoint".to_string()),
+            state.get("endpoint".to_string()).unwrap(),
             Some("https://example.com".to_string())
         );
-        assert_eq!(state.get("unknown".to_string()), None);
+        assert_eq!(state.get("unknown".to_string()).unwrap(), None);
     }
 
     #[test]

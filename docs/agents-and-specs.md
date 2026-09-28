@@ -559,7 +559,7 @@ skills = ["coder-reviewer"]        # read_skill names, named in the preamble
 [[plugins]]                        # its tools become this agent's (PL-U2)
 module = "benford"
 version = "^0.2"                   # checked against the module's [module].version
-grants = ["llm"]                   # "http" / "file-write" would make every call ask first
+grants = ["llm"]                   # a subset of what it requests; logging is always granted
 limits = { max_execution_ms = 5000 }  # lowers the module's [resources], never raises them
 
 [swarm]

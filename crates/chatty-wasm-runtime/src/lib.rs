@@ -5,9 +5,11 @@
 //! world with a message asking for a rebuild), enforces per-call resource
 //! limits (fuel, wall-clock via epoch interruption, memory, output size; see
 //! [`ResourceLimits`]), and implements the host side of the plugin imports
-//! (`llm`, `config`, `logging`, `file`, `billing`).
+//! (`llm`, `config`, `logging`, `file`, `billing`), linking only the
+//! capabilities the module was granted ([`Grants`], PL-U4).
 
 mod error;
+mod grants;
 mod host;
 mod limits;
 mod module;
@@ -15,6 +17,7 @@ mod module;
 pub mod test_support;
 
 pub use error::{CallError, ToolFailure};
+pub use grants::{Grants, NotGranted, UnrequestedGrant};
 pub use host::{BillingProvider, LlmProvider, ModuleManifest};
 pub use limits::{
     EPOCH_TICK, MAX_EXECUTION_MS_CEILING, MAX_FILE_READ_BYTES, MAX_FUEL_CEILING,
@@ -78,5 +81,8 @@ pub(crate) mod bindings {
     wasmtime::component::bindgen!({
         world: "plugin-world",
         path: "../../wit",
+        // `config::get` has no error channel, so an ungranted one traps
+        // (`grants::Refused`).
+        trappable_imports: ["get"],
     });
 }
