@@ -11,17 +11,45 @@
 //! `AsyncApp`, and answers over a one-shot reply channel — and waits for the
 //! answer. Settings changing before anything ever asks simply drops this and
 //! the task it talks to; there was nothing to tear down.
+//!
+//! The desktop's root conversation is its broker's root (ADR-0020: one
+//! broker per root process), so what the start task answers with is the
+//! gateway's direct [`Transport`] as well as its port: `invoke_agent` reaches
+//! the local roles through that handle, never over loopback HTTP (AGE-744).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-/// A reply to one [`LazyGatewayBroker::ensure_started`] request: the port
-/// the gateway bound, or the reason it failed to.
-pub type StartReply = tokio::sync::oneshot::Sender<Result<u16, String>>;
+use chatty_fabric::Transport;
+
+/// What a started gateway hands back: the port it bound, and this process's
+/// direct handle into it (`ProtocolGateway::transport`).
+#[derive(Clone)]
+pub struct StartedGateway {
+    pub port: u16,
+    pub transport: Arc<dyn Transport>,
+}
+
+/// A reply to one [`LazyGatewayBroker::ensure_started`] request: the started
+/// gateway, or the reason it failed to start.
+pub type StartReply = tokio::sync::oneshot::Sender<Result<StartedGateway, String>>;
+
+/// Start `gateway` on `port` as the desktop's broker. Its direct handle is
+/// taken here, after every virtual agent is on it, so the call path reaches
+/// all of them.
+pub async fn start(
+    gateway: &mut chatty_protocol_gateway::ProtocolGateway,
+    port: u16,
+) -> anyhow::Result<StartedGateway> {
+    let transport = gateway.transport();
+    gateway.start().await?;
+    Ok(StartedGateway { port, transport })
+}
 
 /// See the module docs.
 pub struct LazyGatewayBroker {
     request_tx: tokio::sync::mpsc::UnboundedSender<StartReply>,
-    once: tokio::sync::OnceCell<u16>,
+    once: tokio::sync::OnceCell<StartedGateway>,
 }
 
 impl LazyGatewayBroker {
@@ -33,11 +61,9 @@ impl LazyGatewayBroker {
     }
 }
 
-#[async_trait::async_trait]
-impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
-    async fn ensure_started(&self) -> anyhow::Result<String> {
-        let port = self
-            .once
+impl LazyGatewayBroker {
+    async fn started(&self) -> anyhow::Result<&StartedGateway> {
+        self.once
             .get_or_try_init(|| async {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 self.request_tx
@@ -48,14 +74,35 @@ impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
                     .map_err(|_| anyhow::anyhow!("the gateway's start task dropped the reply"))?
                     .map_err(|e| anyhow::anyhow!(e))
             })
-            .await?;
-        Ok(format!("http://localhost:{port}"))
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
+    async fn ensure_started(&self) -> anyhow::Result<String> {
+        let started = self.started().await?;
+        Ok(format!("http://localhost:{}", started.port))
+    }
+
+    /// The root reaches its broker directly (ADR-0020, BI-4).
+    async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
+        Ok(Some(self.started().await?.transport.clone()))
     }
 
     fn bound_addrs(&self) -> Vec<SocketAddr> {
         match self.once.get() {
-            Some(&port) => vec![SocketAddr::from(([127, 0, 0, 1], port))],
+            Some(started) => vec![SocketAddr::from(([127, 0, 0, 1], started.port))],
             None => Vec::new(),
         }
+    }
+
+    /// The root's messages come from its broker's direct handle; a broker
+    /// that has not started has none (TM-2).
+    fn take_run_messages(&self) -> Vec<String> {
+        self.once
+            .get()
+            .map(|started| started.transport.take_run_messages())
+            .unwrap_or_default()
     }
 }

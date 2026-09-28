@@ -63,6 +63,9 @@ ropey.workspace = true
 [dev-dependencies]
 # Scripted stream fixtures shared with chatty-tui's characterization tests.
 chatty-core = { path = "../chatty-core", features = ["test-support"] }
+# `TaskMapper`: the stand-in worker in the desktop delegation tests (AGE-744)
+# answers with the frames a real worker sends.
+chatty-protocol-gateway = { path = "../chatty-protocol-gateway", features = ["worker"] }
 # `TestAppContext` — the desktop's stream handler drives real GPUI entities,
 # so characterizing it needs a real (headless) app context.
 gpui = { workspace = true, features = ["test-support"] }

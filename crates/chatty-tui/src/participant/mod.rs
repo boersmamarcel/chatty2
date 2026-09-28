@@ -34,6 +34,8 @@ mod input_required_chain;
 #[cfg(test)]
 mod one_kind_of_agent;
 #[cfg(test)]
+mod slash_agent;
+#[cfg(test)]
 pub(crate) mod stand_in;
 #[cfg(test)]
 mod swarm_forwarding;

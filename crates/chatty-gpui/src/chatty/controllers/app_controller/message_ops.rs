@@ -35,7 +35,7 @@ use super::message_ops_internals::{
 };
 use super::*;
 use crate::chatty::views::transcript::inline_chat_attachments;
-use chatty_core::session::{Arrival, Decision, QueuedId, TurnEnd};
+use chatty_core::session::{Arrival, Decision, Delegation, QueuedId, TurnEnd};
 
 /// What the composer sends, as the mailbox holds it while a turn streams
 /// (AGE-482). The `TurnInput` is built at dispatch, where the attachment
@@ -47,6 +47,10 @@ pub(super) struct QueuedSend {
     /// The `<terminal_context>` block the composer attached (AGE-587),
     /// taken when the message was sent, not when it runs.
     pub terminal_context: Option<String>,
+    /// `/agent <name> <prompt>`: hand the turn to that agent through the
+    /// conversation's broker instead of asking the model (AGE-744).
+    /// `message` is then the command as typed.
+    pub delegation: Option<Delegation>,
 }
 
 impl ChattyApp {
@@ -71,17 +75,41 @@ impl ChattyApp {
         terminal_context: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.send(
+            QueuedSend {
+                message,
+                attachments,
+                terminal_context,
+                delegation: None,
+            },
+            cx,
+        );
+    }
+
+    /// `/agent <name> <prompt>`: a turn of the active conversation that
+    /// hands `delegation` to its agent through the conversation's own broker
+    /// (ADR-0020), so the delegation row and its swarm tree show exactly as
+    /// for a model-issued `invoke_agent` (AGE-744). Queued like any message
+    /// while a turn streams.
+    pub(super) fn send_delegation(&mut self, delegation: Delegation, cx: &mut Context<Self>) {
+        self.send(
+            QueuedSend {
+                message: delegation.user_text(),
+                attachments: Vec::new(),
+                terminal_context: None,
+                delegation: Some(delegation),
+            },
+            cx,
+        );
+    }
+
+    fn send(&mut self, send: QueuedSend, cx: &mut Context<Self>) {
         let Some(conv_id) = self.active_conversation_id(cx) else {
             // No conversation yet: nothing can be streaming in it.
-            self.send_message_inner(message, attachments, terminal_context, true, cx);
+            self.send_message_inner(send, true, cx);
             return;
         };
-        let arrival = Arrival::Message(QueuedSend {
-            message,
-            attachments,
-            terminal_context,
-        });
-        self.route(&conv_id, arrival, cx);
+        self.route(&conv_id, Arrival::Message(send), cx);
     }
 
     /// "Send now" on a queued message: take it out of the queue and run it
@@ -115,15 +143,17 @@ impl ChattyApp {
     /// visible signal for todo-protocol nudges. Queued behind the streaming
     /// turn if there is one (AGE-242 / D3; one slot).
     pub(super) fn send_protocol_follow_up(&mut self, message: String, cx: &mut Context<Self>) {
-        let Some(conv_id) = self.active_conversation_id(cx) else {
-            self.send_message_inner(message, vec![], None, false, cx);
-            return;
-        };
-        let arrival = Arrival::FollowUp(QueuedSend {
+        let send = QueuedSend {
             message,
             attachments: vec![],
             terminal_context: None,
-        });
+            delegation: None,
+        };
+        let Some(conv_id) = self.active_conversation_id(cx) else {
+            self.send_message_inner(send, false, cx);
+            return;
+        };
+        let arrival = Arrival::FollowUp(send);
         self.route(&conv_id, arrival, cx);
     }
 
@@ -150,13 +180,7 @@ impl ChattyApp {
         let mut notice = None;
         match decision {
             Decision::Dispatch(next) => {
-                self.send_message_inner(
-                    next.message.message,
-                    next.message.attachments,
-                    next.message.terminal_context,
-                    !next.follow_up,
-                    cx,
-                );
+                self.send_message_inner(next.message, !next.follow_up, cx);
             }
             Decision::Cancel => self.cancel_active_stream(cx),
             Decision::Refused(refusal) => {
@@ -204,12 +228,16 @@ impl ChattyApp {
 
     fn send_message_inner(
         &mut self,
-        message: String,
-        attachments: Vec<PathBuf>,
-        terminal_context: Option<String>,
+        send: QueuedSend,
         show_in_transcript: bool,
         cx: &mut Context<Self>,
     ) {
+        let QueuedSend {
+            message,
+            attachments,
+            terminal_context,
+            delegation,
+        } = send;
         debug!(
             message = %message,
             attachment_count = attachments.len(),
@@ -501,6 +529,7 @@ impl ChattyApp {
                                 TurnKind::ProtocolFollowUp
                             },
                             turn_budget: None,
+                            delegation,
                         },
                         chat_view,
                         stream_manager,
@@ -898,13 +927,7 @@ impl ChattyApp {
             .get_mut(conv_id)
             .and_then(|mailbox| mailbox.turn_ended(end));
         if let Some(next) = next {
-            self.send_message_inner(
-                next.message.message,
-                next.message.attachments,
-                next.message.terminal_context,
-                !next.follow_up,
-                cx,
-            );
+            self.send_message_inner(next.message, !next.follow_up, cx);
         }
         self.refresh_queue_view(conv_id, None, cx);
     }

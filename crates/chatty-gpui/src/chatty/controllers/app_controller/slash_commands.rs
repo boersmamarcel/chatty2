@@ -1,9 +1,9 @@
 use super::*;
 use chatty_core::agent_spec::AgentSpec;
-use chatty_core::services::agent_command::{
-    AgentCommandTarget, resolve_agent_command, spec_sub_agent_args,
-};
+use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
+use chatty_core::session::Delegation;
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+use chatty_core::tools::LOCAL_AGENT_NAME;
 
 /// The local roster's specs, from `workspace` (PL-U5): what module settings
 /// declare, else every exposed spec. A declared spec that does not load
@@ -298,10 +298,23 @@ impl ChattyApp {
                     AgentCommandTarget::Remote { config, prompt } => {
                         self.launch_a2a_agent(config.name, prompt, cx)
                     }
-                    AgentCommandTarget::Spec { spec, prompt } => {
-                        self.launch_agent(prompt, Some(spec), cx)
-                    }
-                    AgentCommandTarget::Default { prompt } => self.launch_agent(prompt, None, cx),
+                    // A spec on the roster, or the default sub-agent by its
+                    // roster name: both through the conversation's own
+                    // broker, so the swarm tree shows (AGE-744).
+                    AgentCommandTarget::Spec { spec, prompt } => self.send_delegation(
+                        Delegation {
+                            agent: spec.agent.name,
+                            prompt,
+                        },
+                        cx,
+                    ),
+                    AgentCommandTarget::Default { prompt } => self.send_delegation(
+                        Delegation {
+                            agent: LOCAL_AGENT_NAME.to_string(),
+                            prompt,
+                        },
+                        cx,
+                    ),
                 }
             }
             return true;
@@ -461,293 +474,6 @@ impl ChattyApp {
                 })
                 .map_err(|e| warn!(error = ?e, "Failed to finalize A2A progress in chat view"))
                 .ok();
-        })
-        .detach();
-    }
-
-    /// `/agent <prompt>` — launch chatty-tui in headless mode with the given prompt.
-    fn launch_agent(&mut self, prompt: String, spec: Option<AgentSpec>, cx: &mut Context<Self>) {
-        info!(
-            prompt = %prompt,
-            agent = ?spec.as_ref().map(|spec| &spec.agent.name),
-            "Slash command: launch sub-agent"
-        );
-
-        // Capture the conversation where the sub-agent is launched so the result can be
-        // routed back to the correct conversation even if the user navigates away.
-        let launch_conv_id = cx
-            .try_global::<ConversationsStore>()
-            .and_then(|store| store.active_id().cloned());
-
-        // If there is no conversation yet, create one first so that:
-        // 1. The sub-agent result can be injected into history
-        // 2. Sending a new message while the sub-agent runs won't trigger
-        //    conversation creation (which calls clear_messages and would
-        //    destroy the sub-agent progress trace)
-        if launch_conv_id.is_none() {
-            let prompt_clone = prompt.clone();
-            let create_task = self.create_new_conversation(cx);
-            let app_entity = cx.entity();
-            cx.spawn(async move |_weak, cx| {
-                match create_task.await {
-                    Ok(_id) => {
-                        app_entity
-                            .update(cx, |app, cx| {
-                                app.launch_agent(prompt_clone, spec, cx);
-                            })
-                            .map_err(|e| warn!(error = ?e, "Failed to launch sub-agent after conversation creation"))
-                            .ok();
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "Failed to create conversation for sub-agent");
-                    }
-                }
-            })
-            .detach();
-            return;
-        }
-
-        // Resolve the active model ID so the sub-agent uses the same model.
-        let model_id = cx
-            .try_global::<ConversationsStore>()
-            .and_then(|store| {
-                store
-                    .active_id()
-                    .and_then(|id| store.get_conversation(id))
-                    .map(|conv| conv.model_id().to_string())
-            })
-            .unwrap_or_default();
-
-        let chat_view = self.chat_view.clone();
-        let agent_args = spec_sub_agent_args(spec.as_ref(), &model_id);
-
-        // Show immediate feedback and record the message index for live progress.
-        // Clone the prompt for the display before it is moved into the async task.
-        let prompt_for_display = prompt.clone();
-        self.chat_view.update(cx, |view, cx| {
-            let label = match &spec {
-                Some(spec) => format!("[Agent: {}] {prompt_for_display}", spec.agent.name),
-                None => prompt_for_display,
-            };
-            view.start_delegation_progress(&label, ToolSource::Local, cx);
-        });
-
-        // Channel for streaming stderr progress lines from the subprocess.
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-        // Keep a copy of prompt to use in the history injection label below.
-        let prompt_label = prompt.clone();
-
-        cx.spawn(async move |weak, cx| {
-            let mut blocking_fut = tokio::task::spawn_blocking(move || {
-                use std::io::BufRead as _;
-                use std::process::Stdio;
-
-                // Look for chatty-tui in the same directory as this binary first,
-                // then fall back to letting the OS resolve from PATH.
-                let exe = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("chatty-tui")))
-                    .filter(|p| p.exists())
-                    .unwrap_or_else(|| std::path::PathBuf::from("chatty-tui"));
-
-                let mut cmd = std::process::Command::new(&exe);
-                cmd.arg("--headless")
-                    .arg("--message")
-                    .arg(&prompt)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                #[cfg(target_os = "macos")]
-                if let Some(exe_dir) = exe.parent() {
-                    let frameworks_dir = exe_dir.join("../Frameworks");
-                    if frameworks_dir.join("libpdfium.dylib").exists() {
-                        cmd.env("CHATTY_PDFIUM_LIB_DIR", frameworks_dir);
-                    }
-                }
-                cmd.args(&agent_args);
-                // Headless sub-agents always run with auto-approve: there is no UI
-                // available to show approval prompts, so without this flag any tool
-                // that requires approval will block indefinitely and never complete.
-                info!(exe = ?exe, "Launching headless sub-agent with auto-approve (no approval UI available)");
-                cmd.arg("--auto-approve");
-
-                let mut child = match cmd.spawn() {
-                    Ok(c) => c,
-                    Err(e) => return Err(format!("Sub-agent failed to launch: {e}")),
-                };
-
-                // Drain stderr in a background thread, forwarding each line as a
-                // progress event so the parent TUI can show live tool-call activity.
-                let stderr = child.stderr.take();
-                let stderr_thread = std::thread::spawn(move || {
-                    if let Some(stderr) = stderr {
-                        let reader = std::io::BufReader::new(stderr);
-                        for line in reader.lines().map_while(Result::ok) {
-                            // Every line is the child's human-readable log
-                            // now: ADR-0011's C4 removed the machine lines
-                            // this used to filter out.
-                            let _ = progress_tx.send(line);
-                        }
-                    }
-                });
-
-                let output = match child.wait_with_output() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        let _ = stderr_thread.join();
-                        return Err(format!("Sub-agent failed: {e}"));
-                    }
-                };
-                let _ = stderr_thread.join();
-
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    Ok(stdout)
-                } else {
-                    Err(format!(
-                        "Sub-agent failed (exit {:?})",
-                        output.status.code()
-                    ))
-                }
-            });
-
-            // Drive progress updates while the subprocess runs.
-            // `biased` makes tokio::select! poll branches in declaration order, so
-            // the progress-recv branch is always checked before the completion branch.
-            // This guarantees that any lines already buffered in the channel are
-            // delivered to the UI before we process the final result.
-            let result = loop {
-                tokio::select! {
-                    biased;
-                    Some(line) = progress_rx.recv() => {
-                        chat_view
-                            .update(cx, |view, cx| view.append_delegation_progress(&line, cx))
-                            .map_err(|e| warn!(error = ?e, "Failed to update chat view with sub-agent progress"))
-                            .ok();
-                    }
-                    result = &mut blocking_fut => {
-                        // Drain any progress lines that arrived concurrently with
-                        // the task completing.
-                        while let Ok(line) = progress_rx.try_recv() {
-                            chat_view
-                                .update(cx, |view, cx| view.append_delegation_progress(&line, cx))
-                                .map_err(|e| warn!(error = ?e, "Failed to update chat view with drained sub-agent progress"))
-                                .ok();
-                        }
-                        break result;
-                    }
-                }
-            };
-
-            let agent_result: Result<String, String> = match result {
-                Ok(r) => r,
-                Err(e) => Err(format!("Sub-agent task panicked: {e}")),
-            };
-
-            let success = agent_result.is_ok();
-            let result_text = match agent_result {
-                Ok(stdout) if stdout.is_empty() => None,
-                Ok(stdout) => Some(stdout),
-                Err(e) => Some(format!("⚠️ {e}")),
-            };
-
-            // Inject the sub-agent result into the conversation history so the main
-            // agent can reference it on subsequent turns.  We inject a User→Assistant
-            // message pair to maintain the alternating role pattern that LLM APIs
-            // expect.  The User message describes the task that was delegated and the
-            // Assistant message contains the sub-agent's output.
-            if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
-                let user_entry = rig_core::completion::Message::User {
-                    content: vec![rig_core::message::UserContent::text(format!(
-                        "[Sub-agent task: {prompt_label}]",
-                    ))],
-                };
-                cx.update(|cx| {
-                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(conv_id) {
-                            conv.add_user_message_with_attachments(user_entry, vec![]);
-                            conv.finalize_response(
-                                format!("[Sub-agent result]\n\n{txt}"),
-                                vec![],
-                                None,
-                            );
-                        }
-                    });
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to inject sub-agent result into conversation history"))
-                .ok();
-
-                // Persist the updated history to disk.
-                if let Some(app) = weak.upgrade() {
-                    let conv_id_for_persist = conv_id.clone();
-                    app.update(cx, |app, cx| {
-                        app.persist_conversation(&conv_id_for_persist, cx);
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to persist conversation after sub-agent result"))
-                    .ok();
-                }
-            }
-
-            // Finalize the collapsible trace — result goes inside the expanded body.
-            // If the conversation changed, we still finalize so the trace is frozen,
-            // but we also navigate back / show a fallback note below.
-            let result_for_fallback = result_text.clone();
-            chat_view
-                .update(cx, |view, cx| {
-                    view.finalize_delegation_progress(success, result_text, cx)
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to finalize sub-agent progress in chat view"))
-                .ok();
-
-            // If the user navigated to a different conversation while the sub-agent was
-            // running, route the result back to the conversation where it was launched.
-            // Exception: if the current conversation has an active LLM stream, avoid
-            // disruptive navigation — show the result in the current view with a note.
-            if let Some(ref conv_id) = launch_conv_id {
-                let (current_conv_id, current_has_active_stream) = cx
-                    .update(|cx| {
-                        let current = cx
-                            .try_global::<ConversationsStore>()
-                            .and_then(|store| store.active_id().cloned());
-                        let streaming = current
-                            .as_ref()
-                            .and_then(|id| {
-                                cx.try_global::<GlobalStreamManager>()
-                                    .and_then(|g| g.get())
-                                    .map(|mgr| mgr.read(cx).is_streaming(id))
-                            })
-                            .unwrap_or(false);
-                        (current, streaming)
-                    })
-                    .unwrap_or((None, false));
-
-                let conversation_changed = current_conv_id.as_deref() != Some(conv_id.as_str());
-
-                if conversation_changed {
-                    if current_has_active_stream {
-                        // A stream is active in the current conversation; navigating away
-                        // would be disruptive. Show the result here with a context note.
-                        if let Some(txt) = result_for_fallback {
-                            let noted_msg =
-                                format!("**Sub-agent** *(background task)*:\n\n{txt}");
-                            chat_view
-                                .update(cx, |view, cx| view.add_info_message(noted_msg, cx))
-                                .map_err(|e| warn!(error = ?e, "Failed to show sub-agent result"))
-                                .ok();
-                        }
-                        return;
-                    }
-                    // Navigate back to the launch conversation so the trace appears there.
-                    let nav_conv_id = conv_id.clone();
-                    if let Some(app) = weak.upgrade() {
-                        app.update(cx, |app, cx| {
-                            app.load_conversation(&nav_conv_id, cx);
-                        })
-                        .map_err(|e| warn!(error = ?e, "Failed to navigate back to launch conversation"))
-                        .ok();
-                    }
-                }
-            }
         })
         .detach();
     }

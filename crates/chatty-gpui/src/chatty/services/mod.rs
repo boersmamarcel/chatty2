@@ -6,6 +6,9 @@ pub use chatty_core::services::*;
 /// gateway's `LocalRunner` behind it is `#[cfg(unix)]`.
 #[cfg(unix)]
 pub mod broker_runner;
+/// AGE-744: the desktop's root conversation delegates through its broker.
+#[cfg(all(test, unix))]
+mod desktop_delegation_tests;
 /// The desktop's `LazyBroker` (BI-2, AGE-634). Cross-platform, unlike
 /// `broker_runner`: the module gateway it starts lazily is not Unix-only,
 /// only the fleet-broker socket riding on it is.

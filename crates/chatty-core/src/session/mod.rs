@@ -36,6 +36,7 @@
 //!    the turn under the shared empty-turn rule (AGE-243 / D4) and clears its
 //!    per-turn state. A `FollowUp` after that is the next turn's input.
 
+mod delegation;
 mod event;
 mod handler;
 mod hosted;
@@ -79,6 +80,7 @@ use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
+pub use delegation::Delegation;
 pub use event::SessionEvent;
 pub use handler::{
     BREVITY_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler, TurnPolicy,
@@ -143,6 +145,9 @@ pub struct TurnInput {
     /// `max_agent_turns`: headless runs its follow-up passes on what is left
     /// of the run's budget.
     pub turn_budget: Option<TurnBudget>,
+    /// Hand the turn straight to a named agent instead of asking the model
+    /// (`/agent <name> <prompt>`, AGE-744).
+    pub delegation: Option<Delegation>,
 }
 
 impl TurnInput {
@@ -154,6 +159,15 @@ impl TurnInput {
             attachments: Vec::new(),
             kind: TurnKind::Human,
             turn_budget: None,
+            delegation: None,
+        }
+    }
+
+    /// A human turn handed to `delegation`'s agent (see [`Delegation`]).
+    pub fn delegation(delegation: Delegation) -> Self {
+        Self {
+            delegation: Some(delegation.clone()),
+            ..Self::text(delegation.user_text())
         }
     }
 
@@ -173,6 +187,7 @@ impl TurnInput {
             attachments: Vec::new(),
             kind: TurnKind::Regenerate,
             turn_budget: None,
+            delegation: None,
         }
     }
 }
@@ -485,6 +500,7 @@ impl AgentSession {
             attachments,
             kind,
             turn_budget,
+            delegation,
         } = input;
 
         // Snapshot BEFORE committing the new message: `stream_prompt` appends
@@ -562,6 +578,7 @@ impl AgentSession {
             clarification_rx,
             cancel_flag,
             progress_slot: conversation.invoke_agent_progress_slot(),
+            delegation,
             turn_budget: turn_budget.unwrap_or_else(|| {
                 TurnBudget::new(self.config.execution_settings.max_agent_turns as usize)
             }),
@@ -963,6 +980,7 @@ struct PreparedTurn {
     progress_slot: InvokeAgentProgressSlot,
     policy: TurnPolicy,
     turn_budget: TurnBudget,
+    delegation: Option<Delegation>,
 }
 
 impl PreparedTurn {
@@ -970,17 +988,26 @@ impl PreparedTurn {
     async fn run<F: FnMut(SessionEvent)>(self, mut emit: F) {
         // The history goes out as recorded: the agent's own context guard
         // (`ContextShaper`, a rig hook) shapes it per model call, inside the
-        // tool loop where it actually grows (AGE-504).
-        let stream = stream_prompt(
-            &self.agent,
-            self.history,
-            self.contents,
-            Some(self.approval_rx),
-            Some(self.resolution_rx),
-            Some(self.clarification_rx),
-            self.turn_budget,
-        )
-        .await;
+        // tool loop where it actually grows (AGE-504). A delegation asks
+        // no model: its stream is the one `invoke_agent` call (AGE-744).
+        let stream = match self.delegation {
+            Some(delegation) => Ok(delegation::delegation_stream(
+                self.agent.delegator().cloned(),
+                delegation,
+            )),
+            None => {
+                stream_prompt(
+                    &self.agent,
+                    self.history,
+                    self.contents,
+                    Some(self.approval_rx),
+                    Some(self.resolution_rx),
+                    Some(self.clarification_rx),
+                    self.turn_budget,
+                )
+                .await
+            }
+        };
         let stream = match stream {
             Ok(stream) => stream,
             Err(e) => {
