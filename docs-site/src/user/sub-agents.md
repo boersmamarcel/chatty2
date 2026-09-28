@@ -147,6 +147,8 @@ chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
 
 `--model` (and `--tools` / `--preamble`) override the team's own leader settings when given. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
 
+A team can also make what one role hands the next explicit and checkable: `team.json`'s optional `handoffs` names a JSON Schema per role, as a path relative to the team directory. A worker running as that role must end its final answer with a fenced `json` block matching the schema — get it wrong once and Chatty sends the answer back listing the schema errors; get it wrong again and the delegation fails, with the errors visible to the leader. A team with no `handoffs` behaves exactly as before.
+
 ## Next
 
 - [Tutorial: your first named worker](./tutorial-named-worker.md) — twenty minutes, one reviewer, real hand-off
