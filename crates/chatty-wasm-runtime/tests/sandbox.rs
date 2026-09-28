@@ -196,16 +196,23 @@ async fn sandbox_1_1_good_fixtures_all_four_exports() {
 }
 
 // ---------------------------------------------------------------------------
-// 1.2 - `spin` with default limits: fuel error, host thread free, < 5s.
+// 1.2 - `spin` with a small fuel budget: fuel error, host thread free, < 5s.
+//
+// The default fuel budget (AGE-708: 10^12, sized so a pure spin reaches the
+// 60s wall-clock ceiling before fuel runs out) no longer exhausts within 5s,
+// so this row gives `spin` an explicit small fuel limit instead of relying
+// on the default — it is still exercising the same "fuel exhausted" path,
+// just without waiting a minute for it. See `cpu_bound_tool_hits_wall_clock_not_fuel`
+// below for the default-fuel behaviour this change is about.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_2_spin_default_limits_traps_on_fuel() {
-    let mut m = load(
-        "spin",
-        ModuleManifest::new("spin"),
-        ResourceLimits::default(),
-    );
+    let limits = ResourceLimits {
+        max_fuel: 100_000_000,
+        ..ResourceLimits::default()
+    };
+    let mut m = load("spin", ModuleManifest::new("spin"), limits);
     let start = Instant::now();
     let result = m.chat(user_req("x")).await;
     let elapsed = start.elapsed();
@@ -257,6 +264,38 @@ async fn sandbox_1_3_spin_wall_clock_timeout_fires() {
     assert!(
         elapsed <= Duration::from_millis(500) + TOLERANCE,
         "expected the timeout within 500ms +/- {TOLERANCE:?}, measured {elapsed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AGE-708 (PL-D3b) - `spin` with `max_execution_ms = 2000` and the *default*
+// fuel ceiling: a CPU-bound guest must be bounded by the 60s wall clock, not
+// by an easily-exhausted fuel budget. Before AGE-708 raised the fuel ceiling
+// from 10^9 to 10^12, this row would have ended in `FuelExhausted` well
+// before the 2s deadline; it must now end in `DeadlineExceeded`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cpu_bound_tool_hits_wall_clock_not_fuel() {
+    let limits = ResourceLimits {
+        max_execution_ms: 2_000,
+        ..ResourceLimits::default()
+    };
+    let mut m = load("spin", ModuleManifest::new("spin"), limits);
+    let start = Instant::now();
+    let result = m.chat(user_req("x")).await;
+    let elapsed = start.elapsed();
+
+    let err = result.expect_err("a pure spin must still be stopped by the wall clock");
+    assert!(
+        matches!(call_error(&err), CallError::DeadlineExceeded { .. }),
+        "a CPU-bound tool at the default fuel ceiling must be bounded by the \
+         60s wall clock, not by fuel: expected `deadline exceeded`, got: {err:#} \
+         (elapsed {elapsed:?})"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(2) + TOLERANCE,
+        "expected the timeout within 2s +/- {TOLERANCE:?}, measured {elapsed:?}"
     );
 }
 

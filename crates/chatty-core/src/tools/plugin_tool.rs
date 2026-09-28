@@ -263,14 +263,20 @@ pub fn load_plugin(
     );
     let usage = provider.usage();
     let provider: Arc<dyn LlmProvider> = Arc::new(provider);
-    let mut module = WasmModule::from_file(
+    // The install record's hash is checked on exactly the bytes compiled
+    // (PL-H5a), as the module registry does at its loads.
+    let load_context = || format!("plugin `{}`: failed to load {}", spec.module, dir.display());
+    let bytes = std::fs::read(wasm_path).with_context(load_context)?;
+    chatty_module_registry::install_record::verify_installed(&dir, &bytes)
+        .with_context(load_context)?;
+    let mut module = WasmModule::from_bytes(
         &engine()?,
-        wasm_path,
+        &bytes,
         runtime_manifest,
         provider,
         limits_for(&manifest, spec),
     )
-    .with_context(|| format!("plugin `{}`: failed to load {}", spec.module, dir.display()))?;
+    .with_context(load_context)?;
     let tools = module
         .list_tools()
         .with_context(|| format!("plugin `{}`: list-tools failed", spec.module))?
@@ -506,6 +512,39 @@ mod tests {
         .into_iter()
         .find(|tool| tool.definition().name == name)
         .unwrap_or_else(|| panic!("{name} is registered"))
+    }
+
+    /// PL-H5a: a plugin whose `.wasm` no longer matches its install
+    /// record is refused with the hash error, as at a registry load.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_with_a_tampered_install_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("echo-agent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = fixture_path("echo-agent").parent().unwrap().to_path_buf();
+        for file in ["echo-agent.wasm", "module.toml"] {
+            std::fs::copy(staged.join(file), dir.join(file)).unwrap();
+        }
+        chatty_module_registry::InstallRecord::new(
+            b"other bytes",
+            chatty_module_registry::TrustLevel::Signed,
+            None,
+        )
+        .write(&dir)
+        .unwrap();
+        let host = PluginHost {
+            module_roots: vec![root.path().to_path_buf()],
+            ..PluginHost::default()
+        };
+        let err = load_plugins(
+            &[plugin("echo-agent")],
+            &host,
+            &model(ProviderType::Ollama, "m"),
+        )
+        .await
+        .err()
+        .expect("a tampered plugin must not load");
+        assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
     }
 
     // -- names, approvals, limits --------------------------------------------

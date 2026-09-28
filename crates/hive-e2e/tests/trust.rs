@@ -1,9 +1,11 @@
 //! S6 · Supply chain and trust (evaluation plan §3 S6, rows 6.1–6.7): the
 //! desktop's install flow through the tampering proxy, against a live hive
 //! stack. The attacker controls the network or the registry; chatty must
-//! refuse what it cannot verify. PL-H5 (AGE-608) fixes the red rows, aiming
-//! at the boundary PL-D3 (AGE-595) set: a registry root key compiled into
-//! chatty signs publisher keys; no TOFU.
+//! refuse what it cannot verify. PL-H5a (AGE-703) fixed rows 6.4, 6.5 and
+//! 6.7 (names, download cap, install record re-checked at load); PL-H5
+//! (AGE-608) fixes the signature rows 6.1, 6.2 and 6.6, aiming at the
+//! boundary PL-D3 (AGE-595) set: a registry root key compiled into chatty
+//! signs publisher keys; no TOFU.
 
 use hive_e2e::proxy::{Download, Payload, TamperProxy};
 use hive_e2e::{
@@ -95,8 +97,8 @@ async fn s6_03_tampered_body_is_refused() {
 // ── 6.4 ───────────────────────────────────────────────────────────────────
 
 /// 6.4: a registry that names a module `../../<x>` gets no write outside
-/// the modules directory. Red today: the name is joined into the install
-/// path unvalidated (F5) — PL-H5 (AGE-608).
+/// the modules directory. Fixed by PL-H5a (AGE-703): the name is checked
+/// against the registry's rule before the download and before any write.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s6_04_path_traversal_module_name_is_refused_before_any_write() {
@@ -119,7 +121,7 @@ async fn s6_04_path_traversal_module_name_is_refused_before_any_write() {
     let outside = data_home().join(&escape);
     assert!(
         installed.is_err() && !outside.exists(),
-        "F5 / PL-H5 (AGE-608): module name {shown:?} was installed ({installed:?}); \
+        "F5 / PL-H5a (AGE-703): module name {shown:?} was installed ({installed:?}); \
          {} exists: {}",
         outside.display(),
         outside.exists()
@@ -133,8 +135,8 @@ const DOWNLOAD_CAP: u64 = 64 << 20;
 
 /// 6.5: a 2 GiB body is aborted at the download cap, not read into memory.
 /// The proxy cuts the stream at 256 MiB whatever happens, so the test never
-/// holds more. Red today: no cap, the client reads until the cut —
-/// PL-H5 (AGE-608).
+/// holds more. Fixed by PL-H5a (AGE-703): hive-client refuses a declared
+/// length over the cap and stops reading at it while streaming.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s6_05_oversized_download_is_aborted_at_the_cap() {
@@ -150,7 +152,7 @@ async fn s6_05_oversized_download_is_aborted_at_the_cap() {
     let slack = 16 << 20;
     assert!(
         installed.is_err() && served <= DOWNLOAD_CAP + slack,
-        "PL-H5 (AGE-608): a 2 GiB download was read to {} MiB (cap {} MiB) before it ended: {installed:?}",
+        "PL-H5a (AGE-703): a 2 GiB download was read to {} MiB (cap {} MiB) before it ended: {installed:?}",
         served >> 20,
         DOWNLOAD_CAP >> 20
     );
@@ -181,8 +183,8 @@ async fn s6_06_signed_download_replayed_under_another_name_is_refused() {
 // ── 6.7 ───────────────────────────────────────────────────────────────────
 
 /// 6.7: a module whose `.wasm` changed on disk after install does not load.
-/// Red today: nothing records or re-checks the installed hash —
-/// PL-H5 (AGE-608).
+/// Fixed by PL-H5a (AGE-703): the install writes `.chatty-install.json`
+/// with the hash, and the registry re-checks it at every load.
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s6_07_wasm_tampered_on_disk_after_install_is_refused_at_load() {
@@ -197,7 +199,7 @@ async fn s6_07_wasm_tampered_on_disk_after_install_is_refused_at_load() {
     let loaded = local_module_registry().load(&dir);
     assert!(
         loaded.is_err(),
-        "PL-H5 (AGE-608): {} was replaced by {OTHER}'s bytes after install and still loaded as {:?}",
+        "PL-H5a (AGE-703): {} was replaced by {OTHER}'s bytes after install and still loaded as {:?}",
         dir.display(),
         loaded.ok()
     );

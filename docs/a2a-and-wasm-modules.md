@@ -182,7 +182,8 @@ type reference.
 <module dir>/
 ├── echo-agent/
 │   ├── module.toml          # Manifest (required)
-│   └── echo_agent.wasm      # WASM component binary
+│   ├── echo_agent.wasm      # WASM component binary
+│   └── .chatty-install.json # Install record (only for modules installed from Hive)
 └── code-reviewer/
     ├── module.toml
     └── code_reviewer.wasm
@@ -242,6 +243,18 @@ declaring the same `name`: the first by directory name wins, the second is a fai
 `load` of a name already registered from another directory). The desktop's installed
 extensions list shows a module's failure reason under its row.
 
+**Install hardening (PL-H5a).** `chatty_core::install` checks a registry-supplied module
+name against the registry's rule (`^[a-z][a-z0-9-]{1,48}[a-z0-9]$`, no `--`) and the
+version as semver before anything touches the filesystem, installs into the configured
+`module_dir`, and caps the download at `hive_client::MAX_DOWNLOAD_BYTES` (64 MiB) while it
+streams. Each WASM install writes `.chatty-install.json` (`{sha256, trust_level,
+publisher_key_id}`) beside the module; the registry hashes the `.wasm` bytes it is about
+to compile against that record at every load and refuses a mismatch (`hash mismatch …`,
+shown as `Failed to load:`). A module without a record — copied in by hand — loads as
+`TrustLevel::Local` (`ModuleRegistry::trust_level`), and Settings → Extensions lists it
+under **Local modules**. Signature enforcement (refusing unsigned downloads) is PL-H5,
+AGE-608.
+
 A module appears in `list_agents` when `[capabilities].agent = true`, it is
 `Loaded` (or `Remote`), and it is enabled in Settings → Extensions
 (`collect_module_agents` in chatty-gpui, `discover_module_agents` in
@@ -264,10 +277,16 @@ down to the ceiling.
 
 | Limit | Default = ceiling | Enforcement | Error |
 |:------|:------------------|:------------|:------|
-| **Fuel** | 10⁹ units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
+| **Fuel** | 10¹² units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
 | **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm::complete`, `file::read-bytes`, billing) stop waiting at the deadline | `deadline exceeded` |
 | **Memory** | 256 MiB | Store memory limiter | `memory limit` |
 | **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
+
+The fuel ceiling (AGE-708) is sized so a pure CPU-bound guest is bounded by the 60 s
+wall-clock ceiling, not by fuel: on this host, Wasmtime fuel runs at roughly
+1.5 × 10¹⁰ units/s for a tight arithmetic loop, so 10⁹ (PL-D3's original figure) was
+exhausted in well under a second — 10¹² keeps a pure spin running for over a minute of
+fuel, past the 60 s wall clock.
 
 `list-tools` and `get-agent-card` get a 1 s wall-clock budget. A guest trap or panic
 fails the call with `guest trap: <message>` (the panic message is read from the guest's

@@ -18,7 +18,7 @@ are gated behind the `gpui-globals` feature; `chatty-gpui` enables it,
 | `exporters/` | Conversation export (markdown, PDF, ATIF, …) |
 | `factories/agent_factory/` | Build `AgentClient` per provider; tool registration |
 | `gpui_globals.rs` | `impl Global` for core types (feature-gated) |
-| `install.rs` | First-launch installation tasks |
+| `install.rs` | Hive module install/uninstall (validated names, capped download, `.chatty-install.json` record) and first-launch seeding |
 | `models/` | Pure data types: `Conversation`, `Message`, stores |
 | `repositories/` | Persistence abstractions (SQLite for conversations) |
 | `sandbox/` | Bollard/Docker sandbox backend + manager |

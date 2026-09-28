@@ -297,9 +297,11 @@ fn sandbox_2_5_resources_memory_reaches_the_runtime() {
 }
 
 /// The time half uses `slow-host` (the guest waits on a host `llm::complete`
-/// that takes 2 s) rather than a spinning guest: under the 10⁹-per-call fuel
-/// ceiling a pure spin runs out of fuel in well under 300 ms, so only host
-/// time can outlast the manifest's limit.
+/// that takes 2 s) rather than a spinning guest, so the wall-clock limit is
+/// exercised via host time specifically (a CPU-bound spin would also hit the
+/// manifest's 300 ms wall clock well before its fuel budget, per AGE-708 —
+/// but that wouldn't distinguish the wall-clock enforcement from a fuel
+/// check).
 #[test]
 fn sandbox_2_5_resources_time_reaches_the_runtime() {
     let tmp = tempfile::tempdir().unwrap();
