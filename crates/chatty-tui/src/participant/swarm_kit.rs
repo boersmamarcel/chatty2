@@ -387,7 +387,7 @@ impl SwarmKit {
 impl SwarmKit {
     /// The leader's `invoke_agent`, holding the root broker's direct handle.
     pub fn leader_tool(&self) -> InvokeAgentTool {
-        InvokeAgentTool::new(vec![], vec![], None)
+        InvokeAgentTool::new(vec![], None)
             .with_local_agents(self.roster.clone())
             .with_transport(self.broker().transport())
     }

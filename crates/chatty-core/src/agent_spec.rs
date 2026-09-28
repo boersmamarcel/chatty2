@@ -537,15 +537,168 @@ pub fn list_agent_specs_from(workspace: Option<&Path>, data_dir: Option<&Path>) 
     listed
 }
 
-/// The specs behind a roster of names, or the one default worker
-/// (`local-agent`, a bare spec) when the roster is empty.
+/// The specs behind a roster of names. An empty roster is every exposed
+/// spec the workspace can reach ([`exposed_specs`]): one kind of agent,
+/// whatever file or preset defined it (PL-U5).
 pub fn load_roster(names: &[String], workspace: Option<&Path>) -> Result<Vec<AgentSpec>> {
+    load_roster_from(names, workspace, dirs::data_dir().as_deref())
+}
+
+/// [`load_roster`] with the data directory given rather than the
+/// platform's.
+pub fn load_roster_from(
+    names: &[String],
+    workspace: Option<&Path>,
+    data_dir: Option<&Path>,
+) -> Result<Vec<AgentSpec>> {
     if names.is_empty() {
-        return Ok(vec![AgentSpec::named(crate::tools::LOCAL_AGENT_NAME)]);
+        return Ok(exposed_specs_from(workspace, data_dir));
     }
     names
         .iter()
-        .map(|name| load_agent_spec(name, workspace).map(|loaded| loaded.spec))
+        .map(|name| load_agent_spec_from(name, workspace, data_dir).map(|loaded| loaded.spec))
+        .collect()
+}
+
+/// The names of the roster [`load_roster`] loads: `declared` when it names
+/// any agents, else every exposed spec's name.
+pub fn roster_names(declared: &[String], workspace: Option<&Path>) -> Vec<String> {
+    roster_names_from(declared, workspace, dirs::data_dir().as_deref())
+}
+
+/// [`roster_names`] with the data directory given rather than the
+/// platform's.
+pub fn roster_names_from(
+    declared: &[String],
+    workspace: Option<&Path>,
+    data_dir: Option<&Path>,
+) -> Vec<String> {
+    roster_names_of(declared, &inspect_agent_specs_from(workspace, data_dir))
+}
+
+/// [`roster_names`] over listings already read: `declared` when it names
+/// any agents, else `local-agent` and every served listing's name.
+pub fn roster_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<String> {
+    if !declared.is_empty() {
+        return declared.to_vec();
+    }
+    let default_name = crate::tools::LOCAL_AGENT_NAME;
+    let mut names = vec![default_name.to_string()];
+    names.extend(
+        listings
+            .iter()
+            .filter(|listing| listing.is_served() && listing.name != default_name)
+            .map(|listing| listing.name.clone()),
+    );
+    names
+}
+
+/// Every spec a workspace can reach that others may call, in lookup order
+/// and once per name: `local-agent` first (a bare spec unless a spec
+/// directory defines one), then each first definition whose
+/// `swarm.exposed` is set. A file that does not load is left out with a
+/// warning rather than taking the whole roster down; the Agents settings
+/// page and `/agents` show it with its error.
+pub fn exposed_specs(workspace: Option<&Path>) -> Vec<AgentSpec> {
+    exposed_specs_from(workspace, dirs::data_dir().as_deref())
+}
+
+/// [`exposed_specs`] with the data directory given rather than the
+/// platform's.
+pub fn exposed_specs_from(workspace: Option<&Path>, data_dir: Option<&Path>) -> Vec<AgentSpec> {
+    let default_name = crate::tools::LOCAL_AGENT_NAME;
+    let mut specs = Vec::new();
+    for listing in inspect_agent_specs_from(workspace, data_dir) {
+        if listing.shadowed {
+            continue;
+        }
+        match listing.spec {
+            Ok(spec) if spec.swarm.exposed => specs.push(spec),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                agent = %listing.name,
+                %error,
+                "Leaving an agent spec that does not load out of the roster"
+            ),
+        }
+    }
+    match specs
+        .iter()
+        .position(|spec| spec.agent.name == default_name)
+    {
+        Some(at) => {
+            let spec = specs.remove(at);
+            specs.insert(0, spec);
+        }
+        None => specs.insert(0, AgentSpec::named(default_name)),
+    }
+    specs
+}
+
+/// One spec file or preset as the Agents settings page and `/agents` show
+/// it: where it was found, whether a nearer one shadows it, and what it
+/// declares — or why it does not load.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpecListing {
+    pub name: String,
+    pub source: SpecSource,
+    pub shadowed: bool,
+    pub spec: Result<AgentSpec, String>,
+}
+
+impl SpecListing {
+    /// Whether the broker serves it: the name's first definition, loaded,
+    /// and exposed.
+    pub fn is_served(&self) -> bool {
+        !self.shadowed && self.spec.as_ref().is_ok_and(|spec| spec.swarm.exposed)
+    }
+}
+
+impl SpecSource {
+    /// Where it was found, for a person: the file, or `preset`.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Workspace(path) | Self::DataDir(path) => path.display().to_string(),
+            Self::Preset => "preset".to_string(),
+        }
+    }
+}
+
+/// Every spec a workspace can reach, each loaded from its own file (a
+/// shadowed one too), in [`list_agent_specs`] order.
+pub fn inspect_agent_specs(workspace: Option<&Path>) -> Vec<SpecListing> {
+    inspect_agent_specs_from(workspace, dirs::data_dir().as_deref())
+}
+
+/// [`inspect_agent_specs`] with the data directory given rather than the
+/// platform's.
+pub fn inspect_agent_specs_from(
+    workspace: Option<&Path>,
+    data_dir: Option<&Path>,
+) -> Vec<SpecListing> {
+    list_agent_specs_from(workspace, data_dir)
+        .into_iter()
+        .map(|listed| {
+            let spec = match &listed.source {
+                SpecSource::Workspace(path) | SpecSource::DataDir(path) => {
+                    std::fs::read_to_string(path)
+                        .with_context(|| format!("failed to read {}", path.display()))
+                        .and_then(|text| parse_named(&listed.name, &text))
+                }
+                SpecSource::Preset => PRESETS
+                    .iter()
+                    .find(|(preset, _)| *preset == listed.name)
+                    .map(|(_, text)| parse_named(&listed.name, text))
+                    .expect("a listed preset exists"),
+            }
+            .map_err(|error| format!("{error:#}"));
+            SpecListing {
+                name: listed.name,
+                source: listed.source,
+                shadowed: listed.shadowed,
+                spec,
+            }
+        })
         .collect()
 }
 
@@ -812,12 +965,109 @@ cap_usd = 2.0
         }
     }
 
+    fn names(specs: &[AgentSpec]) -> Vec<&str> {
+        specs.iter().map(|spec| spec.agent.name.as_str()).collect()
+    }
+
+    /// PL-U5: with nothing declared, the roster is `local-agent` and every
+    /// exposed spec — the presets included, so `benford-analyst` is an
+    /// agent like any other.
     #[test]
-    fn an_empty_roster_is_the_one_default_worker() {
-        let roster = load_roster(&[], None).unwrap();
+    fn an_empty_roster_is_every_exposed_spec() {
+        let roster = load_roster_from(&[], None, None).unwrap();
         assert_eq!(
-            roster,
-            vec![AgentSpec::named(crate::tools::LOCAL_AGENT_NAME)]
+            names(&roster),
+            [
+                crate::tools::LOCAL_AGENT_NAME,
+                "benford-analyst",
+                "coder-reviewer-leader",
+                "local-coder",
+                "local-reviewer",
+            ]
         );
+        assert_eq!(roster[0], AgentSpec::named(crate::tools::LOCAL_AGENT_NAME));
+        assert_eq!(
+            roster_names_from(&[], None, None),
+            names(&roster)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_declared_roster_is_exactly_what_it_names() {
+        let declared = vec!["local-reviewer".to_string()];
+        let roster = load_roster_from(&declared, None, None).unwrap();
+        assert_eq!(names(&roster), ["local-reviewer"]);
+        assert_eq!(roster_names_from(&declared, None, None), declared);
+        assert!(load_roster_from(&["nope".to_string()], None, None).is_err());
+    }
+
+    /// Workspace specs join the roster, shadow what they rename, and stay
+    /// out when they are not exposed or do not load.
+    #[test]
+    fn the_exposed_roster_follows_the_spec_directories() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("analyst.toml"),
+            "[agent]\nname = \"analyst\"\ndescription = \"mine\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("hidden.toml"),
+            "[agent]\nname = \"hidden\"\n\n[swarm]\nexposed = false\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("broken.toml"), "[agent]\nnme = \"broken\"\n").unwrap();
+        std::fs::write(
+            dir.join("local-agent.toml"),
+            "[agent]\nname = \"local-agent\"\npreamble = \"Be brief.\"\n",
+        )
+        .unwrap();
+        // A workspace spec that turns a preset off hides the preset too.
+        std::fs::write(
+            dir.join("local-coder.toml"),
+            "[agent]\nname = \"local-coder\"\n\n[swarm]\nexposed = false\n",
+        )
+        .unwrap();
+
+        let listings = inspect_agent_specs_from(Some(workspace.path()), None);
+        let listing = |name: &str| {
+            listings
+                .iter()
+                .find(|listing| listing.name == name && !listing.shadowed)
+                .unwrap()
+        };
+        assert!(listing("analyst").is_served());
+        assert!(!listing("hidden").is_served());
+        let broken = listing("broken");
+        assert!(!broken.is_served());
+        assert!(
+            broken.spec.as_ref().unwrap_err().contains("nme"),
+            "the error names the bad field: {broken:?}"
+        );
+        let shadowed_preset = listings
+            .iter()
+            .find(|listing| listing.name == "local-coder" && listing.shadowed)
+            .unwrap();
+        assert_eq!(shadowed_preset.source, SpecSource::Preset);
+        assert!(shadowed_preset.spec.is_ok());
+        assert!(!shadowed_preset.is_served());
+
+        let roster = exposed_specs_from(Some(workspace.path()), None);
+        assert_eq!(
+            names(&roster),
+            [
+                "local-agent",
+                "analyst",
+                "benford-analyst",
+                "coder-reviewer-leader",
+                "local-reviewer",
+            ]
+        );
+        assert_eq!(roster[0].agent.preamble.as_deref(), Some("Be brief."));
     }
 }

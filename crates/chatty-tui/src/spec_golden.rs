@@ -144,10 +144,13 @@ fn worker_contexts(workspace: &str) -> Vec<(String, AgentBuildContext, Option<St
         let mut argv = vec!["chatty-tui".to_string()];
         argv.extend(spec.args.iter().cloned());
         argv.extend(["--participant-fd", "3"].map(str::to_string));
+        // The one-name roster this golden was recorded with. Since PL-U5
+        // an undeclared roster is every exposed spec, which is an input
+        // to this projection, not something a spec decides.
         let (ctx, model) = context_for(
             &argv,
             workspace,
-            ModuleSettingsModel::default().virtual_agent_names(),
+            vec![chatty_core::tools::LOCAL_AGENT_NAME.to_string()],
         );
         (spec.name, ctx, model)
     })

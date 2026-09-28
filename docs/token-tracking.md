@@ -232,7 +232,7 @@ as a `TokenUsage` line marked `delegated_to`, priced at the model the line names
 (AGE-415, AGE-682). Nested leaders forward their workers' lines with their own, merging
 only lines on the same model. `context_tokens` and `last_usage` stay the leader's own.
 Details in
-[a2a-and-wasm-modules.md](a2a-and-wasm-modules.md#local-agent--a-chatty-agent-in-its-own-process).
+[agents-and-specs.md](agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
 **Read by:**
 - `gather_snapshot_inputs()` — `response_reserve`
