@@ -102,7 +102,7 @@ async fn refuse(stream: UnixStream) {
         Err(_) => SHARED_SOCKET_REFUSAL.to_string(),
     };
     warn!(%reason, "Refused a connection on the shared participant socket");
-    let _ = write_frame(&mut write_half, &BrokerFrame::Error { reason }).await;
+    let _ = write_frame(&mut write_half, &BrokerFrame::Error { reason }, None).await;
 }
 
 /// A connection the broker made for a local worker: the node's name, and
@@ -147,13 +147,21 @@ where
     let (read_half, write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
+    let tap = registry.wire_tap();
+    // Every line read is copied to the wire tap, if one is installed.
+    let decode = |line: &str| {
+        if let Some(tap) = tap.as_ref() {
+            let _ = tap.send(format!("<- {line}"));
+        }
+        decode_frame::<ParticipantFrame>(line)
+    };
 
-    let writer = tokio::spawn(write_frames(write_half, outbound_rx));
+    let writer = tokio::spawn(write_frames(write_half, outbound_rx, tap.clone()));
 
     // 1. The first frame must be a v2 `hello`. The welcome is queued before
     // the node is registered, so it is on the wire ahead of any task.
     let name = match lines.next_line().await {
-        Ok(Some(line)) => match decode_frame::<ParticipantFrame>(&line) {
+        Ok(Some(line)) => match decode(&line) {
             Ok(ParticipantFrame::Hello { card }) => {
                 let _ = outbound_tx.send(node.welcome());
                 registry.register(node, card, outbound_tx.clone())
@@ -199,7 +207,7 @@ where
         while calls.try_join_next().is_some() {}
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
-            Ok(Some(line)) => match decode_frame::<ParticipantFrame>(&line) {
+            Ok(Some(line)) => match decode(&line) {
                 // A peer that stops speaking v2 is not ours to guess at.
                 Err(e @ (FrameError::MissingVersion | FrameError::WrongVersion(_))) => {
                     warn!(participant = %name, error = %e, "Closing the connection: not v2");
@@ -320,12 +328,19 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Write one frame as a line.
-async fn write_frame<W>(write_half: &mut W, frame: &BrokerFrame) -> io::Result<()>
+/// Write one frame as a line, copying it to `tap` when there is one.
+async fn write_frame<W>(
+    write_half: &mut W,
+    frame: &BrokerFrame,
+    tap: Option<&mpsc::UnboundedSender<String>>,
+) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     let mut line = encode_frame(frame).map_err(io::Error::other)?;
+    if let Some(tap) = tap {
+        let _ = tap.send(format!("-> {line}"));
+    }
     line.push('\n');
     write_half.write_all(line.as_bytes()).await?;
     write_half.flush().await
@@ -333,12 +348,15 @@ where
 
 /// Write queued broker frames as newline-delimited JSON until the queue is
 /// closed or the socket refuses a write.
-async fn write_frames<W>(mut write_half: W, mut outbound: mpsc::UnboundedReceiver<BrokerFrame>)
-where
+async fn write_frames<W>(
+    mut write_half: W,
+    mut outbound: mpsc::UnboundedReceiver<BrokerFrame>,
+    tap: Option<mpsc::UnboundedSender<String>>,
+) where
     W: AsyncWrite + Unpin,
 {
     while let Some(frame) = outbound.recv().await {
-        if let Err(e) = write_frame(&mut write_half, &frame).await {
+        if let Err(e) = write_frame(&mut write_half, &frame, tap.as_ref()).await {
             debug!(error = %e, "Participant socket write failed; writer stopping");
             return;
         }
