@@ -1,4 +1,5 @@
 use chatty_core::models::message_types::ToolCallState;
+use chatty_core::tools::plugin_tool::plugin_tool_display_name;
 use std::path::Path;
 
 use super::artifact_kind::tool_file_path;
@@ -47,6 +48,14 @@ pub(crate) fn tool_row_label(
 }
 
 fn verb_for(tool_name: &str, display_name: &str, state: &ToolCallState) -> String {
+    // A spec's plugin tool (PL-U2): one generic verb, whatever the plugin.
+    if let Some(plugin_tool) = plugin_tool_display_name(tool_name) {
+        return match state {
+            ToolCallState::Running => format!("Running {plugin_tool}"),
+            ToolCallState::Success => format!("Ran {plugin_tool}"),
+            ToolCallState::Error(_) => format!("Failed to run {plugin_tool}"),
+        };
+    }
     let (running, done) = match tool_name {
         "read_file" | "read_binary" | "read_excel" | "read_skill" => ("Reading", "Read"),
         "list_directory" | "list_agents" | "list_mcp_services" | "list_tools" => {
@@ -451,6 +460,32 @@ mod tests {
         );
         assert_eq!(label.headline(), "Read docs/poem.md");
         assert!(label.added.is_none());
+    }
+
+    /// PL-U2: a spec's plugin tool reads as running `<plugin>.<tool>`,
+    /// whichever plugin, and counts as a tool in the run's tally.
+    #[test]
+    fn plugin_tools_read_as_ran_plugin_dot_tool() {
+        let verb = |state| {
+            tool_row_label(
+                "echo-agent__reverse",
+                "echo-agent__reverse",
+                &state,
+                r#"{"input":"hello"}"#,
+                None,
+            )
+            .verb
+        };
+        assert_eq!(verb(ToolCallState::Running), "Running echo-agent.reverse");
+        assert_eq!(verb(ToolCallState::Success), "Ran echo-agent.reverse");
+        assert_eq!(
+            verb(ToolCallState::Error("deadline exceeded".into())),
+            "Failed to run echo-agent.reverse"
+        );
+        assert_eq!(
+            super::super::activity::classify_tool("spin__spin"),
+            super::super::activity::ToolKind::External
+        );
     }
 
     /// The generic fallback turned `terminal_read` into "terminaled read".

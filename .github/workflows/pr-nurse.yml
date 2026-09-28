@@ -60,7 +60,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          sparse-checkout: scripts/pr-nurse-triage.sh
+          sparse-checkout: |
+            scripts/pr-nurse-triage.sh
+            scripts/pr-nurse-decide.sh
           sparse-checkout-cone-mode: false
 
       - name: Pick the PR that needs care

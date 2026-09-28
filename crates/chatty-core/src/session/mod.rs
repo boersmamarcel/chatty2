@@ -192,9 +192,10 @@ pub struct AgentSession {
     /// Usage of the most recent turn that reported any.
     last_turn_usage: Option<TokenUsage>,
     /// What this turn's delegated agents spent, one line per model per
-    /// delegation (AGE-415, AGE-682), recorded on the conversation by
-    /// `finish_turn`.
-    delegated_usages: Vec<TokenUsage>,
+    /// delegation (AGE-415, AGE-682), and what its plugins spent, one line
+    /// per plugin (PL-U2): recorded on the conversation by `finish_turn`
+    /// beside the turn's own line.
+    side_usages: Vec<TokenUsage>,
     /// What `finish_turn` prices usage lines with (AGE-682), besides the
     /// conversation's own bound model. Empty until the owner sets it.
     price_book: PriceBook,
@@ -217,7 +218,7 @@ impl AgentSession {
             cancel_flag: None,
             pending_tool_names: HashMap::new(),
             last_turn_usage: None,
-            delegated_usages: Vec::new(),
+            side_usages: Vec::new(),
             price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
         }
@@ -597,6 +598,7 @@ impl AgentSession {
             SessionEvent::Delegation(progress) => self.note_delegation(progress),
             SessionEvent::TurnMessages(messages) => self.set_turn_messages(messages.clone()),
             SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
+            SessionEvent::PluginUsage(usage) => self.note_plugin_usage(usage.clone()),
             _ => {}
         }
         None
@@ -786,9 +788,17 @@ impl AgentSession {
                 // The bill follows the bearer (AGE-415): what the worker
                 // spent is this conversation's spend, priced at the models
                 // it was spent on (AGE-682).
-                self.delegated_usages.extend(usage.iter().cloned());
+                self.side_usages.extend(usage.iter().cloned());
             }
         }
+    }
+
+    /// `SessionEvent::PluginUsage`: what one of the agent's plugins spent
+    /// through `llm::complete` this turn (PL-U2), recorded on the
+    /// conversation by `finish_turn` as a line of its own, priced at the
+    /// model each call names.
+    pub fn note_plugin_usage(&mut self, usage: TokenUsage) {
+        self.side_usages.push(usage);
     }
 
     /// `SessionEvent::TurnMessages`: keep rig's record of the turn until
@@ -830,7 +840,8 @@ impl AgentSession {
     /// lifetime total. A line whose model has no prices is unpriced: its
     /// cost stays `None` and the conversation's total unchanged. What the
     /// turn's delegated agents spent goes on ahead of the turn's own usage,
-    /// one line per model they reported (AGE-415), so the totals carry the
+    /// one line per model they reported (AGE-415), and so does what its
+    /// plugins spent, one line per plugin (PL-U2), so the totals carry the
     /// whole tree while `last_usage` stays this agent's own.
     ///
     /// Returns `None` when there is no conversation or no turn to finish: a
@@ -883,7 +894,7 @@ impl AgentSession {
         if let Some(pricing) = conversation.pricing() {
             book.set(conversation.model_ref().clone(), *pricing);
         }
-        for mut usage in std::mem::take(&mut self.delegated_usages) {
+        for mut usage in std::mem::take(&mut self.side_usages) {
             usage.price(&book);
             conversation.add_delegated_usage(usage);
         }

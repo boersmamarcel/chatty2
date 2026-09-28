@@ -1,6 +1,7 @@
-//! Fixture `slow-host`: `chat` calls the host's `llm::complete`, so a slow provider stalls it in host time.
+//! Fixture `slow-host`: `chat` and the `ask` tool call the host's `llm::complete`, so a slow
+//! provider stalls it in host time.
 use chatty_module_sdk::{export_module, ToolDefinition};
-use chatty_module_sdk::{AgentCard, ChatRequest, ChatResponse, ModuleExports, Role};
+use chatty_module_sdk::{AgentCard, ChatRequest, ChatResponse, Message, ModuleExports, Role};
 
 fn card(name: &str, tools: Vec<ToolDefinition>) -> AgentCard {
     let (name, display_name) = (name.to_string(), name.to_string());
@@ -29,11 +30,18 @@ impl ModuleExports for Fixture {
         let resp = chatty_module_sdk::llm::complete("", &req.messages, None)?;
         reply(resp.content)
     }
-    fn invoke_tool(&self, name: String, _args: String) -> Result<String, String> {
-        Err(format!("unknown tool: {name}"))
+    fn invoke_tool(&self, name: String, args: String) -> Result<String, String> {
+        if name != "ask" {
+            return Err(format!("unknown tool: {name}"));
+        }
+        let messages = [Message { role: Role::User, content: args }];
+        Ok(chatty_module_sdk::llm::complete("", &messages, None)?.content)
     }
     fn list_tools(&self) -> Vec<ToolDefinition> {
-        vec![]
+        let (name, description) = ("ask".into(), "Asks the host model; returns its reply.".into());
+        let parameters_schema =
+            r#"{"type":"object","properties":{"question":{"type":"string"}}}"#.into();
+        vec![ToolDefinition { name, description, parameters_schema }]
     }
     fn get_agent_card(&self) -> AgentCard {
         card("slow-host", vec![])

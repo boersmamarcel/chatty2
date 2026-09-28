@@ -24,7 +24,7 @@ use tokio::runtime::Handle;
 use tracing::debug;
 
 use crate::factories::agent_factory::{completion_model, request_params};
-use crate::models::token_usage::ApiCallUsage;
+use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::llm_service::normalize_usage;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
@@ -136,12 +136,21 @@ impl LlmProvider for PluginLlmProvider {
             has_tools = tools.is_some(),
             "plugin llm::complete"
         );
-        let (response, usage) = self.runtime.block_on(send(
+        let started = std::time::Instant::now();
+        let (response, mut usage) = self.runtime.block_on(send(
             &model_config,
             &provider_config,
             messages,
             tools.as_deref(),
         ))?;
+        // A usage line is a fact (AGE-682): the model that served the call,
+        // when it finished and how long it took; its price is read later.
+        usage.model = Some(ModelRef {
+            provider: provider_config.provider_type.clone(),
+            model_id: model_config.model_identifier.clone(),
+        });
+        usage.at = Some(std::time::SystemTime::now());
+        usage.duration_ms = started.elapsed().as_millis() as u64;
         self.usage.record(usage);
         Ok(response)
     }
@@ -610,6 +619,15 @@ mod tests {
         assert_eq!(calls[0].input_tokens, 60);
         assert_eq!(calls[0].cache_read_tokens, 40);
         assert_eq!(calls[0].output_tokens, 7);
+        // Each call names the model that served it and when (AGE-682).
+        assert_eq!(
+            calls[0].model,
+            Some(ModelRef {
+                provider: ProviderType::OpenRouter,
+                model_id: "test-model".to_string(),
+            })
+        );
+        assert!(calls[0].at.is_some());
         assert!(log.take().is_empty(), "take drains the log");
     }
 

@@ -10,7 +10,7 @@
 //! [`run_stream_loop`](crate::services::run_stream_loop), which places no
 //! `Send` bound on it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -137,6 +137,9 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// AGE-683): counted with the turn, but not part of what the provider's
     /// aggregate covers.
     compaction_calls: Vec<ApiCallUsage>,
+    /// The `llm::complete` calls each plugin made during the turn (PL-U2),
+    /// by plugin name: one `PluginUsage` line each when the turn ends.
+    plugin_calls: BTreeMap<String, Vec<ApiCallUsage>>,
     /// The prompt to emit as `FollowUp` once the turn has ended. First one
     /// queued wins, except that a loop-guard pivot always replaces it: the
     /// pivot cancels the turn, so whatever was queued before is moot.
@@ -173,6 +176,7 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             loop_guard_pivot: None,
             calls: Vec::new(),
             compaction_calls: Vec::new(),
+            plugin_calls: BTreeMap::new(),
             pending_follow_up: None,
             text_overflow: false,
             output_in_call: false,
@@ -410,6 +414,9 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 self.compaction_calls.push(call.clone());
                 (self.emit)(SessionEvent::ApiCallUsage(call));
             }
+            StreamChunk::PluginUsage { plugin, call } => {
+                self.plugin_calls.entry(plugin).or_default().push(call);
+            }
             StreamChunk::TurnUsage(aggregate) => {
                 let usage = self.fold_usage(aggregate);
                 (self.emit)(SessionEvent::TokenUsage(usage));
@@ -455,6 +462,13 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
     }
 
     fn on_stream_ended(&mut self) {
+        // Whatever the turn's plugins spent counts however the turn ended.
+        for (plugin, calls) in std::mem::take(&mut self.plugin_calls) {
+            (self.emit)(SessionEvent::PluginUsage(TokenUsage {
+                plugin: Some(plugin),
+                ..TokenUsage::from_calls(calls)
+            }));
+        }
         (self.emit)(SessionEvent::TurnEnded);
         if let Some(prompt) = self.pending_follow_up.take() {
             (self.emit)(SessionEvent::FollowUp(prompt));

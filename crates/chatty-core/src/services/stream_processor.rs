@@ -894,6 +894,7 @@ mod tests {
             StreamChunk::ClarificationRequested { .. } => "ClarificationRequested",
             StreamChunk::ApiCallUsage(_) => "ApiCallUsage",
             StreamChunk::CompactionUsage(_) => "CompactionUsage",
+            StreamChunk::PluginUsage { .. } => "PluginUsage",
             StreamChunk::TurnUsage(_) => "TokenUsage",
             StreamChunk::TurnMessages(_) => "TurnMessages",
             StreamChunk::Done => "Done",

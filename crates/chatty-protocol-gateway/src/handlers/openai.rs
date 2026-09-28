@@ -324,6 +324,13 @@ async fn run_chat(
     if let Err(e) = module_call::check_credits(&state, module_name).await {
         return openai_error(StatusCode::PAYMENT_REQUIRED, "insufficient_credits", e);
     }
+    if let Err(e) = module_call::check_usage_reporting(&state, module_name) {
+        return openai_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "usage_reporting_required",
+            e,
+        );
+    }
 
     let mut module = module.lock().await;
     let result = module.chat(req).await;

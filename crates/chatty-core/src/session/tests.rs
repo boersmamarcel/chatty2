@@ -798,6 +798,13 @@ fn describe(event: &SessionEvent) -> String {
             u.api_turn_count,
             u.calls.len()
         ),
+        SessionEvent::PluginUsage(u) => format!(
+            "PluginUsage(plugin={:?}, in={}, out={}, calls={})",
+            u.plugin.as_deref().unwrap_or_default(),
+            u.input_tokens,
+            u.output_tokens,
+            u.calls.len()
+        ),
         SessionEvent::TurnMessages(messages) => format!("TurnMessages(len={})", messages.len()),
         SessionEvent::Delegation(progress) => match progress {
             InvokeAgentProgress::Started {

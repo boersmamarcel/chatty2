@@ -67,7 +67,7 @@ pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
 pub(crate) use provider_builder::openrouter_base_url;
 pub(crate) use provider_builder::{completion_model, ollama_think, request_params};
 pub use request_recorder::RequestRecorder;
-pub use tool_loading::{ANSWER_GROUP, CORE_TOOLS, LoadToolsTool, ToolLoader};
+pub use tool_loading::{ANSWER_GROUP, CORE_TOOLS, LoadToolsTool, PluginGroup, ToolLoader};
 pub use tool_profile::{ToolProfile, tool_profile, tool_profile_names};
 pub use tool_registry::ToolAvailability;
 
@@ -210,6 +210,9 @@ pub struct AgentClient {
     /// The model id sent to the provider, which the stream's usage records
     /// name (AGE-682).
     model_id: String,
+    /// Each plugin's `llm::complete` log (PL-U2), by plugin name, sorted:
+    /// `stream_prompt` drains them into the turn.
+    plugin_usage: Vec<(String, crate::services::plugin_llm::PluginUsage)>,
 }
 
 impl AgentClient {
@@ -234,6 +237,11 @@ impl AgentClient {
     /// The record of the last model request `agent` sent.
     pub fn request_recorder(&self) -> &RequestRecorder {
         &self.request_recorder
+    }
+
+    /// The `llm::complete` logs of this agent's plugins, by plugin name.
+    pub fn plugin_usage(&self) -> &[(String, crate::services::plugin_llm::PluginUsage)] {
+        &self.plugin_usage
     }
 
     /// The tool groups loaded so far, when the agent was built with
@@ -284,7 +292,16 @@ impl AgentClient {
             instructions_dir,
             embedded_terminals,
             fabric_transport,
+            plugins,
+            plugin_host,
         } = ctx;
+
+        // The spec's plugins (PL-U2): one instance each for this agent, on
+        // this agent's model. A plugin that does not load fails the build —
+        // the spec depends on it. The spec is their allow-list, so a tool
+        // profile does not filter them.
+        let plugins =
+            crate::tools::plugin_tool::load_plugins(&plugins, &plugin_host, model_config).await?;
 
         // A role's tool profile (ADR-0011 C11) is an allowlist of tool names
         // applied on top of the execution settings: it only ever removes
@@ -1235,7 +1252,15 @@ impl AgentClient {
             None => tool_availability,
         };
 
-        let native_tool_names = active_native_tool_names(&tool_availability);
+        let mut native_tool_names = active_native_tool_names(&tool_availability);
+        // A plugin tool's name holds `__`, which no native tool's does; the
+        // check is what keeps it that way. Reserving the names keeps an MCP
+        // tool from shadowing one.
+        for name in crate::tools::plugin_tool::plugin_tool_names(&plugins) {
+            if !native_tool_names.insert(name.to_string()) {
+                anyhow::bail!("plugin tool `{name}` has the name of another tool of this agent");
+            }
+        }
         let mcp_tool_info = filter_mcp_tool_info(mcp_tool_info, &native_tool_names);
 
         // Create list_tools tool (always available)
@@ -1384,6 +1409,11 @@ impl AgentClient {
             ToolLoader::new(
                 native.iter().map(String::as_str),
                 mcp_tool_info.iter().map(|(_, name, _)| name.clone()),
+                plugins.iter().map(|plugin| PluginGroup {
+                    name: plugin.name.clone(),
+                    description: plugin.description.clone(),
+                    tools: plugin.tools.iter().map(|tool| tool.name.clone()).collect(),
+                }),
                 preload,
             )
         });
@@ -1480,9 +1510,23 @@ impl AgentClient {
             terminal_read_tool: terminal_read_tool,
             terminal_run_tool: terminal_run_tool,
             load_tools_tool: tool_loader.clone().map(LoadToolsTool::new),
+            plugin_tools: {
+                let approvals = crate::tools::plugin_tool::PluginApprovals {
+                    pending: pending_approvals.clone(),
+                    mode: exec_settings
+                        .as_ref()
+                        .map(|s| s.approval_mode.clone())
+                        .unwrap_or_default(),
+                };
+                plugins
+                    .iter()
+                    .flat_map(|plugin| crate::tools::plugin_tool::PluginTool::all(plugin, &approvals))
+                    .map(crate::tools::plugin_tool::PluginTool::into_dynamic)
+                    .collect()
+            },
         );
 
-        let agent = provider_builder::build_provider_agent(
+        let mut agent = provider_builder::build_provider_agent(
             model_config,
             provider_config,
             &preamble,
@@ -1493,6 +1537,10 @@ impl AgentClient {
             tool_loader,
         )
         .await?;
+        agent.plugin_usage = plugins
+            .iter()
+            .map(|plugin| (plugin.name.clone(), plugin.usage.clone()))
+            .collect();
         // What every request carries before any history — the preamble and
         // the tool schemas — is only measurable once the agent exists.
         calibrate_context_shaper(

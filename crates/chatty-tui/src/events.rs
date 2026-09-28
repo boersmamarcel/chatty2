@@ -60,6 +60,9 @@ pub enum AppEvent {
     /// The turn's usage, folded from its per-request records by the session
     /// (the last call's prompt size is the actual context fill, AGE-223).
     TokenUsage(chatty_core::models::token_usage::TokenUsage),
+    /// What one of the agent's plugins spent through `llm::complete` this
+    /// turn (PL-U2): a line of its own, named in `TokenUsage::plugin`.
+    PluginUsage(chatty_core::models::token_usage::TokenUsage),
     /// rig's record of the turn's messages, persisted behind the final text
     /// when the stream completes (AGE-247).
     TurnMessages(Vec<rig_core::completion::Message>),
@@ -142,6 +145,7 @@ impl std::fmt::Debug for AppEvent {
                 .finish(),
             Self::ApiCallUsage(call) => f.debug_tuple("ApiCallUsage").field(call).finish(),
             Self::TokenUsage(usage) => f.debug_tuple("TokenUsage").field(usage).finish(),
+            Self::PluginUsage(usage) => f.debug_tuple("PluginUsage").field(usage).finish(),
             Self::TurnMessages(messages) => f
                 .debug_tuple("TurnMessages")
                 .field(&messages.len())
@@ -215,6 +219,7 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
             }
             SessionEvent::ApiCallUsage(call) => AppEvent::ApiCallUsage(call),
             SessionEvent::TokenUsage(usage) => AppEvent::TokenUsage(usage),
+            SessionEvent::PluginUsage(usage) => AppEvent::PluginUsage(usage),
             SessionEvent::TurnMessages(messages) => AppEvent::TurnMessages(messages),
             SessionEvent::Delegation(progress) => AppEvent::Delegation(progress),
             SessionEvent::Error(error) => AppEvent::StreamError(error),
