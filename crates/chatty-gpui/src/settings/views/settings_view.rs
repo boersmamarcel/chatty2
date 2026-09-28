@@ -1,10 +1,12 @@
 use crate::settings::controllers::SettingsView;
 use crate::settings::controllers::general_settings_controller;
 use crate::settings::models::GeneralSettingsModel;
+use crate::settings::views::agents_page::agents_page;
 use crate::settings::views::execution_settings_page::execution_settings_page;
 use crate::settings::views::extensions_page::extensions_page;
 use crate::settings::views::memory_settings_page::memory_settings_page;
 use crate::settings::views::models_page::{GlobalModelsListView, ModelsListView};
+use crate::settings::views::plugins_page::plugins_page;
 use crate::settings::views::search_settings_page::search_settings_page;
 use crate::settings::views::terminal_settings_page::terminal_settings_page;
 use crate::settings::views::training_settings_page::training_settings_page;
@@ -234,6 +236,8 @@ impl Render for SettingsView {
                                 div().w_full().min_h(px(520.)).child(view)
                             })]),
                     ]),
+                agents_page(),
+                plugins_page(),
                 extensions_page(),
                 search_settings_page(),
                 execution_settings_page(),

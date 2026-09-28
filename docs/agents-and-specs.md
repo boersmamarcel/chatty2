@@ -1,12 +1,11 @@
-# A2A and WASM module architecture
+# Agents and specs
 
 **When to read this:** You need to know how a conversation reaches an agent — a remote
-A2A service or a locally installed WASM module — and where the module runtime,
-registry and gateway fit.
+A2A service or a local agent spec the broker runs — how `list_agents`, `invoke_agent`
+and `/agent` find it, and where the broker and gateway fit.
 
-Authoring a module? Start with
-[Build a WASM plugin](../docs-site/src/dev/guides/build-wasm-module.md) (quick start
-and host-LLM sequence diagrams); the WIT types are in [wit-reference.md](wit-reference.md).
+WASM plugins are not agents: they are tools inside one, and have their own page,
+[plugins.md](plugins.md).
 
 ## Overview
 
@@ -14,25 +13,48 @@ Chatty supports two kinds of agents that can be invoked during a conversation:
 
 | Agent type | Where it runs | How it's called | Configured in |
 |:-----------|:--------------|:----------------|:--------------|
-| **Remote A2A** | External HTTP service | Direct HTTP to the remote URL | Settings → A2A Agents |
-| **Local agent** | A `chatty-tui` worker the broker spawns from an agent spec | Via the local Protocol Gateway / broker | Agent specs (`.chatty/agents/`) |
+| **Remote A2A** | External HTTP service | Direct HTTP to the remote URL | Settings → Extensions |
+| **Local agent** | A `chatty-tui` worker the broker spawns from an agent spec | Via the local Protocol Gateway / broker | Agent specs (`.chatty/agents/`), listed on Settings → Agents |
 
 Both are **unified behind the same tools** (`list_agents`, `invoke_agent`) and the
 same **A2A JSON-RPC protocol**, so the LLM does not need to know which kind it is
 talking to.
 
-A WASM module is **not** an agent (PL-D1 option B, PL-U3): it is a plugin, whose tools
-an agent spec loads into its own agent ("Plugins" below). Until PL-U5 removes it,
-`list_agents`/`invoke_agent` still carry a module-agent branch (a module whose
-`module.toml` sets `[capabilities] agent = true`), but no checked-in plugin sets it and
-the gateway has no module A2A route to answer it.
+There is **one kind of local agent** (PL-U5): a spec, run by chatty's harness, whether it
+came from the workspace, the data directory or the presets. A WASM module is **not** an
+agent (PL-D1 option B): it is a plugin, whose tools an agent spec loads into its own
+agent ([plugins.md](plugins.md)). No code path lists, routes or invokes a module as an
+agent, and `module.toml` refuses the keys that used to say it was one.
+
+### The local roster
+
+The broker serves the **roster**: the specs `module_settings.json`'s `virtual_agents`
+names (a `--team` names its own), or — when nothing is declared — `local-agent` and
+**every exposed spec** the workspace reaches, first definition of each name
+(`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). So the
+`benford-analyst` preset is an agent like any other: `list_agents` lists it,
+`invoke_agent` reaches it at `/a2a/benford-analyst`, and `/agent benford-analyst …` runs
+it. A spec file that does not load is left out of the roster with a warning;
+Settings → Agents and `/agents` show it with its error.
+
+### `/agent` and `/agents`
+
+`/agent <name> <prompt>` resolves `<name>` the same way in both frontends
+(`chatty_core::services::agent_command::resolve_agent_command`): an enabled remote A2A
+agent first (as in `invoke_agent`), then a spec on the local roster; otherwise the whole
+text is the prompt for the default sub-agent. A remote agent is called over A2A; a spec
+runs as a headless `chatty-tui --agent <name>` (with `--model` only when the spec names
+none), so it works with the module runtime off. chatty-tui's `/agents` lists the remote
+agents, the roster's specs with model, profile, plugins and grants, and every spec file
+the roster leaves out with the reason; the desktop shows the same on **Settings →
+Agents** (read-only: edit a spec in its TOML file, then Reload).
 
 ## Remote A2A agents
 
 ### Configuration
 
-Remote agents are configured in **Settings → A2A Agents** and persisted to
-`a2a_agents.json` via `A2aJsonRepository`.
+Remote agents are added under **Settings → Extensions** (listed again on Settings →
+Agents) and persisted to `a2a_agents.json` via `A2aJsonRepository`.
 
 **Data model** (`A2aAgentConfig` in `crates/chatty-core/src/settings/models/a2a_store.rs`):
 
@@ -100,187 +122,14 @@ Events are parsed into `A2aStreamEvent`:
 If the server answers with a `Content-Type` other than `text/event-stream`, the client
 **falls back** to treating the body as a non-streaming `message/send` response.
 
-## Local WASM plugins
-
-A WASM module is a **plugin**: it contributes tools to a chatty agent and
-never runs a loop of its own (PL-D1 option B). The agent is always an agent
-spec run by chatty's harness; a spec's `[[plugins]]` load the plugins it uses,
-one instance per agent, and the model sees their tools as `<plugin>__<tool>`
-("Plugins: a module's tools as the agent's own" below). A plugin is never
-listed or invoked as an agent itself.
-
-### Architecture stack
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    chatty-module-sdk                      │
-│  (Rust SDK for plugin authors, targets wasm32-wasip2)    │
-│  Provides: Plugin trait + export! (generated from WIT),  │
-│            llm::complete, config::get, log::info, etc.   │
-├──────────────────────────────────────────────────────────┤
-│                   chatty-wasm-runtime                     │
-│  (Wasmtime-based host: loads chatty:plugin@0.3.0 .wasm,  │
-│   implements imports, calls guest exports with           │
-│   fuel/memory/timeout limits)                            │
-├──────────────────────────────────────────────────────────┤
-│                  chatty-module-registry                   │
-│  (Discovers modules on disk, parses module.toml,         │
-│   manages load/unload/reload lifecycle)                  │
-├──────────────────────────────────────────────────────────┤
-│   chatty-core (plugin_tool)   │  chatty-protocol-gateway  │
-│   a spec's plugins as rig     │  the same tools to        │
-│   tools of its agent          │  external MCP clients     │
-└──────────────────────────────────────────────────────────┘
-```
-
-| Crate | Role |
-|:------|:-----|
-| `chatty-module-sdk` | Guest-side SDK for plugin authors: the WIT types, one module per host capability, and wit-bindgen's own `Plugin` trait and `export!` macro |
-| `chatty-wasm-runtime` | Wasmtime host: loads `chatty:plugin@0.3.0` components (and refuses every other world), implements the host imports (`llm`, `config`, `logging`, `file`, `billing`), enforces resource limits |
-| `chatty-module-registry` | Discovery (`scan_directory`), lifecycle (`load`/`unload`/`reload`), manifest parsing |
-| `chatty-core` | `tools::plugin_tool` (a spec's plugins as rig tools), `PluginLlmProvider` (a plugin's `llm::complete` on the agent's provider), the A2A client and agent tools |
-| `chatty-protocol-gateway` | HTTP server (axum) serving plugin tools over MCP, and local participants and virtual agents over A2A |
-
-### WIT contract
-
-The host–guest interface is
-[`wit/chatty-plugin.wit`](https://github.com/boersmamarcel/chatty2/blob/main/wit/chatty-plugin.wit)
-(package `chatty:plugin@0.3.0`); [wit-reference.md](wit-reference.md) has the full
-type reference. A component targeting any other world (the old agent-shaped
-`chatty:module@0.2.0` included) is refused at load with `module targets …; this
-chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK`.
-
-**Host imports**, one interface per capability (a plugin lists the ones it
-needs in `metadata().requested-capabilities`; PL-U4 will link only granted ones):
-
-| Interface | Function | Purpose |
-|:----------|:---------|:--------|
-| `llm` | `complete(model, messages, tools)` | A completion on the calling agent's model, through its provider client |
-| `config` | `get(key)` | Read the manifest's `[config]` table |
-| `logging` | `log(level, message)` | Structured logs to the host's `tracing` (always granted) |
-| `file` | `read-bytes(path)` | Read under the manifest's `[files] root`; a plugin without `[files]` reads nothing |
-| `billing` | `acquire-session(estimated_tokens)`, `report-usage(input, output)` | Paid plugins; reserves and settles credits against a Hive-signed session token |
-
-**Guest export** `plugin`:
-
-| Function | Purpose |
-|:---------|:--------|
-| `metadata() → plugin-metadata` | Name, version, description, requested capabilities, config keys |
-| `list-tools() → definitions` | The tools the plugin provides |
-| `invoke-tool(tool-call-request) → result<tool-result, tool-error>` | Run one tool call; a typed error (`unknown-tool`, `invalid-arguments`, `denied`, `failed`) reaches the model as `<kind>: <message>` |
-
-### Module directory layout
-
-```
-<module dir>/
-├── echo/
-│   ├── module.toml          # Manifest (required)
-│   ├── echo.wasm            # WASM component binary
-│   └── .chatty-install.json # Install record (only for modules installed from Hive)
-└── benford/
-    ├── module.toml
-    └── benford.wasm
-```
-
-The directory is configurable via module settings. Platform defaults:
-
-| Platform | Path |
-|:---------|:-----|
-| macOS | `~/Library/Application Support/chatty/modules/` |
-| Linux | `~/.local/share/chatty/modules/` (or `$XDG_DATA_HOME/chatty/modules/`) |
-| Windows | `%APPDATA%\chatty\modules\` |
-
-### Module manifest (`module.toml`)
-
-```toml
-[module]
-name = "echo"
-version = "0.2.0"
-description = "A simple echo plugin"
-wasm = "echo.wasm"              # Plain relative path inside this directory (no `..`, no absolute)
-# execution_mode = "local"      # "local" | "remote" | "remote_only"; remote modules run on the hive-runner (PL-H8 retires this)
-
-[capabilities]
-tools = ["echo", "reverse"]     # Tool names the plugin exposes
-
-[protocols]
-mcp = true                      # Serve the tools to external MCP clients at /mcp/{name}
-
-[resources]
-max_memory_mb = 64              # Memory cap (0 = use default: 256 MiB; may only lower)
-max_execution_ms = 30000        # Per-call timeout (0 = use default: 60 s; may only lower)
-
-[config]                        # Optional: string → string values the guest reads via config::get
-greeting = "hello"
-
-[files]                         # Optional: the only directory file::read-bytes may read
-root = "weights"                # Plain relative path inside this directory
-```
-
-Parsing is strict: an unknown key or table (including the 0.2.0 keys
-`[capabilities] chat` and `[protocols] openai_compat`), an `execution_mode` other than
-`local`/`remote`/`remote_only`, a non-string `[config]` value, or a `wasm`/`[files].root`
-path that is absolute or uses `..`, `\` or `:` is a manifest error. A `[resources]` value
-above a host ceiling is clamped to it, with a warning on the manifest
-(`ModuleManifest::warnings`). `[capabilities] agent` and `[protocols] a2a` still parse:
-the desktop's and chatty-tui's module-agent listing reads them until PL-U5 removes it,
-but no checked-in plugin sets them, and a plugin cannot be invoked as an agent (the
-gateway has no module A2A route).
-
-`ModuleRegistry::scan_directory` visits module directories in name order and returns a
-`ScanReport { loaded, remote, failed }`: every directory that did not load is in `failed`
-with its reason, and remote modules are listed apart from local loads. Two directories
-declaring the same `name`: the first by directory name wins, the second is a failure (so is
-`load` of a name already registered from another directory). The desktop's installed
-extensions list shows a module's failure reason under its row.
-
-**Install hardening (PL-H5a).** `chatty_core::install` checks a registry-supplied module
-name against the registry's rule (`^[a-z][a-z0-9-]{1,48}[a-z0-9]$`, no `--`) and the
-version as semver before anything touches the filesystem, installs into the configured
-`module_dir`, and caps the download at `hive_client::MAX_DOWNLOAD_BYTES` (64 MiB) while it
-streams. Each WASM install writes `.chatty-install.json` (`{sha256, trust_level,
-publisher_key_id}`) beside the module; the registry hashes the `.wasm` bytes it is about
-to compile against that record at every load and refuses a mismatch (`hash mismatch …`,
-shown as `Failed to load:`). A module without a record — copied in by hand — loads as
-`TrustLevel::Local` (`ModuleRegistry::trust_level`), and Settings → Extensions lists it
-under **Local modules**. Signature enforcement (refusing unsigned downloads) is PL-H5,
-AGE-608.
-
-### Resource limits
-
-Every plugin runs inside a sandboxed Wasmtime instance
-(`crates/chatty-wasm-runtime/src/limits.rs`). Every limit is **per call**: fuel is
-refilled and the deadline re-armed before each export call. The defaults are the host
-ceilings; a manifest's `[resources]` may only lower them — a larger value is clamped
-down to the ceiling.
-
-| Limit | Default = ceiling | Enforcement | Error |
-|:------|:------------------|:------------|:------|
-| **Fuel** | 10¹² units per call | Wasmtime fuel (≈1 unit per Wasm instruction) | `fuel exhausted` |
-| **Wall clock** | 60 s per call, host time included | Epoch interruption (10 ms ticks); host imports (`llm::complete`, `file::read-bytes`, billing) stop waiting at the deadline | `deadline exceeded` |
-| **Memory** | 256 MiB | Store memory limiter | `memory limit` |
-| **Output** | 1 MiB per call | Size of each export's return value | `output too large` |
-
-The fuel ceiling (AGE-708) is sized so a pure CPU-bound guest is bounded by the 60 s
-wall-clock ceiling, not by fuel: on this host, Wasmtime fuel runs at roughly
-1.5 × 10¹⁰ units/s for a tight arithmetic loop, so 10⁹ (PL-D3's original figure) was
-exhausted in well under a second — 10¹² keeps a pure spin running for over a minute of
-fuel, past the 60 s wall clock.
-
-`metadata` and `list-tools` get a 1 s wall-clock budget. A guest trap or panic
-fails the call with `guest trap: <message>` (the panic message is read from the guest's
-stderr) and never takes the host down; the trapped instance is dropped and the plugin
-re-instantiated on its next call, so guest statics start over. Callers can match the
-kind with `err.downcast_ref::<chatty_wasm_runtime::CallError>()`; the guest's own
-`tool-error` is a `ToolFailure` (`<kind>: <message>`).
-
 ## Protocol gateway
 
 The gateway (`chatty-protocol-gateway`) is a local HTTP server, bound to
 `127.0.0.1` (not `0.0.0.0`) on a port the embedding app chooses — the desktop
 defaults to `8420` (`module_settings.json`'s `gateway_port`; there is no UI
-field for it yet). It serves every loaded plugin's tools over MCP, and the
-broker's agents (local participants and virtual agents) over A2A:
+field for it yet). It serves every loaded plugin's tools over MCP
+([plugins.md](plugins.md#serving-a-plugin-over-mcp)), and the broker's agents (local
+participants and virtual agents) over A2A:
 
 | Method | Path | Protocol | Description |
 |:-------|:-----|:---------|:------------|
@@ -314,13 +163,13 @@ registered participant and virtual agent, each with its `origin`. A plugin is ne
 
 ### Local participants (ADR-0011)
 
-`{module}` in the A2A routes above also resolves a **local participant**: a
+`{agent}` in the A2A routes above also resolves a **local participant**: a
 worker process the broker spawned on a connection it made for it, which
 published an agent card and answers tasks over that connection. ADR-0011
 routes all fleet coordination — local and hosted — through this one broker
-rather than through a second fan-out path, so a child process and a WASM
-module are the same thing to an A2A caller. Participants are looked up
-**first**, so a live process would shadow a module of the same name.
+rather than through a second fan-out path, so a child process and a hosted
+worker are the same thing to an A2A caller. Participants are looked up
+**first**, so a live process shadows a virtual agent of the same name.
 
 **The connection is the identity** (ADR-0020, AGE-635). The broker admits a
 node, which names it `<spec>-<n>` (`local-coder-0`), creates a `socketpair`
@@ -336,8 +185,8 @@ The connection carries newline-delimited JSON frames, protocol **v2**: every
 frame carries `"v":2` (`hello`, `welcome`, `error`, `task`, `status`,
 `artifact`, `cancel`, `input`, and the call frames below), and a frame without
 it is answered with an `error` frame naming v2 and the connection is closed —
-there is no v1. The gateway maps the task frames onto the same A2A status and
-artifact updates a module produces.
+there is no v1. The gateway maps the task frames onto A2A status and artifact
+updates.
 
 **Workers call over the same connection (ADR-0020, BI-4, AGE-636).** A
 worker's `invoke_agent` and `list_agents` reach local roles and the broker's
@@ -415,8 +264,8 @@ with the connection's transport (`WorkerConnection::transport`,
 `AgentBuildContext::fabric_transport`), so its tools hold the connection from
 the first turn. The in-process chatty-tui root reaches its own broker the
 same way minus the socket: `LazyBroker::transport` hands `invoke_agent` and
-`list_agents` a `DirectTransport` into the broker. Remote agents and WASM
-modules stay on `A2aClient`. The gateway counts HTTP requests for roles and
+`list_agents` a `DirectTransport` into the broker. Remote agents stay on
+`A2aClient`. The gateway counts HTTP requests for roles and
 the directory (`RouteCounter`); in a swarm of workers both stay at zero
 (invariant 4, `no_worker_call_uses_loopback`). The connection is the liveness
 signal: closing it deregisters the participant and fails every task it still
@@ -454,8 +303,8 @@ One flat list of everything addressable, each entry saying whose machine it runs
 }
 ```
 
-Two sources feed it. **Settings** give the configured remotes and the installed
-modules. The **broker's aggregated card** gives whatever registered since — a worker
+Two sources feed it. **Settings** give the configured remotes and the roster's specs
+(names only, as a stand-in until the broker answers). The **broker's aggregated card** gives whatever registered since — a worker
 spawned a minute ago is addressable, and only the broker knows it exists. A name in both
 keeps the settings label, because what the user configured is the more informative
 answer. A gateway that is off or slow to answer is not an error: the list is then what
@@ -466,7 +315,7 @@ settings know. API key values are **never exposed** to the LLM — only
 
 | Origin | Means | Inside the fleet? |
 |:-------|:------|:------------------|
-| `local` | a process on this machine: a spawned worker, a WASM module | yes |
+| `local` | a process on this machine: a spawned worker running a spec | yes |
 | `fleet` | elsewhere in this user's fleet — a leased microVM registering over vsock | yes |
 | `remote_configured` | a URL from Settings → A2A Agents: a third party, chosen deliberately | no |
 | `discovered` | learned from another agent's card rather than configured | no |
@@ -486,9 +335,10 @@ so that one cannot be added without deciding what it means.
 { "agent": "local-agent", "prompt": "Hello, agent!" }
 ```
 
-Resolution order: remote A2A agents first (a remote agent shadows a local module with
-the same name), then **`local-agent`** — the broker's local worker (below) — then local
-module agents (the branch PL-U5 removes; since PL-U3 no gateway route answers it). Every path
+Resolution order: remote A2A agents first (a remote agent shadows a local spec with
+the same name), then the roster's specs — `local-agent` and the rest, the broker's local
+workers (below). Any other name is `NotFound`, listing what is available; a plugin's name
+is never an agent's. Every path
 streams through `A2aClient::send_message_stream()`; progress (`InvokeAgentProgress`) is
 forwarded to the UI so the user sees intermediate output while the tool call is in
 flight.
@@ -734,28 +584,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
 | `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |
-| `plugins` | Optional. WASM modules whose tools this agent runs in-process — see below. |
-
-**Plugins: a module's tools as the agent's own (PL-U2, AGE-616).** Each `[[plugins]]`
-entry is loaded when the agent is built: the module directory (`module_settings.module_dir`)
-is searched for a `module.toml` whose `[module].name` is `module`, its version is checked
-against `version`, and one instance is made for this agent, with the module's `[config]`
-(the spec's `config` on top) and `[files].root`, and its `[resources]` lowered by the
-spec's `limits`. Every tool its `list-tools` names is registered next to the native tools
-as `<module>__<tool>` — `echo__reverse` — because OpenAI-wire providers (OpenRouter,
-Azure) refuse any tool name outside `^[a-zA-Z0-9_-]{1,64}$`, so the dotted form is only
-what the transcript shows ("Ran echo.reverse"). A call goes straight into the
-instance under PL-H1's per-call limits — about 40 µs, against about 1 ms through the
-gateway's `/mcp/{module}` — and a trap, deadline or guest error comes back to the model as
-the tool's error, with its reason, and the turn goes on. The spec is the plugin's
-allow-list: a tool profile does not remove it. A call asks for approval only when the
-spec grants the plugin a side-effecting capability (`http`, `file-write`). Under
-`--tool-loading dynamic` each plugin is one `load_tools` group named after it. What a
-plugin spends through `llm::complete` runs on the calling agent's model and is recorded
-as its own usage line on the turn, naming the plugin and the model that served it. A
-plugin that does not load fails the agent's build. The desktop runs spec agents as
-`chatty-tui` workers, which load their plugins the same way; it no longer adds its modules
-to the MCP server list — `/mcp/{module}` is for MCP clients outside chatty.
+| `plugins` | Optional. WASM modules whose tools this agent runs in-process — see [plugins.md](plugins.md#a-plugins-tools-as-the-agents-own). |
 
 **Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `tools.disable` removes
 whole tool *groups*, which is the wrong grain for a role — a reviewer wants `git_diff`
@@ -788,7 +617,8 @@ one-line branch on the coder's word. It lands in the worker's system prompt ahea
 tool summary, and its first sentence goes on the agent's card so the leader can pick by
 reading.
 
-An empty or absent list is the single `local-agent` of before. A role is a spec and
+An empty or absent list is every exposed spec, `local-agent` first ("The local roster"
+above). A role is a spec and
 nothing else: `invoke_agent` takes no `model` or `role` parameter, so the
 leader's tool schema and prompt prefix are identical whatever the team, and each
 agent's card — what `list_agents` shows — says which model it runs, which tool profile or
@@ -800,8 +630,8 @@ server share that server's budget. Both frontends build their runners from
 `chatty_core::services::virtual_agents::resolve_virtual_agents`; a `--broker` leader
 started with `--ollama`, `--openai-compat-url` or `--api-key` forwards those flags to
 every child (a Harbor sandbox has no `providers.json` for a child to read), and a
-settings-configured desktop leader forwards nothing. There is no settings page for this
-yet; the JSON is the interface.
+settings-configured desktop leader forwards nothing. Settings → Agents shows the roster
+and every spec file; `virtual_agents` in the JSON is how to narrow it.
 
 **The evidence envelope (ADR-0011 C12, AGE-406).** A worker's report is the worker's
 account of what it did; the *runner* can say what it actually left behind, and it does.

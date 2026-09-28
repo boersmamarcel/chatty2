@@ -199,7 +199,7 @@ flowchart LR
 ```
 
 See [build-wasm-module guide](../docs-site/src/dev/guides/build-wasm-module.md)
-(sequence diagrams) and [a2a-and-wasm-modules.md](a2a-and-wasm-modules.md).
+(sequence diagrams) and [agents-and-specs.md](agents-and-specs.md) and [plugins.md](plugins.md).
 
 ## Research touchpoints
 

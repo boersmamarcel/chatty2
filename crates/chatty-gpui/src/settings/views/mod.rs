@@ -1,7 +1,9 @@
+pub mod agents_page;
 pub mod execution_settings_page;
 pub mod extensions_page;
 pub mod memory_settings_page;
 pub mod models_page;
+pub mod plugins_page;
 pub mod providers_view;
 pub mod search_settings_page;
 pub mod settings_view;

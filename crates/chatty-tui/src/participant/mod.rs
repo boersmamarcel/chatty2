@@ -30,6 +30,8 @@ mod equivalence;
 #[cfg(test)]
 mod input_required_chain;
 #[cfg(test)]
+mod one_kind_of_agent;
+#[cfg(test)]
 pub(crate) mod stand_in;
 #[cfg(test)]
 pub(crate) mod swarm_kit;
