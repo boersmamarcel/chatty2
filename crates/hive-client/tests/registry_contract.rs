@@ -123,22 +123,20 @@ async fn register_login_refresh_and_logout() {
 
 // ── Browse ────────────────────────────────────────────────────────────────
 
-/// `GET /api/search` answers a `ModuleList`. No live recording exists: the
-/// registry's search 500s on every query (found by the PL-E6 nightly,
-/// proposed for PL-H7, AGE-610), so this replays the list recording, which
-/// is the same type. Replace it with a real recording once search works.
+/// `GET /api/search` answers a `ModuleList` (PL-H7, AGE-610, fixed the 500
+/// every query used to get).
 #[tokio::test]
 async fn search() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/search"))
-        .and(query_param("q", "echo-agent"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(recorded("modules")))
+        .and(query_param("q", "echo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(recorded("search")))
         .expect(1)
         .mount(&server)
         .await;
-    let list = anonymous(&server).search("echo-agent").await.unwrap();
-    assert!(list.items.iter().any(|m| m.name == "echo-agent"));
+    let list = anonymous(&server).search("echo").await.unwrap();
+    assert!(list.items.iter().any(|m| m.name == "echo"));
 }
 
 #[tokio::test]
@@ -150,45 +148,37 @@ async fn list_modules() {
         .await
         .unwrap();
     assert_eq!(list.items.len() as i64, list.total.min(list.per_page));
-    assert!(list.items.iter().any(|m| m.name == "echo-agent"));
+    assert!(list.items.iter().any(|m| m.name == "echo"));
 }
 
 #[tokio::test]
 async fn get_module() {
     let server = MockServer::start().await;
-    serve(&server, "GET", "/api/modules/echo-agent", "module").await;
-    let module = anonymous(&server).get_module("echo-agent").await.unwrap();
-    assert_eq!(module.name, "echo-agent");
+    serve(&server, "GET", "/api/modules/echo", "module").await;
+    let module = anonymous(&server).get_module("echo").await.unwrap();
+    assert_eq!(module.name, "echo");
     assert_eq!(module.latest_version.as_deref(), Some("0.1.0"));
     assert_eq!(module.execution_mode, "local");
+    // The single-module endpoint embeds the latest version's stored
+    // manifest (API spec §6.3); the list/search endpoints do not.
+    assert!(module.manifest.is_some());
 }
 
 #[tokio::test]
 async fn list_versions() {
     let server = MockServer::start().await;
-    serve(
-        &server,
-        "GET",
-        "/api/modules/echo-agent/versions",
-        "versions",
-    )
-    .await;
-    let versions = anonymous(&server)
-        .list_versions("echo-agent")
-        .await
-        .unwrap();
+    serve(&server, "GET", "/api/modules/echo/versions", "versions").await;
+    let versions = anonymous(&server).list_versions("echo").await.unwrap();
     let v = &versions.items[0];
     assert_eq!(
         (v.module_name.as_str(), v.version.as_str()),
-        ("echo-agent", "0.1.0")
+        ("echo", "0.1.0")
     );
     assert!(v.signature.is_some() && v.publisher_public_key.is_some());
 }
 
 #[tokio::test]
-#[ignore = "known defect: PL-H7 (AGE-610)"]
 async fn list_categories() {
-    // The registry sends `slug`; hive-client's `Category` wants `name`.
     let server = MockServer::start().await;
     serve(&server, "GET", "/api/categories", "categories").await;
     let categories = anonymous(&server).list_categories().await.unwrap();
@@ -218,7 +208,7 @@ async fn download() {
         base64::engine::general_purpose::STANDARD.encode(key.sign(hash.as_bytes()).to_bytes());
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/modules/echo-agent/0.1.0"))
+        .and(path("/api/modules/echo/0.1.0"))
         .and(header("authorization", format!("Bearer {TOKEN}")))
         .respond_with(
             ResponseTemplate::new(200)
@@ -234,22 +224,13 @@ async fn download() {
         .expect(1)
         .mount(&server)
         .await;
-    serve_authed(
-        &server,
-        "GET",
-        "/api/modules/echo-agent/versions",
-        "versions",
-    )
-    .await;
+    serve_authed(&server, "GET", "/api/modules/echo/versions", "versions").await;
 
-    let download = signed_in(&server)
-        .download("echo-agent", "0.1.0")
-        .await
-        .unwrap();
+    let download = signed_in(&server).download("echo", "0.1.0").await.unwrap();
     assert_eq!(download.wasm, wasm);
     assert_eq!(download.wasm_hash, hash);
     assert_eq!(download.trust_level, TrustLevel::Signed);
-    assert_eq!(download.manifest["name"], "echo-agent");
+    assert_eq!(download.manifest["name"], "echo");
 }
 
 // ── Credits, usage, billing sessions ──────────────────────────────────────
@@ -287,7 +268,7 @@ async fn report_usage() {
         .and(path("/api/usage/report"))
         .and(header("authorization", format!("Bearer {TOKEN}")))
         .and(body_partial_json(
-            json!({ "events": [{ "idempotency_key": "k1", "module_name": "echo-agent" }] }),
+            json!({ "events": [{ "idempotency_key": "k1", "module_name": "echo" }] }),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(recorded("usage_report")))
         .expect(1)
@@ -295,7 +276,7 @@ async fn report_usage() {
         .await;
     let event = UsageEvent {
         idempotency_key: "k1".to_string(),
-        module_name: "echo-agent".to_string(),
+        module_name: "echo".to_string(),
         module_version: "0.1.0".to_string(),
         event_type: "invocation".to_string(),
         input_tokens: Some(3),
