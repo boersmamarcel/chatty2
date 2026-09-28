@@ -34,16 +34,15 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chatty_fabric::{HandoffContract, SpawnContext};
+use chatty_fabric::{EndpointBudget, HandoffContract, RunPermit, SpawnContext};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
-use super::budget::{EndpointBudget, EndpointPermit};
 use super::listener::{LocalConnection, open_connection};
-use super::protocol::{CALLER_ENV, DelegatedTask, ParticipantCard, ParticipantSkill};
+use super::protocol::{DelegatedTask, ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
 use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
 
@@ -317,9 +316,7 @@ impl LocalRunner {
         // had already claimed those would be holding a worktree open for as
         // long as it waits.
         let permit = match self.endpoint.as_ref() {
-            Some((endpoint, budget)) => {
-                Some(admit(budget, endpoint, task.caller.as_deref()).await?)
-            }
+            Some((endpoint, budget)) => Some(RunPermit::acquire(budget, endpoint).await),
             None => None,
         };
 
@@ -330,12 +327,12 @@ impl LocalRunner {
         let LocalConnection { name, worker_end } =
             open_connection(&self.registry, &self.agent_name)
                 .context("failed to make a connection for a worker")?;
-        // The permit is tagged with the node's name, which is how a task
-        // this worker delegates back here is known to come from a holder of
-        // this slot (AGE-628): a call over its connection is made as that
-        // name, and an HTTP call carries it as the caller token.
-        let permit = permit.map(|permit| permit.held_by(&name));
-        let caller_token = name.clone();
+        // The node's calls release its permit while they are outstanding
+        // and re-acquire it before the last result is delivered (BI-6), so
+        // the broker's call path finds it by the node's name.
+        if let Some(permit) = permit.as_ref() {
+            self.registry.set_node_permit(&name, permit);
+        }
 
         // Where it goes comes from the task's spawn context: the caller's
         // own tree and branch (BI-5). A task without one is the root's.
@@ -379,7 +376,7 @@ impl LocalRunner {
             );
         }
 
-        let mut child = self.spawn(&name, &caller_token, &worker_end, workspace.as_ref())?;
+        let mut child = self.spawn(&name, &worker_end, workspace.as_ref())?;
         // The child holds its copy. The broker must not keep one: a dead
         // child has to read as a closed connection.
         drop(worker_end);
@@ -414,7 +411,6 @@ impl LocalRunner {
     fn spawn(
         &self,
         name: &str,
-        caller_token: &str,
         worker_end: &std::os::unix::net::UnixStream,
         workspace: Option<&WorkerWorkspace>,
     ) -> Result<Child> {
@@ -427,7 +423,6 @@ impl LocalRunner {
         }
         let mut cmd = Command::new(&self.executable);
         cmd.args(&self.args)
-            .env(CALLER_ENV, caller_token)
             .arg("--participant-fd")
             .arg(PARTICIPANT_FD.to_string())
             .stdin(std::process::Stdio::null())
@@ -520,34 +515,6 @@ fn place_participant_fd(fd: RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A slot on `endpoint` for a task `caller` asked for.
-///
-/// A caller that holds a slot on this endpoint itself — a worker delegating
-/// back through the broker that spawned it — must not queue: it is waiting
-/// on this task, so with every slot taken (the default budget is one, and it
-/// holds it) the wait would never end (AGE-628). It gets a free slot or a
-/// clear error now. Every other caller queues as usual.
-async fn admit(
-    budget: &EndpointBudget,
-    endpoint: &str,
-    caller: Option<&str>,
-) -> Result<EndpointPermit> {
-    match caller {
-        Some(caller) if budget.is_held_by(endpoint, caller) => {
-            budget.try_acquire(endpoint).ok_or_else(|| {
-                anyhow!(
-                    "no free slot on model endpoint {endpoint} (budget {limit}), and the \
-                     delegating worker holds one of them itself, so waiting would never end. \
-                     Do the work directly, delegate to an agent on another endpoint, or \
-                     raise this endpoint's budget in the module settings.",
-                    limit = budget.limit(endpoint),
-                )
-            })
-        }
-        _ => Ok(budget.acquire(endpoint).await),
-    }
-}
-
 /// The broker's view of the runner: a card, and a worker per task.
 ///
 /// The inherent methods stay because they return the concrete [`Worker`],
@@ -603,10 +570,11 @@ pub struct Worker {
     /// The tail of the child's stderr, kept for error messages.
     stderr_tail: Arc<Mutex<String>>,
     stderr_drain: Option<JoinHandle<()>>,
-    /// This worker's slot on the model endpoint, held until it is reaped
-    /// (ADR-0011 C6). Dropped with the worker, so the next queued task is
-    /// admitted by the same event that frees the process and its workspace.
-    _permit: Option<EndpointPermit>,
+    /// This worker's run's slot on the model endpoint (ADR-0011 C6),
+    /// released while the run waits on its own calls (BI-6) and for good
+    /// once it is reaped, so the next queued run is admitted by the same
+    /// event that frees the process and its workspace.
+    _permit: Option<RunPermit>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -1103,115 +1071,43 @@ mod tests {
         assert_eq!(budget.in_flight(ENDPOINT), 1);
     }
 
-    /// A runner whose child writes the caller token it was handed to `out`
-    /// and then stays up, like a worker mid-task.
-    fn token_writing_runner(registry: ParticipantRegistry, out: &std::path::Path) -> LocalRunner {
-        runner(
-            registry,
-            &format!(
-                "printf %s \"${CALLER_ENV}\" > '{}'; {}",
-                out.display(),
-                waiting_worker()
-            ),
-        )
-    }
+    /// BI-6: a metered worker's permit is its node's, where the broker's
+    /// call path releases it while the worker's calls are outstanding. It
+    /// is gone with the node.
+    #[tokio::test]
+    async fn a_metered_worker_s_permit_is_on_its_node() {
+        const ENDPOINT: &str = "http://localhost:11434";
 
-    async fn token_written_to(path: &std::path::Path) -> String {
+        let registry = ParticipantRegistry::new();
+        let budget = EndpointBudget::new(1);
+        let runner = runner(registry.clone(), &waiting_worker())
+            .with_endpoint_budget(ENDPOINT, budget.clone());
+
+        let (worker, _updates) = runner.run_task(DelegatedTask::new("a")).await.unwrap();
+        let permit = registry
+            .node_permit(worker.name())
+            .expect("the node's permit is recorded");
+        assert_eq!(permit.endpoint(), ENDPOINT);
+        assert_eq!(permit.state(), chatty_fabric::RunPermitState::Holding);
+
+        let call = permit.child_call();
+        assert_eq!(budget.in_flight(ENDPOINT), 0, "a waiting run holds no slot");
+        call.finish().await;
+        assert_eq!(budget.in_flight(ENDPOINT), 1);
+        drop(permit);
+
+        let name = worker.name().to_string();
+        drop(worker);
         for _ in 0..500 {
-            if let Ok(token) = std::fs::read_to_string(path)
-                && !token.is_empty()
-            {
-                return token;
+            if registry.node_permit(&name).is_none() {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the worker never wrote its caller token");
-    }
-
-    /// AGE-628: the desktop's default budget is one slot per endpoint, and
-    /// the worker holding it delegates back through the same broker. The
-    /// nested task must fail fast, not wait forever on its own caller.
-    #[tokio::test]
-    async fn a_worker_delegating_on_its_own_full_endpoint_fails_fast() {
-        const ENDPOINT: &str = "http://localhost:11434";
-
-        let dir = tempfile::tempdir().unwrap();
-        let token_file = dir.path().join("token");
-        let registry = ParticipantRegistry::new();
-        let budget = EndpointBudget::new(1);
-        let runner = token_writing_runner(registry.clone(), &token_file)
-            .with_endpoint_budget(ENDPOINT, budget.clone());
-
-        let parent = runner.run_task(DelegatedTask::new("a")).await.unwrap();
-        let token = token_written_to(&token_file).await;
-        assert!(budget.is_held_by(ENDPOINT, &token));
-
-        let nested = tokio::time::timeout(
-            Duration::from_secs(5),
-            runner.run_task(DelegatedTask::new("b").with_caller(Some(token.clone()))),
-        )
-        .await
-        .expect("the nested task does not hang");
-        let err = nested.expect_err("no slot is free for it").to_string();
-        assert!(err.contains(ENDPOINT), "{err}");
-        assert_eq!(budget.queue_depth(ENDPOINT), 0, "and it never queued");
-
-        drop(parent);
         assert!(
-            !budget.is_held_by(ENDPOINT, &token),
-            "reaping clears the holder"
+            registry.node_permit(&name).is_none(),
+            "forgotten with the node"
         );
-    }
-
-    /// With a slot to spare, the same nested task runs.
-    #[tokio::test]
-    async fn a_worker_delegating_on_its_own_endpoint_runs_when_a_slot_is_free() {
-        const ENDPOINT: &str = "http://localhost:11434";
-
-        let dir = tempfile::tempdir().unwrap();
-        let token_file = dir.path().join("token");
-        let registry = ParticipantRegistry::new();
-        let budget = EndpointBudget::new(2);
-        let runner = token_writing_runner(registry.clone(), &token_file)
-            .with_endpoint_budget(ENDPOINT, budget.clone());
-
-        let _parent = runner.run_task(DelegatedTask::new("a")).await.unwrap();
-        let token = token_written_to(&token_file).await;
-        let _nested = tokio::time::timeout(
-            Duration::from_secs(5),
-            runner.run_task(DelegatedTask::new("b").with_caller(Some(token))),
-        )
-        .await
-        .expect("a free slot admits at once")
-        .expect("the nested task runs");
-        assert_eq!(budget.in_flight(ENDPOINT), 2);
-    }
-
-    /// A caller that holds no slot here — the root, or a stale token — still
-    /// queues as before rather than failing.
-    #[tokio::test]
-    async fn a_caller_holding_no_slot_still_queues() {
-        const ENDPOINT: &str = "http://localhost:11434";
-
-        let registry = ParticipantRegistry::new();
-        let budget = EndpointBudget::new(1);
-        let runner = Arc::new(
-            runner(registry.clone(), &waiting_worker())
-                .with_endpoint_budget(ENDPOINT, budget.clone()),
-        );
-        let _first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
-
-        let second = tokio::spawn({
-            let runner = Arc::clone(&runner);
-            async move {
-                runner
-                    .run_task(DelegatedTask::new("b").with_caller(Some("someone-else".into())))
-                    .await
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!second.is_finished(), "it waits for the slot");
-        assert_eq!(runner.queue_depth(), 1);
-        second.abort();
+        assert_eq!(budget.in_flight(ENDPOINT), 0, "and its slot is free");
     }
 }

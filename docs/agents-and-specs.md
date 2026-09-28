@@ -208,7 +208,7 @@ broker → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response
 ```
 
 The call says nothing about its caller: the broker runs it as the node the
-connection names (the permit's AGE-628 check, the edge log's `from`), and
+connection names (whose endpoint permit it releases, the edge log's `from`), and
 writes one edge-log row per `invoke_agent` call when it ends and one `message`
 row per `send_message` call (`<data_dir>/chatty/fabric/edges-<pid>.jsonl`;
 `list_agents` is a directory read, not an edge, and writes none). Several calls can be in flight in one
@@ -463,8 +463,20 @@ server, so the broker holds a semaphore per *endpoint* — the server's base URL
 model and not a worker — and a task waits for a slot before a child is spawned. On a
 local Ollama, three concurrent workers on one loaded model is not three times the
 throughput; it is the fourth request evicting the weights the first three are using.
-The slot is held from just before the spawn until the worker is reaped, so the same
-event that frees the process and its worktree admits the next queued task.
+Waiters are served first come, first served.
+
+**A permit covers a run's model calls, not a worker's whole life (ADR-0020 §3.5,
+BI-6).** A run takes its slot just before its worker is spawned and holds it while it
+talks to its model. When it calls another agent (`invoke_agent` over its connection),
+the broker releases its slot until the call is answered; the result that brings the
+run's outstanding calls back to zero waits in the endpoint's queue for a slot before it
+is delivered, since that result is what starts the run's next model call. So a
+sub-leader and its child on the same budget-1 endpoint both complete: the sub-leader is
+not holding the slot its child needs. If the run's caller gives up while that result
+waits (a cancel, a deadline), the wait is dropped and the run makes no model call. The
+slot is released for good when the worker is reaped. The state machine is
+`chatty_fabric::RunPermit` (`Holding → Released{outstanding} → Reacquiring → Holding`)
+on `chatty_fabric::EndpointBudget`.
 
 The size, in order: an explicit override in `endpoint_budgets` in `module_settings.json`
 (keyed by base URL, e.g. `http://localhost:11434`; no UI yet), then what the provider

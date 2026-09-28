@@ -2004,3 +2004,314 @@ async fn one_broker_per_root() {
         "only the root binds a participant socket"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Endpoint permits per run (BI-6, AGE-638; ADR-0020 invariants 7–9)
+// ---------------------------------------------------------------------------
+
+/// Invariant 8: at budget 1, a sub-leader and its child on the same
+/// endpoint both complete. The sub-leader's run holds the endpoint's one
+/// permit while it talks to its model, lets go of it while its call to the
+/// child is outstanding, and gets it back before the child's answer reaches
+/// it.
+#[tokio::test]
+async fn nested_delegation_at_budget_one_completes() {
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Sse),
+        ],
+        Script::new()
+            .route(
+                LEAD_MODEL,
+                [
+                    Reply::tool_call(
+                        "invoke_agent",
+                        serde_json::json!({ "agent": GRANDCHILD, "prompt": "read the readme" }),
+                    ),
+                    Reply::text("The grandchild read it."),
+                ],
+            )
+            .route(GRANDCHILD_MODEL, reading_grandchild()),
+        Script::new(),
+    )
+    .await;
+    assert_eq!(
+        ModuleSettingsModel::default().default_endpoint_budget,
+        1,
+        "the case under test is the default budget of one"
+    );
+
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
+
+    let out = run.output.as_ref().expect("the leader's call succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response, "The grandchild read it.");
+    // What the sub-leader's model was told the child said: the child's
+    // answer, not a refusal to start it.
+    let lead = kit.sse.requests_for(LEAD_MODEL);
+    assert_eq!(lead.len(), 2);
+    let told = String::from_utf8_lossy(&lead[1].body);
+    assert!(
+        told.contains("It says Chatty."),
+        "the sub-leader's call to its child on its own endpoint did not complete; \
+         its model was told: {told}"
+    );
+    // Both ran, and never at once.
+    assert_eq!(kit.sse.requests_for(GRANDCHILD_MODEL).len(), 2);
+    assert_eq!(kit.sse.max_concurrency(), 1);
+}
+
+/// A leaf: waits `ms` on its model, then answers `text`.
+fn slow_leaf(ms: u64, text: &str) -> Vec<Reply> {
+    vec![Reply::Delay(ms), Reply::text(text)]
+}
+
+/// One `invoke_agent` call to `agent`, then `answer`.
+fn delegate(agent: &str, answer: &str) -> Vec<Reply> {
+    vec![
+        Reply::tool_call(
+            "invoke_agent",
+            serde_json::json!({ "agent": agent, "prompt": "do your part" }),
+        ),
+        Reply::text(answer),
+    ]
+}
+
+/// Invariant 7: across a 3-level, 6-worker run on two budget-1 endpoints,
+/// no endpoint ever serves more model requests at once than its limit.
+///
+/// The root starts two chains at once, each crossing both endpoints:
+/// `kit-p` (SSE) → `kit-q` (NDJSON) → `kit-s` (SSE), and `kit-r` (NDJSON) →
+/// `kit-t` (SSE) → `kit-u` (NDJSON). Every sub-leader releases its slot while
+/// its child works, so the four slots change hands down both chains. `kit-s`
+/// answers well before `kit-u`, whose slow request holds the NDJSON slot:
+/// `kit-q` must wait for it before its next model call rather than talk to
+/// its model beside `kit-u`.
+#[tokio::test]
+async fn permits_never_oversubscribe() {
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new("kit-p", "kit/p", Endpoint::Sse).sub_leader(),
+            AgentDef::new("kit-q", "kit/q", Endpoint::Ndjson).sub_leader(),
+            AgentDef::new("kit-r", "kit/r", Endpoint::Ndjson).sub_leader(),
+            AgentDef::new("kit-s", "kit/s", Endpoint::Sse),
+            AgentDef::new("kit-t", "kit/t", Endpoint::Sse).sub_leader(),
+            AgentDef::new("kit-u", "kit/u", Endpoint::Ndjson),
+        ],
+        Script::new()
+            .route("kit/p", delegate("kit-q", "P done."))
+            .route("kit/t", delegate("kit-u", "T done."))
+            .route("kit/s", slow_leaf(300, "S done.")),
+        Script::new()
+            .route("kit/q", delegate("kit-s", "Q done."))
+            .route("kit/r", delegate("kit-t", "R done."))
+            .route("kit/u", slow_leaf(2500, "U done.")),
+    )
+    .await;
+
+    let (left, right) = tokio::join!(
+        kit.run_leader_to("kit-p", "run your chain"),
+        kit.run_leader_to("kit-r", "run your chain"),
+    );
+
+    for (run, answer) in [(&left, "P done."), (&right, "R done.")] {
+        let out = run.output.as_ref().expect("the leader's call succeeded");
+        assert!(out.success, "{out:?}");
+        assert_eq!(out.response, answer);
+    }
+    // Every worker ran to its answer: two requests for each sub-leader, one
+    // for each leaf.
+    for (daemon, model, requests) in [
+        (&kit.sse, "kit/p", 2),
+        (&kit.ndjson, "kit/q", 2),
+        (&kit.ndjson, "kit/r", 2),
+        (&kit.sse, "kit/s", 1),
+        (&kit.sse, "kit/t", 2),
+        (&kit.ndjson, "kit/u", 1),
+    ] {
+        assert_eq!(daemon.requests_for(model).len(), requests, "{model}");
+    }
+    assert_eq!(
+        kit.sse.max_concurrency(),
+        1,
+        "the SSE endpoint's limit is 1"
+    );
+    assert_eq!(
+        kit.ndjson.max_concurrency(),
+        1,
+        "the NDJSON endpoint's limit is 1"
+    );
+}
+
+/// Three runs waiting on one busy endpoint are served in the order they
+/// arrived: the endpoint's queue is FIFO.
+#[tokio::test]
+async fn permit_queue_is_fifo() {
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new("kit-w", "kit/w", Endpoint::Sse),
+            AgentDef::new("kit-x", "kit/x", Endpoint::Sse),
+            AgentDef::new("kit-y", "kit/y", Endpoint::Sse),
+            AgentDef::new("kit-z", "kit/z", Endpoint::Sse),
+        ],
+        Script::new()
+            // Holds the one slot long enough for the other three to queue.
+            .route("kit/w", slow_leaf(1500, "W done."))
+            .route("kit/x", [Reply::text("X done.")])
+            .route("kit/y", [Reply::text("Y done.")])
+            .route("kit/z", [Reply::text("Z done.")]),
+        Script::new(),
+    )
+    .await;
+
+    let after = |ms: u64, agent: &'static str| {
+        let kit = &kit;
+        async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            kit.run_leader_to(agent, "go").await
+        }
+    };
+    // W takes the slot at once; X, Y and Z queue behind it, in that order
+    // (an in-process call reaches the queue within the stagger).
+    let (w, x, y, z) = tokio::join!(
+        after(0, "kit-w"),
+        after(300, "kit-x"),
+        after(600, "kit-y"),
+        after(900, "kit-z"),
+    );
+    for run in [&w, &x, &y, &z] {
+        assert!(
+            run.output.as_ref().is_ok_and(|o| o.success),
+            "{:?}",
+            run.output
+        );
+    }
+
+    let first = |model: &str| {
+        let requests = kit.sse.requests_for(model);
+        assert_eq!(requests.len(), 1, "{model}");
+        requests[0].arrived
+    };
+    let (w, x, y, z) = (
+        first("kit/w"),
+        first("kit/x"),
+        first("kit/y"),
+        first("kit/z"),
+    );
+    assert!(
+        w < x && x < y && y < z,
+        "served in arrival order: w {w:?}, x {x:?}, y {y:?}, z {z:?}"
+    );
+    assert_eq!(kit.sse.max_concurrency(), 1);
+}
+
+/// Poll `done` until it holds; fail naming `what` at the deadline.
+async fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + DEADLINE;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} never happened"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Invariant 9: a run whose caller gives up while the run waits for its
+/// permit makes no model request.
+///
+/// `kit-m` (SSE) delegates to `kit-g` (NDJSON), which releases `kit-m`'s
+/// slot. `kit-b` takes it and holds it on a slow model request. `kit-g`
+/// answers, so `kit-m` must re-acquire before its result is delivered, and
+/// waits behind `kit-b`. The leader gives up on `kit-m` then. Once `kit-b`
+/// is done the slot is free, and `kit-m` still never asks its model again.
+#[tokio::test]
+async fn cancelled_permit_wait_makes_no_model_call() {
+    use chatty_fabric::RunPermitState;
+
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new("kit-m", "kit/m", Endpoint::Sse).sub_leader(),
+            AgentDef::new("kit-g", "kit/g", Endpoint::Ndjson),
+            AgentDef::new("kit-b", "kit/b", Endpoint::Sse),
+        ],
+        Script::new()
+            .route(
+                "kit/m",
+                [
+                    Reply::tool_call(
+                        "invoke_agent",
+                        serde_json::json!({ "agent": "kit-g", "prompt": "take your time" }),
+                    ),
+                    Reply::text("M done."),
+                ],
+            )
+            .route("kit/b", slow_leaf(3000, "B done.")),
+        Script::new().route("kit/g", slow_leaf(1000, "G done.")),
+    )
+    .await;
+
+    let call = |agent: &'static str| {
+        let tool = kit.leader_tool();
+        tokio::spawn(async move {
+            tool.call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: agent.to_string(),
+                    prompt: "go".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+        })
+    };
+    let registry = kit.participants();
+    let m_state = || registry.node_permit("kit-m-0").map(|p| p.state());
+
+    // kit-m asks for kit-g: its slot is released while kit-g works.
+    let m = call("kit-m");
+    wait_until("kit-g's model request", || {
+        !kit.ndjson.requests_for("kit/g").is_empty()
+    })
+    .await;
+    assert_eq!(m_state(), Some(RunPermitState::Released { outstanding: 1 }));
+
+    // kit-b takes the free slot and holds it.
+    let b = call("kit-b");
+    wait_until("kit-b's model request", || {
+        !kit.sse.requests_for("kit/b").is_empty()
+    })
+    .await;
+
+    // kit-g answers; kit-m's result waits for the slot kit-b holds.
+    wait_until("kit-m waiting for its slot", || {
+        m_state() == Some(RunPermitState::Reacquiring { outstanding: 0 })
+    })
+    .await;
+    assert_eq!(kit.sse.requests_for("kit/m").len(), 1);
+
+    // The leader gives up on kit-m.
+    m.abort();
+    wait_until("kit-m's node to go", || {
+        registry.node_permit("kit-m-0").is_none()
+    })
+    .await;
+
+    // kit-b finishes and frees the slot; nobody is left to take it for kit-m.
+    let b = tokio::time::timeout(DEADLINE, b)
+        .await
+        .expect("kit-b finishes")
+        .expect("kit-b's call ran")
+        .expect("kit-b's call succeeded");
+    assert!(b.success, "{b:?}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        kit.sse.requests_for("kit/m").len(),
+        1,
+        "kit-m made a model request after its caller gave up"
+    );
+    assert!(subtree(&kit).is_empty(), "every worker is gone");
+}

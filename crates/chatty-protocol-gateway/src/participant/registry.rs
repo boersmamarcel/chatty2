@@ -38,7 +38,7 @@ use super::protocol::{
 };
 use chatty_fabric::{
     AgentOrigin, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState,
-    SpawnContext,
+    RunPermit, SpawnContext, WeakRunPermit,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -150,6 +150,11 @@ struct Inner {
     /// its own tree and branch, and the roster it was given. Kept while
     /// the node's connection is open.
     contexts: HashMap<String, SpawnContext>,
+    /// Each metered node's endpoint permit (BI-6): released while the
+    /// node's calls are outstanding, re-acquired before the last result is
+    /// delivered. Weak: the node's worker owns it, so reaping the worker
+    /// frees the slot at once, not when its connection is next read.
+    permits: HashMap<String, WeakRunPermit>,
     /// Where a copy of every line a connection reads or writes goes, when
     /// someone asked for one ([`ParticipantRegistry::tap_wire`]).
     wire_tap: Option<mpsc::UnboundedSender<String>>,
@@ -231,6 +236,24 @@ impl ParticipantRegistry {
         self.lock().contexts.get(name).cloned()
     }
 
+    /// Record the endpoint permit `name`'s run holds (BI-6), without
+    /// keeping it: the runner that spawned the node owns it. A call the node
+    /// makes releases it until the call's result is due. Forgotten when the
+    /// node's connection closes.
+    pub fn set_node_permit(&self, name: &str, permit: &RunPermit) {
+        self.lock()
+            .permits
+            .insert(name.to_string(), permit.downgrade());
+    }
+
+    /// `name`'s endpoint permit, while its runner meters a live run (BI-6).
+    pub fn node_permit(&self, name: &str) -> Option<RunPermit> {
+        self.lock()
+            .permits
+            .get(name)
+            .and_then(WeakRunPermit::upgrade)
+    }
+
     /// Register `node`'s connection: its worker said `hello` with `card`,
     /// and frames for it go to `outbound`. Returns the name it is served
     /// under, which is the admitted one whatever the card says.
@@ -276,6 +299,7 @@ impl ParticipantRegistry {
         let mut inner = self.lock();
         let _ = inner.directory.end(node.id);
         inner.contexts.remove(node.name.as_str());
+        inner.permits.remove(node.name.as_str());
         drop(inner);
         debug!(node = %node.name, "A node's connection closed before it said hello");
     }
@@ -289,6 +313,7 @@ impl ParticipantRegistry {
         let participant = {
             let mut inner = self.lock();
             inner.contexts.remove(name);
+            inner.permits.remove(name);
             let Some(participant) = inner.participants.remove(name) else {
                 return;
             };
