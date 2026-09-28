@@ -12,10 +12,14 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::session::SessionEvent;
+use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Compact progress text for the parent UI from a worker's event: `name` on
-/// a tool start, `✓ name` / `✗ name` on its result, and the worker's stream
-/// error. `names` remembers each tool call's name until its result arrives.
+/// a tool start, `✓ name` / `✗ name` on its result, the worker's stream
+/// error, and — passed on unchanged — a step the worker's own callee
+/// reported, so a grandchild's tool calls reach the leader one line each
+/// (BI-4, AGE-636). `names` remembers each tool call's name until its result
+/// arrives.
 ///
 /// The broker's worker mapper renders these same strings from these same
 /// events, which is what makes a delegated turn read in the parent's
@@ -36,6 +40,7 @@ pub fn progress_text_for_event(
             names.remove(id).map(|name| format!("\u{2717} {name}"))
         }
         SessionEvent::Error(error) => Some(format!("error: {}", error.message)),
+        SessionEvent::Delegation(InvokeAgentProgress::Step(step)) => Some(step.clone()),
         _ => None,
     }
 }

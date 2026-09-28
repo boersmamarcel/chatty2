@@ -395,7 +395,7 @@ impl DesktopSink {
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent start"))
                     .ok();
             }
-            InvokeAgentProgress::Text(text) => {
+            InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {

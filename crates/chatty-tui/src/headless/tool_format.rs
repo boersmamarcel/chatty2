@@ -50,7 +50,7 @@ pub(super) fn format_delegation_lines(
             append_tool_payload(&mut lines, "input", prompt);
             lines
         }
-        InvokeAgentProgress::Text(_) => Vec::new(),
+        InvokeAgentProgress::Text(_) | InvokeAgentProgress::Step(_) => Vec::new(),
         InvokeAgentProgress::Finished {
             success, result, ..
         } => {

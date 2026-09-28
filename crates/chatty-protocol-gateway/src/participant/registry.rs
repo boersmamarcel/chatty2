@@ -24,13 +24,14 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use serde_json::Value;
 
+use super::calls::BrokerCalls;
 use super::protocol::{
     BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
     TaskState,
@@ -140,6 +141,10 @@ struct Inner {
     /// Every node this broker admitted, connected or not, ended ones
     /// included — which is what keeps a name from being issued twice.
     directory: Directory,
+    /// What runs the `call` frames a connection sends (BI-4). Weak: the
+    /// gateway serving this registry owns it, and a connection outliving
+    /// the gateway has nothing left to call.
+    calls: Weak<BrokerCalls>,
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -153,6 +158,19 @@ pub struct ParticipantRegistry {
 impl ParticipantRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Run the `call` frames this registry's connections send on `calls`
+    /// (BI-4). The gateway does this once it knows its virtual agents.
+    pub fn install_calls(&self, calls: &Arc<BrokerCalls>) {
+        self.lock().calls = Arc::downgrade(calls);
+    }
+
+    /// What runs a connection's calls, while the gateway that installed it
+    /// is alive.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn calls(&self) -> Option<Arc<BrokerCalls>> {
+        self.lock().calls.upgrade()
     }
 
     /// Admit a node started as `spec` and name it, before its connection
@@ -418,6 +436,12 @@ impl ParticipantRegistry {
                 text,
                 last_chunk,
             } => (task_id, TaskUpdate::Artifact { text, last_chunk }, false),
+            // Calls are run by the connection loop, which owns their
+            // lifetime; one reaching here was not routed and is dropped.
+            ParticipantFrame::Call { id, .. } => {
+                warn!(participant = %name, call = id, "A call frame outside a connection loop");
+                return true;
+            }
         };
 
         let mut inner = self.lock();

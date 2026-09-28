@@ -361,10 +361,51 @@ take a name the broker is about to route a task to.
 
 The connection carries newline-delimited JSON frames, protocol **v2**: every
 frame carries `"v":2` (`hello`, `welcome`, `error`, `task`, `status`,
-`artifact`, `cancel`, `input`), and a frame without it is answered with an
-`error` frame naming v2 and the connection is closed — there is no v1. The
-gateway maps them onto the same A2A status and artifact updates a module
-produces. The connection is the liveness
+`artifact`, `cancel`, `input`, and the call frames below), and a frame without
+it is answered with an `error` frame naming v2 and the connection is closed —
+there is no v1. The gateway maps the task frames onto the same A2A status and
+artifact updates a module produces.
+
+**Workers call over the same connection (ADR-0020, BI-4, AGE-636).** A
+worker's `invoke_agent` and `list_agents` reach local roles and the broker's
+directory as `call` frames on its own connection, never over loopback HTTP:
+
+| Direction | Frame | Fields |
+|---|---|---|
+| worker → broker | `call` | `id` (the worker's, unique on the connection), `method` (`invoke_agent`, `list_agents`, `send_message`), `params` |
+| broker → worker | `call_progress` | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
+| broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array |
+| broker → worker | `call_error` | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, …) |
+
+```text
+worker → {"v":2,"type":"call","id":1,"method":"invoke_agent","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
+broker → {"v":2,"type":"call_progress","id":1,"event":{"Step":"read_file"}}
+broker → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
+```
+
+The call says nothing about its caller: the broker runs it as the node the
+connection names (the permit's AGE-628 check, the edge log's `from`), and
+writes one edge-log row per `invoke_agent` call when it ends
+(`<data_dir>/chatty/fabric/edges-<pid>.jsonl`; `list_agents` is a directory
+read, not an edge, and writes none). Several calls can be in flight in one
+task; replies match by `id`, in whatever order the calls finish. A callee
+whose task failed is a `call_result` with `success: false`, not a
+`call_error`, so the caller renders it exactly as a failed A2A task. When a
+worker's connection closes, the broker cancels every call still in flight on
+it, which reaps the workers those calls started — so cancelling a leader's
+task reaps its whole subtree (invariant 11). A question a callee asks over a
+worker's call ends that call for now; relaying it across hops is BI-5.
+
+A worker **connects before it builds its agent**: `chatty-tui
+--participant-fd` says `hello`, gets `welcome`, and only then builds the agent
+with the connection's transport (`WorkerConnection::transport`,
+`AgentBuildContext::fabric_transport`), so its tools hold the connection from
+the first turn. The in-process chatty-tui root reaches its own broker the
+same way minus the socket: `LazyBroker::transport` hands `invoke_agent` and
+`list_agents` a `DirectTransport` into the broker. Remote agents and WASM
+modules stay on `A2aClient`. The gateway counts HTTP requests for roles and
+the directory (`RouteCounter`); in a swarm of workers both stay at zero
+(invariant 4, `no_worker_call_uses_loopback`). The connection is the liveness
 signal: closing it deregisters the participant and fails every task it still
 owed. A worker's `ask_user` parks its task in `input-required` with the
 question attached; the caller answers with `message/send` on the same task id
@@ -465,7 +506,9 @@ ledger.
 
 The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
-finishes become `working` status messages, assistant text becomes artifact chunks, and
+finishes become `working` status messages (and so do the steps of anything the child
+itself delegated, `InvokeAgentProgress::Step`, so a grandchild's tool calls reach the
+leader one line each), assistant text becomes artifact chunks, and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
 no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
 naming its model and carrying tokens and time but no price (AGE-682). The lines already

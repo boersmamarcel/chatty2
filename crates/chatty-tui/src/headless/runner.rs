@@ -101,6 +101,9 @@ pub struct HeadlessRunner {
     /// Where the conversation goes when the run ends
     /// (`--save-conversation`, AGE-650).
     save_conversation: Option<PathBuf>,
+    /// The connection a delegated worker's calls travel over (ADR-0020,
+    /// BI-4), set before the agent is built.
+    fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -152,6 +155,7 @@ impl HeadlessRunner {
             answer_file: None,
             usage: UsageRecorder::default(),
             save_conversation: None,
+            fabric_transport: None,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
@@ -233,6 +237,14 @@ impl HeadlessRunner {
     /// trials that only got the instruction via `--preamble`).
     pub(super) fn role_preamble(&self) -> Option<&str> {
         self.config.spec.agent.preamble.as_deref()
+    }
+
+    /// Reach local roles and the broker's directory over `transport` — a
+    /// worker's broker-made connection (ADR-0020, BI-4). Must come before
+    /// the agent is built: a worker connects first, then builds
+    /// (connect-then-build), so its tools hold the connection.
+    pub fn set_fabric_transport(&mut self, transport: Arc<dyn chatty_fabric::Transport>) {
+        self.fabric_transport = Some(transport);
     }
 
     /// Build the agent (with the session's store handles) and its conversation.
@@ -360,6 +372,7 @@ impl HeadlessRunner {
             team_skill: self.config.team.as_ref().and_then(Team::skill),
             unattended: true,
             answer_file: self.answer_file,
+            fabric_transport: self.fabric_transport.clone(),
             ..built.context
         })
     }

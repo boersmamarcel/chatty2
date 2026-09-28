@@ -292,7 +292,7 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
     // delegation; the question itself is the popover's, not a progress line.
     let mut progress = Vec::new();
     while let Ok(event) = progress_rx.try_recv() {
-        if let InvokeAgentProgress::Text(text) = event {
+        if let InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) = event {
             progress.push(text);
         }
     }
